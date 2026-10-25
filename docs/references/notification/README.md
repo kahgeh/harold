@@ -1,6 +1,6 @@
 # Notification
 
-This reference covers the turn-end update: how Harold tells the user a turn ended, by voice when at the desk or the away channel, iMessage, when away.
+This reference covers the turn-end update: how Harold tells the user a turn ended. When the user is away, the update goes to the phone. At the desk, Harold speaks no turn-end update, except the chief's update in a call.
 
 ## Problem
 
@@ -8,16 +8,16 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The path of the turn-end update is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
+Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. One check chooses the path of the turn-end update: whether the screen is locked. With the screen unlocked, Harold leaves the update out. With the screen locked, Harold sends the update to the phone.
 
-Summarisation uses different backends depending on the path:
+The summary backend depends on the path:
 
 | Path              | Summary backend                      | Max input                     | Output                                            |
 | ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
-| At desk (TTS)     | Local model (`mlx_lm`)               | The agent's name, the project and 500 chars of last_user_prompt | one sentence of at most 25 words naming the agent, ≤48 tokens |
+| At desk           | None                                 | None                          | Nothing is spoken or sent                         |
 | Away (iMessage)   | AI CLI or the whole reply, cut at a sentence end within 280 | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 
-If the local model is not configured, fails, or gives no sentence that names the agent, the turn-end update is the fallback sentence, `<Name> has finished and is waiting.`, such as `The chief has finished and is waiting.`
+The only turn-end update that is spoken is the chief's update in a call. See [The chief's update in a call](#the-chiefs-update-in-a-call).
 
 ## Decision flow
 
@@ -32,19 +32,8 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │
   ├─ same pane and prompt recorded in the last 30 seconds? → skip (return)
   │
-  ├─ skip_if_session_active = true?
-  │   └─ tmux display-message -t <session> -p #{session_attached}
-  │      attached ≠ 0 and screen unlocked → skip (return)
-  │
-  ├─ skip_if_pane_active = true?
-  │   └─ ioreg → screen unlocked?
-  │      tmux display-message -t <session> -p #{pane_id} → active pane
-  │      active pane == completing pane → skip (return)
-  │
   ├─ ioreg → IOConsoleLocked = true?
-  │   ├─ no  → this pane the chief's, or not on notify.machine_audio_output?
-  │   │          → leave out (return)
-  │   │        notify_at_desk()
+  │   ├─ no  → leave out (return): reason at_desk, nothing is spoken or sent
   │   └─ yes → messaging paused? → skip (return)
   │           mark was under 10 minutes old? → leave out (return)
   │           pane on neither notify.web_app (the chief, with the app)
@@ -53,14 +42,28 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │           channels::notify_away() (iMessage)
 ```
 
-`<session>` is resolved from the completing pane via `tmux display-message -t <pane_id> -p #{session_name}`.
+## At the desk
 
-## At-desk: TTS
+With the screen unlocked, Harold speaks no turn-end update, whichever pane the update comes from. This holds on every machine, and no machine runs a model for it. Harold logs `spoken update left out (no desk updates)` at `INFO`, with the pane in a `pane_id` field. The delivery span records `channel = machine_audio_output`, `outcome = held_back` and `reason = at_desk`. The event is handled and is not retried.
 
-1. `ask_model()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for one plain past-tense sentence of under about 20 words that says who did what, given the agent's name (`the chief`, `the architect` or `the <main_context> agent`), the project (`main_context`) and the last request
-2. The answer is made one sentence: `<think>...</think>` blocks and outer quotes are stripped, lines are joined, the text is cut at the first `.`, `!` or `?` followed by a space or the end, and one full stop is added. An empty answer, one over 25 words, or one that does not contain the agent's name (case and hyphens ignored) is refused, and the message is the fallback sentence; Harold logs `turn-end update fell back` with its `reason` and `channel`, never the text
-3. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
-4. If the primary command fails to start or exits non-zero, Harold runs the fallback command when configured: `<tts.fallback_command> [tts.fallback_args...] [-v tts.fallback_voice] "<message>"`
+The `[tts]` command still speaks the lines the chief hands to `harold speak` (see [Lines the chief speaks](#lines-the-chief-speaks)).
+
+### The chief's update in a call
+
+During a call at the Mac, when the chief's turn ends and the chief has spoken no line of its own for 2 seconds, the call speaks one sentence about what the chief did. The call answerer's `claude -p` path writes the sentence. It uses `[call_answerer] model` (`haiku`) and `run_budget_usd`, and `[activity_summary] cli_path` with its environment.
+
+1. Harold builds the instructions and the input with `update_request()` in `outbound/tts.rs`: a system prompt that asks for one plain past-tense sentence of under about 20 words that names the agent, then the agent's name (`the chief`), the project and the first 500 characters of the last request. The input goes to Claude Code on standard input. Anthropic receives the chief's name, the project and those 500 characters.
+2. The answer in `result` is made one sentence: `<think>...</think>` blocks and outer quotes are stripped, lines are joined, the text is cut at the first `.`, `!` or `?` followed by a space or the end, and one full stop is added. An empty answer, one over 25 words, or one that does not contain `chief` (case and hyphens ignored) is refused.
+3. The call waits at most 8 seconds. When the run fails, takes longer, or gives no sentence that is kept, or when `[call_answerer] enabled = false`, the call speaks the fallback sentence, `The chief has finished and is waiting.`
+
+The `harold.call_update` span records `outcome` (`model` or `fallback`), `reason` (`none`, `failed`, `timeout`, `too_long`, `no_name` or `answerer_off`) and `cost_micros`. It records no text. A failed run also logs the warn line `call update model failed` with its `reason`.
+
+The update of another agent is not spoken into a call. With the screen unlocked, Harold leaves it out as it does at the desk.
+
+### The `[tts]` command
+
+1. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
+2. If the primary command fails to start or exits non-zero, Harold runs the fallback command when configured: `<tts.fallback_command> [tts.fallback_args...] [-v tts.fallback_voice] "<message>"`
 
 Config keys (`[tts]`):
 
@@ -75,15 +78,15 @@ Config keys (`[tts]`):
 
 ### Muting voice
 
-`SetTtsMuted(muted)` turns the at-desk TTS channel off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
+`SetTtsMuted(muted)` turns the spoken output at the desk off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
 
-- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Turn-end updates to the away channel (iMessage) are unaffected; they have their own switch, described below.
+- Mute gates only the spoken output at the desk: `harold speak` lines and the Mac's call. A turn-end update is left out at the desk whether the voice is muted or not. Turn-end updates to the away channel (iMessage) are unaffected; they have their own switch, described below.
 - A `TurnCompleted` delivered in the same projection batch as a mute change observes the post-batch value.
 - Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-dash client within the projection window may drop the second. The dash always sends from confirmed state and is unaffected.
 
 ### Pausing messaging
 
-`SetMessagingPaused(paused)` is the counterpart for the away channel. While paused, a `TurnCompleted` that would go to iMessage is recorded as an intentional skip before anything is summarised or sent, and it is not sent later. At-desk TTS is unaffected, just as the voice mute does not affect the away channel. The flag is stored as a `MessagingPausedChanged` stream event, projected into the `settings` table, and published in the snapshot as `messaging_paused`. It also stops inbound routing and replies; see [Operation](../operation/README.md#pausing-messaging).
+`SetMessagingPaused(paused)` is the counterpart for the away channel. While paused, a `TurnCompleted` that would go to iMessage is recorded as an intentional skip before anything is summarised or sent, and it is not sent later. The spoken output at the desk is unaffected, just as the voice mute does not affect the away channel. The flag is stored as a `MessagingPausedChanged` stream event, projected into the `settings` table, and published in the snapshot as `messaging_paused`. It also stops inbound routing and replies; see [Operation](../operation/README.md#pausing-messaging).
 
 ## Away: iMessage
 
@@ -116,7 +119,7 @@ Config keys (`[imessage]`):
 
 ## Updates Harold leaves out while you are away
 
-With the screen locked, an agent's finished turn sends an update to the phone unless one of two rules leaves it out. Rule A (below) covers a pane that messaged the phone this turn. The channel lists (see [Channels](#channels)) cover which panes may use the phone at all, and they also drop a message an agent asked Harold to send. At the desk the same lists decide who is spoken; see [Updates Harold does not speak at the desk](#updates-harold-does-not-speak-at-the-desk).
+With the screen locked, an agent's finished turn sends an update to the phone unless one of two rules leaves it out. Rule A (below) covers a pane that messaged the phone this turn. The channel lists (see [Channels](#channels)) cover which panes may use the phone at all, and they also drop a message an agent asked Harold to send. At the desk Harold speaks no turn-end update; see [Updates Harold does not speak at the desk](#updates-harold-does-not-speak-at-the-desk).
 
 ### After a message the agent sent itself
 
@@ -142,7 +145,7 @@ These are Harold's defaults (`default.toml`). With nothing in `local.toml`, only
 | --- | --- | --- |
 | `imessage` | iMessage to the phone | Turn-end updates while the screen is locked, messages agents ask Harold to send, and spoken lines while away (as voice notes) |
 | `web_app` | The web app on the phone (`[web_app]`): its thread, its push and its call | The same, as text in the thread with a push, or a spoken line played in the phone's call |
-| `machine_audio_output` | Speech on the Mac: the `[tts]` command, and the Mac's call | Turn-end updates at the desk, `harold speak` lines at the desk, and other agents' updates said into a call at the Mac |
+| `machine_audio_output` | Speech on the Mac: the `[tts]` command, and the Mac's call | `harold speak` lines at the desk |
 
 **What a list holds.** Each entry is a folder:
 
@@ -165,8 +168,7 @@ Harold takes a pane's folder, the working directory tmux reports for it, from it
 
 | What a pane asks for | Channel and list | Not on the list |
 | --- | --- | --- |
-| A turn-end update, at the desk | `machine_audio_output`, except the chief's own | `spoken update left out (not in notify.machine_audio_output)` |
-| A turn-end update during a call at the Mac | `machine_audio_output` | the same line |
+| A turn-end update, at the desk or during a call at the Mac | None: Harold leaves out every one | `spoken update left out (no desk updates)` |
 | A line it asks Harold to speak, at the desk | `machine_audio_output` | `spoken line dropped (not in notify.machine_audio_output)` |
 | A turn-end update, screen locked | the phone, below | `notification skipped (not in notify.<key>)` |
 | An agent message it asks Harold to send | the phone, below | `agent message dropped (not in notify.<key>)` |
@@ -174,11 +176,11 @@ Harold takes a pane's folder, the working directory tmux reports for it, from it
 
 **The phone** checks, in order: with `[web_app]` set and the chief on `web_app`, the message goes to the app (its thread with a push, or played in the phone's call when it is open; the call also takes a spoken line from any pane on `web_app`). Otherwise, or when the app can't take it (no phone has push turned on, or the push is refused), it goes by iMessage if the pane is on that list, and a message the app couldn't take starts `(app unreachable)`. Otherwise it is held back, and the line names the last list checked. The voice mute and the messaging pause are looked at before any list.
 
-Harold writes each of these lines at `INFO` with the pane in a `pane_id` field, and with `channel` (the key of the list that held the pane back), `kind` (`turn_end_update`, `agent_message` or `spoken_line`), `reason` (`not_listed`; `chief` for the chief's own turn-end update at the desk; `messaged_this_turn` for the line above) and `agent` (the pane's folder below the home folder, such as `code/harold/main`, so it holds no user name). None holds message or spoken text. `<key>` is the channel's key.
+Harold writes each of these lines at `INFO` with the pane in a `pane_id` field, and with `channel` (the key of the list that held the pane back), `kind` (`turn_end_update`, `agent_message` or `spoken_line`), `reason` (`not_listed`; `at_desk` for a turn-end update at the desk; `messaged_this_turn` for the line above) and `agent` (the pane's folder below the home folder, such as `code/harold/main`, so it holds no user name). None holds message or spoken text. `<key>` is the channel's key.
 
 **Held back.** An update or message a channel's rules keep from going out is held back: a turn-end update is "left out" and an agent message or spoken line is "dropped". The `harold.delivery` span of a held-back turn-end update has `outcome = held_back` and a `reason`, and its `channel` is the key of the list that held it, not `imessage` for every update. A pane that sent a message this turn is left out by its own choice and is `skipped`, not held back.
 
-**What is counted.** `harold.notifications` counts by `agent`, `channel` and `outcome`: `sent` when the channel took a turn-end update, agent message or spoken line, and `kept` when the channel's list held it back (`not_listed`). It counts only on a channel that is set up and turned on: `imessage` has `[imessage] recipient`, `web_app` has the `[web_app]` table, and `machine_audio_output` is always set up; `imessage` is on, `machine_audio_output` while the voice mute is off, and the phone channels while messaging is not paused. The chief rule, the mute, the pause and a message sent this turn count neither. See the [telemetry reference](../telemetry/README.md).
+**What is counted.** `harold.notifications` counts by `agent`, `channel` and `outcome`: `sent` when the channel took a turn-end update, agent message or spoken line, and `kept` when the channel's list held it back (`not_listed`). It counts only on a channel that is set up and turned on: `imessage` has `[imessage] recipient`, `web_app` has the `[web_app]` table, and `machine_audio_output` is always set up; `imessage` is on, `machine_audio_output` while the voice mute is off, and the phone channels while messaging is not paused. The desk rule (`at_desk`), the mute, the pause and a message sent this turn count neither. See the [telemetry reference](../telemetry/README.md).
 
 **When the chief's message is held back.** An agent message or spoken line from a pane in the chief's folder (matched by folder, so it works while another pane is the chief) that a list holds back with reason `not_listed`, on a channel that is set up and turned on, makes Harold type `harold alert: chief-message-held-back firing` into the chief's pane. The voice mute, the messaging pause and a message sent this turn are the user's choice or by design, so they do not fire it.
 
@@ -206,11 +208,11 @@ Harold sends nothing to the phone for that turn: no summary and no trailing ques
 
 ## Updates Harold does not speak at the desk
 
-At the desk, Harold says a short update each time an agent's turn ends. When one agent, the chief, tells the user what the others are doing with [`harold speak`](#lines-the-chief-speaks), those updates would talk over it. So Harold says an update only for a pane on `machine_audio_output` (see [Channels](#channels)), and none for the chief itself while it is tracked. The log line is `spoken update left out (chief)` for the chief and `spoken update left out (not in notify.machine_audio_output)` for any other pane that is held back, written at `INFO` with the pane in a `pane_id` field. A worktree, a base checkout, the architect's folder, a subfolder of a listed folder and a pane Harold has no folder for are all held back unless a list names their folder.
+At the desk, Harold speaks no update when an agent's turn ends. When one agent, the chief, tells the user what the others are doing with [`harold speak`](#lines-the-chief-speaks), updates would talk over it, and the user already sees the agents' panes. So Harold leaves out every turn-end update with the screen unlocked, the chief's included. The log line is `spoken update left out (no desk updates)`, written at `INFO` with the pane in a `pane_id` field.
 
-The rule is checked after the voice mute and the two skips for an active session or pane, so an update those skip is logged by them instead. An update the rule leaves out is handled as in [What leaving an update out means](#what-leaving-an-update-out-means): nothing is said, the event is not retried, and a repeat of the turn within 30 seconds is left out too.
+An update the rule leaves out is handled as in [What leaving an update out means](#what-leaving-an-update-out-means): nothing is spoken, the event is not retried, and a repeat of the turn within 30 seconds is left out too.
 
-The rule applies only with the screen unlocked. With the screen locked, the phone's lists decide (see [Channels](#channels)).
+The rule applies only with the screen unlocked. With the screen locked, the phone's lists decide (see [Channels](#channels)). The chief's update in a call is a different path; see [The chief's update in a call](#the-chiefs-update-in-a-call).
 
 ## Messages an agent sends
 
@@ -231,9 +233,9 @@ It differs from a turn-end update in these ways:
 | Started by | The agent's turn ending | The agent running the command |
 | Text | Harold's summary of the agent's final reply. The web app gets all of it; iMessage gets it cut at a sentence end within 280 characters | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
-| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
+| Presence checks | Sent to the phone only when the screen is locked; left out by the rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
 | Channel lists | Left out for a pane the phone's lists do not name, while the screen is locked | Dropped for a pane the phone's lists do not name, whether the screen is locked or not; the command still exits 0 |
-| Voice mute | Silences the at-desk path | Does not apply |
+| Voice mute | Does not apply: nothing is spoken at the desk | Does not apply |
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
 
@@ -268,7 +270,7 @@ Harold stores the line and then handles it:
 | The pane is not on the list of the channel the line would use (`machine_audio_output` at the desk, the phone's lists while away) | Drops it and logs `spoken line dropped (not in notify.<key>) pane_id=…`. The voice mute and the messaging pause are looked at first. |
 | Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. |
 | Screen locked, messaging paused | Dropped and logged, as other away messages are |
-| Screen unlocked (at the desk), voice on | Says the line with the configured `[tts]` command, as turn-end updates are said, without adding anything to it |
+| Screen unlocked (at the desk), voice on | Speaks the line with the configured `[tts]` command, without adding anything to it |
 | Screen unlocked, voice off | Dropped and logged |
 
 The event handler takes the event from the delivery outbox in stream-version order, like an agent's message. It looks at the screen lock, the pause and the voice mute on every try, so a line whose send failed while the user was away is said if they are back at the desk for the retry. A line that was said or sent is logged as `spoken line said at the desk` or `spoken line sent to the away device`; the drops are `spoken line dropped (messaging paused)` and `spoken line dropped (voice off)`. Each of these log lines is written at `INFO` with the pane in a `pane_id` field and never holds the spoken text.
@@ -291,9 +293,6 @@ sequenceDiagram
     participant gRPC as Harold (gRPC)
     participant Store as Event store
     participant Handler as Event handler
-    participant Tmux as tmux
-    participant LocalModel as mlx_lm
-    participant TTS as TTS command
 
     Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message from hook input, main_context)
     gRPC->>Store: append TurnCompleted event
@@ -302,15 +301,9 @@ sequenceDiagram
 
     Handler->>Store: stage event and checkpoint in one transaction
     Store-->>Handler: pending TurnCompleted delivery
-    Handler->>Tmux: display-message -t <pane_id> -p #{session_name} → session
-    Handler->>Tmux: display-message -t <session> -p #{session_attached} → attached?
-    note over Handler: not attached → proceed
     Handler->>Handler: ioreg → IOConsoleLocked = false
-    Handler->>LocalModel: system prompt + agent name, project, "Last request: <last_user_prompt>" → ≤48 tokens
-    LocalModel-->>Handler: "The harold agent fixed the event handler shutdown."
-    Handler->>TTS: say [-v Samantha] "The harold agent fixed the event handler shutdown."
+    note over Handler: left out: spoken update left out (no desk updates)<br/>nothing is spoken or sent
     Handler->>Store: mark delivery complete
-    note over Handler: at-desk does not update last_away_notification_source_agent
 ```
 
 ### Away (screen locked)

@@ -22,7 +22,6 @@ use crate::inbound::ownership::agent_message_text;
 use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::{Channel, NotifySettings, get_settings};
 use crate::store::{AppReplyState, AwayMessageRequested, TurnCompleted};
-use crate::tmux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
@@ -95,7 +94,6 @@ pub fn is_messaging_paused() -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundChannel {
-    Tts,
     Away,
 }
 
@@ -105,26 +103,18 @@ impl OutboundChannel {
         &self,
         turn: &TurnCompleted,
         trace_id: &str,
-        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        self.notify_with_switches(
-            turn,
-            trace_id,
-            is_chief,
-            is_tts_muted(),
-            is_messaging_paused(),
-        )
+        self.notify_with_switches(turn, trace_id, is_messaging_paused())
     }
 
-    /// Why this channel stays silent under the given switches, if it does. The voice
-    /// mute covers only TTS and the messaging pause covers only the away channel.
-    fn skip_reason(&self, tts_muted: bool, messaging_paused: bool) -> Option<&'static str> {
+    /// Why this channel stays silent under the given switch, if it does. The messaging
+    /// pause covers the away channel.
+    fn skip_reason(&self, messaging_paused: bool) -> Option<&'static str> {
         match self {
-            OutboundChannel::Tts if tts_muted => Some("TTS notification skipped (voice muted)"),
             OutboundChannel::Away if messaging_paused => {
                 Some("away notification skipped (messaging paused)")
             }
-            _ => None,
+            OutboundChannel::Away => None,
         }
     }
 
@@ -132,22 +122,13 @@ impl OutboundChannel {
         &self,
         turn: &TurnCompleted,
         trace_id: &str,
-        is_chief: bool,
-        tts_muted: bool,
         messaging_paused: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        if let Some(reason) = self.skip_reason(tts_muted, messaging_paused) {
+        if let Some(reason) = self.skip_reason(messaging_paused) {
             info!("{reason}");
             return Ok((DeliveryOutcome::Skipped, None));
         }
         match self {
-            OutboundChannel::Tts => {
-                if tts::notify_at_desk_as(turn, trace_id, is_chief) {
-                    Ok((DeliveryOutcome::Delivered, None))
-                } else {
-                    Err("TTS notification command failed".into())
-                }
-            }
             OutboundChannel::Away => match channels::notify_away(turn, trace_id)? {
                 channels::AwayNotification::Sent(agent) => {
                     Ok((DeliveryOutcome::Delivered, Some(agent)))
@@ -181,23 +162,18 @@ pub fn is_screen_locked() -> bool {
 // ---------------------------------------------------------------------------
 
 /// What a turn-end update and a message an agent asked for read from, and do to, the
-/// world outside the decision: the clock, the settings, the screen lock, tmux and the
+/// world outside the decision: the clock, the settings, the screen lock and the
 /// channels. The daemon uses `SystemEnvironment`; tests pass a fake.
 pub(crate) trait NotifyEnvironment: Send + Sync {
     fn now(&self) -> Instant;
     fn notify_settings(&self) -> &NotifySettings;
     fn screen_locked(&self) -> bool;
-    /// Whether the session containing `pane_id` has an attached client.
-    fn session_attached(&self, pane_id: &str) -> bool;
-    /// The active pane of the session containing `pane_id`, if a client is attached.
-    fn active_pane(&self, pane_id: &str) -> Option<String>;
     /// Send a turn-end update through `channel`.
     fn deliver(
         &self,
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         trace_id: &str,
-        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String>;
     /// Send a message an agent asked for through the away channel.
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
@@ -226,22 +202,13 @@ impl NotifyEnvironment for SystemEnvironment {
         is_screen_locked()
     }
 
-    fn session_attached(&self, pane_id: &str) -> bool {
-        tmux::is_session_attached(pane_id)
-    }
-
-    fn active_pane(&self, pane_id: &str) -> Option<String> {
-        tmux::active_pane_in_session(pane_id)
-    }
-
     fn deliver(
         &self,
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         trace_id: &str,
-        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        channel.notify(turn, trace_id, is_chief)
+        channel.notify(turn, trace_id)
     }
 
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String> {
@@ -539,19 +506,15 @@ impl NotifyState {
     }
 }
 
-/// The `channel` attribute of a turn-end update sent through `channel`, the `[notify]` key:
-/// `machine_audio_output`, or the away channel, `imessage`.
-fn channel_name(channel: OutboundChannel) -> &'static str {
-    match channel {
-        OutboundChannel::Tts => "machine_audio_output",
-        OutboundChannel::Away => "imessage",
+/// The `channel` attribute of a turn-end update at the desk, the `[notify]` key
+/// `machine_audio_output`, and of one sent to the phone through the away channel,
+/// `imessage`.
+fn channel_name(screen_locked: bool) -> &'static str {
+    if screen_locked {
+        "imessage"
+    } else {
+        "machine_audio_output"
     }
-}
-
-/// Whether `pane_id` is the chief's pane, found as `notify.chief` finds it, so the update
-/// names `the chief` and not `the <project> agent`.
-fn is_chief_pane(cfg: &NotifySettings, agents: &left_out::TrackedAgents, pane_id: &str) -> bool {
-    agents.chief_pane_id(cfg.chief.as_deref(), cfg.chief_session.as_deref()) == Some(pane_id)
 }
 
 /// What a hold makes of the delivery: held back by a rule, or skipped by the user's own
@@ -661,16 +624,12 @@ fn notify_routed(
 
     let cfg = environment.notify_settings();
     let screen_locked = environment.screen_locked();
-    let channel = if screen_locked {
-        OutboundChannel::Away
-    } else {
-        OutboundChannel::Tts
-    };
-    let app_route = match (channel, app) {
-        (OutboundChannel::Away, Some(chief_app)) => Some(chief_app),
+    let channel = OutboundChannel::Away;
+    let app_route = match app {
+        Some(chief_app) if screen_locked => Some(chief_app),
         _ => None,
     };
-    let name = channel_name(channel);
+    let name = channel_name(screen_locked);
 
     // Dedup: skip if same pane+prompt was notified within the window.
     let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
@@ -681,53 +640,38 @@ fn notify_routed(
         return Ok(DeliveryOutcome::Skipped);
     }
 
-    // Session-level skip: if completing pane's session has an attached client AND the
-    // screen is not locked, skip entirely.  When the screen is locked the user is away
-    // from the desk, so we must still notify even though tmux is attached.
-    if cfg.skip_if_session_active && !screen_locked && environment.session_attached(&turn.pane_id) {
-        record_delivery_channel(app_route.is_some(), app_route_channel, name);
-        record_skip_reason("session_active");
-        info!("notification skipped (session is active, screen unlocked)");
-        return Ok(DeliveryOutcome::Skipped);
+    // With the screen unlocked nothing is spoken for a turn-end update, whichever pane
+    // it comes from. The event is handled and not retried.
+    if !screen_locked {
+        let held = left_out::desk_update_reason(agents, &turn.pane_id);
+        return leave_out(
+            state,
+            environment,
+            agents,
+            dedup_key,
+            now,
+            &turn.pane_id,
+            &held,
+        );
     }
 
-    // Pane-level skip: skip only when the completing pane is the active pane
-    // AND the screen is not locked (user is at desk looking at it).
-    // If screen is locked, always notify even if pane matches.
-    if cfg.skip_if_pane_active
-        && !screen_locked
-        && environment.active_pane(&turn.pane_id).as_deref() == Some(turn.pane_id.as_str())
-    {
+    // The messaging pause skips as it always has, before any rule below is looked at: a
+    // paused update would not go to the phone.
+    if let Some(reason) = channel.skip_reason(is_messaging_paused()) {
         record_delivery_channel(app_route.is_some(), app_route_channel, name);
-        record_skip_reason("pane_active");
-        info!("notification skipped (pane is active and screen unlocked)");
-        return Ok(DeliveryOutcome::Skipped);
-    }
-
-    // The voice mute and the messaging pause skip as they always have, before any rule
-    // below is looked at: a paused update would not go to the phone.
-    if let Some(reason) = channel.skip_reason(is_tts_muted(), is_messaging_paused()) {
-        record_delivery_channel(app_route.is_some(), app_route_channel, name);
-        record_skip_reason(match channel {
-            OutboundChannel::Tts => "voice_mute",
-            OutboundChannel::Away => "messaging_pause",
-        });
+        record_skip_reason("messaging_pause");
         info!("{reason}");
         return Ok(DeliveryOutcome::Skipped);
     }
 
     // A held-back update records the channel whose rule held it, once, in `leave_out`.
-    let held = if screen_locked {
-        left_out::left_out_reason(
-            messaged_this_turn,
-            cfg,
-            agents,
-            app_route.is_some(),
-            &turn.pane_id,
-        )
-    } else {
-        left_out::desk_update_reason(cfg, agents, &turn.pane_id)
-    };
+    let held = left_out::left_out_reason(
+        messaged_this_turn,
+        cfg,
+        agents,
+        app_route.is_some(),
+        &turn.pane_id,
+    );
     if let Some(held) = held {
         return leave_out(
             state,
@@ -745,10 +689,7 @@ fn notify_routed(
     record_delivery_channel(app_route.is_some(), app_route_channel, name);
 
     // The channel that took the update, for `harold.notifications`.
-    let mut sent_on = match channel {
-        OutboundChannel::Tts => Channel::MachineAudioOutput,
-        OutboundChannel::Away => Channel::Imessage,
-    };
+    let mut sent_on = Channel::Imessage;
     let delivered = match app_route {
         Some(chief_app) => {
             deliver_turn_from_chief(chief_app, turn, event_id).map(|(carried_by, source)| {
@@ -778,12 +719,7 @@ fn notify_routed(
                 (DeliveryOutcome::Delivered, source)
             })
         }
-        None => environment.deliver(
-            &channel,
-            turn,
-            trace_id,
-            is_chief_pane(cfg, agents, &turn.pane_id),
-        ),
+        None => environment.deliver(&channel, turn, trace_id),
     };
     let (outcome, source_agent) = match delivered {
         Ok(delivered) => delivered,
@@ -855,33 +791,19 @@ mod tests {
     }
 
     #[test]
-    fn muted_tts_channel_skips_without_running_the_command() {
-        let outcome =
-            OutboundChannel::Tts.notify_with_switches(&turn(), "trace", false, true, false);
-        assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
-    }
-
-    #[test]
-    fn paused_away_channel_is_skipped_whatever_the_voice_state() {
+    fn paused_away_channel_is_skipped() {
         // Asserts the decision only. Going through `notify_with_switches` would reach
         // the real away send if this gate were ever removed.
-        for tts_muted in [false, true] {
-            assert_eq!(
-                OutboundChannel::Away.skip_reason(tts_muted, true),
-                Some("away notification skipped (messaging paused)")
-            );
-        }
+        assert_eq!(
+            OutboundChannel::Away.skip_reason(true),
+            Some("away notification skipped (messaging paused)")
+        );
+        assert!(OutboundChannel::Away.skip_reason(false).is_none());
     }
 
     #[test]
-    fn messaging_pause_silences_the_away_channel_only() {
-        assert!(OutboundChannel::Away.skip_reason(false, true).is_some());
-        assert!(OutboundChannel::Tts.skip_reason(false, true).is_none());
-    }
-
-    #[test]
-    fn voice_mute_does_not_silence_the_away_channel() {
-        assert!(OutboundChannel::Away.skip_reason(true, false).is_none());
-        assert!(OutboundChannel::Tts.skip_reason(false, false).is_none());
+    fn a_paused_away_channel_skips_without_sending() {
+        let outcome = OutboundChannel::Away.notify_with_switches(&turn(), "trace", true);
+        assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
     }
 }

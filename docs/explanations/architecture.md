@@ -4,7 +4,7 @@ What Harold is made of and how its parts talk, kept true by the pod that builds 
 
 ## Purpose
 
-Harold watches the coding agents in the user's tmux panes on each Mac, tells the user when one finishes, at the desk or on the phone, and routes the user's replies back to the right pane. It also hosts tools: the question tool and the backlog tool, which the chief of pods uses, and the watch tool, which any agent can use.
+Harold watches the coding agents in the user's tmux panes on each Mac, tells the user on the phone when one finishes, and routes the user's replies back to the right pane. It also hosts tools: the question tool and the backlog tool, which the chief of pods uses, and the watch tool, which any agent can use.
 
 ## Components
 
@@ -72,7 +72,7 @@ flowchart LR
 | agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters | `harold/src/agent/` |
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
 | projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
-| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update. The local model makes the update (`harold/src/outbound/tts.rs`), in a delivery or in a call | `harold/src/outbound/`, `harold/src/projector.rs`, `harold/src/tmux.rs` |
+| delivery handler | Reads the outbox, and leaves out or sends each turn-end update. It speaks none and runs no model. The chief's update in a call comes from Haiku through the call answerer's `claude -p` path (`harold/src/voice_input/mac.rs`) | `harold/src/outbound/`, `harold/src/projector.rs` |
 | channels and channel listener | Send to the phone by iMessage, and record the user's replies in the event stream | `harold/src/channels/` |
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
@@ -269,7 +269,7 @@ Raw terminal captures stay inside capture and parsing. Only eligible, sanitized,
 
 A turn-end update and an agent-state update serve different purposes. The dash needs an updated view even when you are already looking at the agent and no turn-end update is needed.
 
-A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, speaks it at the desk, or sends it through the away channel, iMessage. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
+A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, or sends it through the away channel, iMessage. At the desk it leaves every update out. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
 
 For a phone reply, the channel listener records an `InboundMessageReceived` event. The delivery handler resolves a live agent pane using the message's routing tag or the configured routing fallbacks, checks that an agent is still present, and submits the message to that pane through tmux. A reply typed in the web app may carry a photo: its `InboundMessageReceived` payload then holds `photo`, a file name in `app-photos/`, and the line typed into the chief's pane ends with `📷` and that file's absolute path, which Claude Code reads ([ADR 0010](../adr/0010-photos-reach-the-chief-as-files.md)).
 

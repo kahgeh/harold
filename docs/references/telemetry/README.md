@@ -185,7 +185,6 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
-| `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
 
 **A turn you start by speaking in a call** is one trace, with these spans in order:
 
@@ -195,21 +194,21 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.call_speech`, inside it | speech starts – the cut | `cut` (`quiet` after 60 quiet frames, or `max_length` at 60 s) |
 | `harold.call_transcribe`, inside it | the turn's WAV written – the transcript back from Whisper | `audio_ms` (the clip), `waited_ms` (how long the job waited for the worker, which is busy while a Kokoro job runs, and does not count the worker's load), `load_waited_ms` (how long the turn waited for the worker to finish loading: 0 when the worker was ready before the turn was cut), `result` (`text`, `no_speech` or `failed`) |
 | `harold.turn`, and `harold.turn_complete` inside it | as above, with `started_by = voice` | as above |
-| `harold.call_update`, and `harold.local_model` inside it | the turn-end update made, as the caller waits for it | none; `harold.local_model` has `result` |
+| `harold.call_update` | the chief's turn-end update made by the call answerer's `claude -p` path, as the caller waits for it (8 s at most) | `outcome` (`model` or `fallback`), `reason` (`none`, `failed`, `timeout`, `too_long`, `no_name` or `answerer_off`), `cost_micros`. No text |
 | `harold.call_answer`, inside it | the call answerer's run: the call facts gathered and the `claude -p` run | `result` (`said`, `handed_over` or `failed`), `reason` (on a failure: `not_started`, `exited`, `timed_out` or `no_answer`), `facts_ms`, `model_ms`, `cost_micros`, `input_tokens`, `output_tokens` |
 | `harold.call_voice`, inside it | a line or phrase queued for Kokoro – the sound made | `source` (`chief_line`, `update`, `answer`, `phrase` or `other_agent`), `waited_ms`, `audio_ms` (the made WAV), `result` (`made` or `failed`). A kept phrase already on disk has none |
 | `harold.call_play`, inside it | the sound handed to the sink – the sink says it ended | `source` (as above, plus `tick`, `ringback` and `pickup`; the last two belong to no turn), `call_from`, and on the phone `start_ms` |
 
-`harold.call_turn` opens when speech starts and ends when the turn's answer has played or been stopped. It also ends when the turn is dropped, forgotten, given up (the 90 s wait) or the call ends. A turn held for a busy chief goes on in the same span, and the user's next speech joins it. When the call ends while the turn is still held, the span ends there and the turn, once typed after the call, joins a root `harold.call_turn` of its own with only `pane_id`, so that trace has no speech spans and no sound numbers. `first_sound_ms` is the time from the cut to the start of Harold's first sound for the turn, the tick, the ringback and the pick-up left out; for a turn the call answerer answers it is the answer itself, so it equals `answer_ms`. `answer_ms` is the time from the cut to the start of the answer: the call answerer's `say`, the chief's first `harold speak` line in the turn, or the update line. On a turn the call answerer answered (`answered_by = answerer`) no phrase comes before the answer, and no turn-end update runs; a turn that fell back to the chief has `answered_by = chief`, and a dropped turn `none`. A failed run of the call answerer writes the WARN line `call answer failed` with `reason` (the exit status stays in `harold.log`). Hand-over lines carry `hand_over_id` and never the request: `hand-over typed` (`pane_id`, `typed_while_busy`, `wait_ms`), `hand-over waiting` (once, with `reason`) and `hand-over not typed` (WARN, after 30 minutes). See the [call answerer reference](../voice-input/call-answerer.md). Either is left out when no such sound played, and the cut is when the quiet frames end the speech, so the user's last word was about 1.2 s earlier. On the phone both count to when Harold offered the sound; `start_ms` on `harold.call_play` is the further time until it started on the phone, from 0 to 60,000. At the desk `afplay` starts at once, so there is no `start_ms`. A `harold.call_voice` or `harold.call_play` for a sound of the turn is a child of `harold.call_turn`; a line outside a turn, such as another agent's, gets root spans of its own. When the wait gives up, `harold.call_turn` ends before a late stop hook adds its `harold.turn`, so that child can outlive its parent. `harold.call_update`'s duration is how long the call makes the caller wait for the update. A `harold.local_model` span with no parent means a run escaped its turn. No call span holds what was said, the transcript, the line or a file path.
+`harold.call_turn` opens when speech starts and ends when the turn's answer has played or been stopped. It also ends when the turn is dropped, forgotten, given up (the 90 s wait) or the call ends. A turn held for a busy chief goes on in the same span, and the user's next speech joins it. When the call ends while the turn is still held, the span ends there and the turn, once typed after the call, joins a root `harold.call_turn` of its own with only `pane_id`, so that trace has no speech spans and no sound numbers. `first_sound_ms` is the time from the cut to the start of Harold's first sound for the turn, the tick, the ringback and the pick-up left out; for a turn the call answerer answers it is the answer itself, so it equals `answer_ms`. `answer_ms` is the time from the cut to the start of the answer: the call answerer's `say`, the chief's first `harold speak` line in the turn, or the update line. On a turn the call answerer answered (`answered_by = answerer`) no phrase comes before the answer, and no turn-end update runs; a turn that fell back to the chief has `answered_by = chief`, and a dropped turn `none`. A failed run of the call answerer writes the WARN line `call answer failed` with `reason` (the exit status stays in `harold.log`). Hand-over lines carry `hand_over_id` and never the request: `hand-over typed` (`pane_id`, `typed_while_busy`, `wait_ms`), `hand-over waiting` (once, with `reason`) and `hand-over not typed` (WARN, after 30 minutes). See the [call answerer reference](../voice-input/call-answerer.md). Either is left out when no such sound played, and the cut is when the quiet frames end the speech, so the user's last word was about 1.2 s earlier. On the phone both count to when Harold offered the sound; `start_ms` on `harold.call_play` is the further time until it started on the phone, from 0 to 60,000. At the desk `afplay` starts at once, so there is no `start_ms`. A `harold.call_voice` or `harold.call_play` for a sound of the turn is a child of `harold.call_turn`; a line outside a turn, such as another agent's, gets root spans of its own. When the wait gives up, `harold.call_turn` ends before a late stop hook adds its `harold.turn`, so that child can outlive its parent. `harold.call_update`'s duration is how long the call makes the caller wait for the update. No call span holds what was said, the transcript, the line or a file path.
 
 
 **A call's start** is a root span of its own, `harold.call_ring`, from the tap to the end of the pick-up sound, with `cycles` (ringback cycles played, 1 or more), `worker` (`ready` when the worker was loaded at the tap, `loaded_now` when the call waited for it) and `warm_ms` (how long the call answerer's warm-up took, 5000 when it was cut at its limit; absent when the call has no answerer). `cycles` should be 1 for a call whose worker the page loaded, and 2 or 3 for a cold one. To see how calls start, count `harold.call_ring` spans by `cycles` per day; act when calls ring 4 or more cycles, which is over 12 s, and read the `voice worker ready` line's `load_ms` and `started_by` from that time. Info only: no alert, and no tile on the dashboard yet.
 
-`turn-end update fell back` (INFO, `reason` and `channel`) is written when Harold says the fallback sentence. A model that fails writes the WARN line `local model failed` with `reason` `spawn_failed` (`uv` not found or not runnable), `exit_status` (the model crashed or is not installed) or `empty_output`; the exit status stays in `harold.log`, which errors do not leave for HyperDX. No span, line or counter holds the sentence, the prompt or the model's text.
+The chief's update in a call is the fallback sentence when `harold.call_update` has `outcome = fallback`; its `reason` says why. A run that fails or passes 8 s also writes the WARN line `call update model failed` with `reason` (`failed` or `timeout`) inside the span. No span or line holds the sentence, the prompt or the model's text. To see how the updates go, count `harold.call_update` spans by `outcome` and `reason`, and read their duration, which should be under 5 s. Info only: no alert, because this update is rare and the user hears the fallback sentence.
 
 A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id.
 
-`harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether delivered, skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `session_active`, `pane_active`, `voice_mute`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
+`harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list, or the desk rule, kept the update from going out, with `reason` `not_listed` or `at_desk`, and `channel` the key of the list that held it, or `machine_audio_output` for `at_desk`), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
 `harold.delivery`'s `text_cut` is `true` when the update was cut to fit iMessage, and `false` when it went whole. The app always gets the whole text, so `web_app` is always `false`. A cut also writes an info line, `turn-end update cut`, inside the span, with `channel`, `pane_id` and `count` (the characters before the cut). It never holds the text. An `AI CLI failed` or `failed to spawn AI CLI` warn line in the same trace says the whole reply was cut, not the AI CLI's text; with neither line, the AI CLI's text was cut, unless the AI CLI is not set or printed nothing, which write no line. The `AI CLI failed` line carries `exit_code`, `subtype` and `is_error` from the CLI's JSON result, never its text.
 
@@ -225,7 +224,7 @@ WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'delivered'
 GROUP BY day, channel ORDER BY day
 ```
 
-Two queries check `outcome = skipped` after a release, each over the last 7 days. No alert reads them. Both should give 0. The first gives more than 0 when a skip path records no `channel` or `reason`. The second gives more than 0 when the lock check failed while the user was away: `pane_active` and `session_active` fire only with the screen unlocked, so their channel is always `machine_audio_output`, and the trace shows which turn.
+Two queries check `harold.delivery` after a release, each over the last 7 days. No alert reads them. Both should give 0. The first gives more than 0 when a skip path records no `channel` or `reason`. The second gives more than 0 when a turn-end update was delivered on `machine_audio_output`: Harold speaks none at the desk now, so the trace shows which turn and `pane_id` which pane.
 
 ```sql
 SELECT count() FROM otel.otel_traces
@@ -234,9 +233,9 @@ WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'skipped'
   AND Timestamp > now() - INTERVAL 7 DAY;
 
 SELECT count() FROM otel.otel_traces
-WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'skipped'
-  AND SpanAttributes['reason'] IN ('pane_active', 'session_active')
-  AND SpanAttributes['channel'] != 'machine_audio_output'
+WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'delivered'
+  AND SpanAttributes['channel'] = 'machine_audio_output'
+  AND SpanAttributes['kind'] = 'turn_end'
   AND Timestamp > now() - INTERVAL 7 DAY
 ```
 
@@ -262,7 +261,6 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_requests` | counter, `{request}` | `channel`, `outcome` (`typed`, `unavailable`), `resolved_by` |
 | `harold.phone_requests.wrong` | counter, `{request}` | `channel`, `resolved_by` |
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
-| `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise `no_model`, `model_failed`, `too_long` or `no_name`) |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
 | `harold.app_spans.not_forwarded` | counter, `{span}` | `reason` (`collector_unreachable`, `collector_refused`, `timed_out`, `queue_full`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
@@ -399,8 +397,6 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Specs | Spec size, median words | the median `pod.spec.words` of specs first ready in the period | SQL: specs whose first sample past `drafted` falls in the period |
 | Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | SQL: the counter rule over the histogram's count and sum |
 | Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | SQL: the counter rule over the histogram's count and sum |
-| Turn-end updates | Turn-end update, model p95 | the 95th percentile of the duration of `harold.local_model` spans with `result = answered`: the delay the user hears after a turn ends | SQL: the 95th percentile of those spans. Info only: tuning, no alert |
-| Turn-end updates | Turn-end updates in full sentences | `model` divided by all `harold.turn_end_updates` over the last 7 days (its earlier tile is "previous 7 days"). Below 70% means the prompt and the model no longer agree on one sentence naming the agent | SQL: the counter rule, `model` rises over all rises. Info only: no alert |
 | Turns | Call turn, time to first sound and to the answer, last 7 days | a table with one row per `call_from` and `answered_by`: the number of `harold.call_turn` spans, and the p50 and p95, in seconds, of `first_sound_ms` and of `answer_ms` over the last 7 days. The aim is an `answer_ms` p50 about 5.5 s for `answerer` (`first_sound_ms` follows it, since the answer is the first sound), and near the chief's own turn time plus 1 s for `chief`. On a day with at least 3 answerer turns, act when the `answer_ms` p50 is above 7 s, or above 15 s for `chief`: look at a turn's trace, where the long child span shows the slow part (`call_answer`'s `model_ms` against `call_transcribe`, and `load_waited_ms` against the worker's `load_ms`). The last column, `waited_for_the_load`, counts the `harold.call_transcribe` spans in those turns with `load_waited_ms` above 0; a call now rings until its worker is ready, so a first turn does not wait for the load and only a worker restarted mid-call can make it non-zero; the early-load signal is `harold.call_ring`. On a day with at least 3 call turns, more `chief` turns than `answerer` turns means the call answerer is failing. Info only: no alert, no earlier tile | SQL: `harold.call_turn` spans, `quantileIf` over the turns that carry the number |
 | Turns | Call answers failed, by day | the number of `harold.call_answer` spans with `result = failed` for each of the last 7 days. Above 2 on a day is the cue to look. Info only: no alert. The release watch already reports any `call answer failed` WARN since an install | SQL: `harold.call_answer` spans counted per day |
 | Turns | Call answerer spend, by day | the sum of `cost_micros` of `harold.call_answer` spans, in dollars, for each of the last 7 days. Above $0.10 on a day, about 300 turns at today's price, means far more turns than expected or a prompt that grew. Act when the median `input_tokens` of a day's answers is above 6,000 (`SELECT quantile(0.5)(toUInt64OrZero(SpanAttributes['input_tokens'])) FROM otel.otel_traces WHERE SpanName = 'harold.call_answer' AND Timestamp > now() - INTERVAL 1 DAY`): the cause is then the pods' spec count. Info only: no alert | SQL: `harold.call_answer` spans, `cost_micros` summed per day |
@@ -477,7 +473,6 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by` of `imessage` and `unknown`, never `web_app`;
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
 - `harold.app_spans.not_forwarded`, for each `reason`;
-- `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
 
@@ -517,7 +512,7 @@ The lead-time cards and the "Start to completion" panel apply the rule to the hi
 Two limits remain:
 
 - A series whose previous point is older than the lookback counts from 0. After a restart that is right, because the counter starts again at 0. If the collector was unreachable for longer than the lookback while Harold kept running, the rise during the outage is counted when export resumes.
-- The builder panel "Phone requests reaching the right agent" and the three counter alerts, `phone-request-unavailable`, `wrong-agent` and `local-model-failing`, still use HyperDX's reading. They depend on the counting from 0 above.
+- The builder panel "Phone requests reaching the right agent" and the two counter alerts, `phone-request-unavailable` and `wrong-agent`, still use HyperDX's reading. They depend on the counting from 0 above.
 
 ## The alerts
 
@@ -527,7 +522,6 @@ Two limits remain:
 | `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of the duration of typed `harold.phone_request` spans above 60 seconds, every hour, on the traces source |
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
-| `local-model-failing` | The local model failed more than 3 times in an hour, so every turn-end update is the fallback sentence. Severity: warn. Action: the chief checks `uv` and `mlx_lm` (the `reason` on `local model failed` in the turn's trace says which). Expected rate: 0 | sum of `harold.turn_end_updates` with `reason = model_failed` above 3, every hour |
 | `watch-cost-high` | Watches spent more than $1.00 in a day. Severity: warn. Action: the chief stops or tunes the watch (`harold tool watch list` shows the spend; `watch.cost_usd` by `folder` names the folder, and the `harold.watch.run` spans with the highest `cost_usd` name the watch and run). Expected firing rate: rarely. No budget ships, so this is the only spending signal until the user sets one | sum of `watch.cost_usd` above 1.00, over 1 day |
 
 Their basis is the period the spec drew, 11 to 15 October:
@@ -536,9 +530,6 @@ Their basis is the period the spec drew, 11 to 15 October:
 - `phone-request-slow` would never have fired: the median was 6 seconds, the 95th percentile 11 seconds, and the highest hourly 95th percentile 37 seconds.
 - `wrong-agent` would have fired once, on 14 October at 08:42.
 - `slot-idle` would have fired every day: at most 2 of harold's 3 slots were ever busy at once. This is the gap the keep-3-busy rule is about.
-
-`local-model-slow` is not an alert, and has no panel: the model's run time only needs tuning, and nobody is asked to act on it. The card "Turn-end update, model p95" (severity info, no action) shows the duration of the `harold.local_model` span. These are deviations from the approved spec, agreed by the chief.
-
 - `watch-cost-high` is a signal, not a limit: it does not stop a watch. Failing runs are not an alert of their own: after 3 runs in a row fail, the watch stops and types `WATCH <name> stopped: 3 runs in a row failed (<reason>)` into the chief's pane, and the failure outcomes of `watch.runs` show the rest.
 
 Merges, turns per session and the spec facts have no alert. They describe throughput, and no level of them is wrong in itself.
@@ -589,7 +580,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the six alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the five alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -706,7 +697,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -736,7 +727,7 @@ fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harol
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -749,7 +740,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
@@ -757,6 +748,16 @@ done
 ```
 
 `harold-alerts` is then unused and may be deleted.
+
+**Remove** an alert and its webhook that no file defines, such as `local-model-failing`, which left the files when Harold stopped running a local model. Find both ids by name, delete the alert first, then its webhook. The commands delete nothing else:
+
+```sh
+name=local-model-failing
+id=$(alert_id "$name")
+WEBHOOK_ID=$(webhook_id "harold-alerts-$name")
+[ -z "$id" ] || hdx -X DELETE "$HYPERDX_URL/api/v2/alerts/$id"
+[ -z "$WEBHOOK_ID" ] || hdx -X DELETE "$HYPERDX_URL/api/v2/webhooks/$WEBHOOK_ID"
+```
 
 After the create or update loops, run the check by hand. It compares HyperDX with the alert files and with the `harold-alerts-<name>` webhooks. It uses the same `HYPERDX_URL`. It reads the key from a file, not from `HYPERDX_API_KEY`. The file is `~/.config/harold/hyperdx-access-key`, or the file named by `HYPERDX_API_KEY_FILE`.
 

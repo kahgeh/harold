@@ -1,6 +1,7 @@
 //! The Mac's side of a call: the microphone through `ffmpeg`, the speakers through `afplay`,
 //! and `caffeinate` to keep the display awake while the call lasts.
 
+use super::answerer::{ClaudeRunner, ModelRunner, Run, RunResult, spent, usd_text};
 use super::worker::{DEFAULT_VOICE, ProcessWorker, WorkerCommand, WorkerError};
 use super::{AudioSink, AudioSource, CallPorts};
 use crate::agent::snapshot::AgentSnapshotHub;
@@ -11,10 +12,11 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::oneshot;
-use tracing::warn;
+use tracing::{Instrument as _, warn};
 
 pub(crate) const FFMPEG: &str = "ffmpeg";
 pub(crate) const CAFFEINATE: &str = "caffeinate";
@@ -236,6 +238,49 @@ pub(crate) struct MacPorts {
     chief_session: Option<String>,
     tts: Arc<TtsSettings>,
     sink: Arc<MacSink>,
+    /// Runs the chief's update in a call. `None` with `[call_answerer] enabled = false`.
+    runner: Option<Arc<dyn ModelRunner>>,
+    /// `[call_answerer] model` and `run_budget_usd` (as `--max-budget-usd` shows it).
+    update_model: String,
+    update_budget_usd: String,
+    /// How long the update waits for the model: `UPDATE_LIMIT`, shorter in a test.
+    update_limit: Duration,
+}
+
+/// The most time the chief's update in a call waits for the model.
+const UPDATE_LIMIT: Duration = Duration::from_secs(8);
+
+/// What the chief's update in a call came to: the sentence to speak, and what the
+/// `harold.call_update` span records.
+struct ChiefUpdate {
+    line: String,
+    /// `model` or `fallback`.
+    outcome: &'static str,
+    /// `none` for `model`, otherwise why it is the fallback sentence.
+    reason: &'static str,
+    cost_micros: Option<u64>,
+}
+
+impl ChiefUpdate {
+    fn fallback(reason: &'static str, cost_micros: Option<u64>) -> Self {
+        Self {
+            line: tts::fallback_sentence().to_string(),
+            outcome: "fallback",
+            reason,
+            cost_micros,
+        }
+    }
+}
+
+/// The answer in `result` of Claude Code's `--output-format json` output, `None` when the
+/// output is not JSON, says it is an error, or holds no text.
+fn result_text(stdout: &[u8]) -> Option<String> {
+    let output: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    if output.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
+        return None;
+    }
+    let text = output.get("result")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 impl MacPorts {
@@ -260,6 +305,60 @@ impl MacPorts {
                 fallback_args: tts.fallback_args.clone(),
             }),
             sink: Arc::new(MacSink::new()),
+            // The program and environment the call answerer and the watch tool use.
+            runner: settings.call_answerer.enabled.then(|| {
+                Arc::new(ClaudeRunner::new(
+                    settings.activity_summary.cli_path.clone(),
+                    settings.activity_summary.environment.0.clone(),
+                )) as Arc<dyn ModelRunner>
+            }),
+            update_model: settings.call_answerer.model.clone(),
+            update_budget_usd: usd_text(settings.call_answerer.run_budget_usd),
+            update_limit: UPDATE_LIMIT,
+        }
+    }
+
+    /// The chief's update for a turn that began with `last_user_prompt`: one sentence from
+    /// the model, or the fallback sentence. Nothing of the prompt or the answer is logged
+    /// or recorded.
+    async fn chief_update(&self, last_user_prompt: &str, project: &str) -> ChiefUpdate {
+        let Some(runner) = &self.runner else {
+            return ChiefUpdate::fallback("answerer_off", None);
+        };
+        let request = tts::update_request(last_user_prompt, project);
+        let run = Run {
+            model: self.update_model.clone(),
+            budget_usd: self.update_budget_usd.clone(),
+            timeout: self.update_limit,
+            prompt: request.prompt,
+            system_prompt: request.system_prompt,
+            schema: None,
+        };
+        let failed = |reason: &'static str, cost_micros: Option<u64>| {
+            warn!(reason, "call update model failed");
+            ChiefUpdate::fallback(reason, cost_micros)
+        };
+        let ran = match tokio::time::timeout(self.update_limit, runner.run(&run)).await {
+            Ok(ran) => ran,
+            Err(_) => return failed("timeout", None),
+        };
+        let (stdout, ok) = match ran {
+            RunResult::FailedToStart => return failed("failed", None),
+            RunResult::Killed => return failed("timeout", None),
+            RunResult::Exited { stdout, ok, .. } => (stdout, ok),
+        };
+        let cost_micros = spent(&stdout).map(|(cost, ..)| cost);
+        let Some(answer) = ok.then(|| result_text(&stdout)).flatten() else {
+            return failed("failed", cost_micros);
+        };
+        match tts::clean_sentence(&answer) {
+            Ok(line) => ChiefUpdate {
+                line,
+                outcome: "model",
+                reason: "none",
+                cost_micros,
+            },
+            Err(refused) => ChiefUpdate::fallback(refused.as_str(), cost_micros),
         }
     }
 
@@ -324,23 +423,25 @@ impl CallPorts for MacPorts {
     }
 
     async fn turn_end_update(&self, prompt: &str, turn: &tracing::Span) -> String {
-        let prompt = prompt.to_string();
         let context = last_component(self.chief_folder.as_deref().unwrap_or_default());
         let update_span = tracing::info_span!(
             target: crate::telemetry::TRACE_TARGET,
             parent: turn,
-            "harold.call_update"
+            "harold.call_update",
+            outcome = tracing::field::Empty,
+            reason = tracing::field::Empty,
+            cost_micros = tracing::field::Empty,
         );
-        let update = tokio::task::spawn_blocking(move || {
-            update_span.in_scope(|| {
-                tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call")
-            })
-        })
-        .await;
-        update.unwrap_or_else(|_| {
-            warn!("turn-end update not made");
-            tts::fallback_sentence(&tts::AgentName::Chief)
-        })
+        let update = self
+            .chief_update(prompt, &context)
+            .instrument(update_span.clone())
+            .await;
+        update_span.record("outcome", update.outcome);
+        update_span.record("reason", update.reason);
+        if let Some(cost_micros) = update.cost_micros {
+            update_span.record("cost_micros", cost_micros);
+        }
+        update.line
     }
 
     fn calls_dir(&self) -> PathBuf {
@@ -511,13 +612,49 @@ mod tests {
         assert_eq!(last_component(""), "");
     }
 
-    #[tokio::test]
-    async fn the_turn_end_update_runs_the_local_model_inside_harold_call_update() {
-        use crate::telemetry::{TRACE_TARGET, test_support};
-        use opentelemetry::trace::TraceContextExt as _;
-        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    /// Gives one scripted result after `delay`, and keeps the runs it was given.
+    struct ScriptedRunner {
+        result: Mutex<Option<RunResult>>,
+        delay: Duration,
+        runs: Mutex<Vec<Run>>,
+    }
 
-        test_support::install();
+    impl ScriptedRunner {
+        fn giving(result: RunResult, delay: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                result: Mutex::new(Some(result)),
+                delay,
+                runs: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn answering(stdout: &str) -> Arc<Self> {
+            Self::giving(
+                RunResult::Exited {
+                    stdout: stdout.as_bytes().to_vec(),
+                    ok: true,
+                    exit: "exit code 0".into(),
+                },
+                Duration::ZERO,
+            )
+        }
+    }
+
+    impl ModelRunner for ScriptedRunner {
+        fn run<'a>(&'a self, run: &'a Run) -> crate::tools::BoxFuture<'a, RunResult> {
+            Box::pin(async move {
+                self.runs.lock().unwrap().push(run.clone());
+                tokio::time::sleep(self.delay).await;
+                self.result
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or(RunResult::FailedToStart)
+            })
+        }
+    }
+
+    fn ports_running(runner: Option<Arc<dyn ModelRunner>>) -> MacPorts {
         crate::settings::init_settings_for_test();
         let snapshots = AgentSnapshotHub::new(crate::agent::domain::AgentSnapshot {
             tts_muted: false,
@@ -527,26 +664,179 @@ mod tests {
             monitor_health: Vec::new(),
             panes: Vec::new(),
         });
-        let ports = MacPorts::from_settings(crate::settings::get_settings(), snapshots);
+        let mut ports = MacPorts::from_settings(crate::settings::get_settings(), snapshots);
+        ports.runner = runner;
+        ports
+    }
+
+    /// The line the update gave, and its `harold.call_update` span, found through the turn.
+    async fn update_of(ports: &MacPorts) -> (String, opentelemetry_sdk::trace::SpanData) {
+        use crate::telemetry::{TRACE_TARGET, test_support};
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        test_support::install();
         let turn = tracing::info_span!(target: TRACE_TARGET, parent: None, "harold.call_turn");
         let trace_id = turn.context().span().span_context().trace_id();
+        let turn_span_id = turn.context().span().span_context().span_id();
 
-        ports.turn_end_update("fix it", &turn).await;
+        let line = ports.turn_end_update("fix it", &turn).await;
         drop(turn);
 
-        let spans: Vec<_> = test_support::spans()
+        let update = test_support::spans()
             .into_iter()
-            .filter(|span| span.span_context.trace_id() == trace_id)
-            .collect();
-        let find = |name: &str| spans.iter().find(|span| span.name == name).unwrap();
-        let (turn, update, model) = (
-            find("harold.call_turn"),
-            find("harold.call_update"),
-            find("harold.local_model"),
+            .find(|span| {
+                span.span_context.trace_id() == trace_id && span.name == "harold.call_update"
+            })
+            .expect("a harold.call_update span");
+        assert_eq!(update.parent_span_id, turn_span_id);
+        (line, update)
+    }
+
+    fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    }
+
+    const FALLBACK: &str = "The chief has finished and is waiting.";
+
+    #[tokio::test]
+    async fn a_kept_answer_is_spoken_and_the_run_holds_the_shared_prompts() {
+        let stdout = r#"{"type":"result","is_error":false,"result":"The chief merged the branch.","total_cost_usd":0.0002694}"#;
+        let runner = ScriptedRunner::answering(stdout);
+        let ports = ports_running(Some(runner.clone()));
+        let logs = crate::outbound::fake::CapturedLogs::start();
+
+        let (line, update) = update_of(&ports).await;
+
+        assert_eq!(line, "The chief merged the branch.");
+        let runs = runner.runs.lock().unwrap();
+        assert_eq!(runs.len(), 1);
+        let request = tts::update_request("fix it", "chief-of-pods");
+        assert_eq!(runs[0].system_prompt, request.system_prompt);
+        assert_eq!(runs[0].prompt, request.prompt);
+        assert_eq!(runs[0].schema, None);
+        assert_eq!(runs[0].model, "haiku");
+        assert_eq!(runs[0].budget_usd, "0.02");
+        assert_eq!(runs[0].timeout, Duration::from_secs(8));
+        assert_eq!(attribute(&update, "outcome").as_deref(), Some("model"));
+        assert_eq!(attribute(&update, "reason").as_deref(), Some("none"));
+        assert_eq!(attribute(&update, "cost_micros").as_deref(), Some("269"));
+        assert!(!logs.text().contains("call update model failed"));
+        assert!(!crate::telemetry::test_support::exported_text().contains("merged the branch"));
+    }
+
+    #[tokio::test]
+    async fn every_other_result_speaks_the_fallback_sentence_with_its_reason() {
+        let exited = |stdout: &str, ok: bool| RunResult::Exited {
+            stdout: stdout.as_bytes().to_vec(),
+            ok,
+            exit: "exit code 1".into(),
+        };
+        let long = format!(
+            r#"{{"is_error":false,"result":"The chief {}done.","total_cost_usd":0.0001}}"#,
+            "did it ".repeat(30)
         );
-        assert_eq!(update.parent_span_id, turn.span_context.span_id());
-        assert_eq!(model.parent_span_id, update.span_context.span_id());
-        assert!(update.attributes.is_empty());
+        let cases = [
+            (RunResult::FailedToStart, "failed"),
+            (RunResult::Killed, "timeout"),
+            (exited("", false), "failed"),
+            (
+                exited(r#"{"is_error":true,"result":"CANARY-9"}"#, true),
+                "failed",
+            ),
+            (exited("not json", true), "failed"),
+            (exited(&long, true), "too_long"),
+            (
+                exited(
+                    r#"{"is_error":false,"result":"The agent fixed it. CANARY-9"}"#,
+                    true,
+                ),
+                "no_name",
+            ),
+            (exited(r#"{"is_error":false,"result":""}"#, true), "failed"),
+        ];
+        for (result, reason) in cases {
+            let ports = ports_running(Some(ScriptedRunner::giving(result, Duration::ZERO)));
+            let logs = crate::outbound::fake::CapturedLogs::start();
+
+            let (line, update) = update_of(&ports).await;
+
+            assert_eq!(line, FALLBACK, "{reason}");
+            assert_eq!(attribute(&update, "outcome").as_deref(), Some("fallback"));
+            assert_eq!(attribute(&update, "reason").as_deref(), Some(reason));
+            let failed_line = logs.text().contains("call update model failed");
+            assert_eq!(
+                failed_line,
+                matches!(reason, "failed" | "timeout"),
+                "{reason}"
+            );
+            assert!(!logs.text().contains("CANARY-9"));
+        }
+        assert!(!crate::telemetry::test_support::exported_text().contains("CANARY-9"));
+    }
+
+    #[tokio::test]
+    async fn a_run_over_the_limit_speaks_the_fallback_sentence() {
+        let runner = ScriptedRunner::giving(
+            RunResult::Exited {
+                stdout: br#"{"is_error":false,"result":"The chief finished."}"#.to_vec(),
+                ok: true,
+                exit: "exit code 0".into(),
+            },
+            Duration::from_secs(30),
+        );
+        let mut ports = ports_running(Some(runner));
+        assert_eq!(ports.update_limit, Duration::from_secs(8));
+        ports.update_limit = Duration::from_millis(100);
+        let logs = crate::outbound::fake::CapturedLogs::start();
+
+        let started = Instant::now();
+        let (line, update) = update_of(&ports).await;
+
+        assert_eq!(line, FALLBACK);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(attribute(&update, "outcome").as_deref(), Some("fallback"));
+        assert_eq!(attribute(&update, "reason").as_deref(), Some("timeout"));
+        assert!(logs.text().contains("call update model failed"));
+    }
+
+    #[tokio::test]
+    async fn without_the_call_answerer_the_fallback_sentence_is_spoken_and_no_model_runs() {
+        let ports = ports_running(None);
+
+        let (line, update) = update_of(&ports).await;
+
+        assert_eq!(line, FALLBACK);
+        assert_eq!(attribute(&update, "outcome").as_deref(), Some("fallback"));
+        assert_eq!(
+            attribute(&update, "reason").as_deref(),
+            Some("answerer_off")
+        );
+        assert_eq!(attribute(&update, "cost_micros"), None);
+    }
+
+    #[test]
+    fn the_runner_is_built_only_with_the_call_answerer_on() {
+        crate::settings::init_settings_for_test();
+        let snapshots = || {
+            AgentSnapshotHub::new(crate::agent::domain::AgentSnapshot {
+                tts_muted: false,
+                messaging_paused: false,
+                through_event_version: crate::store::EventVersion::start(),
+                server_time_ms: 1_000,
+                monitor_health: Vec::new(),
+                panes: Vec::new(),
+            })
+        };
+        let on = crate::settings::get_settings();
+        assert!(on.call_answerer.enabled);
+        assert!(MacPorts::from_settings(on, snapshots()).runner.is_some());
+
+        let off = crate::settings::settings_with("[call_answerer]\nenabled = false");
+        assert!(MacPorts::from_settings(&off, snapshots()).runner.is_none());
     }
 
     #[test]

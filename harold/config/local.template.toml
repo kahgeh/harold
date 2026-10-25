@@ -14,9 +14,6 @@ handle_ids = [1, 36]
 
 [ai]
 cli_path = "/path/to/claude"
-# Optional: local MLX model for short TTS summaries (faster, private)
-# local_model = "Qwen/Qwen3-32B-MLX-8bit"
-# local_model_dir = "/path/to/mlx-lm"
 
 # Dashboard descriptions use Claude authentication independently of [ai].
 [activity_summary]
@@ -67,8 +64,6 @@ command = "say"
 # args = ["-m", "mlx_audio.stt.generate", "--model", "mlx-community/whisper-large-v3-turbo"]
 
 # [notify]
-# skip_if_session_active = true  # skip if completing pane is in the active tmux session
-# skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
 # chief = "/Users/you/Dev/chief-of-pods"                 # which pane is the chief, matched by folder
 # imessage = ["/Users/you/Dev/chief-of-pods"]            # whose agents may reach the phone by iMessage; [] is nobody, ["*"] is everyone
 # web_app = ["/Users/you/Dev/chief-of-pods"]             # the same for the web app

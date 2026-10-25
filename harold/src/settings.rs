@@ -68,8 +68,6 @@ impl ChatDbSettings {
 #[derive(Debug, Deserialize)]
 pub struct AiSettings {
     pub cli_path: Option<String>,
-    pub local_model: Option<String>,
-    pub local_model_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -998,8 +996,13 @@ impl StoreSettings {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotifySettings {
-    pub skip_if_session_active: bool,
-    pub skip_if_pane_active: bool,
+    /// `notify.skip_if_session_active`, read so that a file that sets it still loads. Harold
+    /// no longer reads it (`warn_unread_settings` warns).
+    #[serde(default, rename = "skip_if_session_active")]
+    _skip_if_session_active: Option<bool>,
+    /// `notify.skip_if_pane_active`, ignored as `skip_if_session_active` is.
+    #[serde(default, rename = "skip_if_pane_active")]
+    _skip_if_pane_active: Option<bool>,
     /// `notify.away_channel`, read so that `away_channel = "imessage"` still loads. Harold
     /// no longer reads it (`away_channel_still_set` warns), and any other value is refused
     /// before this is read (`removed_setting_messages`).
@@ -1494,6 +1497,34 @@ pub(crate) fn away_channel_still_set() -> bool {
     local_config().is_ok_and(|local| away_channel_is_imessage(&local))
 }
 
+/// The settings Harold no longer reads that the merged config (`config/local.toml` and the
+/// `HAROLD__` environment) still sets. Key presence only: no value is read.
+pub(crate) const UNREAD_SETTINGS: [&str; 4] = [
+    "ai.local_model",
+    "ai.local_model_dir",
+    "notify.skip_if_session_active",
+    "notify.skip_if_pane_active",
+];
+
+/// Which of `UNREAD_SETTINGS` `config` sets.
+fn unread_settings_in(config: &Config) -> Vec<&'static str> {
+    UNREAD_SETTINGS
+        .into_iter()
+        .filter(|key| has_key(config, key))
+        .collect()
+}
+
+/// Logs `setting no longer read` once for each of `UNREAD_SETTINGS` that the merged config
+/// sets. Harold starts either way.
+pub(crate) fn warn_unread_settings() {
+    let Ok(merged) = merged_config() else {
+        return;
+    };
+    for key in unread_settings_in(&merged) {
+        tracing::warn!(key, "setting no longer read");
+    }
+}
+
 fn away_channel_is_imessage(local: &Config) -> bool {
     local
         .get_string("notify.away_channel")
@@ -1707,6 +1738,43 @@ mod tests {
         assert!(messages.iter().all(|m| !m.contains(secret)));
         let host = removed("[grpc]\nhost = '100.64.0.1'\n");
         assert!(host.iter().all(|m| !m.contains("100.64.0.1")));
+    }
+
+    fn unread(local: &str) -> Vec<&'static str> {
+        let default = include_str!("../config/default.toml");
+        let merged = Config::builder()
+            .add_source(File::from_str(default, FileFormat::Toml))
+            .add_source(File::from_str(local, FileFormat::Toml))
+            .build()
+            .unwrap();
+        super::unread_settings_in(&merged)
+    }
+
+    #[test]
+    fn the_shipped_defaults_set_no_unread_setting() {
+        assert_eq!(unread(""), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn each_unread_setting_is_found_alone_and_the_config_still_loads() {
+        for (local, key) in [
+            ("[ai]\nlocal_model = 'm'\n", "ai.local_model"),
+            ("[ai]\nlocal_model_dir = '/d'\n", "ai.local_model_dir"),
+            (
+                "[notify]\nskip_if_session_active = true\n",
+                "notify.skip_if_session_active",
+            ),
+            (
+                "[notify]\nskip_if_pane_active = false\n",
+                "notify.skip_if_pane_active",
+            ),
+        ] {
+            assert_eq!(unread(local), [key], "{local}");
+            default_settings_with(local);
+        }
+        let all = "[ai]\nlocal_model = 'm'\nlocal_model_dir = '/d'\n[notify]\nskip_if_session_active = true\nskip_if_pane_active = false\n";
+        assert_eq!(unread(all), super::UNREAD_SETTINGS);
+        default_settings_with(all);
     }
 
     #[test]
@@ -3293,15 +3361,12 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             dir.join("default.toml"),
         )
         .expect("copy default.toml");
-        std::fs::write(
-            dir.join("local.toml"),
-            "[ai]\nlocal_model = \"test-model\"\nlocal_model_dir = \"/nonexistent\"",
-        )
-        .expect("write local.toml");
+        std::fs::write(dir.join("local.toml"), "[ai]\ncli_path = \"test-cli\"")
+            .expect("write local.toml");
         let dir_str = dir.to_str().expect("utf-8 temp dir");
 
         let defaults = Settings::load_defaults(dir_str).expect("load_defaults");
-        assert_eq!(defaults.ai.local_model, None);
+        assert_eq!(defaults.ai.cli_path, None);
 
         // SAFETY: this is the only test that touches these vars.
         unsafe {
@@ -3309,7 +3374,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             std::env::set_var("HAROLD_ENV", "local");
         }
         let loaded = Settings::load().expect("load");
-        assert_eq!(loaded.ai.local_model.as_deref(), Some("test-model"));
+        assert_eq!(loaded.ai.cli_path.as_deref(), Some("test-cli"));
     }
 
     #[test]

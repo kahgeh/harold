@@ -139,8 +139,6 @@ level = "info"
 path = "~/.harold/store"
 
 [notify]
-skip_if_session_active = true
-skip_if_pane_active = false
 # Which pane is the chief, matched by folder. Each list says whose agents may use that
 # channel: [] is nobody, ["*"] is everyone.
 chief = "chief-of-pods"

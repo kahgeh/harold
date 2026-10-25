@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_six_alerts_are_the_ones_in_the_specs() {
+fn the_five_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -111,16 +111,11 @@ fn the_six_alerts_are_the_ones_in_the_specs() {
             "phone-request-slow",
             "wrong-agent",
             "slot-idle",
-            "local-model-failing",
             "watch-cost-high"
         ]
     );
-    // `local-model-slow` is not an alert.
-    assert!(alert_line(br#"{"alert":"local-model-slow","state":"firing"}"#).is_err());
-    assert_eq!(
-        alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#),
-        Ok("harold alert: local-model-failing firing".into())
-    );
+    // The local model is gone, and so is its alert.
+    assert!(alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#).is_err());
     // The watch tool's failing runs are a dashboard card, not an alert: the watch types
     // its own closing line when three runs in a row fail.
     assert!(!ALERT_NAMES.contains(&"watch-runs-failing"));

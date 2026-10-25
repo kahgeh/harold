@@ -554,6 +554,10 @@ pub(crate) struct Run {
     pub budget_usd: String,
     pub timeout: Duration,
     pub prompt: String,
+    /// The run's system prompt: the answerer's rules, or a caller's own instructions.
+    pub system_prompt: String,
+    /// The `--json-schema` of the output, `None` for a plain text answer in `result`.
+    pub schema: Option<String>,
 }
 
 /// How a run ended.
@@ -581,13 +585,13 @@ pub(crate) trait ModelRunner: Send + Sync {
 }
 
 /// A dollar amount for `--max-budget-usd`, with no trailing zeros: 0.02 is `0.02`.
-fn usd_text(usd: f64) -> String {
+pub(crate) fn usd_text(usd: f64) -> String {
     let text = format!("{usd:.6}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// The arguments of one run: safe mode, no tools, no saved transcript, JSON out under the
-/// schema, the rules as the system prompt. The prompt goes in on standard input.
+/// schema when the run has one, the run's system prompt. The prompt goes in on standard input.
 pub(crate) fn claude_args(run: &Run) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["--print", "--safe-mode", "--no-session-persistence"]
         .into_iter()
@@ -600,9 +604,11 @@ pub(crate) fn claude_args(run: &Run) -> Vec<OsString> {
     flag("--tools", "");
     flag("--model", &run.model);
     flag("--output-format", "json");
-    flag("--json-schema", SCHEMA);
+    if let Some(schema) = &run.schema {
+        flag("--json-schema", schema);
+    }
     flag("--max-budget-usd", &run.budget_usd);
-    flag("--system-prompt", RULES);
+    flag("--system-prompt", &run.system_prompt);
     args
 }
 
@@ -798,7 +804,7 @@ pub(crate) fn read_output(stdout: &[u8]) -> Option<Output> {
 }
 
 /// The cost and tokens of a run whose output is read before the answer is known.
-fn spent(stdout: &[u8]) -> Option<(u64, u64, u64)> {
+pub(crate) fn spent(stdout: &[u8]) -> Option<(u64, u64, u64)> {
     let result: Value = serde_json::from_slice(stdout).ok()?;
     let usage = result.get("usage");
     let tokens = |key: &str| {
@@ -871,6 +877,8 @@ impl Answerer {
             budget_usd: usd_text(self.settings.run_budget_usd),
             timeout: Duration::from_secs(self.settings.timeout_seconds),
             prompt: prompt(facts, ask.call, ask.words),
+            system_prompt: RULES.to_string(),
+            schema: Some(SCHEMA.to_string()),
         };
         let started = Instant::now();
         let ran = self.runner.run(&run).await;

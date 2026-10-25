@@ -80,7 +80,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | --- | --- | --- |
 | turn-end update | What Harold says or sends when an agent's turn ends, as delivery work that the `TurnCompleted` event creates | "completion notification", "notification" alone |
 | trailing question | The last sentence of a turn-end update, when the update ends with it and it ends in `?`. iMessage sends it as a second message | "question" alone, which is a todo kind |
-| fallback sentence | The spoken turn-end update `<Name> has finished and is waiting.`, said when the local model gives no sentence that names the agent | "default message", "fixed tail" |
+| fallback sentence | The spoken turn-end update `The chief has finished and is waiting.`, spoken in a call when Haiku gives no sentence that names the chief, fails or passes 8 s, or the call answerer is off | "default message", "fixed tail" |
 | agent message | Text an agent asks Harold to send to the phone (`send-message-to-away-device`) | — |
 | spoken line | A line the chief asks Harold to say (`harold speak`) | — |
 | voice note | A spoken line sent to the phone as audio | — |
@@ -225,7 +225,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | checkpoint | The projector's saved position in the event stream | "cursor" for the saved position |
 | state database | The Turso database `harold-state.db` that holds the current agent view, the outbox and the checkpoint | "SQLite" for it |
 | outbox | The stored list of delivery work, such as a turn-end update to send or a phone reply to route | "queue" for it |
-| delivery handler | The part of Harold that reads the outbox, checks the `[notify]` settings and whether the user is at the desk, then leaves out, speaks or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
+| delivery handler | The part of Harold that reads the outbox, checks the `[notify]` settings and whether the user is at the desk, then leaves out or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
 | channel listener | The part of Harold that receives replies from the away channel and records each in the event stream | "poller", "watcher" for it |
 | snapshot | The complete current view of every agent, as the dash receives it | — |
 | snapshot publisher | The part of Harold that sends snapshots to clients | — |

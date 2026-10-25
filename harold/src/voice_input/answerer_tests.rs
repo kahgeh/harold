@@ -212,6 +212,8 @@ fn run_of(prompt: &str) -> Run {
         budget_usd: "0.02".into(),
         timeout: Duration::from_secs(15),
         prompt: prompt.into(),
+        system_prompt: RULES.into(),
+        schema: Some(SCHEMA.into()),
     }
 }
 
@@ -236,6 +238,39 @@ fn a_run_is_safe_mode_with_no_tools_no_saved_transcript_and_the_schema() {
     for flag in ["--resume", "--continue", "--allowedTools", "--add-dir"] {
         assert!(!args.iter().any(|arg| arg == flag), "{flag}");
     }
+}
+
+#[test]
+fn a_run_without_a_schema_passes_no_schema_and_its_own_system_prompt() {
+    let mut run = run_of("x");
+    run.schema = None;
+    run.system_prompt = "Write one sentence.".into();
+
+    let args = texts(claude_args(&run));
+
+    assert!(!args.iter().any(|arg| arg == "--json-schema"));
+    let at = args
+        .iter()
+        .position(|arg| arg == "--system-prompt")
+        .unwrap();
+    assert_eq!(args[at + 1], "Write one sentence.");
+}
+
+#[tokio::test]
+async fn the_answerers_runs_pass_its_rules_and_schema() {
+    let runner = FakeRunner::giving([ok(SAMPLE)]);
+
+    ask(
+        &answerer(sources(), &runner),
+        "how is the chief",
+        &CallSoFar::default(),
+    )
+    .await;
+
+    let runs = runner.runs.lock().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].system_prompt, RULES);
+    assert_eq!(runs[0].schema.as_deref(), Some(SCHEMA));
 }
 
 #[test]

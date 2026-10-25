@@ -1788,7 +1788,7 @@ mod one_trace_per_turn {
         let directory = TestDirectory::new();
         let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
         let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
-        let environment = Arc::new(FakeEnvironment::new(""));
+        let environment = Arc::new(FakeEnvironment::locked(""));
         let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
 
         // 1. A reply, stored as the listener stores it and typed into the pane.
@@ -1820,7 +1820,7 @@ mod one_trace_per_turn {
         assert!(handle_next_delivery(&store, dispatcher).await.unwrap());
         assert_eq!(
             environment.delivered(),
-            [(OutboundChannel::Tts, pane.clone())]
+            [(OutboundChannel::Away, pane.clone())]
         );
 
         let request = span_on("harold.phone_request", &pane);
@@ -1952,7 +1952,7 @@ mod one_trace_per_turn {
         let directory = TestDirectory::new();
         let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
         let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
-        let environment = Arc::new(FakeEnvironment::new(""));
+        let environment = Arc::new(FakeEnvironment::locked(""));
         let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
 
         store_reply(&store, &canary, OffsetDateTime::now_utc()).await;
@@ -1983,7 +1983,7 @@ mod one_trace_per_turn {
         assert!(handle_next_delivery(&store, dispatcher).await.unwrap());
         assert_eq!(
             environment.delivered(),
-            [(OutboundChannel::Tts, pane.clone())]
+            [(OutboundChannel::Away, pane.clone())]
         );
 
         let trace_id = span_on("harold.phone_request", &pane)
@@ -2002,14 +2002,13 @@ mod one_trace_per_turn {
     }
 
     #[tokio::test]
-    async fn a_skipped_turn_end_is_logged_inside_the_turns_trace() {
+    async fn a_turn_end_left_out_at_the_desk_is_logged_inside_the_turns_trace() {
         test_support::install();
         let pane = unique_pane();
         let directory = TestDirectory::new();
         let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
         let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
         let environment = Arc::new(FakeEnvironment::new(""));
-        environment.set_session_attached(true);
         let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
 
         store_reply(&store, "please build it", OffsetDateTime::now_utc()).await;
@@ -2036,7 +2035,7 @@ mod one_trace_per_turn {
         assert_eq!(deliveries.len(), 1);
         assert_eq!(
             span_attr(&deliveries[0], "outcome").as_deref(),
-            Some("skipped")
+            Some("held_back")
         );
         let skipped_in_trace = test_support::logs().iter().any(|log| {
             log.record

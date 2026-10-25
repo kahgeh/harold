@@ -15,7 +15,6 @@ mod settings;
 mod store;
 mod telemetry;
 mod timed_prompts;
-mod tmux;
 mod tools;
 mod util;
 mod voice_input;
@@ -634,7 +633,7 @@ async fn shutdown_signal() {
 }
 
 fn run_diagnostics(delay_secs: u64) {
-    use outbound::{is_screen_locked, tts::notify_at_desk};
+    use outbound::is_screen_locked;
     use store::TurnCompleted;
 
     let turn = TurnCompleted {
@@ -695,9 +694,7 @@ fn run_diagnostics(delay_secs: u64) {
 
     println!("\n--- Testing notify path (screen_locked={locked}) ---");
     if !locked {
-        println!("Running TTS...");
-        let _ = notify_at_desk(&turn, "diag");
-        println!("TTS done");
+        println!("The screen is unlocked: a turn-end update is not spoken or sent.");
         return;
     }
 
@@ -975,6 +972,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             "setting no longer read: notify.away_channel; remove it from config/local.toml"
         );
     }
+    settings::warn_unread_settings();
     init_settings(settings);
     let cfg = get_settings();
 

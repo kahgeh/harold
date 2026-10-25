@@ -2206,3 +2206,38 @@ async fn a_call_hung_up_while_ringing_records_its_cycles_and_worker() {
         "the span of a call hung up while ringing has its fields"
     );
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn another_agents_turn_end_update_is_left_out_and_not_said_into_the_call() {
+    use crate::outbound::fake::{FakeEnvironment, turn};
+    use crate::outbound::left_out::TrackedAgents;
+    use crate::outbound::{DeliveryOutcome, NotifyState, notify};
+
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    let played_before = h.played();
+    // The pane is on `machine_audio_output`, which let its update into the call before.
+    let environment = FakeEnvironment::new("[notify]\nmachine_audio_output = [\"/work/harold\"]");
+    let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+    let logs = CapturedLogs::start();
+
+    let outcome = notify(
+        &turn("%2", "build it"),
+        "trace",
+        &NotifyState::default(),
+        &agents,
+        &environment,
+    );
+    settle().await;
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+    assert!(
+        logs.text()
+            .contains("spoken update left out (no desk updates) pane_id=%2"),
+        "{}",
+        logs.text()
+    );
+    assert!(environment.delivered().is_empty());
+    assert_eq!(h.played(), played_before);
+}

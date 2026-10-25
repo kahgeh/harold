@@ -71,16 +71,12 @@ pub(crate) struct TrackedAgents {
     panes: Vec<TrackedPane>,
 }
 
-/// One tracked agent pane: where it runs and where it sits in tmux.
+/// One tracked agent pane: where it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedPane {
     pane_id: String,
     /// The working directory tmux reports for the pane.
     folder: String,
-    session: String,
-    window_index: u32,
-    pane_index: u32,
-    started_at_ms: i64,
 }
 
 impl TrackedAgents {
@@ -93,51 +89,21 @@ impl TrackedAgents {
                 .map(|projection| TrackedPane {
                     pane_id: projection.pane.incarnation.pane_id.clone(),
                     folder: projection.pane.working_directory.clone(),
-                    session: projection.pane.session_name.clone(),
-                    window_index: projection.pane.window_index,
-                    pane_index: projection.pane.pane_index,
-                    started_at_ms: projection.pane.incarnation.agent_started_at_ms,
                 })
                 .collect(),
         }
     }
 
-    /// Panes in one session, in listing order, all started at the same time.
+    /// Panes with the folders given, in listing order.
     #[cfg(test)]
     pub(crate) fn in_folders(panes: &[(&str, &str)]) -> Self {
         Self {
             panes: panes
                 .iter()
-                .enumerate()
-                .map(|(index, (pane_id, folder))| TrackedPane {
+                .map(|(pane_id, folder)| TrackedPane {
                     pane_id: pane_id.to_string(),
                     folder: folder.to_string(),
-                    session: String::new(),
-                    window_index: 0,
-                    pane_index: index as u32,
-                    started_at_ms: 0,
                 })
-                .collect(),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_positions(panes: &[(&str, &str, &str, u32, u32, i64)]) -> Self {
-        Self {
-            panes: panes
-                .iter()
-                .map(
-                    |&(pane_id, folder, session, window_index, pane_index, started_at_ms)| {
-                        TrackedPane {
-                            pane_id: pane_id.into(),
-                            folder: folder.into(),
-                            session: session.into(),
-                            window_index,
-                            pane_index,
-                            started_at_ms,
-                        }
-                    },
-                )
                 .collect(),
         }
     }
@@ -176,37 +142,9 @@ impl TrackedAgents {
         list.iter().any(|entry| same_folder(folder, entry))
     }
 
-    /// The chief's pane (see `resolve_chief`).
-    pub(crate) fn chief_pane_id(
-        &self,
-        chief: Option<&str>,
-        chief_session: Option<&str>,
-    ) -> Option<&str> {
-        let lookup = resolve_chief(
-            self.panes.iter().map(|pane| PanePosition {
-                pane_id: &pane.pane_id,
-                folder: &pane.folder,
-                session: &pane.session,
-                window_index: pane.window_index,
-                pane_index: pane.pane_index,
-                started_at_ms: pane.started_at_ms,
-            }),
-            chief,
-            chief_session,
-        );
-        match lookup {
-            ChiefLookup::Found(pane_id) => self
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == pane_id)
-                .map(|pane| pane.pane_id.as_str()),
-            ChiefLookup::Ambiguous { .. } | ChiefLookup::None => None,
-        }
-    }
-
-    /// Whether `pane_id`'s folder matches `chief`. Unlike `chief_pane_id` it holds for
-    /// every pane in the folder, so a message from the chief's folder is still known as
-    /// the chief's while another pane is the chief.
+    /// Whether `pane_id`'s folder matches `chief`. It holds for every pane in the folder,
+    /// so a message from the chief's folder is still known as the chief's while another
+    /// pane is the chief.
     pub(crate) fn is_in_chief_folder(&self, chief: Option<&str>, pane_id: &str) -> bool {
         let (Some(chief), Some(folder)) = (chief, self.folder_of(pane_id)) else {
             return false;
@@ -417,8 +355,8 @@ impl UpdateKind {
 
 /// `reason` of a hold that is the channel's list.
 pub(crate) const NOT_LISTED: &str = "not_listed";
-/// `reason` of the chief's turn-end update left out at the desk.
-pub(crate) const CHIEF_REASON: &str = "chief";
+/// `reason` of a turn-end update left out at the desk, where none is spoken.
+pub(crate) const AT_DESK_REASON: &str = "at_desk";
 /// `reason` of an update left out because its pane sent a message this turn.
 pub(crate) const MESSAGED_REASON: &str = "messaged_this_turn";
 
@@ -518,34 +456,15 @@ pub(crate) fn phone_held_back(
     Some(away)
 }
 
-/// The hold on the turn-end update of `pane_id` at the desk: the chief's own is not
-/// spoken, and nor is one from a pane that is not on `machine_audio_output`.
-pub(crate) fn desk_update_reason(
-    settings: &NotifySettings,
-    agents: &TrackedAgents,
-    pane_id: &str,
-) -> Option<Held> {
-    if agents.chief_pane_id(settings.chief.as_deref(), settings.chief_session.as_deref())
-        == Some(pane_id)
-    {
-        return Some(Held {
-            line: "spoken update left out (chief)".to_string(),
-            channel: Channel::MachineAudioOutput,
-            reason: CHIEF_REASON,
-            agent: agents.agent_of(pane_id),
-        });
+/// The hold on the turn-end update of `pane_id` at the desk: no pane's update is spoken
+/// there, the chief's included.
+pub(crate) fn desk_update_reason(agents: &TrackedAgents, pane_id: &str) -> Held {
+    Held {
+        line: "spoken update left out (no desk updates)".to_string(),
+        channel: Channel::MachineAudioOutput,
+        reason: AT_DESK_REASON,
+        agent: agents.agent_of(pane_id),
     }
-    if !agents.may_use(settings, Channel::MachineAudioOutput, pane_id) {
-        return Some(Held::not_listed(
-            format!(
-                "spoken update left out (not in notify.{})",
-                Channel::MachineAudioOutput.key()
-            ),
-            Channel::MachineAudioOutput,
-            agents.agent_of(pane_id),
-        ));
-    }
-    None
 }
 
 /// The hold on the locked-screen turn-end update of `pane_id`, when either rule applies.
@@ -815,16 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn tracked_agents_use_the_session_setting() {
-        let agents = TrackedAgents::with_positions(&[
-            ("%1", "/w/chief-of-pods", "old", 0, 0, 1),
-            ("%2", "/w/chief-of-pods", "chief", 0, 0, 9),
-        ]);
-        assert_eq!(agents.chief_pane_id(CHIEF_SET, None), Some("%1"));
-        assert_eq!(agents.chief_pane_id(CHIEF_SET, Some("chief")), Some("%2"));
-    }
-
-    #[test]
     fn agent_is_the_folder_below_home() {
         let home = Some("/Users/x");
         assert_eq!(
@@ -991,12 +900,6 @@ mod tests {
                 .as_deref(),
             Some("agent message dropped (not in notify.imessage)")
         );
-        assert_eq!(
-            desk_update_reason(&notify, &agents, "%2")
-                .map(|held| held.line)
-                .as_deref(),
-            Some("spoken update left out (not in notify.machine_audio_output)")
-        );
         assert_eq!(message_dropped_reason(&notify, &agents, false, "%2"), None);
     }
 
@@ -1044,40 +947,28 @@ mod tests {
     }
 
     #[test]
-    fn chief_is_quiet_at_the_desk_and_the_first_of_two_matching_panes_is_the_chief() {
+    fn no_pane_is_spoken_at_the_desk_the_chiefs_included() {
         let notify = settings("");
         let one = TrackedAgents::in_folders(&[
             ("%1", "/Users/x/code/chief-of-pods"),
             ("%2", "/work/harold"),
         ]);
-        assert_eq!(one.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));
-        assert_eq!(
-            desk_update_reason(&notify, &one, "%1")
-                .map(|held| held.line)
-                .as_deref(),
-            Some("spoken update left out (chief)")
-        );
+        for pane in ["%1", "%2", "%9"] {
+            let held = desk_update_reason(&one, pane);
+            assert_eq!(held.line, "spoken update left out (no desk updates)");
+            assert_eq!(held.reason, "at_desk");
+            assert_eq!(held.channel, Channel::MachineAudioOutput);
+            assert!(held.is_held_back());
+            assert!(!held.is_kept());
+        }
         let two = TrackedAgents::in_folders(&[
             ("%1", "/Users/x/code/chief-of-pods"),
             ("%2", "/tmp/chief-of-pods"),
         ]);
-        assert_eq!(two.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));
         for channel in ALL_CHANNELS {
             assert!(two.may_use(&notify, channel, "%1"));
             assert!(two.may_use(&notify, channel, "%2"));
         }
-        assert_eq!(
-            desk_update_reason(&notify, &two, "%1")
-                .map(|held| held.line)
-                .as_deref(),
-            Some("spoken update left out (chief)")
-        );
-        assert_eq!(desk_update_reason(&notify, &two, "%2"), None);
-        let gone = TrackedAgents::in_folders(&[("%2", "/tmp/chief-of-pods")]);
-        assert_eq!(
-            gone.chief_pane_id(notify.chief.as_deref(), None),
-            Some("%2")
-        );
     }
 
     #[test]

@@ -32,13 +32,10 @@ pub(crate) struct FakeEnvironment {
     elapsed: Mutex<Duration>,
     settings: NotifySettings,
     screen_locked: AtomicBool,
-    session_attached: AtomicBool,
-    active_pane: Mutex<Option<String>>,
     fail_sends: AtomicBool,
     /// The error the next turn-end send fails with, once.
     fail_next: Mutex<Option<String>>,
     delivered: Mutex<Vec<(OutboundChannel, String)>>,
-    delivered_as_chief: Mutex<Vec<bool>>,
     away_messages: Mutex<Vec<String>>,
     reply_targets: Mutex<Vec<String>>,
     spoken_lines: Mutex<Vec<String>>,
@@ -50,8 +47,7 @@ pub(crate) struct FakeEnvironment {
 impl FakeEnvironment {
     /// The shipped default settings with `overrides` (TOML) laid over them, except that each
     /// channel list the overrides leave out is `["*"]`: every pane may use it, so a test
-    /// that is not about the lists need not name a folder. The screen starts unlocked, no
-    /// tmux client is attached, and sends succeed.
+    /// that is not about the lists need not name a folder. The screen starts unlocked and sends succeed.
     pub(crate) fn new(overrides: &str) -> Self {
         let mut notify = crate::settings::settings_with(overrides).notify;
         for (key, list) in [
@@ -68,12 +64,9 @@ impl FakeEnvironment {
             elapsed: Mutex::new(Duration::ZERO),
             settings: notify,
             screen_locked: AtomicBool::new(false),
-            session_attached: AtomicBool::new(false),
-            active_pane: Mutex::new(None),
             fail_sends: AtomicBool::new(false),
             fail_next: Mutex::new(None),
             delivered: Mutex::new(Vec::new()),
-            delivered_as_chief: Mutex::new(Vec::new()),
             away_messages: Mutex::new(Vec::new()),
             reply_targets: Mutex::new(Vec::new()),
             spoken_lines: Mutex::new(Vec::new()),
@@ -97,14 +90,6 @@ impl FakeEnvironment {
         self.screen_locked.store(locked, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_session_attached(&self, attached: bool) {
-        self.session_attached.store(attached, Ordering::SeqCst);
-    }
-
-    pub(crate) fn set_active_pane(&self, pane_id: Option<&str>) {
-        *self.active_pane.lock().unwrap() = pane_id.map(str::to_string);
-    }
-
     pub(crate) fn set_fail_sends(&self, fail: bool) {
         self.fail_sends.store(fail, Ordering::SeqCst);
     }
@@ -112,11 +97,6 @@ impl FakeEnvironment {
     /// Makes the next turn-end send fail with `error`, and the ones after it succeed.
     pub(crate) fn fail_next_send_with(&self, error: &str) {
         *self.fail_next.lock().unwrap() = Some(error.to_string());
-    }
-
-    /// Whether each turn-end update handed to `deliver` was the chief's pane's.
-    pub(crate) fn delivered_as_chief(&self) -> Vec<bool> {
-        self.delivered_as_chief.lock().unwrap().clone()
     }
 
     /// Each turn-end update delivered: the channel and the pane.
@@ -163,22 +143,12 @@ impl NotifyEnvironment for FakeEnvironment {
         self.screen_locked.load(Ordering::SeqCst)
     }
 
-    fn session_attached(&self, _pane_id: &str) -> bool {
-        self.session_attached.load(Ordering::SeqCst)
-    }
-
-    fn active_pane(&self, _pane_id: &str) -> Option<String> {
-        self.active_pane.lock().unwrap().clone()
-    }
-
     fn deliver(
         &self,
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         _trace_id: &str,
-        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        self.delivered_as_chief.lock().unwrap().push(is_chief);
         if let Some(error) = self.fail_next.lock().unwrap().take() {
             return Err(error);
         }
@@ -190,13 +160,12 @@ impl NotifyEnvironment for FakeEnvironment {
             .unwrap()
             .push((*channel, turn.pane_id.clone()));
         let source = match channel {
-            OutboundChannel::Tts => None,
-            OutboundChannel::Away => Some(AgentAddress::TmuxPane {
+            OutboundChannel::Away => AgentAddress::TmuxPane {
                 pane_id: turn.pane_id.clone(),
                 label: turn.pane_label.clone(),
-            }),
+            },
         };
-        Ok((DeliveryOutcome::Delivered, source))
+        Ok((DeliveryOutcome::Delivered, Some(source)))
     }
 
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String> {

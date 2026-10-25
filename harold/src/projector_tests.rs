@@ -2815,7 +2815,7 @@ fn deliveries_under(
 fn a_given_up_turn_end_records_given_up_and_keeps_no_trace() {
     let event_id = uuid::Uuid::new_v4();
     let (_, parent) = keep_a_turn_for(event_id);
-    let environment = Arc::new(FakeEnvironment::new(""));
+    let environment = Arc::new(FakeEnvironment::locked(""));
     let dispatcher = Unpaused(dispatcher_with(&environment));
     let pane = unique_pane();
     environment.set_fail_sends(true);
@@ -2866,7 +2866,7 @@ fn a_turn_end_delivery_span_carries_text_cut() {
 fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     let event_id = uuid::Uuid::new_v4();
     let (trace_id, parent) = keep_a_turn_for(event_id);
-    let environment = Arc::new(FakeEnvironment::new(""));
+    let environment = Arc::new(FakeEnvironment::locked(""));
     let dispatcher = Unpaused(dispatcher_with(&environment));
 
     let outcome = dispatch_turn_end(&dispatcher, &event_id.to_string(), &unique_pane());
@@ -2876,7 +2876,7 @@ fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].span_context.trace_id(), trace_id);
     assert_eq!(attr(&deliveries[0], "kind"), "turn_end");
-    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
+    assert_eq!(attr(&deliveries[0], "channel"), "imessage");
     assert_eq!(attr(&deliveries[0], "outcome"), "delivered");
     assert!(
         telemetry::take_turn_delivery(&event_id.to_string()).is_none(),
@@ -2903,11 +2903,10 @@ fn a_turn_end_sent_while_away_records_the_away_channel() {
 }
 
 #[test]
-fn a_skipped_turn_end_records_skipped() {
+fn a_turn_end_at_the_desk_records_held_back_at_desk() {
     let event_id = uuid::Uuid::new_v4();
     let (_, parent) = keep_a_turn_for(event_id);
     let environment = Arc::new(FakeEnvironment::new(""));
-    environment.set_session_attached(true);
 
     let outcome = dispatch_turn_end(
         &Unpaused(dispatcher_with(&environment)),
@@ -2915,12 +2914,16 @@ fn a_skipped_turn_end_records_skipped() {
         &unique_pane(),
     );
 
-    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(matches!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack { reason: "at_desk" })
+    ));
+    assert!(environment.delivered().is_empty());
     let deliveries = deliveries_under(parent);
     assert_eq!(deliveries.len(), 1);
-    assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+    assert_eq!(attr(&deliveries[0], "outcome"), "held_back");
     assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
-    assert_eq!(attr(&deliveries[0], "reason"), "session_active");
+    assert_eq!(attr(&deliveries[0], "reason"), "at_desk");
 }
 
 /// Dispatches a turn end on `pane` through `dispatcher` under a fresh live turn, and
@@ -2940,19 +2943,6 @@ fn skipped_span_of(dispatcher: &dyn DeliveryDispatcher, pane: &str) -> (String, 
 }
 
 #[test]
-fn a_turn_end_from_the_active_pane_records_its_channel_and_reason() {
-    let environment = Arc::new(FakeEnvironment::new(
-        "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true",
-    ));
-    let pane = unique_pane();
-    environment.set_active_pane(Some(&pane));
-
-    let span = skipped_span_of(&Unpaused(dispatcher_with(&environment)), &pane);
-
-    assert_eq!(span, ("machine_audio_output".into(), "pane_active".into()));
-}
-
-#[test]
 fn a_repeated_turn_end_records_its_channel_and_reason() {
     for (locked, channel) in [(false, "machine_audio_output"), (true, "imessage")] {
         let environment = Arc::new(FakeEnvironment::new(""));
@@ -2961,7 +2951,12 @@ fn a_repeated_turn_end_records_its_channel_and_reason() {
         let pane = unique_pane();
         let first = uuid::Uuid::new_v4();
         let outcome = dispatch_turn_end(&dispatcher, &first.to_string(), &pane);
-        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+        // At the desk the first is left out, and the repeat of a left-out turn is a
+        // duplicate as well.
+        assert!(
+            matches!(outcome, Ok(DeliveryOutcome::Delivered)) == locked,
+            "{outcome:?}"
+        );
 
         let span = skipped_span_of(&dispatcher, &pane);
 
@@ -3000,32 +2995,10 @@ fn a_paused_away_turn_end_records_skipped_on_the_away_channel() {
 }
 
 #[test]
-fn a_muted_desk_turn_end_records_skipped_on_machine_audio_output() {
-    let event_id = uuid::Uuid::new_v4();
-    let (_, parent) = keep_a_turn_for(event_id);
-    let environment = Arc::new(FakeEnvironment::new(""));
-    crate::outbound::set_tts_muted(true);
-
-    let outcome = dispatch_turn_end(
-        &Unpaused(dispatcher_with(&environment)),
-        &event_id.to_string(),
-        &unique_pane(),
-    );
-    crate::outbound::set_tts_muted(false);
-
-    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
-    let deliveries = deliveries_under(parent);
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
-    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
-    assert_eq!(attr(&deliveries[0], "reason"), "voice_mute");
-}
-
-#[test]
 fn a_failed_turn_end_records_failed_and_its_retry_stays_in_the_trace() {
     let event_id = uuid::Uuid::new_v4();
     let (trace_id, parent) = keep_a_turn_for(event_id);
-    let environment = Arc::new(FakeEnvironment::new(""));
+    let environment = Arc::new(FakeEnvironment::locked(""));
     let dispatcher = Unpaused(dispatcher_with(&environment));
     let pane = unique_pane();
 
@@ -3052,7 +3025,7 @@ fn a_failed_turn_end_records_failed_and_its_retry_stays_in_the_trace() {
 #[test]
 fn a_turn_end_with_no_kept_trace_starts_its_own() {
     telemetry::test_support::install();
-    let environment = Arc::new(FakeEnvironment::new(""));
+    let environment = Arc::new(FakeEnvironment::locked(""));
     let pane = unique_pane();
     let before = telemetry::test_support::spans().len();
 
@@ -3061,7 +3034,7 @@ fn a_turn_end_with_no_kept_trace_starts_its_own() {
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     assert_eq!(
         environment.delivered(),
-        [(crate::outbound::OutboundChannel::Tts, pane)]
+        [(crate::outbound::OutboundChannel::Away, pane)]
     );
     let started_own = telemetry::test_support::spans()
         .into_iter()
@@ -3105,7 +3078,7 @@ fn a_turn_end_delivered_before_its_event_id_is_kept_joins_the_turn_by_its_pane()
     let (trace_id, parent, cx) = a_live_turn();
     let pane = unique_pane();
     let event_id = uuid::Uuid::new_v4();
-    let environment = Arc::new(FakeEnvironment::new(""));
+    let environment = Arc::new(FakeEnvironment::locked(""));
     // The handler keeps the turn under its pane before it asks the monitor to store it.
     telemetry::keep_pending_turn(&pane, cx.clone());
 
@@ -3128,7 +3101,7 @@ fn a_turn_end_delivered_before_its_event_id_is_kept_joins_the_turn_by_its_pane()
 
     // A later turn end on the same pane does not join this turn.
     let later = dispatch_turn_end(
-        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::locked("")))),
         &uuid::Uuid::new_v4().to_string(),
         &pane,
     );
@@ -3146,7 +3119,7 @@ fn a_turn_stored_before_its_delivery_is_kept_by_its_event_id_only() {
 
     // Another turn end on the pane, with another event id, does not take it.
     let other = dispatch_turn_end(
-        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::locked("")))),
         &uuid::Uuid::new_v4().to_string(),
         &pane,
     );
@@ -3154,7 +3127,7 @@ fn a_turn_stored_before_its_delivery_is_kept_by_its_event_id_only() {
     assert!(deliveries_under(parent).is_empty());
 
     let own = dispatch_turn_end(
-        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::locked("")))),
         &event_id.to_string(),
         &pane,
     );
@@ -3170,7 +3143,7 @@ fn a_turn_whose_store_failed_is_not_joined_by_a_later_turn_end() {
     telemetry::forget_pending_turn(&pane, &cx);
 
     let later = dispatch_turn_end(
-        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::locked("")))),
         &uuid::Uuid::new_v4().to_string(),
         &pane,
     );
@@ -4968,7 +4941,7 @@ async fn the_delivery_span_of_a_held_back_update_names_the_holding_channel_and_o
 }
 
 #[tokio::test]
-async fn the_delivery_span_of_a_desk_update_a_list_holds_back_names_machine_audio_output() {
+async fn the_delivery_span_of_a_desk_update_names_machine_audio_output_and_at_desk() {
     let directory = TestDirectory::new();
     let tree = unique_tree();
     let (environment, dispatcher, _alerts) = published_with_alerts(
@@ -4985,14 +4958,13 @@ async fn the_delivery_span_of_a_desk_update_a_list_holds_back_names_machine_audi
 
     assert!(matches!(
         outcome,
-        Ok(DeliveryOutcome::HeldBack {
-            reason: "not_listed"
-        })
+        Ok(DeliveryOutcome::HeldBack { reason: "at_desk" })
     ));
     let deliveries = deliveries_under(parent);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(attr(&deliveries[0], "outcome"), "held_back");
     assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
+    assert_eq!(attr(&deliveries[0], "reason"), "at_desk");
 }
 
 // ---------------------------------------------------------------------------

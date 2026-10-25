@@ -6,7 +6,7 @@ use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{
     AppDelivery, AppRoute, AwayText, CarriedBy, ChiefApp, DeliveryOutcome, NotPushedReason,
-    NotifyState, OutboundChannel, deliver_from_chief, is_chief_pane, notify, notify_with_app,
+    NotifyState, OutboundChannel, deliver_from_chief, notify, notify_with_app,
 };
 use crate::inbound::ownership::agent_message_text;
 use crate::store::{AppReplyState, TurnCompleted};
@@ -44,51 +44,76 @@ fn locked_screen_sends_the_update_to_the_phone_and_records_the_reply_target() {
 }
 
 #[test]
-fn unlocked_screen_speaks_the_update_and_records_no_reply_target() {
-    let environment = FakeEnvironment::new("");
-    let state = NotifyState::default();
-
-    let outcome = notify_turn(&environment, &state, &turn("%1", "build it"));
-
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Tts, "%1".to_string())]
+fn unlocked_screen_leaves_out_every_update_and_speaks_nothing() {
+    let agents = TrackedAgents::in_folders(&[
+        ("%1", "/work/chief-of-pods"),
+        ("%2", "/work/harold"),
+        ("%3", "/work/listed"),
+    ]);
+    // Panes %1 and %3 are on the desk's list; %2 is not. None of them is spoken.
+    let environment = FakeEnvironment::new(
+        "[notify]\nchief = \"/work/chief-of-pods\"\nmachine_audio_output = [\"/work/chief-of-pods\", \"/work/listed\"]",
     );
+    let logs = CapturedLogs::start();
+
+    for pane in ["%1", "%2", "%3", "%9"] {
+        let outcome = notify_turn_among(
+            &environment,
+            &NotifyState::default(),
+            &agents,
+            &turn(pane, "build it"),
+        );
+        assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+        assert!(
+            logs.text().contains(&format!(
+                "spoken update left out (no desk updates) pane_id={pane}"
+            )),
+            "{pane}: {}",
+            logs.text()
+        );
+    }
+
+    assert!(environment.delivered().is_empty());
     assert!(environment.reply_targets().is_empty());
 }
 
 #[test]
-fn attached_session_is_skipped_only_while_the_screen_is_unlocked() {
+fn a_left_out_desk_update_is_not_counted_and_is_logged_on_the_desk_channel() {
     let environment = FakeEnvironment::new("");
-    environment.set_session_attached(true);
-    let state = NotifyState::default();
+    let logs = CapturedLogs::start();
 
-    let outcome = notify_turn(&environment, &state, &turn("%1", "build it"));
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
-    assert!(environment.delivered().is_empty());
+    notify_turn(
+        &environment,
+        &NotifyState::default(),
+        &turn("%1", "build it"),
+    )
+    .unwrap();
 
-    environment.set_screen_locked(true);
-    let outcome = notify_turn(&environment, &state, &turn("%1", "build it"));
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    let text = logs.text();
+    assert!(text.contains("channel=\"machine_audio_output\""), "{text}");
+    assert!(text.contains("kind=\"turn_end_update\""), "{text}");
+    assert!(text.contains("reason=\"at_desk\""), "{text}");
 }
 
 #[test]
-fn active_pane_is_skipped_only_while_the_screen_is_unlocked() {
-    let environment = FakeEnvironment::new(
-        "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true",
-    );
-    environment.set_active_pane(Some("%1"));
-    let state = NotifyState::default();
+fn the_voice_mute_does_not_change_a_left_out_desk_update() {
+    super::set_tts_muted(true);
+    let environment = FakeEnvironment::new("");
 
-    let outcome = notify_turn(&environment, &state, &turn("%1", "build it"));
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    let outcome = notify_turn(&environment, &NotifyState::default(), &turn("%1", "x"));
+    super::set_tts_muted(false);
 
-    let outcome = notify_turn(&environment, &state, &turn("%2", "build it"));
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+}
 
+#[test]
+fn the_old_skip_settings_change_nothing() {
+    let environment =
+        FakeEnvironment::new("[notify]\nskip_if_session_active = true\nskip_if_pane_active = true");
     environment.set_screen_locked(true);
-    let outcome = notify_turn(&environment, &state, &turn("%1", "build it"));
+
+    let outcome = notify_turn(&environment, &NotifyState::default(), &turn("%1", "x"));
+
     assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
 }
 
@@ -246,36 +271,15 @@ fn mark_does_not_affect_another_pane_and_survives_its_turn() {
 }
 
 #[test]
-fn turn_ending_at_the_desk_is_spoken_and_removes_the_mark() {
+fn turn_ending_at_the_desk_is_left_out_and_removes_the_mark() {
     let (environment, state) = marked_pane();
     environment.set_screen_locked(false);
 
     assert_eq!(
         notify_turn(&environment, &state, &turn("%1", "report in")),
-        Ok(DeliveryOutcome::Delivered)
+        Ok(DeliveryOutcome::HeldBack { reason: "at_desk" })
     );
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Tts, "%1".to_string())]
-    );
-
-    environment.set_screen_locked(true);
-    assert_eq!(
-        notify_turn(&environment, &state, &turn("%1", "carry on")),
-        Ok(DeliveryOutcome::Delivered)
-    );
-}
-
-#[test]
-fn turn_skipped_at_the_desk_still_removes_the_mark() {
-    let (environment, state) = marked_pane();
-    environment.set_screen_locked(false);
-    environment.set_session_attached(true);
-
-    assert_eq!(
-        notify_turn(&environment, &state, &turn("%1", "report in")),
-        Ok(DeliveryOutcome::Skipped)
-    );
+    assert!(environment.delivered().is_empty());
 
     environment.set_screen_locked(true);
     assert_eq!(
@@ -330,57 +334,6 @@ fn duplicate_turn_still_removes_the_mark() {
 }
 
 #[test]
-fn failed_delivery_keeps_the_mark_for_the_retry_of_the_same_turn() {
-    let (environment, state) = marked_pane();
-    let finished = turn("%1", "report in");
-
-    // The turn ends at the desk and the spoken update fails.
-    environment.set_screen_locked(false);
-    environment.set_fail_sends(true);
-    assert_eq!(
-        notify_turn(&environment, &state, &finished),
-        Err("channel down".to_string())
-    );
-
-    // The screen is locked before the retry: the pane messaged the phone this turn, so
-    // the retry is left out.
-    environment.set_screen_locked(true);
-    environment.set_fail_sends(false);
-    environment.advance(Duration::from_secs(5));
-    assert_eq!(
-        notify_turn(&environment, &state, &finished),
-        Ok(DeliveryOutcome::Skipped)
-    );
-    assert!(environment.delivered().is_empty());
-
-    // The retry removed the mark: the pane's next turn sends its update.
-    assert_eq!(
-        notify_turn(&environment, &state, &turn("%1", "carry on")),
-        Ok(DeliveryOutcome::Delivered)
-    );
-}
-
-#[test]
-fn mark_put_back_after_a_failed_delivery_keeps_the_time_it_was_set() {
-    let (environment, state) = marked_pane();
-    let finished = turn("%1", "report in");
-
-    environment.set_screen_locked(false);
-    environment.set_fail_sends(true);
-    environment.advance(Duration::from_secs(590));
-    assert!(notify_turn(&environment, &state, &finished).is_err());
-
-    // 600 seconds after the message: the limit runs from the message, not from the retry.
-    environment.set_screen_locked(true);
-    environment.set_fail_sends(false);
-    environment.advance(Duration::from_secs(10));
-    assert_eq!(
-        notify_turn(&environment, &state, &finished),
-        Ok(DeliveryOutcome::Delivered)
-    );
-}
-
-#[test]
 fn paused_update_is_skipped_as_before_and_removes_the_mark() {
     let (environment, state) = marked_pane();
     let finished = turn("%1", "report in");
@@ -410,15 +363,6 @@ const ONLY_FROM_CHIEF: &str = "[notify]\nchief = \"/work/chief-of-pods\"\nimessa
 /// Pane %1 runs an agent in the chief's folder, pane %2 runs one in another folder.
 fn chief_and_pod() -> TrackedAgents {
     TrackedAgents::in_folders(&[("%1", "/work/chief-of-pods"), ("%2", "/work/harold")])
-}
-
-#[test]
-fn a_turn_is_the_chiefs_when_its_pane_is_the_one_notify_chief_finds() {
-    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
-    let settings = environment.notify_settings();
-    assert!(is_chief_pane(settings, &chief_and_pod(), "%1"));
-    assert!(!is_chief_pane(settings, &chief_and_pod(), "%2"));
-    assert!(!is_chief_pane(settings, &chief_and_pod(), "%9"));
 }
 
 #[test]
@@ -467,9 +411,10 @@ fn pane_on_the_list_sends_its_update() {
 fn with_no_agent_in_a_listed_folder_every_pane_is_held_back_on_both_channels() {
     let pod_only = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
     for environment in [
-        FakeEnvironment::locked(ONLY_FROM_CHIEF),
-        FakeEnvironment::new(ONLY_FROM_CHIEF),
+        (FakeEnvironment::locked(ONLY_FROM_CHIEF), "not_listed"),
+        (FakeEnvironment::new(ONLY_FROM_CHIEF), "at_desk"),
     ] {
+        let (environment, reason) = environment;
         let outcome = notify_turn_among(
             &environment,
             &NotifyState::default(),
@@ -477,12 +422,7 @@ fn with_no_agent_in_a_listed_folder_every_pane_is_held_back_on_both_channels() {
             &turn("%2", "build it"),
         );
 
-        assert_eq!(
-            outcome,
-            Ok(DeliveryOutcome::HeldBack {
-                reason: "not_listed",
-            })
-        );
+        assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason }));
         assert!(environment.delivered().is_empty());
     }
 }
@@ -512,50 +452,6 @@ fn the_default_lists_speak_nobody_but_a_chief_of_pods_folder() {
 }
 
 #[test]
-fn desk_speaks_only_listed_agents_and_never_the_chief() {
-    let overrides = "[notify]\nchief = \"/work/chief-of-pods\"\nmachine_audio_output = [\"/work/chief-of-pods\", \"/work/listed\"]";
-    let environment = FakeEnvironment::new(overrides);
-    let agents = TrackedAgents::in_folders(&[
-        ("%1", "/work/chief-of-pods"),
-        ("%2", "/work/listed"),
-        ("%3", "/work/harold-worktree"),
-        ("%4", "/work/harold"),
-        ("%5", "/work/architect"),
-        ("%6", "/work/listed/sub"),
-    ]);
-    let logs = CapturedLogs::start();
-
-    for pane in ["%1", "%2", "%3", "%4", "%5", "%6", "%9"] {
-        notify_turn_among(
-            &environment,
-            &NotifyState::default(),
-            &agents,
-            &turn(pane, "build it"),
-        )
-        .unwrap();
-    }
-
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Tts, "%2".to_string())]
-    );
-    assert_eq!(environment.delivered_as_chief(), [false]);
-    let text = logs.text();
-    assert!(
-        text.contains("spoken update left out (chief) pane_id=%1"),
-        "{text}"
-    );
-    for pane in ["%3", "%4", "%5", "%6", "%9"] {
-        assert!(
-            text.contains(&format!(
-                "spoken update left out (not in notify.machine_audio_output) pane_id={pane}"
-            )),
-            "{pane}: {text}"
-        );
-    }
-}
-
-#[test]
 fn an_empty_machine_audio_output_silences_the_desk_but_not_the_phone() {
     let agents = chief_and_pod();
     let desk = FakeEnvironment::new("[notify]\nmachine_audio_output = []");
@@ -567,24 +463,6 @@ fn an_empty_machine_audio_output_silences_the_desk_but_not_the_phone() {
     assert_eq!(
         phone.delivered(),
         [(OutboundChannel::Away, "%2".to_string())]
-    );
-}
-
-#[test]
-fn a_star_list_speaks_every_pane_even_one_with_no_folder() {
-    let environment = FakeEnvironment::new("[notify]\nmachine_audio_output = [\"*\"]");
-
-    notify_turn_among(
-        &environment,
-        &NotifyState::default(),
-        &TrackedAgents::default(),
-        &turn("%9", "x"),
-    )
-    .unwrap();
-
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Tts, "%9".to_string())]
     );
 }
 
@@ -630,18 +508,8 @@ fn agent_on_the_list_that_messaged_this_turn_gets_no_update() {
 }
 
 #[test]
-fn the_voice_mute_and_the_messaging_pause_come_before_the_lists() {
+fn the_messaging_pause_comes_before_the_lists() {
     let agents = chief_and_pod();
-    super::set_tts_muted(true);
-    let muted = FakeEnvironment::new(ONLY_FROM_CHIEF);
-    let logs = CapturedLogs::start();
-    notify_turn_among(&muted, &NotifyState::default(), &agents, &turn("%2", "x")).unwrap();
-    super::set_tts_muted(false);
-    assert!(
-        logs.text()
-            .contains("TTS notification skipped (voice muted)")
-    );
-
     super::set_messaging_paused(true);
     let paused = FakeEnvironment::locked(ONLY_FROM_CHIEF);
     let logs = CapturedLogs::start();
@@ -1015,18 +883,15 @@ fn the_delivery_span_carries_text_cut_for_a_cut_and_an_uncut_update() {
 }
 
 #[test]
-fn unlocked_chief_turn_is_unchanged_by_the_app() {
+fn unlocked_chief_turn_is_left_out_and_the_app_is_not_used() {
     let environment = FakeEnvironment::new("");
     let app = FakeApp::new(AppDelivery::Pushed);
     let away = FakeAwayText::default();
 
     let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Tts, "%1".to_string())]
-    );
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+    assert!(environment.delivered().is_empty());
     assert!(app.delivered().is_empty());
     assert!(away.sends().is_empty());
 }
@@ -1074,18 +939,11 @@ fn only_chief_listed(tree: &str) -> String {
 
 #[test]
 fn an_update_a_list_holds_back_counts_kept_and_logs_the_fields() {
-    for (locked, channel, line) in [
-        (
-            true,
-            "imessage",
-            "notification skipped (not in notify.imessage) pane_id=%2",
-        ),
-        (
-            false,
-            "machine_audio_output",
-            "spoken update left out (not in notify.machine_audio_output) pane_id=%2",
-        ),
-    ] {
+    for (locked, channel, line) in [(
+        true,
+        "imessage",
+        "notification skipped (not in notify.imessage) pane_id=%2",
+    )] {
         let tree = unique_tree();
         let environment = if locked {
             FakeEnvironment::locked(&only_chief_listed(&tree))
@@ -1128,14 +986,7 @@ fn a_delivered_update_counts_sent_on_the_channel_that_took_it() {
     let tree = unique_tree();
     let chief = format!("{tree}/chief-of-pods");
 
-    let desk = FakeEnvironment::new(&format!("[notify]\nchief = \"{chief}\""));
-    // A pane that is not the chief, so the desk speaks it.
     let others = TrackedAgents::in_folders(&[("%1", &chief), ("%2", &format!("{tree}/harold"))]);
-    notify_turn_among(&desk, &NotifyState::default(), &others, &turn("%2", "a")).unwrap();
-    assert_eq!(
-        notified(&format!("{tree}/harold"), "machine_audio_output", "sent"),
-        1
-    );
 
     let phone = FakeEnvironment::locked(&format!("[notify]\nchief = \"{chief}\""));
     notify_turn_among(&phone, &NotifyState::default(), &others, &turn("%2", "b")).unwrap();
@@ -1163,31 +1014,18 @@ fn a_delivered_update_counts_sent_on_the_channel_that_took_it() {
 }
 
 #[test]
-fn what_the_chief_rule_the_mute_the_pause_and_a_message_this_turn_hold_counts_neither() {
+fn what_the_desk_rule_the_pause_and_a_message_this_turn_hold_counts_neither() {
     let tree = unique_tree();
     let chief = format!("{tree}/chief-of-pods");
     let overrides = format!("[notify]\nchief = \"{chief}\"");
     let agents = TrackedAgents::in_folders(&[("%1", &chief)]);
 
-    // The chief's own update is not spoken at the desk.
-    let logs = CapturedLogs::start();
+    // An update at the desk is left out, the chief's too, and nothing is counted.
     let desk = FakeEnvironment::new(&overrides);
     let outcome = notify_turn_among(&desk, &NotifyState::default(), &agents, &turn("%1", "a"));
-    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "chief" }));
-    let text = logs.text();
-    assert!(
-        text.contains("spoken update left out (chief) pane_id=%1"),
-        "{text}"
-    );
-    assert!(text.contains("reason=\"chief\""), "{text}");
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
 
-    // The voice mute, on a pane the lists let through (the chief rule would hold the
-    // chief), and the pause.
-    let listed = TrackedAgents::in_folders(&[("%2", &format!("{tree}/harold"))]);
-    super::set_tts_muted(true);
-    let muted = notify_turn_among(&desk, &NotifyState::default(), &listed, &turn("%2", "b"));
-    super::set_tts_muted(false);
-    assert_eq!(muted, Ok(DeliveryOutcome::Skipped));
+    // The pause.
     super::set_messaging_paused(true);
     let phone = FakeEnvironment::locked(&overrides);
     notify_turn_among(&phone, &NotifyState::default(), &agents, &turn("%1", "c")).unwrap();

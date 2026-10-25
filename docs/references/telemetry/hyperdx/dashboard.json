@@ -25,11 +25,6 @@
       "collapsed": false
     },
     {
-      "id": "turn-end",
-      "title": "Turn-end updates",
-      "collapsed": false
-    },
-    {
       "id": "notifications",
       "title": "Notifications (leave the product filter empty)",
       "collapsed": false
@@ -657,86 +652,6 @@
         "numberFormat": {
           "output": "time",
           "factor": 1
-        }
-      }
-    },
-    {
-      "id": "model-p95",
-      "name": "Turn-end update, model p95",
-      "x": 0,
-      "y": 18,
-      "w": 3,
-      "h": 3,
-      "containerId": "turn-end",
-      "config": {
-        "configType": "sql",
-        "displayType": "number",
-        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
-        "sourceId": "@TRACES_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantile(0.95)(Duration / 1e9) FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.local_model' AND SpanAttributes['result'] = 'answered' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now()",
-        "numberFormat": {
-          "output": "time",
-          "factor": 1
-        }
-      }
-    },
-    {
-      "id": "model-p95-previous",
-      "name": "Turn-end update, model p95, previous 24 h",
-      "x": 3,
-      "y": 18,
-      "w": 3,
-      "h": 3,
-      "containerId": "turn-end",
-      "config": {
-        "configType": "sql",
-        "displayType": "number",
-        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
-        "sourceId": "@TRACES_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantile(0.95)(Duration / 1e9) FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.local_model' AND SpanAttributes['result'] = 'answered' AND Timestamp >= now() - INTERVAL 48 HOUR AND Timestamp < now() - INTERVAL 24 HOUR",
-        "numberFormat": {
-          "output": "time",
-          "factor": 1
-        }
-      }
-    },
-    {
-      "id": "full-sentences",
-      "name": "Turn-end updates in full sentences",
-      "x": 6,
-      "y": 18,
-      "w": 3,
-      "h": 3,
-      "containerId": "turn-end",
-      "config": {
-        "configType": "sql",
-        "displayType": "number",
-        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
-        "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT if(sumIf(rise, MetricName = 'harold.turn_end_updates') = 0, NULL, sumIf(rise, MetricName = 'harold.turn_end_updates' AND Attributes['outcome'] = 'model') / sumIf(rise, MetricName = 'harold.turn_end_updates')) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.turn_end_updates') AND TimeUnix >= now() - INTERVAL 336 HOUR AND TimeUnix < now())) WHERE TimeUnix >= now() - INTERVAL 168 HOUR",
-        "numberFormat": {
-          "output": "percent",
-          "mantissa": 1
-        }
-      }
-    },
-    {
-      "id": "full-sentences-previous",
-      "name": "Turn-end updates in full sentences, previous 7 days",
-      "x": 9,
-      "y": 18,
-      "w": 3,
-      "h": 3,
-      "containerId": "turn-end",
-      "config": {
-        "configType": "sql",
-        "displayType": "number",
-        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
-        "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT if(sumIf(rise, MetricName = 'harold.turn_end_updates') = 0, NULL, sumIf(rise, MetricName = 'harold.turn_end_updates' AND Attributes['outcome'] = 'model') / sumIf(rise, MetricName = 'harold.turn_end_updates')) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.turn_end_updates') AND TimeUnix >= now() - INTERVAL 504 HOUR AND TimeUnix < now() - INTERVAL 168 HOUR)) WHERE TimeUnix >= now() - INTERVAL 336 HOUR",
-        "numberFormat": {
-          "output": "percent",
-          "mantissa": 1
         }
       }
     },

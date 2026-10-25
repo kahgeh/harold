@@ -18,17 +18,6 @@ fn unique_pane() -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_model_failed_fallback_is_counted_from_0_at_start() {
-    test_support::install();
-    register_phone_counters();
-    let counted = test_support::exact_counter_value(
-        "harold.turn_end_updates",
-        &[("outcome", "fallback"), ("reason", "model_failed")],
-    );
-    assert!(counted.is_some());
-}
-
-#[test]
 fn the_web_app_push_counter_is_counted_from_0_at_start() {
     test_support::install();
     register_phone_counters();
@@ -520,7 +509,7 @@ async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line(
     tracing::subscriber::with_default(subscriber, || {
         // Turn-end updates delivered as the event handler delivers them, through the
         // daemon's dispatcher and a fake environment.
-        let environment = Arc::new(crate::outbound::fake::FakeEnvironment::new(""));
+        let environment = Arc::new(crate::outbound::fake::FakeEnvironment::locked(""));
         for _ in 0..20 {
             let delivering = std::time::Instant::now();
             let delivered = crate::projector::tests::dispatch_turn_end_with_fake_environment(
@@ -1738,7 +1727,6 @@ const METRICS: &[&str] = &[
     "harold.phone_requests",
     "harold.phone_requests.wrong",
     "harold.phone_request.latency",
-    "harold.turn_end_updates",
     "harold.turns",
     "harold.turn.duration",
     "pod.specs",
@@ -1803,7 +1791,6 @@ const SPANS: &[&str] = &[
     "harold.turn_complete",
     "harold.delivery",
     "harold.voice_note",
-    "harold.local_model",
     "harold.watch.run",
     "harold.watch.model",
     "harold.call_turn",
@@ -1815,7 +1802,7 @@ const SPANS: &[&str] = &[
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
 /// reads them. For a builder tile, the first phrase is its `aggFn` and level; for a SQL
 /// tile, every phrase is in its SQL.
-const CARDS: [(&str, &str, &[&str], &[&str]); 18] = [
+const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
     ("Pods", "Free slots, average", &["pod.slots.free"], &["avg"]),
     (
         "Pods",
@@ -1931,22 +1918,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 18] = [
             "Attributes['phase'] = 'build'",
         ],
     ),
-    (
-        "Turn-end updates",
-        "Turn-end update, model p95",
-        &["harold.local_model"],
-        &["quantile(0.95)(Duration / 1e9)", "harold.local_model"],
-    ),
-    (
-        "Turn-end updates",
-        FULL_SENTENCES_CARD,
-        &["harold.turn_end_updates"],
-        &["SELECT if(sumIf(rise"],
-    ),
 ];
-
-/// The card read over the last 7 days (168 hours); its earlier tile is "previous 7 days".
-const FULL_SENTENCES_CARD: &str = "Turn-end updates in full sentences";
 
 /// The card read over the last hour; every other card reads the last 24 hours (choice 10).
 const LAST_HOUR_CARD: &str = "Lines merged, last hour";
@@ -2071,7 +2043,6 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
     assert_eq!(
         files,
         [
-            "alert-local-model-failing.json",
             "alert-phone-request-slow.json",
             "alert-phone-request-unavailable.json",
             "alert-slot-idle.json",
@@ -2079,7 +2050,6 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "alert-wrong-agent.json",
             "dashboard.json",
             "trends.json",
-            "webhook-local-model-failing.json",
             "webhook-phone-request-slow.json",
             "webhook-phone-request-unavailable.json",
             "webhook-slot-idle.json",
@@ -2146,8 +2116,6 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .flat_map(|(_, card, ..)| {
             let earlier = if *card == LAST_HOUR_CARD {
                 format!("{card}, previous hour")
-            } else if *card == FULL_SENTENCES_CARD {
-                format!("{card}, previous 7 days")
             } else if *card == "Merges to main, last 24 h" {
                 "Merges to main, the 24 h before".to_string()
             } else {
@@ -2187,7 +2155,6 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             "Phone requests",
             "Pods",
             "Specs",
-            "Turn-end updates",
             "Turns",
             "Web app (the phone's browser)"
         ]
@@ -2197,7 +2164,6 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         let (current, earlier) = (&pair[0], &pair[1]);
         let hours = match card {
             LAST_HOUR_CARD => 1,
-            FULL_SENTENCES_CARD => 168,
             _ => 24,
         };
         let other_periods: &[&str] = if hours == 1 {
@@ -2414,7 +2380,6 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("specs", true),
         ("phone", false),
         ("turns", false),
-        ("turn-end", false),
         ("web-app", false),
         ("knowledge", false),
         // The card takes `$__filters`, so the product filter empties it: its container
@@ -2498,9 +2463,9 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
             }
         }
     }
-    // Eight counter cards and two lead-time cards, each with its earlier number, the
+    // Seven counter cards and two lead-time cards, each with its earlier number, the
     // notifications card, the browser spans not forwarded card and three trends panels.
-    assert_eq!(counted, 25);
+    assert_eq!(counted, 23);
 }
 
 #[test]
@@ -2552,15 +2517,6 @@ fn the_alert_files_carry_the_spec_thresholds() {
             1.0,
             "above",
             120,
-        ),
-        (
-            "local-model-failing",
-            METRICS_SOURCE,
-            "harold.turn_end_updates",
-            "sum",
-            3.0,
-            "above_exclusive",
-            60,
         ),
         (
             "watch-cost-high",
@@ -2631,10 +2587,6 @@ fn the_alert_files_carry_the_spec_thresholds() {
     assert_eq!(
         slow["select"][0]["where"],
         "ServiceName = 'harold' AND SpanName = 'harold.phone_request' AND SpanAttributes['pane_id'] != ''"
-    );
-    assert_eq!(
-        config("local-model-failing")["select"][0]["where"],
-        "Attributes['reason'] = 'model_failed'"
     );
     assert_eq!(config("wrong-agent")["select"][0]["where"], "");
     assert_eq!(config("slot-idle")["groupBy"], "Attributes['pod.product']");
@@ -2886,8 +2838,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -2901,8 +2853,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -3078,8 +3030,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the four created.
-    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
+    // The old webhook, the two kept, and the three created.
+    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -3089,7 +3041,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 4, "{calls:?}");
+    assert_eq!(posts, 3, "{calls:?}");
 }
 
 #[test]
@@ -3431,7 +3383,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
     stand_in
 }
 
@@ -3440,7 +3392,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 6 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 5 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),

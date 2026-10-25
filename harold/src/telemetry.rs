@@ -296,8 +296,6 @@ pub(crate) struct Instruments {
     pub phone_request_latency: Histogram<f64>,
     /// `harold.turns`, `{turn}`.
     pub turns: Counter<u64>,
-    /// `harold.turn_end_updates`, `{update}`, by `outcome` and `reason`.
-    pub turn_end_updates: Counter<u64>,
     /// `harold.turn.duration`, seconds.
     pub turn_duration: Histogram<f64>,
     /// `pod.merges`, `{merge}`.
@@ -355,7 +353,6 @@ pub(crate) fn instruments() -> &'static Instruments {
                 &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
             ),
             turns: counter("harold.turns", "{turn}"),
-            turn_end_updates: counter("harold.turn_end_updates", "{update}"),
             turn_duration: seconds(
                 "harold.turn.duration",
                 &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
@@ -419,14 +416,6 @@ pub(crate) const PHONE_CHANNELS: [&str; 2] = ["imessage", "unknown"];
 /// after `init_telemetry`, when export is on.
 pub(crate) fn register_phone_counters() {
     let instruments = instruments();
-    // `model_failed` is what `local-model-failing` reads, so it is counted from 0 too.
-    instruments.turn_end_updates.add(
-        0,
-        &[
-            KeyValue::new("outcome", "fallback"),
-            KeyValue::new("reason", "model_failed"),
-        ],
-    );
     for outcome in ["accepted", "gone", "refused", "unreachable"] {
         instruments
             .web_app_pushes
