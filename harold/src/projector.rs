@@ -739,9 +739,9 @@ fn dispatch_spoken_line(
 /// asked with the line's pane id and text, and says the line in the open call, if any.
 /// On the locked-screen branch, `chief_app` is asked with the pane id: when it gives the
 /// app route, the line goes to the app as text, and to iMessage as text when the app does
-/// not push it. No voice note is made for it. `phone_drop` and `desk_drop` give the log
-/// line for a pane not on the list of the branch taken, once the voice mute and the
-/// messaging pause have been looked at.
+/// not push it. With no app route the line is dropped (`Skipped`): Harold sends no voice
+/// note. `phone_drop` and `desk_drop` give the log line for a pane not on the list of the
+/// branch taken, once the voice mute and the messaging pause have been looked at.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_spoken_line_with_app<'a>(
     delivery: &PendingDelivery,
@@ -794,12 +794,8 @@ fn dispatch_spoken_line_with_app<'a>(
             }
             return Ok(DeliveryOutcome::Delivered);
         }
-        environment
-            .send_spoken_line(said)
-            .map_err(DispatchError::Retryable)?;
-        info!(pane_id = %pane_id, "spoken line sent to the away device");
-        sent(pane_id, Channel::Imessage);
-        return Ok(DeliveryOutcome::Delivered);
+        info!(pane_id = %pane_id, "spoken line dropped (screen locked)");
+        return Ok(DeliveryOutcome::Skipped);
     }
     if voice_muted {
         info!(pane_id = %pane_id, "spoken line dropped (voice off)");
@@ -1131,6 +1127,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// The pause after a cycle that failed for any reason but a delivery's send.
 const ERROR_PAUSE: Duration = Duration::from_secs(1);
 
+/// The folder old Harold versions kept voice notes in, inside the temporary folder.
+const OLD_NOTE_FOLDER: &str = "harold-voice-notes";
+
+/// Remove the folder `folder` once, at start: the file names in it hold the words of old
+/// spoken lines. A missing folder is nothing to do.
+fn remove_old_note_folder(folder: &std::path::Path) {
+    if let Err(error) = std::fs::remove_dir_all(folder)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(error = %error, "old voice note folder not removed");
+    }
+}
+
 /// `run_event_handler_with_app` without the web app. Only tests call it now.
 #[cfg(test)]
 pub async fn run_event_handler(
@@ -1155,11 +1164,7 @@ pub async fn run_event_handler_with_app(
         production_dispatcher(Arc::new(SystemEnvironment), &snapshots, app, alerts.clone())
             .with_photos_dir(store.app_photos_dir()),
     );
-    // Voice notes sent before a restart are kept for Messages to read; remove the old ones.
-    crate::outbound::voice_note::remove_old_notes(
-        &crate::outbound::voice_note::notes_parent(),
-        std::time::SystemTime::now(),
-    );
+    remove_old_note_folder(&std::env::temp_dir().join(OLD_NOTE_FOLDER));
     info!("event handler starting");
     run_deliveries(store, dispatcher, Some(snapshots), alerts, shutdown).await;
     info!("event handler shutting down");

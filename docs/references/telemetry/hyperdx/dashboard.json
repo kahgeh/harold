@@ -672,6 +672,22 @@
       }
     },
     {
+      "id": "spoken-lines-dropped-while-locked",
+      "name": "Spoken lines dropped while locked, by pane, per day",
+      "x": 12,
+      "y": 21,
+      "w": 12,
+      "h": 3,
+      "containerId": "notifications",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, LogAttributes['pane_id'] AS pane_id, count() AS dropped FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'spoken line dropped (screen locked)' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, pane_id ORDER BY day DESC, dropped DESC"
+      }
+    },
+    {
       "id": "call-turn-first-sound-and-answer",
       "name": "Call turn, time to first sound and to the answer, last 7 days",
       "x": 12,

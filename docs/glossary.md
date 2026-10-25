@@ -83,7 +83,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | fallback sentence | The spoken turn-end update `The chief has finished and is waiting.`, spoken in a call when Haiku gives no sentence that names the chief, fails or passes 8 s, or the call answerer is off | "default message", "fixed tail" |
 | agent message | Text an agent asks Harold to send to the phone (`send-message-to-away-device`) | — |
 | spoken line | A line the chief asks Harold to say (`harold speak`) | — |
-| voice note | A spoken line sent to the phone as audio | — |
+| voice note | A spoken line sent to the phone as audio. Harold no longer sends one (no-voice-notes, 2026-10-25) | — |
 | held back | An update or message a channel's rules keep from going out. A turn-end update held back is "left out", and an agent message or spoken line held back is "dropped". `outcome = held_back` covers both | "skipped" (except in the existing `notification skipped` log line, kept as written), "suppressed" |
 | left out | A turn-end update Harold chose not to say or send. It names the channel list that held the pane back | — |
 | dropped | An agent message or spoken line Harold chose not to send. It names the channel list that held the pane back | — |

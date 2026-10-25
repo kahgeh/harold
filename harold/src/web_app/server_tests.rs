@@ -1324,7 +1324,7 @@ impl FakeSay {
     }
 }
 
-impl crate::outbound::voice_note::Runner for FakeSay {
+impl crate::outbound::runner::Runner for FakeSay {
     fn run(&self, program: &str, args: &[String], _timeout: Duration) -> bool {
         self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(program, "say");

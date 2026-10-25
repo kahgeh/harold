@@ -184,7 +184,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.reply_stored` | storing the reply, so the stored event records the trace | |
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
-| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
+| `harold.delivery` | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
 
 **A turn you start by speaking in a call** is one trace, with these spans in order:
 

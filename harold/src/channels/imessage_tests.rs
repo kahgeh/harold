@@ -14,10 +14,10 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
-    apple_date_to_utc, attachment_args, is_marked_as_harold, max_rowid_of, notification_message,
-    notification_plan, osascript_command, parse_max_rowid, poll_chat_db, poll_db, read_start,
-    record_row, run_with_script, send_imessage_to_with, send_script, start_cursors,
-    start_listener_cursors, start_listener_reading, wait_for_start_row,
+    apple_date_to_utc, is_marked_as_harold, max_rowid_of, notification_message, notification_plan,
+    osascript_command, parse_max_rowid, poll_chat_db, poll_db, read_start, record_row,
+    run_with_script, send_imessage_to_with, send_script, start_cursors, start_listener_cursors,
+    start_listener_reading, wait_for_start_row,
 };
 
 #[test]
@@ -662,7 +662,7 @@ fn a_row_that_is_only_attachment_placeholders_is_not_a_reply() {
 }
 
 #[tokio::test]
-async fn a_voice_note_echo_is_never_recorded_as_a_reply() {
+async fn an_attachment_only_echo_is_never_recorded_as_a_reply() {
     let store_directory = TestDirectory::new();
     let store = HaroldStore::open(&store_directory.0).await.unwrap();
     let directory = TestDirectory::new();
@@ -1874,29 +1874,6 @@ fn agent_message_goes_out_with_one_marker() {
 }
 
 #[test]
-fn attachment_script_is_fixed_text_and_takes_the_path_and_recipient_as_arguments() {
-    let args = attachment_args(
-        std::path::Path::new("/tmp/harold-voice-1/line.m4a"),
-        "me@example.com",
-    );
-    assert_eq!(
-        args,
-        [
-            "-e",
-            "on run argv",
-            "-e",
-            "set theFile to POSIX file (item 1 of argv)",
-            "-e",
-            "tell application \"Messages\" to send theFile to buddy (item 2 of argv)",
-            "-e",
-            "end run",
-            "/tmp/harold-voice-1/line.m4a",
-            "me@example.com",
-        ]
-    );
-}
-
-#[test]
 fn an_apple_date_is_read_as_nanoseconds_or_as_seconds_since_2001() {
     use time::format_description::well_known::Rfc3339;
     let start_of_2001 = time::OffsetDateTime::parse("2001-01-01T00:00:00Z", &Rfc3339).unwrap();
@@ -1963,45 +1940,6 @@ async fn a_self_sent_reply_is_a_phone_request_on_the_imessage_channel() {
     let reply = crate::telemetry::open_reply_for(&trace_id).expect("the request is kept open");
     assert_eq!(reply.channel, "imessage");
     assert_eq!(reply.reply_at, apple_date_to_utc(sent));
-}
-
-#[test]
-fn a_failed_attachment_send_discards_osascript_output_and_logs_no_words() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let directory = TestDirectory::new();
-    let seen = directory.0.join("streams");
-    let fake = directory.0.join("osascript");
-    // The script writes how it found standard output, then standard error. The file's path
-    // is the ninth argument, after the four `-e` lines of the script.
-    std::fs::write(
-        &fake,
-        format!(
-            "#!/bin/sh\nout=kept; [ /dev/fd/1 -ef /dev/null ] && out=discarded\nerr=kept; [ /dev/fd/2 -ef /dev/null ] && err=discarded\necho \"$out $err\" > '{0}'\necho \"sent $9\"\necho \"cannot send $9\" >&2\nexit 1\n",
-            seen.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let note = directory.0.join("Release install is on task five.m4a");
-    let logs = crate::outbound::fake::CapturedLogs::start();
-
-    let error =
-        super::send_attachment_with(fake.to_str().unwrap(), &note, "me@example.com").unwrap_err();
-
-    assert!(
-        error.starts_with("osascript exited unsuccessfully"),
-        "{error}"
-    );
-    assert!(!error.contains("Release install"), "{error}");
-    assert_eq!(
-        std::fs::read_to_string(&seen).unwrap(),
-        "discarded discarded\n"
-    );
-    assert!(!logs.text().contains("Release install"), "{}", logs.text());
-    assert_eq!(
-        super::send_attachment_with("true", &note, "me@example.com"),
-        Ok(())
-    );
 }
 
 #[test]

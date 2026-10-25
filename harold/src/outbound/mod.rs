@@ -1,8 +1,8 @@
 pub mod tts;
 
 pub(crate) mod left_out;
+pub(crate) mod runner;
 pub(crate) mod spoken_line;
-pub(crate) mod voice_note;
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -179,8 +179,6 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
     /// Say a spoken line at the desk with the `[tts]` command, adding nothing to it.
     fn speak_line(&self, line: &str) -> Result<(), String>;
-    /// Send a spoken line to the away device as a voice note.
-    fn send_spoken_line(&self, line: &str) -> Result<(), String>;
     /// Make `agent` the one an untagged reply goes to.
     fn record_reply_target(&self, agent: AgentAddress);
     /// Whether `channel` is set up: `imessage` has a recipient, `web_app` its table. `machine_audio_output` always is.
@@ -221,10 +219,6 @@ impl NotifyEnvironment for SystemEnvironment {
         } else {
             Err("TTS command failed".into())
         }
-    }
-
-    fn send_spoken_line(&self, line: &str) -> Result<(), String> {
-        channels::send_spoken_line(line)
     }
 
     fn record_reply_target(&self, agent: AgentAddress) {

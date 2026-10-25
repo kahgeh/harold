@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use super::AppState;
 use super::route::now_ms;
-use crate::outbound::voice_note::{MODEL_TIMEOUT, Runner};
+use crate::outbound::runner::{MODEL_TIMEOUT, Runner};
 
 // The speech detector's own numbers (`voice_input/speech.rs`), which it keeps private.
 /// Frames, from the first, that set the background.

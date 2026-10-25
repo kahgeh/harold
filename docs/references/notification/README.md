@@ -143,7 +143,7 @@ These are Harold's defaults (`default.toml`). With nothing in `local.toml`, only
 
 | Key | The channel | What goes out on it |
 | --- | --- | --- |
-| `imessage` | iMessage to the phone | Turn-end updates while the screen is locked, messages agents ask Harold to send, and spoken lines while away (as voice notes) |
+| `imessage` | iMessage to the phone | Turn-end updates while the screen is locked, messages agents ask Harold to send, and the chief's spoken lines while away (as text) |
 | `web_app` | The web app on the phone (`[web_app]`): its thread, its push and its call | The same, as text in the thread with a push, or a spoken line played in the phone's call |
 | `machine_audio_output` | Speech on the Mac: the `[tts]` command, and the Mac's call | `harold speak` lines at the desk |
 
@@ -249,7 +249,7 @@ The chief hands Harold a sentence or two of its own for the user to hear:
 ~/bin/harold/harold speak --src-id "$TMUX_PANE" 'Release install is on task five of six. Nothing needs you.'
 ```
 
-At the desk Harold says the line; away from it, Harold sends the line to the phone as a voice note. Harold adds nothing to the line, and its model writes no summary of it.
+At the desk Harold says the line; away from it, Harold sends the chief's line to the phone as text, and drops the line of any other pane. Harold sends no voice note. Harold adds nothing to the line, and its model writes no summary of it.
 
 The command calls the daemon's `SpeakLine` RPC and waits up to 3 seconds. The daemon makes the text one line (line breaks and tabs become spaces), checks that it has 1 to 300 characters and that the pane hosts an agent the agent monitor tracks, and then stores a `SpokenLineRequested` event. The command exits 0 once the event is stored, which is before the line is said or sent. Otherwise it prints one line on standard error, stores nothing and exits 1:
 
@@ -268,20 +268,15 @@ Harold stores the line and then handles it:
 | Situation | What Harold does |
 |---|---|
 | The pane is not on the list of the channel the line would use (`machine_audio_output` at the desk, the phone's lists while away) | Drops it and logs `spoken line dropped (not in notify.<key>) pane_id=…`. The voice mute and the messaging pause are looked at first. |
-| Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. |
+| Screen locked (away), messaging not paused, the chief's pane with the web app route on | Sends the line to the web app as text, with a push, or to the iMessage recipient as text when the app does not push it. |
+| Screen locked (away), messaging not paused, any other pane, or the chief with no web app route | Drops it and logs `spoken line dropped (screen locked) pane_id=…`. The agent's own text messages still reach the user. |
 | Screen locked, messaging paused | Dropped and logged, as other away messages are |
 | Screen unlocked (at the desk), voice on | Speaks the line with the configured `[tts]` command, without adding anything to it |
 | Screen unlocked, voice off | Dropped and logged |
 
-The event handler takes the event from the delivery outbox in stream-version order, like an agent's message. It looks at the screen lock, the pause and the voice mute on every try, so a line whose send failed while the user was away is said if they are back at the desk for the retry. A line that was said or sent is logged as `spoken line said at the desk` or `spoken line sent to the away device`; the drops are `spoken line dropped (messaging paused)` and `spoken line dropped (voice off)`. Each of these log lines is written at `INFO` with the pane in a `pane_id` field and never holds the spoken text.
+The event handler takes the event from the delivery outbox in stream-version order, like an agent's message. It looks at the screen lock, the pause and the voice mute on every try, so a line whose send failed while the user was away is said if they are back at the desk for the retry. A line that was said or sent is logged as `spoken line said at the desk` or `spoken line said in the open call`; the drops are `spoken line dropped (messaging paused)`, `spoken line dropped (voice off)` and `spoken line dropped (screen locked)`. Each of these log lines is written at `INFO` with the pane in a `pane_id` field and never holds the spoken text.
 
-Harold makes the voice note with the model it speaks with at the desk: it runs the `[tts]` command and arguments with every `--play` removed, so nothing is heard, and with `--file_prefix <folder>/line --join_audio --audio_format wav` added before the last `--text`, then the line, so the model writes `<folder>/line.wav`. `afconvert -f m4af -d aac` turns `line.wav` into the AAC file `<name>.m4a` (named after the line, as described below), which Harold sends with a fixed AppleScript that takes the file's path and the recipient as arguments, so the line's text never enters the script. When the model exits non-zero, writes no `line.wav` or takes over 120 seconds, Harold makes `<name>.m4a` with `say` instead, reading the line from `<folder>/line.txt`, and logs `voice note made with say (the model failed)`; when `[tts]` does not run `mlx_audio.tts.generate`, it uses `say` directly, and when `say`, `afconvert` or the send fails, the line stays pending and is retried. Each voice note is made in its own folder under `$TMPDIR/harold-voice-notes/`, which is kept after a send, because Messages may read the file after `osascript` returns, and removed once 10 minutes old, when a later voice note is made or the event handler starts; a voice note that could not be made or sent has its folder removed at once.
-
-`<name>` is built from the line, so the phone shows what each voice note says. Harold keeps the line's letters and digits, in any language, removes apostrophes (`'` and `’`), turns every run of any other character (spaces, punctuation, `/`, `:`, emoji, line breaks) into one space and removes spaces at either end. A name over 60 characters is cut after the last whole word that fits, and a first word over 60 characters is cut at 60. A line with no letter or digit gives `voice note`. The line `Release install is on task five of six. Nothing needs you.` arrives as `Release install is on task five of six Nothing needs you.m4a`. A name never holds `/` or `:`, never starts with `-` or `.`, is never empty and is at most 244 bytes; two voice notes with the same name do not clash, because each is in its own folder.
-
-The line's words therefore also reach the voice note's file name under `$TMPDIR/harold-voice-notes/`, removed once 10 minutes old, when a later voice note is made or Harold's event handler starts; the arguments of `afconvert`, `say` and `osascript`, seen only by processes on this Mac; and the attachment's name in Messages, on both Macs and the phone, kept as long as the chat. They do not reach Harold's log: nothing logs the voice note's path, and the output and error output of `osascript` for the attachment send are discarded, as the model's, `afconvert`'s and `say`'s are, so a failed send is logged only as failed, with its exit status. A text iMessage's words and recipient reach `osascript` on its standard input, never its arguments; a voice note's path and recipient still reach its arguments.
-
-The chat is with the user's own Apple ID, so the voice note also comes back into `chat.db` as a received row, with no `🤖` marker and with the attachment placeholder U+FFFC as its text; when Harold reads replies it skips any row whose text, with whitespace removed, is only U+FFFC characters (the file name is not part of that text), so the echo is never typed into a pane, while a reply the user types always has other characters.
+Harold no longer makes voice notes (no-voice-notes, 2026-10-25). At start, Harold removes the folder `$TMPDIR/harold-voice-notes/` that older versions used, once, if it exists, because its file names held the words of old lines. When Harold reads replies it still skips any row whose text, with whitespace removed, is only U+FFFC characters (the attachment placeholder), so the echo of an old voice note is never typed into a pane.
 
 ## Sequences
 

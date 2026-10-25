@@ -110,50 +110,6 @@ pub(crate) fn send_imessage(msg: &str) -> Result<(), String> {
     send_imessage_to(msg, recipient)
 }
 
-/// The AppleScript that sends a file as an attachment. It is fixed text: the file's path
-/// and the recipient reach it as arguments, and no line's text ever does.
-const ATTACHMENT_SCRIPT: [&str; 4] = [
-    "on run argv",
-    "set theFile to POSIX file (item 1 of argv)",
-    "tell application \"Messages\" to send theFile to buddy (item 2 of argv)",
-    "end run",
-];
-
-/// The `osascript` arguments that send the file at `path` to `recipient`.
-fn attachment_args(path: &Path, recipient: &str) -> Vec<String> {
-    ATTACHMENT_SCRIPT
-        .iter()
-        .flat_map(|line| ["-e".to_string(), line.to_string()])
-        .chain([path.to_string_lossy().into_owned(), recipient.to_string()])
-        .collect()
-}
-
-/// Send the file at `path` to the configured recipient, in the same chat as Harold's text.
-/// The attachment carries no Harold marker; `replies_after` skips its echo instead.
-pub(crate) fn send_attachment(path: &Path) -> Result<(), String> {
-    let cfg = get_settings();
-    let Some(recipient) = cfg.imessage.recipient.as_deref() else {
-        return Err("iMessage recipient is not configured".into());
-    };
-    send_attachment_with("osascript", path, recipient)
-}
-
-/// Send the file at `path` to `recipient` by running `program`, which is `osascript`
-/// outside tests. Its output and error output are discarded: either can name the file, and
-/// a voice note's file name holds the words of its line.
-fn send_attachment_with(program: &str, path: &Path, recipient: &str) -> Result<(), String> {
-    let status = Command::new(program)
-        .args(attachment_args(path, recipient))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| format!("failed to start osascript: {error}"))?;
-    if !status.success() {
-        return Err(format!("osascript exited unsuccessfully: {status}"));
-    }
-    Ok(())
-}
-
 fn recent_outgoing_texts(handle_id: i64) -> Vec<String> {
     let db_path = get_settings().chat_db.resolved_path();
     let out = Command::new("sqlite3")

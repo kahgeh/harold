@@ -10,7 +10,8 @@ use super::{
     ChiefTyper, DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
     dispatch_away_message, dispatch_spoken_line, dispatch_spoken_line_with_app,
     handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
-    project_and_publish_agent_snapshot, route_message, run_event_handler, stored_envelope,
+    project_and_publish_agent_snapshot, remove_old_note_folder, route_message, run_event_handler,
+    stored_envelope,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
@@ -49,6 +50,20 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn start_removes_the_old_notes_folder_once_and_a_missing_folder_is_not_an_error() {
+    let temporary = TestDirectory::new();
+    let folder = temporary.0.join(super::OLD_NOTE_FOLDER);
+    std::fs::create_dir_all(folder.join("old-note")).unwrap();
+    std::fs::write(folder.join("old-note").join("line.m4a"), b"audio").unwrap();
+
+    remove_old_note_folder(&folder);
+    assert!(!folder.exists());
+
+    remove_old_note_folder(&folder);
+    assert!(!folder.exists());
 }
 
 #[derive(Default)]
@@ -1943,7 +1958,7 @@ fn dispatch_line(
 }
 
 #[test]
-fn locked_screen_sends_the_line_to_the_away_device_and_logs_no_text() {
+fn locked_screen_with_no_app_route_drops_the_line_and_logs_no_text() {
     let environment = FakeEnvironment::locked("");
     let logs = CapturedLogs::start();
 
@@ -1954,18 +1969,34 @@ fn locked_screen_sends_the_line_to_the_away_device_and_logs_no_text() {
         false,
     );
 
-    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
-    assert_eq!(environment.voice_notes(), ["All pods are green."]);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
     assert!(environment.spoken_lines().is_empty());
-    assert!(
-        environment.reply_targets().is_empty(),
-        "a voice note sets no reply target"
-    );
+    assert!(environment.reply_targets().is_empty());
     assert!(
         logs.text()
-            .contains("spoken line sent to the away device pane_id=%1")
+            .contains("spoken line dropped (screen locked) pane_id=%1")
     );
     assert!(!logs.text().contains("All pods are green."));
+}
+
+#[test]
+fn locked_screen_drops_a_line_from_any_pane_without_an_app_route() {
+    let environment = FakeEnvironment::locked("");
+    let logs = CapturedLogs::start();
+    let line = SpokenLineRequested {
+        pane_id: "%2".into(),
+        text: "secret words".into(),
+    };
+
+    let outcome = dispatch_line(&environment, &line, false, false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.spoken_lines().is_empty());
+    assert!(
+        logs.text()
+            .contains("spoken line dropped (screen locked) pane_id=%2")
+    );
+    assert!(!logs.text().contains("secret words"));
 }
 
 #[test]
@@ -1976,7 +2007,6 @@ fn locked_screen_with_messaging_paused_drops_the_line() {
     let outcome = dispatch_line(&environment, &chief_line("hi"), true, false);
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
-    assert!(environment.voice_notes().is_empty());
     assert!(
         logs.text()
             .contains("spoken line dropped (messaging paused) pane_id=%1")
@@ -1996,7 +2026,6 @@ fn unlocked_screen_with_voice_on_says_exactly_the_line() {
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     assert_eq!(environment.spoken_lines(), ["Release install is done."]);
-    assert!(environment.voice_notes().is_empty());
 }
 
 #[test]
@@ -2008,28 +2037,10 @@ fn unlocked_screen_with_voice_off_drops_the_line_and_runs_nothing() {
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
     assert!(environment.spoken_lines().is_empty());
-    assert!(environment.voice_notes().is_empty());
     assert!(
         logs.text()
             .contains("spoken line dropped (voice off) pane_id=%1")
     );
-}
-
-#[test]
-fn failed_voice_note_is_retried_and_said_at_the_desk_once_unlocked() {
-    let environment = FakeEnvironment::locked("");
-    environment.set_fail_sends(true);
-    let line = chief_line("hi");
-
-    let first = dispatch_line(&environment, &line, false, false);
-    assert!(matches!(first, Err(DispatchError::Retryable(_))));
-
-    environment.set_fail_sends(false);
-    environment.set_screen_locked(false);
-    let retry = dispatch_line(&environment, &line, false, false);
-    assert!(matches!(retry, Ok(DeliveryOutcome::Delivered)));
-    assert_eq!(environment.spoken_lines(), ["hi"]);
-    assert!(environment.voice_notes().is_empty());
 }
 
 #[test]
@@ -2078,8 +2089,8 @@ async fn spoken_line_from_outside_the_chiefs_folder_is_dropped_without_its_text(
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    // The screen is locked in `dispatcher_over`: the chief's line becomes a voice note.
-    assert_eq!(environment.voice_notes(), ["All pods are green."]);
+    // The screen is locked in `dispatcher_over`, with no app route: the chief's line is dropped.
+    assert!(environment.spoken_lines().is_empty());
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 
@@ -2106,7 +2117,6 @@ fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
     );
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
-    assert!(environment.voice_notes().is_empty());
     assert!(
         logs.text()
             .contains("spoken line dropped (not in notify.imessage) pane_id=%2")
@@ -2167,7 +2177,6 @@ fn a_spoken_line_an_open_call_played_is_not_pushed_or_sent() {
     assert!(app.delivered().is_empty());
     assert!(away.sends().is_empty());
     assert!(environment.spoken_lines().is_empty());
-    assert!(environment.voice_notes().is_empty());
 }
 
 #[test]
@@ -3609,7 +3618,7 @@ async fn other_panes_messages_are_handled_as_today() {
 }
 
 #[tokio::test]
-async fn locked_chief_spoken_line_goes_to_the_app_as_text_and_makes_no_voice_note() {
+async fn locked_chief_spoken_line_goes_to_the_app_as_text() {
     let directory = TestDirectory::new();
     let with = with_app(
         &directory,
@@ -3623,7 +3632,6 @@ async fn locked_chief_spoken_line_goes_to_the_app_as_text_and_makes_no_voice_not
         .dispatch(&spoken_delivery(json!(chief_line("All pods are green."))));
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
-    assert!(with.environment.voice_notes().is_empty());
     assert!(with.environment.spoken_lines().is_empty());
     assert_eq!(
         with.app.delivered(),
@@ -3648,7 +3656,6 @@ async fn locked_chief_spoken_line_not_pushed_goes_to_imessage_as_text() {
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     assert_eq!(with.away.sends(), ["(app unreachable) All pods are green."]);
-    assert!(with.environment.voice_notes().is_empty());
     assert!(with.environment.spoken_lines().is_empty());
 }
 
@@ -3781,9 +3788,9 @@ async fn chief_message_goes_to_imessage_as_today_while_the_listing_fails() {
         .dispatch(&spoken_delivery(json!(chief_line("hi"))));
 
     assert!(matches!(message, Ok(DeliveryOutcome::Delivered)));
-    assert!(matches!(line, Ok(DeliveryOutcome::Delivered)));
+    assert!(matches!(line, Ok(DeliveryOutcome::Skipped)));
     assert_eq!(with.environment.away_messages(), ["All pods are green"]);
-    assert_eq!(with.environment.voice_notes(), ["hi"]);
+    assert!(with.environment.spoken_lines().is_empty());
     assert_eq!(with.environment.reply_targets(), ["%1"]);
     assert!(with.app.delivered().is_empty());
     assert!(with.away.sends().is_empty());
@@ -3810,7 +3817,6 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
     assert!(with.away.sends().is_empty());
     assert!(with.environment.away_messages().is_empty());
     assert!(with.environment.delivered().is_empty());
-    assert!(with.environment.voice_notes().is_empty());
     assert!(with.environment.reply_targets().is_empty());
 }
 
@@ -4556,9 +4562,9 @@ async fn spoken_lines_from_unlisted_panes_are_dropped_on_each_channel_naming_its
     ));
     assert!(matches!(
         dispatcher.dispatch(&line("%1")),
-        Ok(DeliveryOutcome::Delivered)
+        Ok(DeliveryOutcome::Skipped)
     ));
-    assert_eq!(environment.voice_notes(), ["All green."]);
+    assert!(environment.spoken_lines().is_empty());
     // Screen unlocked: the desk's list.
     environment.set_screen_locked(false);
     assert!(matches!(
@@ -4737,15 +4743,17 @@ async fn a_message_and_a_line_a_channel_took_count_sent() {
     )
     .await;
 
-    // Locked: the message and the line go to the away device (imessage).
-    for delivery in [
-        away_delivery(json!(message_from("%1", "hi"))),
-        spoken_from("%1"),
-    ] {
-        let outcome = dispatcher.dispatch_with_pause(&delivery, None, false);
-        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
-    }
-    assert_eq!(notified(&chief, "imessage", "sent"), 2);
+    // Locked: the message goes to the away device (imessage); the line has no text route and
+    // is dropped, so it counts as neither sent nor kept.
+    let message = dispatcher.dispatch_with_pause(
+        &away_delivery(json!(message_from("%1", "hi"))),
+        None,
+        false,
+    );
+    assert!(matches!(message, Ok(DeliveryOutcome::Delivered)));
+    let line = dispatcher.dispatch_with_pause(&spoken_from("%1"), None, false);
+    assert!(matches!(line, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(notified(&chief, "imessage", "sent"), 1);
 
     // Unlocked: the line is said at the desk.
     environment.set_screen_locked(false);

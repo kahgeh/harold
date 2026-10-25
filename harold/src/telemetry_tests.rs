@@ -1790,7 +1790,6 @@ const SPANS: &[&str] = &[
     "harold.turn",
     "harold.turn_complete",
     "harold.delivery",
-    "harold.voice_note",
     "harold.watch.run",
     "harold.watch.model",
     "harold.call_turn",
@@ -2125,6 +2124,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         })
         .chain([
             NOTIFICATIONS_CARD.to_string(),
+            SPOKEN_LINES_DROPPED_CARD.to_string(),
             CALL_TURN_CARD.to_string(),
             CALL_ANSWERS_FAILED_CARD.to_string(),
             CALL_ANSWERER_SPEND_CARD.to_string(),
@@ -2256,6 +2256,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 }
 
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
+const SPOKEN_LINES_DROPPED_CARD: &str = "Spoken lines dropped while locked, by pane, per day";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
 /// The knowledge index's cards, in the order the dashboard lists them.
 const KNOWLEDGE_CARDS: [&str; 6] = [
@@ -2309,6 +2310,27 @@ fn the_notifications_card_is_a_table_of_sent_and_kept_over_the_picked_range() {
     }
     // The range is the dashboard's, not a fixed period.
     assert!(!sql.contains("now() - INTERVAL"), "{sql}");
+}
+
+#[test]
+fn the_spoken_lines_dropped_card_counts_the_locked_drops_by_pane_and_day() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == SPOKEN_LINES_DROPPED_CARD)
+        .expect("the spoken lines dropped card");
+    let config = &card["config"];
+    assert_eq!(config["displayType"], "table");
+    let sql = config["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "otel.otel_logs",
+        "Body = 'spoken line dropped (screen locked)'",
+        "LogAttributes['pane_id'] AS pane_id",
+        "INTERVAL 7 DAY",
+        "GROUP BY day, pane_id",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
 }
 
 #[test]
@@ -2388,7 +2410,9 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
     ]);
     for tile in tiles(&dashboard) {
         let name = tile["name"].as_str().unwrap();
-        let filtered = containers[tile["containerId"].as_str().unwrap()];
+        // A log card reads `otel.otel_logs`, which the product filter does not reach.
+        let filtered =
+            containers[tile["containerId"].as_str().unwrap()] && name != SPOKEN_LINES_DROPPED_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.

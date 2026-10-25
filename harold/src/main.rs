@@ -743,7 +743,9 @@ fn print_help() {
     println!("                          Send TEXT to the away device from tmux pane ID;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold speak --src-id ID TEXT");
-    println!("                          Say TEXT from tmux pane ID, or send it as a voice note;");
+    println!(
+        "                          Say TEXT from tmux pane ID at the desk, or send it as text;"
+    );
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold app pair [--unlock]");
     println!(

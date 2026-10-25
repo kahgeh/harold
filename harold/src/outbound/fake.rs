@@ -39,7 +39,6 @@ pub(crate) struct FakeEnvironment {
     away_messages: Mutex<Vec<String>>,
     reply_targets: Mutex<Vec<String>>,
     spoken_lines: Mutex<Vec<String>>,
-    voice_notes: Mutex<Vec<String>>,
     /// The channels the test has marked not set up.
     not_set_up: Mutex<Vec<Channel>>,
 }
@@ -70,7 +69,6 @@ impl FakeEnvironment {
             away_messages: Mutex::new(Vec::new()),
             reply_targets: Mutex::new(Vec::new()),
             spoken_lines: Mutex::new(Vec::new()),
-            voice_notes: Mutex::new(Vec::new()),
             not_set_up: Mutex::new(Vec::new()),
         }
     }
@@ -122,11 +120,6 @@ impl FakeEnvironment {
     /// Each spoken line said at the desk.
     pub(crate) fn spoken_lines(&self) -> Vec<String> {
         self.spoken_lines.lock().unwrap().clone()
-    }
-
-    /// Each spoken line sent to the away device.
-    pub(crate) fn voice_notes(&self) -> Vec<String> {
-        self.voice_notes.lock().unwrap().clone()
     }
 }
 
@@ -184,14 +177,6 @@ impl NotifyEnvironment for FakeEnvironment {
             return Err("TTS command failed".into());
         }
         self.spoken_lines.lock().unwrap().push(line.to_string());
-        Ok(())
-    }
-
-    fn send_spoken_line(&self, line: &str) -> Result<(), String> {
-        if self.fail_sends.load(Ordering::SeqCst) {
-            return Err("channel down".into());
-        }
-        self.voice_notes.lock().unwrap().push(line.to_string());
         Ok(())
     }
 

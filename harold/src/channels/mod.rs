@@ -270,29 +270,11 @@ pub(crate) fn send_away_message(message: &AwayMessageRequested) -> Result<(), St
     imessage::send_imessage(&text)
 }
 
-/// Send a spoken line to the away device as a voice note. The caller has already checked
-/// the messaging pause.
-pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
-    let cfg = get_settings();
-    // Checked before the note is made, so a retry does not rerun the model for nothing.
-    if cfg.imessage.recipient.is_none() {
-        return Err("iMessage recipient is not configured".into());
-    }
-    crate::outbound::voice_note::send_voice_note_in(
-        &crate::outbound::voice_note::notes_parent(),
-        std::time::SystemTime::now(),
-        &cfg.tts,
-        line,
-        &crate::outbound::voice_note::SystemRunner,
-        imessage::send_attachment,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AwayMessageRequested, TurnCompleted, notify_away, send, send_away_message,
-        send_spoken_line, send_unless_paused,
+        send_unless_paused,
     };
     use crate::agent::domain::CompletionSummaryUpdate;
     use crate::settings::init_settings_for_test;
@@ -361,14 +343,5 @@ mod tests {
             text: "hi".into(),
         };
         assert_eq!(send_away_message(&message), Err(NOT_CONFIGURED.to_string()));
-    }
-
-    #[test]
-    fn send_spoken_line_reaches_imessage() {
-        init_settings_for_test();
-        assert_eq!(
-            send_spoken_line("good morning"),
-            Err(NOT_CONFIGURED.to_string())
-        );
     }
 }
