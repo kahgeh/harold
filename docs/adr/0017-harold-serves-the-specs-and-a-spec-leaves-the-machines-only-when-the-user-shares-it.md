@@ -1,4 +1,4 @@
-# 0016. Harold serves the specs, and a spec leaves the machines only when the user shares it
+# 0017. Harold serves the specs, and a spec leaves the machines only when the user shares it
 
 Date: 2026-10-25
 Status: Accepted (serve-specs). Builds on 0002, 0007, 0012 and 0015.
