@@ -9,8 +9,10 @@ use tokio::task::JoinHandle;
 
 use super::{Specs, SpecsState, listener_hosts, render_markdown, specs_router, valid_id};
 use crate::outbound::fake::CapturedLogs;
+use crate::settings::GrpcSettings;
 use crate::store::{EventVersion, HaroldStore};
 use crate::tools::Products;
+use crate::web_app::notes::Notes;
 use crate::web_app::origin::loopback_hosts;
 use crate::web_app::pages::{CONTENT_SECURITY_POLICY, SPEC_CONTENT_SECURITY_POLICY};
 use crate::web_app::{AppState, WebAppIdentity, router};
@@ -89,6 +91,10 @@ impl Drop for Served {
 }
 
 async fn web_app(specs: Arc<Specs>, store: Arc<HaroldStore>) -> Served {
+    web_app_with_notes(specs, store, false).await
+}
+
+async fn web_app_with_notes(specs: Arc<Specs>, store: Arc<HaroldStore>, notes_on: bool) -> Served {
     let (shutdown, shutdown_rx) = watch::channel(());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -102,6 +108,12 @@ async fn web_app(specs: Arc<Specs>, store: Arc<HaroldStore>) -> Served {
         WebAppIdentity::default(),
     );
     state.specs = specs;
+    if notes_on {
+        state.notes = Some(Notes::lazy(&GrpcSettings {
+            host: "127.0.0.1".into(),
+            port: 1,
+        }));
+    }
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router(state)).await;
     });
@@ -673,17 +685,17 @@ async fn share_sends_nothing_without_an_origin_or_for_an_id_that_fails_the_spec_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_thread_page_header_links_the_specs_page() {
-    let repo = Repo::new();
-    let directory = Repo::new();
-    let server = web_app(repo.specs(), store(&directory.root).await).await;
+async fn the_thread_page_header_has_no_specs_link() {
+    for notes_on in [false, true] {
+        let repo = Repo::new();
+        let directory = Repo::new();
+        let server = web_app_with_notes(repo.specs(), store(&directory.root).await, notes_on).await;
 
-    let body = get(&server, "/").await.text().await.unwrap();
+        let body = get(&server, "/").await.text().await.unwrap();
 
-    assert!(
-        body.contains("<a href=\"/specs\" id=\"to-specs\" class=\"todos-button\">Specs</a>"),
-        "{body}"
-    );
+        assert!(!body.contains("id=\"to-specs\""), "{body}");
+        assert_eq!(body.contains("id=\"to-notes\""), notes_on, "{body}");
+    }
 }
 
 #[test]

@@ -250,7 +250,7 @@ The routes sit behind the web app's login, device, host and origin checks like e
 
 ## Specs
 
-The thread's header shows **Specs** beside **Notes**. It opens the specs page, and the back arrow comes back to the thread. The pages show the spec files of the products in the registry that `[telemetry] pod_registry` names, through the same `Products` port as the question tool ([ADR 0015](../../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). They show nothing the files do not hold.
+A todo's **Open the spec** link opens its spec page. A spec page links to the specs list, and the back arrow comes back to the thread. The pages show the spec files of the products in the registry that `[telemetry] pod_registry` names, through the same `Products` port as the question tool ([ADR 0015](../../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). They show nothing the files do not hold.
 
 - **The list** (`GET /specs`) shows each product's specs, newest first, with their titles. A machine with no registry reads `No specs on this machine`.
 - **A spec page** (`GET /specs/{product}/{id}`) shows the product, the id and the first 12 characters of the file's SHA-256 on its top line, so you can compare it with the SPEC line, then the rendered spec. The id is lowercase letters, digits and `-`. A fenced `mermaid` block, or a raw `<pre class="mermaid">` block, is drawn as a diagram, with the theme `neutral` in light mode and `dark` in dark mode. Mermaid runs with `securityLevel: 'strict'`. A diagram that fails to draw shows its source. Raw HTML shows as text, and a link keeps its `href` only for `http:`, `https:` or a relative address.
