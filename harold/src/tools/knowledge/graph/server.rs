@@ -152,6 +152,23 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
+/// Ends a server taken out of `live`: a polite end first, a kill after `STOP_LIMIT`.
+async fn end(mut live: Live) {
+    if let Some(pid) = live.child.id() {
+        let _ = Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await;
+    }
+    if tokio::time::timeout(STOP_LIMIT, live.child.wait())
+        .await
+        .is_err()
+    {
+        let _ = live.child.kill().await;
+    }
+    info!("knowledge graph server stopped");
+}
+
 impl TypeDbServer {
     pub(crate) fn new(config: ServerConfig) -> Arc<Self> {
         let client = reqwest::Client::builder()
@@ -202,6 +219,31 @@ impl TypeDbServer {
             base: live.base.clone(),
             token,
         })
+    }
+
+    /// The server's address and token when it runs and is signed in. It never starts the
+    /// server and never marks it used, so a periodic look keeps neither it nor its idle time.
+    pub(crate) async fn peek_lease(&self) -> Option<Lease> {
+        let mut guard = self.live.lock().await;
+        let live = guard.as_mut()?;
+        if !matches!(live.child.try_wait(), Ok(None)) {
+            return None;
+        }
+        Some(Lease {
+            base: live.base.clone(),
+            token: live.token.clone()?,
+        })
+    }
+
+    /// Gives the server a running process and a token, as a start would.
+    #[cfg(test)]
+    pub(crate) async fn adopt_for_test(&self, child: Child) {
+        *self.live.lock().await = Some(Live {
+            child,
+            base: "http://127.0.0.1:1".into(),
+            token: Some("token".into()),
+            last_used: Instant::now(),
+        });
     }
 
     /// Forgets the token after the server refused it, so the next lease signs in again.
@@ -355,33 +397,24 @@ impl TypeDbServer {
 
     /// Stops the server now, if it runs: a polite end first, a kill after `STOP_LIMIT`.
     pub(crate) async fn stop(&self) {
-        let Some(mut live) = self.live.lock().await.take() else {
-            return;
-        };
-        if let Some(pid) = live.child.id() {
-            let _ = Command::new("/bin/kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .await;
+        let mut guard = self.live.lock().await;
+        if let Some(live) = guard.take() {
+            end(live).await;
         }
-        if tokio::time::timeout(STOP_LIMIT, live.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = live.child.kill().await;
-        }
-        info!("knowledge graph server stopped");
     }
 
+    /// Checks the idle time and takes the server in one lock hold, and ends it before the lock
+    /// goes. A call that comes meanwhile waits, then finds no server and starts it again.
     async fn stop_if_idle(&self) {
-        let idle = self
-            .live
-            .lock()
-            .await
+        let mut guard = self.live.lock().await;
+        let idle = guard
             .as_ref()
             .is_some_and(|live| live.last_used.elapsed() >= self.config.idle);
-        if idle {
-            self.stop().await;
+        if !idle {
+            return;
+        }
+        if let Some(live) = guard.take() {
+            end(live).await;
         }
     }
 

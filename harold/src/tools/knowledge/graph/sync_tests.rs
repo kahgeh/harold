@@ -132,3 +132,31 @@ async fn a_rebuild_after_each_step_matches_the_live_graph() {
         assert_eq!(rig.graph.snapshot().await.unwrap(), live, "step {index}");
     }
 }
+
+#[tokio::test]
+async fn a_pass_goes_past_a_vault_note_the_graph_cannot_name_and_keeps_going() {
+    let rig = rig().await;
+    // The title of b is too long for the graph, so b is never put, and the link to it names
+    // a vault note the graph does not hold.
+    let mut unnameable = desired("b", &[]);
+    unnameable.title = "x".repeat(501);
+    let vault = [
+        desired("a", &["b", "c"]),
+        unnameable,
+        desired("c", &[]),
+        desired("d", &[]),
+    ];
+    let synced = sync_vault(&rig.writer, &vault).await.unwrap();
+    let snapshot = rig.graph.snapshot().await.unwrap();
+    assert!(!snapshot.notes.contains_key("b"));
+    assert_eq!(
+        snapshot.notes.keys().cloned().collect::<Vec<_>>(),
+        ["a", "c", "d"]
+    );
+    // The link to c comes after the refused link to b in the pass, and it is still made.
+    assert_eq!(
+        snapshot.links.iter().cloned().collect::<Vec<_>>(),
+        [("a".to_string(), "c".to_string())]
+    );
+    assert_eq!(synced.logged, 4);
+}

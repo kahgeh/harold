@@ -4,7 +4,7 @@
 //! record and its apply.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, info, warn};
@@ -15,6 +15,11 @@ use super::log::{RecordLog, end_sequence};
 use super::metrics;
 use super::records::{By, DataRecord, Malformed, Op, SchemaRecord};
 use super::schema;
+
+/// How often the writer counts the records that wait and publishes the gauges.
+const MINUTE: Duration = Duration::from_secs(60);
+/// How long records may wait before the writer warns.
+const WAITING_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 /// Why a graph call is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +113,14 @@ pub(crate) struct Status {
     pub last_refusal: Option<Refusal>,
 }
 
+/// A stretch of minutes in which records waited. It ends when the count is 0 again.
+struct Spell {
+    /// When the writer first saw records wait.
+    since: tokio::time::Instant,
+    /// The warn line is logged: once for each spell.
+    logged: bool,
+}
+
 enum Command {
     Change {
         op: Op,
@@ -171,6 +184,8 @@ impl GraphWriter {
         };
         let mut task = Task {
             writer: writer.clone(),
+            spell: Mutex::new(None),
+            typed: None,
         };
         task.open().await?;
         tokio::spawn(task.run(inbox));
@@ -270,6 +285,9 @@ fn unreachable(_: BackendError) -> GraphError {
 
 struct Task {
     writer: GraphWriter,
+    spell: Mutex<Option<Spell>>,
+    /// The typed relations last counted, which the minute tick publishes again.
+    typed: Option<usize>,
 }
 
 impl Task {
@@ -312,7 +330,7 @@ impl Task {
 
     /// Publishes the two gauges' numbers. The typed relations are counted when asked, since
     /// it reads the whole graph; the records waiting are read from the logs and the position.
-    async fn publish_metrics(&self, count_typed: bool) {
+    async fn publish_metrics(&mut self, count_typed: bool) {
         let backend = &self.writer.backend;
         let Ok(waiting) =
             catchup::waiting(&**backend, &*self.writer.schema_log, &*self.writer.data_log).await
@@ -324,7 +342,54 @@ impl Task {
         } else {
             None
         };
+        self.typed = typed.or(self.typed);
         metrics::publish(waiting, typed);
+    }
+
+    /// Each minute: counts the records that wait, publishes the gauges and warns when records
+    /// have waited 10 minutes. It reads quietly, so it never starts TypeDB or keeps it from
+    /// stopping when idle. With TypeDB stopped, nothing is judged and a spell that has not
+    /// logged ends, since the catch-up runs at the next start. A read that fails is not judged.
+    async fn minute(&mut self) {
+        let writer = &self.writer;
+        let position = match writer.backend.watch_position().await {
+            Ok(Some(position)) => position,
+            Ok(None) => {
+                // A spell that logged stays: the same records still wait, and one line is enough.
+                let mut spell = lock(&self.spell);
+                if spell.as_ref().is_some_and(|spell| !spell.logged) {
+                    *spell = None;
+                }
+                return;
+            }
+            Err(_) => return,
+        };
+        let Ok(waiting) =
+            catchup::waiting_from(position, &*writer.schema_log, &*writer.data_log).await
+        else {
+            return;
+        };
+        metrics::publish(waiting.count, self.typed);
+        let mut spell = lock(&self.spell);
+        if waiting.count == 0 {
+            *spell = None;
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let spell = spell.get_or_insert(Spell {
+            since: now,
+            logged: false,
+        });
+        if spell.logged || now.duration_since(spell.since) < WAITING_LIMIT {
+            return;
+        }
+        spell.logged = true;
+        warn!(
+            reason = "waiting_too_long",
+            waiting = waiting.count,
+            sequence = waiting.first,
+            "knowledge graph behind"
+        );
     }
 
     /// Appends each schema step the schema log lacks, flushed.
@@ -403,6 +468,13 @@ impl Task {
             "knowledge graph behind"
         );
         metrics::publish(waiting, None);
+        // This line is the spell's warning: the minute tick adds no second one.
+        lock(&self.spell)
+            .get_or_insert(Spell {
+                since: tokio::time::Instant::now(),
+                logged: true,
+            })
+            .logged = true;
         *lock(&self.writer.shared.last_refusal) = Some(refusal.clone());
         self.set_phase(Phase::Behind(refusal));
     }
@@ -477,29 +549,41 @@ impl Task {
     }
 
     async fn run(mut self, mut inbox: mpsc::Receiver<Command>) {
-        while let Some(command) = inbox.recv().await {
-            match command {
-                Command::Change { op, by, reply } => {
-                    let typed = matches!(op, Op::PutRelation { .. } | Op::RemoveRelation { .. });
-                    let result = self.change(op, by).await;
-                    let logged = matches!(result, Ok(Some(_)));
-                    let _ = reply.send(result);
-                    if logged {
-                        self.publish_metrics(typed).await;
-                    }
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + MINUTE, MINUTE);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                command = inbox.recv() => {
+                    let Some(command) = command else { return };
+                    self.handle(command).await;
                 }
-                Command::Void {
-                    sequence,
-                    reason,
-                    reply,
-                } => {
-                    let _ = reply.send(self.void(sequence, reason).await);
-                    self.publish_metrics(true).await;
+                _ = tick.tick() => self.minute().await,
+            }
+        }
+    }
+
+    async fn handle(&mut self, command: Command) {
+        match command {
+            Command::Change { op, by, reply } => {
+                let typed = matches!(op, Op::PutRelation { .. } | Op::RemoveRelation { .. });
+                let result = self.change(op, by).await;
+                let logged = matches!(result, Ok(Some(_)));
+                let _ = reply.send(result);
+                if logged {
+                    self.publish_metrics(typed).await;
                 }
-                Command::Rebuild { reply } => {
-                    let _ = reply.send(self.rebuild(RebuildReason::Asked).await);
-                    self.publish_metrics(true).await;
-                }
+            }
+            Command::Void {
+                sequence,
+                reason,
+                reply,
+            } => {
+                let _ = reply.send(self.void(sequence, reason).await);
+                self.publish_metrics(true).await;
+            }
+            Command::Rebuild { reply } => {
+                let _ = reply.send(self.rebuild(RebuildReason::Asked).await);
+                self.publish_metrics(true).await;
             }
         }
     }

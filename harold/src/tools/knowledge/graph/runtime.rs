@@ -17,6 +17,9 @@ const DATA_KEY: &[u8] = b"graph/data";
 #[tonic::async_trait]
 pub(crate) trait BackendOpener: Send + Sync {
     async fn open(&self, typedb_folder: &Path) -> Result<Arc<dyn GraphBackend>, GraphError>;
+
+    /// Waits until what the opener started has stopped, once the shutdown has come.
+    async fn finished(&self) {}
 }
 
 /// Where the logs and TypeDB's data live: `<store>/tools/knowledge/graph/`.
@@ -73,6 +76,13 @@ impl GraphRuntime {
 
     pub(crate) fn enabled(&self) -> bool {
         self.opener.is_some() || self.writer.initialized()
+    }
+
+    /// Waits for the graph's server to stop. Call it after the shutdown has come.
+    pub(crate) async fn finished(&self) {
+        if let Some(opener) = &self.opener {
+            opener.finished().await;
+        }
     }
 
     /// The graph writer once started, without starting it.

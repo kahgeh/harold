@@ -1,7 +1,7 @@
 //! The graph's two gauges, `harold.knowledge.graph_waiting` and `harold.knowledge.typed_relations`.
 //! The graph writer is the only writer of either number, so it publishes them after each
-//! change, and the gauges report them at every export while the graph is on. Reading them
-//! never wakes TypeDB.
+//! change and once a minute, and the gauges report them at every export while the graph is
+//! on. Reading them never wakes TypeDB.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,8 +32,16 @@ fn register() {
     });
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What this thread published, so a test sees its own writer and no other test's.
+    pub(crate) static PUBLISHED: std::cell::RefCell<Vec<(usize, Option<usize>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Records the numbers the gauges report from now on.
 pub(crate) fn publish(waiting: usize, typed_relations: Option<usize>) {
+    #[cfg(test)]
+    PUBLISHED.with(|published| published.borrow_mut().push((waiting, typed_relations)));
     register();
     WAITING.store(waiting as u64, Ordering::Relaxed);
     if let Some(typed) = typed_relations {

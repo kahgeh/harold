@@ -340,9 +340,9 @@ idle_minutes = 10                                # the default
 
 | Signal | Fields | When |
 |---|---|---|
-| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change, after a refused or unanswered change, and after a catch-up, while the graph is on |
-| `harold.knowledge.typed_relations` (gauge) | none | The typed relations in the graph |
-| `knowledge graph behind` (warn) | `sequence`, `reason`, `waiting` | TypeDB refuses a record |
+| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change, after a refused or unanswered change, after a catch-up, and every minute, while the graph is on |
+| `harold.knowledge.typed_relations` (gauge) | none | The typed relations in the graph. Published after a change to them and every minute, while the graph is on |
+| `knowledge graph behind` (warn) | `sequence`, `reason`, `waiting` | TypeDB refuses a record, or records have waited 10 minutes (`reason` = `waiting_too_long`, `sequence` = the first record that waits). Once for each spell. A stopped graph is not judged |
 | `knowledge graph record voided` (warn) | `sequence`, `reason` | A record is voided |
 | `knowledge graph rebuilt` (info) | `reason` (`asked` or `missing`), `schema_steps`, `records`, `voided`, `ms` | A rebuild ends |
 | `harold.knowledge.graph_rebuild` (span) | `reason`, `schema_steps`, `records`, `voided`, `ms`, `result` | Each rebuild |

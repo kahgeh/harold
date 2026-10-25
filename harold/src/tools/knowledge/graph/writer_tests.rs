@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::super::fake::FakeGraph;
 use super::super::log::tests::MemoryLog;
@@ -414,4 +415,207 @@ async fn a_rebuild_that_cannot_read_a_log_leaves_the_writer_able_to_go_on() {
         "not stuck in graph_rebuilding"
     );
     assert_eq!(writer.snapshot().await.unwrap().notes.len(), 1);
+}
+
+// The minute tick: paused time, the fake graph, and the log lines kept in a buffer.
+
+#[derive(Clone, Default)]
+struct Lines(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+    type Writer = Lines;
+
+    fn make_writer(&'a self) -> Lines {
+        self.clone()
+    }
+}
+
+impl Lines {
+    /// Starts keeping this thread's log lines. The tests run on one thread each.
+    fn keep() -> (Self, tracing::subscriber::DefaultGuard) {
+        let lines = Self::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(lines.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        (lines, guard)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn behind(&self) -> Vec<String> {
+        self.text()
+            .lines()
+            .filter(|line| line.contains("knowledge graph behind"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn too_long(&self) -> usize {
+        self.behind()
+            .iter()
+            .filter(|line| line.contains("waiting_too_long"))
+            .count()
+    }
+}
+
+/// Lets the writer task see `count` minutes go by, one tick at a time.
+async fn minutes(count: u32) {
+    // The writer task must have run once, so that its first tick is a minute after the start.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..count {
+        tokio::time::advance(Duration::from_secs(60)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+/// Logs a record the graph does not hold, as a record logged before a crash would wait.
+async fn leave_waiting(rig: &Rig, name: &str) -> u64 {
+    let value = serde_json::to_vec(&DataRecord {
+        op: note(name),
+        at_ms: 0,
+        by: By::Call,
+    })
+    .unwrap();
+    rig.data.append(value).await.unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn records_that_wait_ten_minutes_log_once_for_each_spell() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    let first = leave_waiting(&rig, "a").await;
+    // The writer sees the record at the first minute, and 9 minutes later it logs nothing.
+    minutes(10).await;
+    assert!(lines.behind().is_empty(), "{}", lines.text());
+    minutes(1).await;
+    assert_eq!(lines.too_long(), 1, "{}", lines.text());
+    let line = lines.behind().remove(0);
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains("waiting=1"), "{line}");
+    assert!(line.contains(&format!("sequence={first}")), "{line}");
+    // The same spell does not log again.
+    minutes(8).await;
+    assert_eq!(lines.too_long(), 1);
+
+    // The count goes back to 0; a new spell of 10 minutes logs again.
+    writer.rebuild().await.unwrap();
+    minutes(1).await;
+    leave_waiting(&rig, "b").await;
+    minutes(10).await;
+    assert_eq!(lines.too_long(), 1);
+    minutes(1).await;
+    assert_eq!(lines.too_long(), 2, "{}", lines.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_record_logs_once_and_the_ten_minute_trigger_adds_no_second_line() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.graph.refuse(0);
+    assert_eq!(
+        writer.submit(note("a"), By::Call).await.unwrap_err(),
+        GraphError::Behind
+    );
+    assert_eq!(lines.behind().len(), 1);
+    assert_eq!(lines.too_long(), 0);
+    minutes(15).await;
+    assert_eq!(lines.behind().len(), 1, "{}", lines.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_judged_while_the_graph_is_stopped_and_the_spell_starts_again_after() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    rig.start().await.unwrap();
+    leave_waiting(&rig, "a").await;
+    rig.graph.set_stopped(true);
+    crate::tools::knowledge::graph::metrics::PUBLISHED.with(|p| p.borrow_mut().clear());
+    minutes(15).await;
+    assert!(lines.behind().is_empty());
+    assert!(
+        crate::tools::knowledge::graph::metrics::PUBLISHED.with(|p| p.borrow().is_empty()),
+        "a stopped graph publishes nothing"
+    );
+    // TypeDB starts again: the count is judged from now, not from before the stop.
+    rig.graph.set_stopped(false);
+    minutes(10).await;
+    assert!(lines.behind().is_empty(), "{}", lines.text());
+    minutes(1).await;
+    assert_eq!(lines.too_long(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn both_gauges_are_published_each_minute_without_a_change() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    with_notes(&writer, &["a", "b"]).await;
+    writer
+        .submit(relation("a", "relates_to", "b"), By::Call)
+        .await
+        .unwrap();
+    let published = &crate::tools::knowledge::graph::metrics::PUBLISHED;
+    published.with(|p| p.borrow_mut().clear());
+    minutes(2).await;
+    assert_eq!(
+        published.with(|p| p.borrow().clone()),
+        [(0, Some(1)), (0, Some(1))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_waiting_gauge_shows_the_catch_up_that_clears_the_records_that_waited() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    with_notes(&writer, &["a"]).await;
+    // TypeDB is out of reach for a rebuild, which leaves the writer with records to apply.
+    rig.graph.set_unreachable(true);
+    assert_eq!(
+        writer.rebuild().await.unwrap_err(),
+        GraphError::TypeDbUnreachable
+    );
+    leave_waiting(&rig, "b").await;
+    rig.graph.set_unreachable(false);
+    let published = &crate::tools::knowledge::graph::metrics::PUBLISHED;
+    published.with(|p| p.borrow_mut().clear());
+    // The note is held already, so this change logs nothing; the catch-up before it does the work.
+    assert_eq!(writer.submit(note("a"), By::Index).await.unwrap(), None);
+    assert!(rig.graph.snapshot().await.unwrap().notes.contains_key("b"));
+    assert_eq!(published.with(|p| p.borrow().clone()), [(0, None)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spell_that_logged_a_refusal_stays_through_a_stop_and_a_start() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.graph.refuse(0);
+    writer.submit(note("a"), By::Call).await.unwrap_err();
+    minutes(2).await;
+    rig.graph.set_stopped(true);
+    minutes(15).await;
+    rig.graph.set_stopped(false);
+    minutes(15).await;
+    assert_eq!(lines.behind().len(), 1, "{}", lines.text());
 }

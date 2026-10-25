@@ -70,6 +70,10 @@ pub(crate) trait GraphBackend: Send + Sync {
     async fn create_database(&self) -> BackendResult<()>;
     async fn drop_database(&self) -> BackendResult<()>;
     async fn position(&self) -> BackendResult<Position>;
+    /// Reads the position without starting the server and without marking it used, so a
+    /// periodic look never wakes TypeDB or keeps it from stopping when idle. `None` when the
+    /// server is not running.
+    async fn watch_position(&self) -> BackendResult<Option<Position>>;
     /// Defines a schema step and moves the schema position, in one transaction.
     async fn apply_schema(&self, record: &SchemaRecord, sequence: u64) -> BackendResult<()>;
     /// Applies a data record and moves the data position, in one transaction. Applying a

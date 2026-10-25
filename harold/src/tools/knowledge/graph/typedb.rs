@@ -199,8 +199,26 @@ fn refusal(reply: &Reply) -> BackendError {
 impl TypeDbBackend {
     /// One request. A token the server refuses is replaced once.
     async fn send(&self, method: Method, path: &str, body: Option<&Value>) -> BackendResult<Reply> {
+        self.send_as(false, method, path, body).await
+    }
+
+    /// One request. A `quiet` request never starts the server and does not mark it used.
+    async fn send_as(
+        &self,
+        quiet: bool,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> BackendResult<Reply> {
         for attempt in 0..2 {
-            let lease = self.server.lease().await?;
+            let lease = if quiet {
+                self.server
+                    .peek_lease()
+                    .await
+                    .ok_or(BackendError::Unreachable)?
+            } else {
+                self.server.lease().await?
+            };
             let mut request = self
                 .server
                 .client()
@@ -235,6 +253,10 @@ impl TypeDbBackend {
 
     /// The rows a read returns, each as the map of its selected variables.
     async fn rows(&self, query: &str) -> BackendResult<Vec<Value>> {
+        self.rows_as(false, query).await
+    }
+
+    async fn rows_as(&self, quiet: bool, query: &str) -> BackendResult<Vec<Value>> {
         let body = json!({
             "query": query,
             "commit": false,
@@ -242,7 +264,9 @@ impl TypeDbBackend {
             "transactionType": "read",
             "queryOptions": {"includeInstanceTypes": false, "answerCountLimit": ANSWER_LIMIT},
         });
-        let reply = self.send(Method::POST, "/v1/query", Some(&body)).await?;
+        let reply = self
+            .send_as(quiet, Method::POST, "/v1/query", Some(&body))
+            .await?;
         match reply.status {
             200 => Ok(reply.body["answers"]
                 .as_array()
@@ -251,6 +275,27 @@ impl TypeDbBackend {
             206 => Err(BackendError::Unreachable),
             _ => Err(refusal(&reply)),
         }
+    }
+
+    async fn position_as(&self, quiet: bool) -> BackendResult<Position> {
+        let id = quote(POSITION_ID);
+        let read = |attribute: &'static str| {
+            let query = format!(
+                "match $g isa graph_position, has position_id {id}, has {attribute} $x; select $x;"
+            );
+            async move {
+                match self.rows_as(quiet, &query).await {
+                    Ok(rows) => Ok(rows.first().and_then(|row| number(row, "x"))),
+                    // The schema has no step yet, so the type is not there.
+                    Err(BackendError::Refused(code)) if code == "inf2" => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        Ok(Position {
+            schema: read("schema_sequence").await?,
+            data: read("data_sequence").await?,
+        })
     }
 
     /// Runs the statements and the position statements in one transaction and commits it. A
@@ -345,24 +390,14 @@ impl GraphBackend for TypeDbBackend {
     }
 
     async fn position(&self) -> BackendResult<Position> {
-        let id = quote(POSITION_ID);
-        let read = |attribute: &'static str| {
-            let query = format!(
-                "match $g isa graph_position, has position_id {id}, has {attribute} $x; select $x;"
-            );
-            async move {
-                match self.rows(&query).await {
-                    Ok(rows) => Ok(rows.first().and_then(|row| number(row, "x"))),
-                    // The schema has no step yet, so the type is not there.
-                    Err(BackendError::Refused(code)) if code == "inf2" => Ok(None),
-                    Err(error) => Err(error),
-                }
-            }
-        };
-        Ok(Position {
-            schema: read("schema_sequence").await?,
-            data: read("data_sequence").await?,
-        })
+        self.position_as(false).await
+    }
+
+    async fn watch_position(&self) -> BackendResult<Option<Position>> {
+        if self.server.peek_lease().await.is_none() {
+            return Ok(None);
+        }
+        self.position_as(true).await.map(Some)
     }
 
     async fn apply_schema(&self, record: &SchemaRecord, sequence: u64) -> BackendResult<()> {
@@ -531,6 +566,8 @@ pub(crate) struct TypeDbOpener {
     pub shutdown: tokio::sync::watch::Receiver<()>,
     /// The one server of this opener, so a second open never starts a second server.
     pub server: std::sync::Mutex<Option<Arc<TypeDbServer>>>,
+    /// The server's reaper, which stops TypeDB at shutdown. `finished` awaits it.
+    pub reaper: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[tonic::async_trait]
@@ -548,12 +585,28 @@ impl BackendOpener for TypeDbOpener {
                     folder: typedb_folder.to_path_buf(),
                     idle: self.idle,
                 });
-                drop(server.spawn_reaper(self.shutdown.clone()));
+                *self
+                    .reaper
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(server.spawn_reaper(self.shutdown.clone()));
                 *held = Some(Arc::clone(&server));
                 server
             }
         };
         Ok(Arc::new(TypeDbBackend::new(server)))
+    }
+
+    /// Waits for the reaper, which stops TypeDB when the shutdown comes.
+    async fn finished(&self) {
+        let reaper = self
+            .reaper
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(reaper) = reaper {
+            let _ = reaper.await;
+        }
     }
 }
 

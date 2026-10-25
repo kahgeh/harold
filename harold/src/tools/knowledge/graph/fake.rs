@@ -18,6 +18,8 @@ struct State {
     /// The position read fails as TypeDB would when its database is gone.
     position_fails: bool,
     applied: Vec<u64>,
+    /// The server is stopped, as after an idle stop.
+    stopped: bool,
 }
 
 #[derive(Default)]
@@ -32,6 +34,10 @@ impl FakeGraph {
 
     pub(crate) fn fail_position(&self, fail: bool) {
         self.state.lock().unwrap().position_fails = fail;
+    }
+
+    pub(crate) fn set_stopped(&self, stopped: bool) {
+        self.state.lock().unwrap().stopped = stopped;
     }
 
     pub(crate) fn set_unreachable(&self, unreachable: bool) {
@@ -110,6 +116,13 @@ impl GraphBackend for FakeGraph {
             return Err(BackendError::Refused("database_missing".into()));
         }
         Ok(state.position)
+    }
+
+    async fn watch_position(&self) -> BackendResult<Option<Position>> {
+        if self.state.lock().unwrap().stopped {
+            return Ok(None);
+        }
+        self.position().await.map(Some)
     }
 
     async fn apply_schema(&self, record: &SchemaRecord, sequence: u64) -> BackendResult<()> {

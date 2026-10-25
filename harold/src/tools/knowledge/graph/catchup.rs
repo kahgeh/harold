@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::backend::{BackendError, GraphBackend, Which};
+use super::backend::{BackendError, GraphBackend, Position, Which};
 use super::log::{LogError, RecordLog};
 use super::records::{DataRecord, Op, SchemaRecord};
 
@@ -118,8 +118,30 @@ pub(crate) async fn waiting(
     data_log: &dyn RecordLog,
 ) -> Result<usize, CatchUpError> {
     let position = backend.position().await.map_err(position_error)?;
-    Ok(schema_log.read_after(position.schema).await?.len()
-        + data_log.read_after(position.data).await?.len())
+    Ok(waiting_from(position, schema_log, data_log).await?.count)
+}
+
+/// The records that wait after a position read earlier.
+pub(crate) struct Waiting {
+    pub count: usize,
+    /// The sequence of the first record that waits: a schema record when one waits, else a data record.
+    pub first: Option<u64>,
+}
+
+pub(crate) async fn waiting_from(
+    position: Position,
+    schema_log: &dyn RecordLog,
+    data_log: &dyn RecordLog,
+) -> Result<Waiting, LogError> {
+    let schema = schema_log.read_after(position.schema).await?;
+    let data = data_log.read_after(position.data).await?;
+    Ok(Waiting {
+        count: schema.len() + data.len(),
+        first: schema
+            .first()
+            .or(data.first())
+            .map(|(sequence, _)| *sequence),
+    })
 }
 
 #[cfg(test)]

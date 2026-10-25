@@ -102,3 +102,73 @@ async fn a_bucket_that_cannot_be_reached_at_start_leaves_the_tool_up_and_answeri
     let _ = stop.send(());
     let _ = handle.task.await;
 }
+
+/// An opener that makes no backend. Its `finished` takes a while, then notes that it ended.
+struct Slow(Arc<std::sync::atomic::AtomicBool>);
+
+#[tonic::async_trait]
+impl graph::runtime::BackendOpener for Slow {
+    async fn open(
+        &self,
+        _folder: &Path,
+    ) -> Result<Arc<dyn graph::backend::GraphBackend>, graph::writer::GraphError> {
+        Err(graph::writer::GraphError::Off)
+    }
+
+    async fn finished(&self) {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn the_knowledge_task_waits_for_the_graph_to_stop_before_it_ends() {
+    let (vault, secrets, data) = (TempFolder::new(), TempFolder::new(), TempFolder::new());
+    let settings = launch(&vault, &secrets, 0o600).settings;
+    let bucket = settings.bucket.as_ref().unwrap();
+    let bucket_config = store::BucketConfig {
+        endpoint: bucket.endpoint.clone(),
+        bucket: bucket.bucket.clone(),
+        prefix: settings.prefix("m"),
+        access_key: "a".into(),
+        secret_key: "b".into(),
+        encryption_key_file: secrets.0.join("key"),
+    };
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opening = Arc::new(service::Opening::default());
+    let runtime = graph::runtime::GraphRuntime::new(
+        graph::runtime::GraphFolders::under(&data.0),
+        Arc::new(Slow(Arc::clone(&ended))),
+    );
+    let _ = opening.graph.set(Arc::new(runtime));
+    let (stop, shutdown) = tokio::sync::watch::channel(());
+    let embedder = embed::WorkerEmbedder::new(
+        embed::WorkerCommand {
+            python: "python3".into(),
+            args: Vec::new(),
+            model_path: PathBuf::from("/no/such/model.gguf"),
+            model_sha256: None,
+            folder: data.0.join("worker"),
+        },
+        embed::IDLE_LIMIT,
+    );
+    // The bucket is down, so the open keeps trying until the shutdown comes.
+    let task = tokio::spawn(open_and_run(Opening {
+        opening,
+        db_folder: data.0.join("index"),
+        bucket_config,
+        embedder,
+        vault: vault.0.clone(),
+        exclude: Vec::new(),
+        shutdown,
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    stop.send(()).unwrap();
+    task.await.unwrap();
+    assert!(
+        ended.load(std::sync::atomic::Ordering::SeqCst),
+        "the task ended before the graph had stopped"
+    );
+}

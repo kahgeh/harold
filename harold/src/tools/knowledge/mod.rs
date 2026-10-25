@@ -114,6 +114,7 @@ pub(crate) async fn start(
                 idle: Duration::from_secs(u64::from(settings.graph.idle_minutes) * 60),
                 shutdown: shutdown.clone(),
                 server: Default::default(),
+                reaper: Default::default(),
             }),
         ),
         _ => graph::runtime::GraphRuntime::off(),
@@ -150,6 +151,13 @@ struct Opening {
     shutdown: tokio::sync::watch::Receiver<()>,
 }
 
+/// Waits for TypeDB to stop, so Harold does not exit before it has.
+async fn finish_graph(opening: &service::Opening) {
+    if let Some(graph) = opening.graph.get() {
+        graph.finished().await;
+    }
+}
+
 /// Opens the database, trying again every `OPEN_RETRY` until it opens, then serves the index
 /// and keeps it current until shutdown. Until it opens, every call answers `Unavailable`.
 async fn open_and_run(mut task: Opening) {
@@ -171,7 +179,10 @@ async fn open_and_run(mut task: Opening) {
         }
         tokio::select! {
             () = tokio::time::sleep(OPEN_RETRY) => {}
-            _ = task.shutdown.changed() => return,
+            _ = task.shutdown.changed() => {
+                finish_graph(&task.opening).await;
+                return;
+            }
         }
     };
     let index = index::Index::new(
@@ -187,6 +198,7 @@ async fn open_and_run(mut task: Opening) {
     let reaper = task.embedder.spawn_reaper(task.shutdown.clone());
     index::run(Arc::clone(&index), task.shutdown.clone()).await;
     let _ = reaper.await;
+    finish_graph(&task.opening).await;
     // Dropping the last handle closes the database, which blocks while buckwal ends.
     let _ = tokio::task::spawn_blocking(move || drop(index)).await;
 }

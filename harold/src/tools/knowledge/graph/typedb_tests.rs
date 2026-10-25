@@ -123,3 +123,64 @@ fn only_a_coded_400_is_a_refusal_and_every_other_failure_is_the_servers() {
         BackendError::Unreachable
     );
 }
+
+fn opener(shutdown: tokio::sync::watch::Receiver<()>) -> TypeDbOpener {
+    TypeDbOpener {
+        binary: PathBuf::from("/nonexistent/typedb"),
+        idle: Duration::from_secs(3600),
+        shutdown,
+        server: Default::default(),
+        reaper: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_waits_for_the_reaper_and_the_server_is_stopped_before_it_finishes() {
+    let (shutdown, signal) = tokio::sync::watch::channel(());
+    let opener = opener(signal);
+    opener
+        .open(Path::new("/nonexistent/typedb-folder"))
+        .await
+        .unwrap();
+    let server = opener.server.lock().unwrap().clone().unwrap();
+    let child = tokio::process::Command::new("/bin/sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    server.adopt_for_test(child).await;
+    assert!(server.peek_lease().await.is_some());
+
+    shutdown.send(()).unwrap();
+    opener.finished().await;
+    assert!(
+        server.peek_lease().await.is_none(),
+        "the server is stopped when the shutdown wait ends"
+    );
+    // A second wait has nothing left to wait for.
+    opener.finished().await;
+}
+
+#[tokio::test]
+async fn a_second_open_keeps_the_one_server_and_the_one_reaper() {
+    let (_shutdown, signal) = tokio::sync::watch::channel(());
+    let opener = opener(signal);
+    for _ in 0..2 {
+        opener
+            .open(Path::new("/nonexistent/typedb-folder"))
+            .await
+            .unwrap();
+    }
+    assert!(opener.reaper.lock().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_look_at_the_position_does_not_start_a_server_that_is_not_running() {
+    let (_shutdown, signal) = tokio::sync::watch::channel(());
+    let opener = opener(signal);
+    let backend = opener
+        .open(Path::new("/nonexistent/typedb-folder"))
+        .await
+        .unwrap();
+    assert_eq!(backend.watch_position().await, Ok(None));
+}
