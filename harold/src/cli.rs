@@ -25,6 +25,7 @@ pub(crate) enum Mode {
     Diagnostics { delay_seconds: u64 },
     CheckConfig,
     CheckReady,
+    BuildFeatures,
     Accept(AcceptArgs),
     SendMessageToAwayDevice(AwayMessageArgs),
     Speak(AwayMessageArgs),
@@ -1039,6 +1040,7 @@ impl Mode {
             ["--help" | "-h"] => Ok(Self::Help),
             ["--check-config"] => Ok(Self::CheckConfig),
             ["--check-ready"] => Ok(Self::CheckReady),
+            ["--build-features"] => Ok(Self::BuildFeatures),
             ["accept", rest @ ..] => parse_accept(rest).map(Self::Accept),
             [AWAY_MESSAGE_COMMAND, rest @ ..] => {
                 parse_away_message(rest).map(Self::SendMessageToAwayDevice)
@@ -2287,6 +2289,12 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn build_features_parses_alone_only() {
+        assert_eq!(parse(&["--build-features"]), Ok(Mode::BuildFeatures));
+        assert!(parse(&["--build-features", "--check-config"]).is_err());
     }
 
     #[test]

@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+default = ["mac-defaults"]
+# The feature sets. `mac-defaults` is the Mac package; `linux-defaults` is the Linux package.
+# Both parts below need macOS, so `linux-defaults` has no feature yet.
+mac-defaults = ["imessage", "calls"]
+linux-defaults = []
+# The iMessage channel: reading chat.db and sending through osascript. macOS only.
+imessage = []
+# Calls at the desk and in the web app: voice input, the call answerer, the call models and
+# the echo test page. macOS only.
+calls = []
+
 [dependencies]
 config = "0.15.19"
 serde = { version = "1.0.228", features = ["derive"] }

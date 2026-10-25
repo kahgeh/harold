@@ -2,6 +2,7 @@ mod activity_summary;
 mod agent;
 mod alerts;
 mod away_message;
+mod build_features;
 mod channels;
 mod cli;
 mod crash_guard;
@@ -826,6 +827,7 @@ fn print_help() {
     println!("  harold tool backlog queue export    Print the queue as markdown; 30s timeout");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
+    println!("  harold --build-features Print the Cargo features of this build, one per line");
     println!("  harold --help           Show this help\n");
     println!("ENVIRONMENT:");
     println!("  HAROLD_CONFIG_DIR       Config directory (default: config/ next to the binary)");
@@ -855,6 +857,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if mode == cli::Mode::Help {
         print_help();
+        return Ok(());
+    }
+    if mode == cli::Mode::BuildFeatures {
+        print!("{}", build_features::listing(build_features::FEATURES));
         return Ok(());
     }
 
