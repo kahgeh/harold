@@ -360,7 +360,7 @@ class CheckTests(ReleaseTestCase):
         self.assert_refused('Not released: tests failed in python3 -m unittest discover -s scripts/tests.\n'
                             'FAILED (failures=1)')
         ran = [tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS]
-        self.assertEqual(ran, list(release.TESTS[:3]))
+        self.assertEqual(ran, list(release.TESTS[:2]))
 
     def test_the_tests_are_the_workflows_in_its_order(self):
         tag, latest = release.checks(self.work, None, None)
@@ -368,10 +368,10 @@ class CheckTests(ReleaseTestCase):
         self.assertEqual([tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS], list(release.TESTS))
         self.assertEqual(release.TESTS, (
             ('cargo', 'test', '--workspace', '--locked'),
-            ('bash', 'scripts/check_features.sh'),
             ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
             ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
-            ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete')))
+            ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),
+            ('bash', 'scripts/check_features.sh')))
 
     def test_every_failing_check_is_printed_and_no_test_runs(self):
         git(self.work, 'checkout', '-q', '-b', 'topic')

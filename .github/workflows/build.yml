@@ -46,6 +46,8 @@ jobs:
           python3 -m unittest hooks.providers.test_turn_complete
 
       - name: Check the feature mixes
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: ./scripts/check_features.sh
 
       - name: Build release binaries

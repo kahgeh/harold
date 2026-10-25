@@ -27,10 +27,10 @@ ARCHIVE = PACKAGE + '.tar.gz'
 CHECKSUM = ARCHIVE + '.sha256'
 # The tests the build workflow runs, in its order.
 TESTS = (('cargo', 'test', '--workspace', '--locked'),
-         ('bash', 'scripts/check_features.sh'),
          ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
          ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
-         ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'))
+         ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),
+         ('bash', 'scripts/check_features.sh'))
 BUILD_LIMIT = 45 * 60  # the workflow's timeout-minutes
 FIND_LIMIT = 2 * 60
 POLL = 10

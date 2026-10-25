@@ -1545,7 +1545,7 @@ fn away_channel_is_imessage(local: &Config) -> bool {
         .is_ok_and(|value| value == "imessage")
 }
 
-/// The sentence for `setting`, which this build cannot use because it lacks `feature`'s part.
+/// The sentence for `setting`, which this build cannot use because it lacks `part`.
 /// Install.py holds a copy of each sentence.
 #[cfg(not(all(feature = "imessage", feature = "calls")))]
 fn needs_feature_sentence(setting: &str, part: &str) -> String {
