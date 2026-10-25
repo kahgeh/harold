@@ -30,9 +30,9 @@ pub(crate) const SPEC_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; scrip
 
 /// The name of the vendored Mermaid bundle, which `scripts/build_web_mermaid.sh` prints and
 /// `specs.js` imports. It changes whenever the bundle's bytes do.
-pub(crate) const MERMAID_JS_NAME: &str = "mermaid-12.1.0-88dc4138.js";
+pub(crate) const MERMAID_JS_NAME: &str = "mermaid-12.1.0-9918635a.js";
 pub(crate) const MERMAID_JS: &[u8] =
-    include_bytes!("../../static/web_app/mermaid-12.1.0-88dc4138.js");
+    include_bytes!("../../static/web_app/mermaid-12.1.0-9918635a.js");
 const SPECS_JS: &[u8] = include_bytes!("../../static/web_app/specs.js");
 
 /// The name of the vendored OpenTelemetry bundle, which `scripts/build_web_otel.sh` prints

@@ -2,6 +2,7 @@
 # Builds the one Mermaid bundle the spec pages load, from web-mermaid/package-lock.json,
 # and writes it to harold/static/web_app/mermaid-<mermaid version>-<8 hex of its sha256>.js.
 # Run it only to upgrade, after a fresh audit (docs/references/dependency-audits.md).
+# The bundle leaves out elkjs (EPL-2.0): esbuild puts web-mermaid/empty-elk.js in its place.
 # The Rust build and the release never run it. Needs node and npm; installs nothing
 # globally and runs no package script.
 set -eu
@@ -12,15 +13,21 @@ static_dir="$root/harold/static/web_app"
 work=$(mktemp -d "${TMPDIR:-/tmp}/web-mermaid.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-cp "$source_dir/package.json" "$source_dir/package-lock.json" "$source_dir/lib.js" "$work/"
+cp "$source_dir/package.json" "$source_dir/package-lock.json" "$source_dir/lib.js" "$source_dir/empty-elk.js" "$work/"
 cd "$work"
 npm ci --ignore-scripts --no-audit --no-fund >/dev/null
 
 ./node_modules/.bin/esbuild lib.js --bundle --minify --format=esm --platform=browser \
-  --target=safari16 --legal-comments=none --log-level=warning --outfile=body.js
+  --target=safari16 --legal-comments=none --log-level=warning \
+  --alias:elkjs/lib/elk.bundled.js=./empty-elk.js --outfile=body.js
 
 if grep -q -e child_process -e node:fs body.js; then
   echo "the bundle names a Node-only module" >&2
+  exit 1
+fi
+
+if grep -q org.eclipse.elk body.js; then
+  echo "the bundle holds elkjs" >&2
   exit 1
 fi
 

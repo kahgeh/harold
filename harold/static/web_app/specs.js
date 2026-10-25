@@ -1,7 +1,7 @@
 // Draws the Mermaid diagrams on a spec page. The library is one vendored file, built by
 // scripts/build_web_mermaid.sh. Its name changes whenever its bytes do; keep this import and
 // MERMAID_JS_NAME in src/web_app/pages.rs the same.
-import mermaid from "/static/mermaid-12.1.0-88dc4138.js";
+import mermaid from "/static/mermaid-12.1.0-9918635a.js";
 
 const dark = matchMedia("(prefers-color-scheme: dark)");
 const diagrams = [...document.querySelectorAll("pre.mermaid")].map((node) => ({
@@ -14,6 +14,7 @@ function start() {
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "strict",
+    layout: "dagre",
     theme: dark.matches ? "dark" : "neutral",
   });
 }

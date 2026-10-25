@@ -600,6 +600,10 @@ fn the_mermaid_bundle_is_named_after_its_bytes_and_built_from_the_locked_package
     for module in ["child_process", "node:fs"] {
         assert!(!bundle.contains(module), "the bundle holds {module}");
     }
+    assert!(
+        !bundle.contains("org.eclipse.elk"),
+        "the bundle holds elkjs code"
+    );
     let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/web_app");
     let bundles: Vec<String> = std::fs::read_dir(folder)
         .unwrap()
@@ -618,6 +622,10 @@ fn the_specs_script_imports_the_mermaid_bundle_by_its_name() {
             super::pages::MERMAID_JS_NAME
         )),
         "specs.js does not import the bundle by its name"
+    );
+    assert!(
+        script.contains(r#"layout: "dagre""#),
+        "specs.js does not start Mermaid with the dagre layout, and the bundle has no ELK"
     );
 }
 
