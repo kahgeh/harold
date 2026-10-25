@@ -196,6 +196,7 @@ pub(crate) async fn start(
     cfg: &Settings,
     store_path: &str,
     snapshots: AgentSnapshotHub,
+    specs_addr: Option<std::net::SocketAddr>,
     shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Tools {
     let ports =
@@ -216,12 +217,8 @@ pub(crate) async fn start(
     };
     let products = RegistryProducts {
         path: cfg.telemetry.pod_registry_path(),
-        // The listener opens only with a registry, and only with the web app.
-        specs_url: cfg
-            .web_app
-            .as_ref()
-            .filter(|_| cfg.telemetry.pod_registry.is_some())
-            .map(|web_app| format!("http://{}", web_app.specs_listen())),
+        // The address the specs listener bound; none when it is not open.
+        specs_url: specs_addr.map(|addr| format!("http://{addr}")),
     };
     let extras = Extras {
         watch_typing: Arc::new(TmuxTyping {

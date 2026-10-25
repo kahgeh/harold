@@ -569,14 +569,12 @@ pub(crate) struct Running {
     #[cfg(test)]
     pub local_addr: std::net::SocketAddr,
     /// The address the specs listener listens on; none when it is not open.
-    #[cfg(test)]
     pub specs_addr: Option<std::net::SocketAddr>,
 }
 
 /// The specs listener, running.
 struct SpecsListener {
     server: JoinHandle<Result<(), std::io::Error>>,
-    #[cfg(test)]
     addr: std::net::SocketAddr,
 }
 
@@ -611,7 +609,6 @@ async fn start_specs_listener(
     });
     Some(SpecsListener {
         server: tokio::spawn(async move { server.await }),
-        #[cfg(test)]
         addr: bound,
     })
 }
@@ -701,7 +698,6 @@ pub(crate) async fn start(
         }
         None => None,
     };
-    #[cfg(test)]
     let specs_addr = specs_listener.as_ref().map(|listener| listener.addr);
     let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));
     let mut server_shutdown = shutdown;
@@ -734,7 +730,6 @@ pub(crate) async fn start(
         pairing,
         #[cfg(test)]
         local_addr,
-        #[cfg(test)]
         specs_addr,
     })
 }

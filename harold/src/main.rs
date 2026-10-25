@@ -1151,7 +1151,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     // The tools' services join the core service on one server. A tool that cannot start
     // is logged and left out.
-    let tools = tools::start(cfg, &store_path, snapshots.clone(), shutdown_rx.clone()).await;
+    let tools = tools::start(
+        cfg,
+        &store_path,
+        snapshots.clone(),
+        web_app.as_ref().and_then(|running| running.specs_addr),
+        shutdown_rx.clone(),
+    )
+    .await;
 
     info!(address = %addr, "Harold listening");
     let restart_reminder = cfg.restart_reminder.enabled.then(|| {

@@ -791,3 +791,64 @@ fn the_share_button_posts_through_datastar_and_not_plain_fetch() {
         "specs.js posts the share request"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_spec_shared_record_joins_the_phones_trace() {
+    crate::telemetry::test_support::install();
+    let repo = Repo::new();
+    repo.write("traced.md", "# Traced\n");
+    let directory = Repo::new();
+    let store = store(&directory.root).await;
+    let server = web_app(repo.specs(), Arc::clone(&store)).await;
+    let trace = "5bf92f3577b34da6a3ce929d0e0e4737";
+
+    let mut headers = SAME_ORIGIN.to_vec();
+    let traceparent = format!("00-{trace}-00f067aa0ba902b8-01");
+    headers.push(("traceparent", &traceparent));
+    let response = share(&server, "/specs/harold/traced/share", &headers, "{}").await;
+    assert_eq!(response.status(), 200);
+
+    let joined = crate::telemetry::test_support::logs()
+        .into_iter()
+        .any(|log| {
+            format!("{:?}", log.record.body()).contains("app spec shared")
+                && log
+                    .record
+                    .trace_context()
+                    .is_some_and(|context| context.trace_id.to_string() == trace)
+        });
+    assert!(
+        joined,
+        "no `app spec shared` record carries the phone's trace"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_specs_listener_that_cannot_bind_is_not_open_and_names_no_address() {
+    let directory = Repo::new();
+    let store = store(&directory.root).await;
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut taken_settings = settings();
+    taken_settings.specs_listen = Some(taken.local_addr().unwrap().to_string());
+    let registry = directory.root.join("products.toml");
+    std::fs::write(&registry, "").unwrap();
+    let grpc = crate::web_app::idle_grpc();
+    let mut agents = crate::web_app::idle_agents(&grpc);
+    agents.pod_registry = Some(&registry);
+    let (shutdown, shutdown_rx) = watch::channel(());
+
+    let running = crate::web_app::start(
+        &taken_settings,
+        store,
+        &directory.root.join("store"),
+        shutdown_rx,
+        None,
+        agents,
+    )
+    .await
+    .unwrap();
+
+    assert!(running.specs_addr.is_none());
+    drop(shutdown);
+    running.handle.await.unwrap();
+}

@@ -677,21 +677,25 @@ pub(crate) async fn post_share(
         OffsetDateTime::now_utc(),
         parent.as_ref(),
         async {
-            append_app_reply_with_photo(&state.store, &text, None)
+            let stored = append_app_reply_with_photo(&state.store, &text, None)
                 .await
-                .is_ok()
+                .is_ok();
+            // Logged inside the reply's span, so the line joins the reply's trace.
+            if stored {
+                info!(
+                    product = %spec.product,
+                    id = %spec.id,
+                    sha = %spec.sha_short(),
+                    "app spec shared"
+                );
+            }
+            stored
         },
     )
     .await;
     if !stored {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    info!(
-        product = %spec.product,
-        id = %spec.id,
-        sha = %spec.sha_short(),
-        "app spec shared"
-    );
     let done = PatchElements::new(
         "<span id=\"share-spec\" class=\"share-done\" role=\"status\">Asked the chief to share it</span>",
     );
