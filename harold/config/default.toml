@@ -2,6 +2,8 @@
 host = "127.0.0.1"
 port = 50060
 
+# [imessage], [chat_db] and notify.imessage need the `imessage` feature. A build without it
+# refuses them in local.toml and ignores these defaults.
 [imessage]
 # recipient and handle_id can also be set via:
 #   HAROLD__IMESSAGE__RECIPIENT="+61..."
@@ -126,6 +128,7 @@ model_revision = "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
 # fallback_command can be set in local.toml to run a backup TTS command
 # if the primary command fails.
 
+# [voice_input] needs the `calls` feature: a build without it refuses the section.
 # [voice_input] is set in local.toml. Its settings besides `command` and `args`, and their
 # defaults:
 #   keep_worker_minutes = 10

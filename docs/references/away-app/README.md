@@ -6,6 +6,8 @@ Harold serves the app itself, from this Mac, on a loopback address (`127.0.0.1`,
 
 The chief is the first agent pane of the chief's tmux session among the agents running in a folder `[notify] chief` matches.
 
+The web app works in every build. Its calls need the `calls` feature, and its iMessage fallback needs the `imessage` feature.
+
 ## Rolling back to an earlier Harold
 
 This build adds migrations to Harold's state database: `002_web_app` (two tables, one for the thread and one for the phones that turned on push) and `003_app_photo` (a `photo` column on the thread's rows and a table of the photos uploaded). A Harold built before this one finds a migration it does not know, refuses the store, and stops at start with `incompatible state schema`.

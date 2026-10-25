@@ -5,7 +5,7 @@
 //! status.
 
 use super::answerer::{Answer, Ask, CallAnswering, CallSoFar, Failure, Remark, Who};
-use super::hand_over::{HandOvers, without_hand_over_tag};
+use super::hand_over::HandOvers;
 use super::hang_up::{Spoken, hang_up};
 use super::models::Status as ModelsStatus;
 use super::phone::sound_length;
@@ -15,6 +15,7 @@ use super::phrases::{
 };
 use super::speech::{FRAME, MAX_TURN_FRAMES, START_FRAMES, SpeechDetector};
 use super::wav::{pickup_wav, ringback_wav, tick_wav, wav_bytes};
+use super::without_hand_over_tag;
 use super::worker::{Health, LoadCause, Transcript, VoiceWorker, WorkerError, log_exited};
 use super::{
     AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Said, Speaker,

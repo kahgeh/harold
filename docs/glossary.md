@@ -7,6 +7,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | Harold | The daemon on each Mac that watches agents, notifies the user, routes replies and hosts tools | "the server" |
+| feature | A Cargo feature of Harold that builds one platform part in, such as `imessage`. It is chosen when Harold is built and is not a setting | "flag" alone, "toggle". "Feature flag" stays allowed: it is your own word |
+| feature set | A named group of features: `mac-defaults` (the default) or `linux-defaults` | "profile", "preset" |
+| `imessage` | The feature that builds in the iMessage channel. macOS only | "iMessage flag" |
+| `calls` | The feature that builds in calls, the call answerer, the call models and the echo test page. macOS only | "voice feature" |
+| Mac package | The release file `harold-aarch64-apple-darwin.tar.gz`, built with `mac-defaults` | "bundle" for the file |
 | haroldctl | The command that starts, stops and checks the installed Harold service | — |
 | tmx-agent-dash, the dash | The terminal dashboard that lists agents and holds the chief's questions | "dashboard" for the dash (HyperDX has dashboards), "TUI" |
 | agent | A coding agent running in a tmux pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |

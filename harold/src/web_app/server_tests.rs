@@ -8,7 +8,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::echo_test::{EchoTest, echo_test_path};
+#[cfg(feature = "calls")]
+use super::echo_test::EchoTest;
 use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::pages::{Part, older_rows, split_links, thread_window};
@@ -71,6 +72,7 @@ impl TestServer {
     }
 
     /// The router with this echo test's folder and `say` runner.
+    #[cfg(feature = "calls")]
     async fn serve_echo(store: Arc<HaroldStore>, echo_test: EchoTest) -> Self {
         Self::serve_with(store, WebAppIdentity::default(), Some(echo_test)).await
     }
@@ -92,10 +94,13 @@ impl TestServer {
             None,
             identity,
         );
+        #[cfg(feature = "calls")]
         let state = match echo_test {
             Some(echo_test) => state.with_echo_test(echo_test),
             None => state,
         };
+        #[cfg(not(feature = "calls"))]
+        let _: Option<EchoTest> = echo_test;
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
@@ -1303,312 +1308,323 @@ async fn a_change_to_a_row_older_than_the_window_sends_no_patch() {
     }
 }
 
-/// A `say` that writes `WAV` to the file after `-o`, or fails; it records how often it ran.
-struct FakeSay {
-    fails: bool,
-    runs: std::sync::atomic::AtomicUsize,
-}
+/// Without `calls` there is no echo test, and no test passes one.
+#[cfg(not(feature = "calls"))]
+enum EchoTest {}
 
-const WAV: &[u8] = b"RIFF-fake-wave-bytes";
+/// The echo test is part of calls.
+#[cfg(feature = "calls")]
+mod echo {
+    use super::super::echo_test::{EchoTest, echo_test_path};
+    use super::*;
 
-impl FakeSay {
-    fn new(fails: bool) -> Arc<Self> {
-        Arc::new(Self {
-            fails,
-            runs: std::sync::atomic::AtomicUsize::new(0),
-        })
+    /// A `say` that writes `WAV` to the file after `-o`, or fails; it records how often it ran.
+    struct FakeSay {
+        fails: bool,
+        runs: std::sync::atomic::AtomicUsize,
     }
 
-    fn runs(&self) -> usize {
-        self.runs.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
+    const WAV: &[u8] = b"RIFF-fake-wave-bytes";
 
-impl crate::outbound::runner::Runner for FakeSay {
-    fn run(&self, program: &str, args: &[String], _timeout: Duration) -> bool {
-        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(program, "say");
-        assert!(args.contains(&"--file-format=WAVE".to_owned()), "{args:?}");
-        assert!(
-            args.contains(&"--data-format=LEI16@24000".to_owned()),
-            "{args:?}"
-        );
-        if self.fails {
-            return false;
+    impl FakeSay {
+        fn new(fails: bool) -> Arc<Self> {
+            Arc::new(Self {
+                fails,
+                runs: std::sync::atomic::AtomicUsize::new(0),
+            })
         }
-        let at = args.iter().position(|arg| arg == "-o").expect("-o");
-        std::fs::write(&args[at + 1], WAV).is_ok()
+
+        fn runs(&self) -> usize {
+            self.runs.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
-}
 
-async fn echo_server(directory: &TestDirectory, say: &Arc<FakeSay>) -> (TestServer, PathBuf) {
-    let folder = echo_test_path(&directory.store_path());
-    let echo = EchoTest::new(folder.clone(), say.clone());
-    (
-        TestServer::serve_echo(directory.store().await, echo).await,
-        folder,
-    )
-}
+    impl crate::outbound::runner::Runner for FakeSay {
+        fn run(&self, program: &str, args: &[String], _timeout: Duration) -> bool {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(program, "say");
+            assert!(args.contains(&"--file-format=WAVE".to_owned()), "{args:?}");
+            assert!(
+                args.contains(&"--data-format=LEI16@24000".to_owned()),
+                "{args:?}"
+            );
+            if self.fails {
+                return false;
+            }
+            let at = args.iter().position(|arg| arg == "-o").expect("-o");
+            std::fs::write(&args[at + 1], WAV).is_ok()
+        }
+    }
 
-/// A post of a run as the app's own page sends it.
-async fn post_run(server: &TestServer, body: String) -> reqwest::Response {
-    reqwest::Client::new()
-        .post(server.url("/echo-test/runs"))
-        .header("Tailscale-User-Login", LOGIN)
-        .header("Sec-Fetch-Site", "same-origin")
-        .header("Datastar-Request", "true")
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .unwrap()
-}
+    async fn echo_server(directory: &TestDirectory, say: &Arc<FakeSay>) -> (TestServer, PathBuf) {
+        let folder = echo_test_path(&directory.store_path());
+        let echo = EchoTest::new(folder.clone(), say.clone());
+        (
+            TestServer::serve_echo(directory.store().await, echo).await,
+            folder,
+        )
+    }
 
-/// The class and the text of the one result line in the Datastar events that patch
-/// `#echo-results`.
-async fn echo_line(response: reqwest::Response) -> (String, String) {
-    assert_eq!(response.status(), 200);
-    let events = response.text().await.unwrap();
-    let html = events
-        .lines()
-        .find_map(|line| line.strip_prefix("data: elements "))
-        .unwrap_or_else(|| panic!("an elements patch in {events}"));
-    let rest = html
-        .strip_prefix(r#"<ul id="echo-results"><li"#)
-        .unwrap_or_else(|| panic!("the results list in {html}"));
-    let (attributes, text) = rest.split_once('>').unwrap();
-    let text = text.strip_suffix("</li></ul>").unwrap();
-    (attributes.trim().to_owned(), text.to_owned())
-}
-
-fn run_body(kind: &str, loud_frames: usize) -> String {
-    let mut frames = vec![100.0; 25];
-    frames.extend((0..100).map(|i| if i < loud_frames { 500.0 } else { 100.0 }));
-    serde_json::json!({
-        "setup": "speaker", "kind": kind, "frames": frames,
-        "playing_from": 25, "playing_to": 125, "echo_cancellation": true,
-        "standalone": true, "user_agent": "ECHO-AGENT-1",
-    })
-    .to_string()
-}
-
-fn run_files(folder: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return Vec::new();
-    };
-    let mut files: Vec<_> = entries.map(|entry| entry.unwrap().path()).collect();
-    files.sort();
-    files
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_echo_test_page_serves_its_script_and_says_no_sound_is_sent() {
-    let directory = TestDirectory::new();
-    let (server, _) = echo_server(&directory, &FakeSay::new(false)).await;
-
-    let response = get_with_login(&server.url("/echo-test")).await;
-    assert_eq!(response.status(), 200);
-    assert!(
-        response.headers()["content-type"]
-            .to_str()
-            .unwrap()
-            .starts_with("text/html")
-    );
-    assert_eq!(
-        response.headers()["content-security-policy"],
-        CONTENT_SECURITY_POLICY
-    );
-    let page = response.text().await.unwrap();
-    assert!(page.contains(r#"src="/static/echo-test.js""#), "{page}");
-    assert!(page.contains("/static/app.css"));
-    assert!(page.contains("loudness numbers"), "{page}");
-    assert!(page.contains("no sound"), "{page}");
-    assert!(
-        page.contains(r#"<script type="module" src="/static/datastar-1.0.2.js"></script>"#),
-        "the page loads Datastar, which the script posts through: {page}"
-    );
-
-    // Nothing in the app links to it.
-    assert!(!body_of(&server, "/").await.contains("echo-test"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_post_to_the_runs_route_needs_the_same_origin() {
-    let directory = TestDirectory::new();
-    let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
-    let client = reqwest::Client::new();
-
-    for (site, content_type) in [
-        (None, Some("application/json")),
-        (Some("cross-site"), Some("application/json")),
-        (Some("same-origin"), None),
-        (Some("same-origin"), Some("text/plain")),
-    ] {
-        let mut request = client
+    /// A post of a run as the app's own page sends it.
+    async fn post_run(server: &TestServer, body: String) -> reqwest::Response {
+        reqwest::Client::new()
             .post(server.url("/echo-test/runs"))
             .header("Tailscale-User-Login", LOGIN)
-            .body(run_body("silent", 0));
-        if let Some(site) = site {
-            request = request.header("Sec-Fetch-Site", site);
-        }
-        if let Some(content_type) = content_type {
-            request = request.header("Content-Type", content_type);
-        }
-        let response = request.send().await.unwrap();
-        assert_eq!(response.status(), 403, "{site:?} {content_type:?}");
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Datastar-Request", "true")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap()
     }
-    assert!(run_files(&folder).is_empty());
-    assert_eq!(post_run(&server, run_body("silent", 0)).await.status(), 200);
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_run_is_written_under_echo_test_answered_with_its_verdict_and_logged_without_sound() {
-    crate::telemetry::test_support::install();
-    let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
-
-    let response = post_run(&server, run_body("silent", 2)).await;
-    assert_eq!(
-        response.headers()["content-type"],
-        "text/event-stream",
-        "the answer is Datastar events"
-    );
-    let (class, line) = echo_line(response).await;
-    assert_eq!(class, "", "a pass has no class");
-    let line = line.as_str();
-    assert!(line.starts_with("Silent, on the table: pass."), "{line}");
-    assert!(line.contains("2%"), "{line}");
-
-    let files = run_files(&folder);
-    assert_eq!(files.len(), 1, "{files:?}");
-    let name = files[0].file_name().unwrap().to_str().unwrap();
-    assert!(name.ends_with("Z-speaker-silent.json"), "{name}");
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
-    assert_eq!(saved["setup"], "speaker");
-    assert_eq!(saved["kind"], "silent");
-    assert_eq!(saved["frames"].as_array().unwrap().len(), 125);
-    assert_eq!(saved["playing_from"], 25);
-    assert_eq!(saved["playing_to"], 125);
-    assert_eq!(saved["verdict"]["verdict"], "pass");
-
-    let captured = logs.text();
-    assert!(captured.contains("echo test run"), "{captured}");
-    for wanted in [
-        r#"setup="speaker""#,
-        r#"kind="silent""#,
-        r#"verdict="pass""#,
-        "share_over_bar=0.02",
-        "echo_cancellation=true",
-        "standalone=true",
-    ] {
-        assert!(captured.contains(wanted), "no {wanted} in {captured}");
-    }
-    assert!(!captured.contains("ECHO-AGENT-1"), "{captured}");
-    assert!(!captured.contains("frames"), "{captured}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_failed_run_patches_its_line_in_class_fail_and_escapes_it() {
-    let directory = TestDirectory::new();
-    let (server, _) = echo_server(&directory, &FakeSay::new(false)).await;
-
-    // Every playback frame is loud, so the silent run fails.
-    let (class, line) = echo_line(post_run(&server, run_body("silent", 100)).await).await;
-    assert_eq!(class, r#"class="fail""#);
-    assert!(line.contains("fail"), "{line}");
-    assert!(!line.contains('<'), "{line}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_talk_run_uses_the_newest_silent_run_of_its_setup() {
-    let directory = TestDirectory::new();
-    let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
-
-    let (_, first) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
-    assert!(first.contains("run silent first"), "{first}");
-
-    // The silent run's frames are all 100, so the bar is 200 and the talk run's 500s clear it.
-    assert_eq!(post_run(&server, run_body("silent", 0)).await.status(), 200);
-    let (class, talk) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
-    assert_eq!(class, "", "{talk}");
-    assert!(talk.contains("pass"), "{talk}");
-    assert_eq!(
-        run_files(&folder).len(),
-        3,
-        "a run that needs a silent run is kept too"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a_bad_run_gets_400_writes_nothing_and_logs_a_warning() {
-    crate::telemetry::test_support::install();
-    let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
-
-    let mut too_many: serde_json::Value = serde_json::from_str(&run_body("silent", 0)).unwrap();
-    too_many["frames"] = serde_json::json!(vec![1.0; 1001]);
-    for body in [
-        run_body("silent", 0).replace("speaker", "kitchen"),
-        run_body("silent", 0).replace("silent", "shout"),
-        too_many.to_string(),
-        format!("{} {}", run_body("silent", 0), " ".repeat(70_000)),
-        "nonsense".to_owned(),
-    ] {
-        let response = post_run(&server, body).await;
-        assert_eq!(response.status(), 400);
-    }
-    assert!(run_files(&folder).is_empty());
-    let captured = logs.text();
-    assert!(captured.contains("echo test run not saved"), "{captured}");
-    assert!(captured.contains(r#"reason="bad_request""#), "{captured}");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a_run_that_cannot_be_written_says_it_was_not_saved() {
-    crate::telemetry::test_support::install();
-    let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
-    // A file where the folder should be.
-    std::fs::write(&folder, b"in the way").unwrap();
-
-    let response = post_run(&server, run_body("silent", 0)).await;
-    assert_eq!(response.status(), 500);
-    let answer: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(answer["saved"], false);
-    let captured = logs.text();
-    assert!(captured.contains("echo test run not saved"), "{captured}");
-    assert!(captured.contains(r#"reason="write_failed""#), "{captured}");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn the_sample_is_wav_made_once_by_say_and_a_failure_gives_503() {
-    crate::telemetry::test_support::install();
-    let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let say = FakeSay::new(false);
-    let (server, folder) = echo_server(&directory, &say).await;
-
-    for _ in 0..2 {
-        let response = get_with_login(&server.url("/echo-test/sample")).await;
+    /// The class and the text of the one result line in the Datastar events that patch
+    /// `#echo-results`.
+    async fn echo_line(response: reqwest::Response) -> (String, String) {
         assert_eq!(response.status(), 200);
-        assert_eq!(response.headers()["content-type"], "audio/wav");
-        assert_eq!(response.bytes().await.unwrap().as_ref(), WAV);
+        let events = response.text().await.unwrap();
+        let html = events
+            .lines()
+            .find_map(|line| line.strip_prefix("data: elements "))
+            .unwrap_or_else(|| panic!("an elements patch in {events}"));
+        let rest = html
+            .strip_prefix(r#"<ul id="echo-results"><li"#)
+            .unwrap_or_else(|| panic!("the results list in {html}"));
+        let (attributes, text) = rest.split_once('>').unwrap();
+        let text = text.strip_suffix("</li></ul>").unwrap();
+        (attributes.trim().to_owned(), text.to_owned())
     }
-    assert_eq!(say.runs(), 1, "made at the first request and kept");
-    assert!(run_files(&folder).is_empty(), "no scratch file is left");
 
-    let failing = FakeSay::new(true);
-    let other = TestDirectory::new();
-    let (server, _) = echo_server(&other, &failing).await;
-    let response = get_with_login(&server.url("/echo-test/sample")).await;
-    assert_eq!(response.status(), 503);
-    let _ = get_with_login(&server.url("/echo-test/sample")).await;
-    assert_eq!(failing.runs(), 2, "a failure is tried again");
-    let captured = logs.text();
-    assert!(captured.contains("echo test sample not made"), "{captured}");
-    assert!(captured.contains(r#"reason="say_failed""#), "{captured}");
+    fn run_body(kind: &str, loud_frames: usize) -> String {
+        let mut frames = vec![100.0; 25];
+        frames.extend((0..100).map(|i| if i < loud_frames { 500.0 } else { 100.0 }));
+        serde_json::json!({
+            "setup": "speaker", "kind": kind, "frames": frames,
+            "playing_from": 25, "playing_to": 125, "echo_cancellation": true,
+            "standalone": true, "user_agent": "ECHO-AGENT-1",
+        })
+        .to_string()
+    }
+
+    fn run_files(folder: &std::path::Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        let mut files: Vec<_> = entries.map(|entry| entry.unwrap().path()).collect();
+        files.sort();
+        files
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_echo_test_page_serves_its_script_and_says_no_sound_is_sent() {
+        let directory = TestDirectory::new();
+        let (server, _) = echo_server(&directory, &FakeSay::new(false)).await;
+
+        let response = get_with_login(&server.url("/echo-test")).await;
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            CONTENT_SECURITY_POLICY
+        );
+        let page = response.text().await.unwrap();
+        assert!(page.contains(r#"src="/static/echo-test.js""#), "{page}");
+        assert!(page.contains("/static/app.css"));
+        assert!(page.contains("loudness numbers"), "{page}");
+        assert!(page.contains("no sound"), "{page}");
+        assert!(
+            page.contains(r#"<script type="module" src="/static/datastar-1.0.2.js"></script>"#),
+            "the page loads Datastar, which the script posts through: {page}"
+        );
+
+        // Nothing in the app links to it.
+        assert!(!body_of(&server, "/").await.contains("echo-test"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_post_to_the_runs_route_needs_the_same_origin() {
+        let directory = TestDirectory::new();
+        let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
+        let client = reqwest::Client::new();
+
+        for (site, content_type) in [
+            (None, Some("application/json")),
+            (Some("cross-site"), Some("application/json")),
+            (Some("same-origin"), None),
+            (Some("same-origin"), Some("text/plain")),
+        ] {
+            let mut request = client
+                .post(server.url("/echo-test/runs"))
+                .header("Tailscale-User-Login", LOGIN)
+                .body(run_body("silent", 0));
+            if let Some(site) = site {
+                request = request.header("Sec-Fetch-Site", site);
+            }
+            if let Some(content_type) = content_type {
+                request = request.header("Content-Type", content_type);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 403, "{site:?} {content_type:?}");
+        }
+        assert!(run_files(&folder).is_empty());
+        assert_eq!(post_run(&server, run_body("silent", 0)).await.status(), 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_run_is_written_under_echo_test_answered_with_its_verdict_and_logged_without_sound() {
+        crate::telemetry::test_support::install();
+        let logs = CapturedLogs::start();
+        let directory = TestDirectory::new();
+        let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
+
+        let response = post_run(&server, run_body("silent", 2)).await;
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/event-stream",
+            "the answer is Datastar events"
+        );
+        let (class, line) = echo_line(response).await;
+        assert_eq!(class, "", "a pass has no class");
+        let line = line.as_str();
+        assert!(line.starts_with("Silent, on the table: pass."), "{line}");
+        assert!(line.contains("2%"), "{line}");
+
+        let files = run_files(&folder);
+        assert_eq!(files.len(), 1, "{files:?}");
+        let name = files[0].file_name().unwrap().to_str().unwrap();
+        assert!(name.ends_with("Z-speaker-silent.json"), "{name}");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        assert_eq!(saved["setup"], "speaker");
+        assert_eq!(saved["kind"], "silent");
+        assert_eq!(saved["frames"].as_array().unwrap().len(), 125);
+        assert_eq!(saved["playing_from"], 25);
+        assert_eq!(saved["playing_to"], 125);
+        assert_eq!(saved["verdict"]["verdict"], "pass");
+
+        let captured = logs.text();
+        assert!(captured.contains("echo test run"), "{captured}");
+        for wanted in [
+            r#"setup="speaker""#,
+            r#"kind="silent""#,
+            r#"verdict="pass""#,
+            "share_over_bar=0.02",
+            "echo_cancellation=true",
+            "standalone=true",
+        ] {
+            assert!(captured.contains(wanted), "no {wanted} in {captured}");
+        }
+        assert!(!captured.contains("ECHO-AGENT-1"), "{captured}");
+        assert!(!captured.contains("frames"), "{captured}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_run_patches_its_line_in_class_fail_and_escapes_it() {
+        let directory = TestDirectory::new();
+        let (server, _) = echo_server(&directory, &FakeSay::new(false)).await;
+
+        // Every playback frame is loud, so the silent run fails.
+        let (class, line) = echo_line(post_run(&server, run_body("silent", 100)).await).await;
+        assert_eq!(class, r#"class="fail""#);
+        assert!(line.contains("fail"), "{line}");
+        assert!(!line.contains('<'), "{line}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_talk_run_uses_the_newest_silent_run_of_its_setup() {
+        let directory = TestDirectory::new();
+        let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
+
+        let (_, first) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
+        assert!(first.contains("run silent first"), "{first}");
+
+        // The silent run's frames are all 100, so the bar is 200 and the talk run's 500s clear it.
+        assert_eq!(post_run(&server, run_body("silent", 0)).await.status(), 200);
+        let (class, talk) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
+        assert_eq!(class, "", "{talk}");
+        assert!(talk.contains("pass"), "{talk}");
+        assert_eq!(
+            run_files(&folder).len(),
+            3,
+            "a run that needs a silent run is kept too"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bad_run_gets_400_writes_nothing_and_logs_a_warning() {
+        crate::telemetry::test_support::install();
+        let logs = CapturedLogs::start();
+        let directory = TestDirectory::new();
+        let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
+
+        let mut too_many: serde_json::Value = serde_json::from_str(&run_body("silent", 0)).unwrap();
+        too_many["frames"] = serde_json::json!(vec![1.0; 1001]);
+        for body in [
+            run_body("silent", 0).replace("speaker", "kitchen"),
+            run_body("silent", 0).replace("silent", "shout"),
+            too_many.to_string(),
+            format!("{} {}", run_body("silent", 0), " ".repeat(70_000)),
+            "nonsense".to_owned(),
+        ] {
+            let response = post_run(&server, body).await;
+            assert_eq!(response.status(), 400);
+        }
+        assert!(run_files(&folder).is_empty());
+        let captured = logs.text();
+        assert!(captured.contains("echo test run not saved"), "{captured}");
+        assert!(captured.contains(r#"reason="bad_request""#), "{captured}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_run_that_cannot_be_written_says_it_was_not_saved() {
+        crate::telemetry::test_support::install();
+        let logs = CapturedLogs::start();
+        let directory = TestDirectory::new();
+        let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
+        // A file where the folder should be.
+        std::fs::write(&folder, b"in the way").unwrap();
+
+        let response = post_run(&server, run_body("silent", 0)).await;
+        assert_eq!(response.status(), 500);
+        let answer: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(answer["saved"], false);
+        let captured = logs.text();
+        assert!(captured.contains("echo test run not saved"), "{captured}");
+        assert!(captured.contains(r#"reason="write_failed""#), "{captured}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_sample_is_wav_made_once_by_say_and_a_failure_gives_503() {
+        crate::telemetry::test_support::install();
+        let logs = CapturedLogs::start();
+        let directory = TestDirectory::new();
+        let say = FakeSay::new(false);
+        let (server, folder) = echo_server(&directory, &say).await;
+
+        for _ in 0..2 {
+            let response = get_with_login(&server.url("/echo-test/sample")).await;
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["content-type"], "audio/wav");
+            assert_eq!(response.bytes().await.unwrap().as_ref(), WAV);
+        }
+        assert_eq!(say.runs(), 1, "made at the first request and kept");
+        assert!(run_files(&folder).is_empty(), "no scratch file is left");
+
+        let failing = FakeSay::new(true);
+        let other = TestDirectory::new();
+        let (server, _) = echo_server(&other, &failing).await;
+        let response = get_with_login(&server.url("/echo-test/sample")).await;
+        assert_eq!(response.status(), 503);
+        let _ = get_with_login(&server.url("/echo-test/sample")).await;
+        assert_eq!(failing.runs(), 2, "a failure is tried again");
+        let captured = logs.text();
+        assert!(captured.contains("echo test sample not made"), "{captured}");
+        assert!(captured.contains(r#"reason="say_failed""#), "{captured}");
+    }
 }

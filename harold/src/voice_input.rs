@@ -9,23 +9,24 @@ mod mac;
 mod models;
 mod phone;
 mod phrases;
+mod shared;
 mod speech;
 mod wav;
 mod worker;
 
 pub(crate) use answerer::{CallAnswering, daemon_call_answering};
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
-pub(crate) use hand_over::without_hand_over_tag;
 pub(crate) use mac::MacPorts;
-pub(crate) use models::{Env as ModelsEnv, Missing, SpeechModels, SystemHost};
+pub(crate) use models::{Env as ModelsEnv, SpeechModels, SystemHost};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use phone::{
-    ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
-    PhoneCalls, PhoneLine, PhoneSound, PhoneSpeech, PhoneStarted, PhoneView, SPEECH_BASE,
-    SPEECH_PER_CHAR,
+    ANSWER_KEEP, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE, PhoneCalls,
+    PhoneLine, SPEECH_BASE, SPEECH_PER_CHAR,
 };
-/// The web app's `POST /call` says these when no phone call starts.
-pub(crate) use phrases::{NO_CHIEF, VOICE_FAILED};
+pub(crate) use shared::{
+    AudioRefused, CallState, CallStatus, LineTaker, Missing, NO_CHIEF, PhoneSound, PhoneSpeech,
+    PhoneStarted, PhoneView, Said, Speaker, TurnResult, VOICE_FAILED, without_hand_over_tag,
+};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -58,17 +59,6 @@ pub(crate) trait AudioSource: Send + 'static {
             Some((block, tokio::time::Instant::now()))
         }
     }
-}
-
-/// What a sound says, for a sink that shows or relays it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Said {
-    /// The tick that plays while an answer is awaited.
-    Tick,
-    /// One of Harold's own phrases.
-    Phrase(String),
-    /// A line said into the call.
-    Line { text: String, by: Speaker },
 }
 
 /// Where a call's sound goes. The core plays one file at a time and knows when each ends.
@@ -159,77 +149,6 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     fn answering(&self) -> Option<Arc<CallAnswering>> {
         daemon_answering()
     }
-}
-
-/// What a call is doing, as the dashboard's button shows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallState {
-    /// No `[voice_input]`: no call can start.
-    NotSetUp,
-    Off,
-    /// The call is open and the voice worker cannot listen yet: it is loading, or a speech
-    /// model is still being fetched.
-    Connecting,
-    Listening,
-    Transcribing,
-    /// A turn was typed and the chief has not answered yet.
-    Waiting,
-    /// Harold plays a line or a phrase; the user is not heard.
-    Speaking,
-}
-
-/// What became of the user's last turn, or of the last START.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnResult {
-    Typed,
-    NothingHeard,
-    NoChief,
-    ChiefBusy,
-    Failed,
-    VoiceMuted,
-    /// The call answerer's line played, and nothing was handed over.
-    Answered,
-    /// The call answerer's line played, with a hand-over to the chief.
-    HandedOver,
-}
-
-impl TurnResult {
-    /// The `reason` a log line carries.
-    pub(crate) fn reason(self) -> &'static str {
-        match self {
-            Self::Typed => "typed",
-            Self::NothingHeard => "nothing_heard",
-            Self::NoChief => "no_chief",
-            Self::ChiefBusy => "chief_busy",
-            Self::Failed => "failed",
-            Self::VoiceMuted => "voice_muted",
-            Self::Answered => "answered",
-            Self::HandedOver => "handed_over",
-        }
-    }
-}
-
-/// The answer to every call action.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallStatus {
-    pub state: CallState,
-    /// The pane of the agent in the chief's folder, read when the status is asked for.
-    pub chief_pane_id: Option<String>,
-    /// The last transcript typed into the chief's pane in this call.
-    pub last_transcript: Option<String>,
-    pub last_result: Option<TurnResult>,
-    /// How far a speech model's download has come, in whole percent, while the call
-    /// connects.
-    pub model_percent: Option<u8>,
-}
-
-/// Who sent a line said into an open call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Speaker {
-    /// `harold speak` from the chief: the answer to the user's turn.
-    Chief,
-    /// Another agent's turn-end update.
-    OtherAgent,
 }
 
 /// Starts, ends and talks to at most one call at a time.
@@ -448,13 +367,6 @@ pub(crate) fn daemon_answering() -> Option<Arc<CallAnswering>> {
 /// The daemon's calls; `None` before start-up sets them, and in `--diagnostics` and tests.
 pub(crate) fn daemon_calls() -> Option<&'static DaemonCalls> {
     DAEMON_CALLS.get()
-}
-
-/// Somewhere the chief's spoken lines can be said: a set of calls, of which one may be open.
-pub(crate) trait LineTaker: Send + Sync {
-    /// Says `line` in the open call, from a blocking thread, and returns once it has ended.
-    /// `None` when no call is open (or the line is not one these calls say).
-    fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool>;
 }
 
 impl<P: CallPorts> LineTaker for CallControl<P> {

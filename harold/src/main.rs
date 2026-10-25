@@ -18,6 +18,10 @@ mod telemetry;
 mod timed_prompts;
 mod tools;
 mod util;
+#[cfg(feature = "calls")]
+mod voice_input;
+#[cfg(not(feature = "calls"))]
+#[path = "voice_input/off.rs"]
 mod voice_input;
 mod web_app;
 
@@ -658,11 +662,14 @@ fn run_diagnostics(delay_secs: u64) {
     println!("screen_locked : {locked}");
 
     let cfg = get_settings();
+    #[cfg(feature = "imessage")]
     println!(
         "iMessage      : recipient={} handle_ids={:?}",
         cfg.imessage.recipient.as_deref().unwrap_or("(not set)"),
         cfg.imessage.handle_ids,
     );
+    #[cfg(not(feature = "imessage"))]
+    println!("iMessage      : not built into this Harold");
     println!(
         "TTS           : command={} voice={:?}",
         cfg.tts.command, cfg.tts.voice,
@@ -694,6 +701,12 @@ fn run_diagnostics(delay_secs: u64) {
     }
 
     println!("\n--- Testing notify path (screen_locked={locked}) ---");
+    diagnose_away_notification(turn, locked);
+}
+
+/// Sends a test away notification through iMessage when the screen is locked.
+#[cfg(feature = "imessage")]
+fn diagnose_away_notification(turn: store::TurnCompleted, locked: bool) {
     if !locked {
         println!("The screen is unlocked: a turn-end update is not spoken or sent.");
         return;
@@ -713,6 +726,12 @@ fn run_diagnostics(delay_secs: u64) {
     println!("Away notification sent (check your phone)");
 
     println!("\nDone.");
+}
+
+/// A build without `imessage` has no away channel to test.
+#[cfg(not(feature = "imessage"))]
+fn diagnose_away_notification(_turn: store::TurnCompleted, _locked: bool) {
+    println!("This Harold has no iMessage: no away notification is sent.");
 }
 
 /// Print the one line a command failed with and exit 1. Returning the error from `main`
@@ -872,6 +891,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(async_main(mode))
+}
+
+/// Sets up the call answerer, the speech models and the desk's calls, and returns the phone's
+/// calls for the web app, which exist only with `[web_app]`.
+#[cfg(feature = "calls")]
+fn start_calls(
+    cfg: &settings::Settings,
+    store: &Arc<store::HaroldStore>,
+    store_path: &str,
+    snapshots: &agent::snapshot::AgentSnapshotHub,
+) -> Option<Arc<dyn web_app::call::PhoneCallApi>> {
+    // The call answerer, before any call can start.
+    if let Some(answering) =
+        voice_input::daemon_call_answering(cfg, Arc::clone(store), snapshots.clone())
+    {
+        voice_input::init_call_answering(answering);
+    }
+    // The speech models: a missing one is downloaded in the background, pinned and checked
+    // (ADR 0011), and a call waits for them.
+    if let Some(voice_input) = cfg.voice_input.as_ref() {
+        let folder = std::path::Path::new(store_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("speech-models");
+        voice_input::init_speech_models(voice_input::SpeechModels::new(
+            voice_input,
+            &cfg.tts,
+            folder,
+            voice_input::ModelsEnv::from_process(),
+            Arc::new(voice_input::SystemHost),
+        ));
+    }
+    // The desk's calls come first: they sweep leftover `call-*` folders before either
+    // control can start a call.
+    let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
+    let set_up = call_ports.set_up();
+    voice_input::init_daemon_calls(voice_input::CallControl::new(call_ports, set_up));
+
+    // The phone's calls exist only with the web app. One value serves the web app's call
+    // routes and the chief's spoken lines.
+    let phone_calls = cfg.web_app.as_ref().map(|_| {
+        let ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
+        let set_up = ports.set_up();
+        let end_desk: web_app::call::EndDeskCall = Arc::new(|| {
+            Box::pin(async {
+                if let Some(calls) = voice_input::daemon_calls() {
+                    calls.stop().await;
+                }
+            })
+        });
+        Arc::new(web_app::call::AppCalls::new(
+            voice_input::PhoneCalls::new(ports, set_up).keeping_worker_for(Duration::from_secs(
+                60 * cfg
+                    .voice_input
+                    .as_ref()
+                    .map_or(10, |v| v.keep_worker_minutes),
+            )),
+            Arc::clone(store),
+            end_desk,
+        ))
+    });
+    if let Some(calls) = &phone_calls {
+        voice_input::init_phone_calls(Arc::clone(calls) as Arc<dyn voice_input::LineTaker>);
+    }
+    phone_calls.map(|calls| calls as Arc<dyn web_app::call::PhoneCallApi>)
+}
+
+/// A build without `calls` has no call answerer, speech models or calls.
+#[cfg(not(feature = "calls"))]
+fn start_calls(
+    _cfg: &settings::Settings,
+    _store: &Arc<store::HaroldStore>,
+    _store_path: &str,
+    _snapshots: &agent::snapshot::AgentSnapshotHub,
+) -> Option<Arc<dyn web_app::call::PhoneCallApi>> {
+    None
 }
 
 async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
@@ -1062,59 +1157,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());
     }
-    // The call answerer, before any call can start.
-    if let Some(answering) =
-        voice_input::daemon_call_answering(cfg, Arc::clone(&store), snapshots.clone())
-    {
-        voice_input::init_call_answering(answering);
-    }
-    // The speech models: a missing one is downloaded in the background, pinned and checked
-    // (ADR 0011), and a call waits for them.
-    if let Some(voice_input) = cfg.voice_input.as_ref() {
-        let folder = std::path::Path::new(&store_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("speech-models");
-        voice_input::init_speech_models(voice_input::SpeechModels::new(
-            voice_input,
-            &cfg.tts,
-            folder,
-            voice_input::ModelsEnv::from_process(),
-            Arc::new(voice_input::SystemHost),
-        ));
-    }
-    // The desk's calls come first: they sweep leftover `call-*` folders before either
-    // control can start a call.
-    let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
-    let set_up = call_ports.set_up();
-    voice_input::init_daemon_calls(voice_input::CallControl::new(call_ports, set_up));
-
-    // The phone's calls exist only with the web app. One value serves the web app's call
-    // routes and the chief's spoken lines.
-    let phone_calls = cfg.web_app.as_ref().map(|_| {
-        let ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
-        let set_up = ports.set_up();
-        let end_desk: web_app::call::EndDeskCall = Arc::new(|| {
-            Box::pin(async {
-                if let Some(calls) = voice_input::daemon_calls() {
-                    calls.stop().await;
-                }
-            })
-        });
-        Arc::new(web_app::call::AppCalls::new(
-            voice_input::PhoneCalls::new(ports, set_up).keeping_worker_for(Duration::from_secs(
-                60 * cfg
-                    .voice_input
-                    .as_ref()
-                    .map_or(10, |v| v.keep_worker_minutes),
-            )),
-            Arc::clone(&store),
-            end_desk,
-        ))
-    });
-    if let Some(calls) = &phone_calls {
-        voice_input::init_phone_calls(Arc::clone(calls) as Arc<dyn voice_input::LineTaker>);
-    }
+    let phone_calls = start_calls(cfg, &store, &store_path, &snapshots);
     let browser_collector = telemetry
         .exporting()
         .then(|| cfg.telemetry.otlp_http_endpoint.clone())
@@ -1125,7 +1168,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&store),
         std::path::Path::new(&store_path),
         shutdown_rx.clone(),
-        phone_calls.map(|calls| calls as Arc<dyn web_app::call::PhoneCallApi>),
+        phone_calls,
         web_app::Agents {
             snapshots: &snapshots,
             chief_folder: cfg.notify.chief.as_deref(),
@@ -1145,6 +1188,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         web_app.as_ref().map(|running| Arc::clone(&running.route)),
         shutdown_rx.clone(),
     ));
+    #[cfg(feature = "imessage")]
     let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
         Arc::clone(&store),
         shutdown_rx.clone(),
@@ -1213,6 +1257,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     // Wait for the handler, the listener, the timed-prompt task, the tools, the web app, the
     // pod facts and the alert address to stop before returning.
     let _ = event_handler_handle.await;
+    #[cfg(feature = "imessage")]
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
     if let Some(handle) = log_trim {

@@ -51,14 +51,17 @@ pub struct ImessageSettings {
     pub recipient: Option<String>,
     /// All chat.db handle IDs associated with your Apple ID (phone number, emails).
     #[serde(default)]
+    #[cfg_attr(not(feature = "imessage"), allow(dead_code))]
     pub handle_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "imessage"), allow(dead_code))]
 pub struct ChatDbSettings {
     pub path: String,
 }
 
+#[cfg_attr(not(feature = "imessage"), allow(dead_code))]
 impl ChatDbSettings {
     pub fn resolved_path(&self) -> String {
         expand_tilde(&self.path)
@@ -676,6 +679,7 @@ fn keep_worker_minutes() -> u64 {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "calls"), allow(dead_code))]
 pub struct TtsSettings {
     /// The commit of the Kokoro model, 40 lowercase hex characters.
     #[serde(default = "kokoro_revision")]
@@ -746,6 +750,7 @@ impl TelemetrySettings {
 
 /// The Python and arguments that run the voice worker for calls with the chief.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "calls"), allow(dead_code))]
 pub(crate) struct VoiceInputSettings {
     /// The Python the voice worker runs with.
     pub command: String,
@@ -1330,6 +1335,7 @@ pub struct Settings {
     pub machines: Vec<String>,
     pub grpc: GrpcSettings,
     pub imessage: ImessageSettings,
+    #[cfg_attr(not(feature = "imessage"), allow(dead_code))]
     pub chat_db: ChatDbSettings,
     pub ai: AiSettings,
     #[serde(default)]
@@ -1389,11 +1395,14 @@ impl Settings {
             self.web_app.as_ref(),
             self.notify.chief.as_deref(),
         ));
-        if self.imessage.recipient.is_none() {
-            errors.push("imessage.recipient is required".into());
-        }
-        if self.imessage.handle_ids.is_empty() {
-            errors.push("imessage.handle_ids requires at least one handle ID".into());
+        #[cfg(feature = "imessage")]
+        {
+            if self.imessage.recipient.is_none() {
+                errors.push("imessage.recipient is required".into());
+            }
+            if self.imessage.handle_ids.is_empty() {
+                errors.push("imessage.handle_ids requires at least one handle ID".into());
+            }
         }
         errors
     }
@@ -1536,6 +1545,34 @@ fn away_channel_is_imessage(local: &Config) -> bool {
         .is_ok_and(|value| value == "imessage")
 }
 
+/// The sentence for `setting`, which this build cannot use because it lacks `feature`'s part.
+/// Install.py holds a copy of each sentence.
+#[cfg(not(all(feature = "imessage", feature = "calls")))]
+fn needs_feature_sentence(setting: &str, part: &str) -> String {
+    format!(
+        "{setting} is set, but this Harold is built without {part}: remove it from config/local.toml."
+    )
+}
+
+/// The sentences for each setting `local` sets that needs a feature this build lacks. Key
+/// presence only: no value is read.
+fn settings_missing_a_feature(local: &Config) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut messages = Vec::new();
+    #[cfg(not(feature = "imessage"))]
+    for setting in ["notify.imessage", "imessage", "chat_db"] {
+        if has_key(local, setting) {
+            messages.push(needs_feature_sentence(setting, "iMessage"));
+        }
+    }
+    #[cfg(not(feature = "calls"))]
+    if has_key(local, "voice_input") {
+        messages.push(needs_feature_sentence("voice_input", "calls"));
+    }
+    let _ = local;
+    messages
+}
+
 fn removed_setting_messages_from(local: &Config, merged: &Config) -> Vec<String> {
     let mut messages = Vec::new();
     if has_key(local, "telegram") {
@@ -1550,6 +1587,7 @@ fn removed_setting_messages_from(local: &Config, merged: &Config) -> Vec<String>
     if has_key(local, "notify.away_channel") && !away_channel_is_imessage(local) {
         messages.push(AWAY_CHANNEL_REMOVED.to_owned());
     }
+    messages.extend(settings_missing_a_feature(local));
     // An unparseable host is left to the validation that refuses it today.
     if let Ok(host) = merged.get_string("grpc.host")
         && parse_host(&host).is_ok()
@@ -2665,6 +2703,144 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert_eq!(settings.notify.away_messages_only_from, None);
     }
 
+    #[cfg(not(feature = "imessage"))]
+    #[test]
+    fn a_build_without_imessage_refuses_each_imessage_setting_the_local_config_sets() {
+        for (local, setting) in [
+            ("[notify]\nimessage = [\"a\"]\n", "notify.imessage"),
+            ("[imessage]\nrecipient = \"a@b.c\"\n", "imessage"),
+            ("[chat_db]\npath = \"/x\"\n", "chat_db"),
+        ] {
+            assert_eq!(
+                removed(local),
+                [format!(
+                    "{setting} is set, but this Harold is built without iMessage: remove it from config/local.toml."
+                )],
+                "{setting}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "imessage"))]
+    #[test]
+    fn a_build_without_imessage_loads_the_shipped_defaults_and_asks_for_no_recipient() {
+        assert!(removed("").is_empty());
+        let errors = default_settings_with("").validate();
+        assert!(!errors.iter().any(|error| error.starts_with("imessage.")));
+    }
+
+    #[cfg(not(feature = "calls"))]
+    #[test]
+    fn a_build_without_calls_refuses_voice_input() {
+        assert_eq!(
+            removed("[voice_input]\ncommand = \"python\"\n"),
+            [
+                "voice_input is set, but this Harold is built without calls: remove it from config/local.toml."
+            ]
+        );
+        assert!(removed("").is_empty());
+    }
+
+    #[cfg(feature = "imessage")]
+    #[test]
+    fn a_build_with_imessage_accepts_the_imessage_settings() {
+        let local = "[notify]\nimessage = [\"a\"]\n[imessage]\nrecipient = \"a@b.c\"\nhandle_ids = [1]\n[chat_db]\npath = \"/x\"\n";
+        assert!(removed(local).is_empty());
+    }
+
+    #[cfg(feature = "calls")]
+    #[test]
+    fn a_build_with_calls_accepts_voice_input() {
+        assert!(removed("[voice_input]\ncommand = \"python\"\n").is_empty());
+    }
+
+    /// The sections and keys of this Mac's `local.toml`, with made-up values.
+    #[cfg(all(feature = "imessage", feature = "calls"))]
+    const MAC_LOCAL: &str = r#"
+machines = ["laptop-mac", "studio-mac"]
+[imessage]
+recipient = "+10000000000"
+handle_ids = [1, 2]
+[ai]
+cli_path = "claude"
+[store]
+path = "~/.harold/store"
+[tts]
+command = "say"
+args = ["-r", "200"]
+fallback_command = "afplay"
+[notify]
+chief_session = "chief"
+[activity_summary]
+enabled = true
+cli_path = "claude"
+model = "haiku"
+effort = "low"
+[agent_monitor]
+inventory_interval_ms = 1000
+screen_interval_ms = 1500
+[[timed_prompts]]
+name = "morning"
+at = "09:00"
+folder = "/work/chief"
+text = "good morning"
+[telemetry]
+otlp_endpoint = "http://localhost:4317"
+alert_listen = "127.0.0.1:4320"
+pod_registry = "/work/pods.toml"
+[web_app]
+listen = "laptop-mac.example.ts.net:8443"
+allowed_login = "someone@example.com"
+app_name = "Harold"
+icon = "H"
+[watch]
+skill_folders = ["/work/skills"]
+[voice_input]
+command = "/work/venv/bin/python"
+args = ["/work/voice_worker.py", "--model", "mlx-community/whisper-large-v3-turbo"]
+[knowledge]
+vault = "/work/vault"
+exclude = ["log.md"]
+command = "/work/venv/bin/python"
+args = ["/work/embed_worker.py"]
+model = "/work/model.gguf"
+model_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+[knowledge.bucket]
+endpoint = "http://127.0.0.1:9000"
+bucket = "notes"
+credentials_file = "/work/bucket"
+encryption_key_file = "/work/key"
+"#;
+
+    #[cfg(all(feature = "imessage", feature = "calls"))]
+    #[test]
+    fn a_config_with_the_form_of_this_macs_local_toml_loads_on_mac_defaults() {
+        assert!(removed(MAC_LOCAL).is_empty());
+        let settings = default_settings_with(MAC_LOCAL);
+        assert_eq!(settings.imessage.handle_ids, [1, 2]);
+        assert!(settings.voice_input.is_some());
+        assert!(settings.web_app.is_some());
+        assert_eq!(settings.tts.command, "say");
+    }
+
+    #[test]
+    fn a_tts_with_only_a_command_and_args_still_runs_that_command() {
+        let out =
+            std::env::temp_dir().join(format!("harold-settings-tts-{}", uuid::Uuid::new_v4()));
+        let settings = default_settings_with(&format!(
+            "[tts]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf %s \\\"$1\\\" > '{}'\", \"sh\"]\n",
+            out.display()
+        ));
+        assert!(crate::outbound::tts::speak_line_with(
+            &settings.tts,
+            "hello",
+            &crate::outbound::tts::LineStopper::default()
+        ));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[cfg(feature = "imessage")]
     #[test]
     fn validate_always_requires_the_imessage_recipient_and_handles() {
         let errors = default_settings_with("").validate();

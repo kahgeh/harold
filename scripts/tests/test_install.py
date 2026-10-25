@@ -831,13 +831,17 @@ class InstalledServiceTests(unittest.TestCase):
                 self.run_install(None)
         return str(raised.exception)
 
-    def test_the_five_refusal_sentences_match_the_spec(self):
-        self.assertEqual(len(self.install.REFUSAL_SENTENCES), 5)
+    def test_the_refusal_sentences_match_the_spec(self):
+        self.assertEqual(len(self.install.REFUSAL_SENTENCES), 9)
         self.assertEqual(self.install.REFUSAL_SENTENCES[0], '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
         self.assertEqual(self.install.REFUSAL_SENTENCES[1], '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.')
         self.assertEqual(self.install.REFUSAL_SENTENCES[2], 'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.')
         self.assertEqual(self.install.REFUSAL_SENTENCES[3], 'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
         self.assertEqual(self.install.REFUSAL_SENTENCES[4], 'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[5], 'notify.imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[6], 'imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[7], 'chat_db is set, but this Harold is built without iMessage: remove it from config/local.toml.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[8], 'voice_input is set, but this Harold is built without calls: remove it from config/local.toml.')
 
     def test_a_refused_config_relays_only_the_fixed_sentences_and_leaves_the_old_harold(self):
         stderr = '\n'.join(['Error: "invalid configuration"', '  ' + self.install.REFUSAL_SENTENCES[0] + '  ',

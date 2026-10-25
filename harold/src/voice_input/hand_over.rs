@@ -29,24 +29,6 @@ pub(super) const GIVE_UP: Duration = Duration::from_secs(30 * 60);
 /// The longest request typed, in characters.
 const REQUEST_CHARS: usize = 1000;
 
-/// `text` without a leading `H<1 to 4 digits>:` and the spaces after it: the tag the chief
-/// puts on its report so Harold can match it to a hand-over, which nobody should hear or
-/// read. A tag with nothing after it, and any other line, comes back as it is.
-pub(crate) fn without_hand_over_tag(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix('H') else {
-        return text;
-    };
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if !(1..=4).contains(&digits) {
-        return text;
-    }
-    let Some(after) = rest[digits..].strip_prefix(':') else {
-        return text;
-    };
-    let said = after.trim_start_matches(' ');
-    if said.is_empty() { text } else { said }
-}
-
 /// Where a hand-over stands, as far as Harold knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HandOverState {

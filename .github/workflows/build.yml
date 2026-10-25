@@ -45,6 +45,9 @@ jobs:
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete
 
+      - name: Check the feature mixes
+        run: ./scripts/check_features.sh
+
       - name: Build release binaries
         env:
           HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}

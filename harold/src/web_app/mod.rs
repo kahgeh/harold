@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 use crate::agent::domain::AgentSnapshot;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::AppRoute;
+#[cfg(feature = "calls")]
 use crate::outbound::runner::SystemRunner;
 use crate::settings::{GrpcSettings, WebAppIcon, WebAppSettings};
 use crate::store::HaroldStore;
@@ -59,6 +60,7 @@ mod browser_traces_tests;
 pub(crate) mod browser_traces;
 pub(crate) mod call;
 pub(crate) mod chief;
+#[cfg(feature = "calls")]
 pub(crate) mod echo_test;
 pub(crate) mod login;
 pub(crate) mod notes;
@@ -77,7 +79,7 @@ pub(crate) mod updates;
 #[path = "flow_tests.rs"]
 mod flow_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "calls"))]
 #[path = "echo_test_tests.rs"]
 mod echo_test_tests;
 
@@ -427,6 +429,7 @@ pub(crate) struct AppState {
     /// Bumped by each todo post, so every open page reads the todos again at once.
     pub todos_changed: Arc<watch::Sender<u64>>,
     /// The echo test's runs, sample and recent silent runs.
+    #[cfg(feature = "calls")]
     pub echo_test: Arc<echo_test::EchoTest>,
     /// The open page streams, which the route reads before it pushes.
     pub pages: Arc<OpenPages>,
@@ -439,6 +442,7 @@ pub(crate) struct AppState {
 #[cfg(test)]
 impl AppState {
     /// This state with `echo_test` in place of the one that makes no sample.
+    #[cfg(feature = "calls")]
     pub(crate) fn with_echo_test(mut self, echo_test: echo_test::EchoTest) -> Self {
         self.echo_test = Arc::new(echo_test);
         self
@@ -470,6 +474,7 @@ impl AppState {
             notes: None,
             specs: Arc::new(specs::Specs::new(None)),
             todos_changed: Arc::new(watch::channel(0).0),
+            #[cfg(feature = "calls")]
             echo_test: Arc::new(echo_test::EchoTest::new(
                 std::env::temp_dir().join("harold-echo-test-unused"),
                 Arc::new(echo_test::NeverRuns),
@@ -555,7 +560,7 @@ pub(crate) fn phone_traceparent(headers: &axum::http::HeaderMap) -> String {
 /// and every response
 /// carrying the content security policy.
 pub(crate) fn router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(pages::get_thread))
         .route("/pair", post(pair::post_pair))
         .route("/static/{name}", get(pages::get_static))
@@ -590,9 +595,6 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/specs", get(specs::get_list))
         .route("/specs/{product}/{id}", get(specs::get_spec))
         .route("/specs/{product}/{id}/share", post(specs::post_share))
-        .route("/echo-test", get(echo_test::get_page))
-        .route("/echo-test/sample", get(echo_test::get_sample))
-        .route("/echo-test/runs", post(echo_test::post_run))
         .route("/speech-check", get(speech_check::get_page))
         .route(
             "/speech-check/runs",
@@ -603,7 +605,14 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/call/check", post(call::post_check))
         .route("/call/played", post(call::post_played))
         .route("/call/talk-now", post(call::post_talk_now))
-        .route("/call/answer/{id}", get(call::get_answer))
+        .route("/call/answer/{id}", get(call::get_answer));
+    // The echo test is part of calls.
+    #[cfg(feature = "calls")]
+    let router = router
+        .route("/echo-test", get(echo_test::get_page))
+        .route("/echo-test/sample", get(echo_test::get_sample))
+        .route("/echo-test/runs", post(echo_test::post_run));
+    router
         .fallback(pages::not_found)
         // The last layer added runs first: the login check, then the device check, then
         // the origin check.
@@ -728,6 +737,7 @@ pub(crate) async fn start(
             agents.pod_registry.map(Path::to_path_buf),
         )),
         todos_changed: Arc::new(watch::channel(0).0),
+        #[cfg(feature = "calls")]
         echo_test: Arc::new(echo_test::EchoTest::new(
             echo_test::echo_test_path(store_path),
             Arc::new(SystemRunner),

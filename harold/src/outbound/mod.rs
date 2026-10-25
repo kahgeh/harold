@@ -1,6 +1,9 @@
+// Only a call uses most of the turn-end update helpers in `tts`.
+#[cfg_attr(not(feature = "calls"), allow(dead_code))]
 pub mod tts;
 
 pub(crate) mod left_out;
+#[cfg_attr(not(feature = "calls"), allow(dead_code))]
 pub(crate) mod runner;
 pub(crate) mod spoken_line;
 
@@ -228,7 +231,9 @@ impl NotifyEnvironment for SystemEnvironment {
     fn channel_set_up(&self, channel: Channel) -> bool {
         let settings = get_settings();
         match channel {
-            Channel::Imessage => settings.imessage.recipient.is_some(),
+            Channel::Imessage => {
+                cfg!(feature = "imessage") && settings.imessage.recipient.is_some()
+            }
             Channel::WebApp => settings.web_app.is_some(),
             Channel::MachineAudioOutput => true,
         }

@@ -2,6 +2,8 @@
 
 This reference covers the turn-end update: how Harold tells the user a turn ended. When the user is away, the update goes to the phone. At the desk, Harold speaks no turn-end update, except the chief's update in a call.
 
+The iMessage part of this reference needs the `imessage` feature. A build without it never sets up the `imessage` channel, and refuses the `notify.imessage`, `[imessage]` and `[chat_db]` settings. Such a build reaches the phone through the web app only.
+
 ## Problem
 
 AI agents finish turns silently. Without active monitoring you won't know a task is done until you look — which breaks flow at your desk and leaves agents idle when you're away.

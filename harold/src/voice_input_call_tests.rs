@@ -1620,7 +1620,8 @@ async fn hand_overs_after_the_call_ends_keep_counting_on() {
 // The ringing, the warm-up, and the speech models
 // ---------------------------------------------------------------------------
 
-use super::super::models::{Missing, Status as ModelsStatus};
+use super::super::Missing;
+use super::super::models::Status as ModelsStatus;
 use super::super::phrases::MODEL_MISSING;
 use super::super::worker::{LoadCause, LoadFailure};
 use crate::settings::{KOKORO_REVISION, WHISPER_REVISION};

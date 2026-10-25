@@ -273,6 +273,8 @@ A `TurnCompleted` event creates delivery work in the outbox. The delivery handle
 
 For a phone reply, the channel listener records an `InboundMessageReceived` event. The delivery handler resolves a live agent pane using the message's routing tag or the configured routing fallbacks, checks that an agent is still present, and submits the message to that pane through tmux. A reply typed in the web app may carry a photo: its `InboundMessageReceived` payload then holds `photo`, a file name in `app-photos/`, and the line typed into the chief's pane ends with `📷` and that file's absolute path, which Claude Code reads ([ADR 0010](../adr/0010-photos-reach-the-chief-as-files.md)).
 
+The channels are Cargo features of the build. The `imessage` feature builds in the iMessage channel and the `calls` feature builds in calls. The `mac-defaults` set holds both, and the `linux-defaults` set holds neither yet ([ADR 0019](../adr/0019-harold-is-built-from-per-part-features-for-the-mac-and-linux.md)). A build without `imessage` never sets up that channel and reaches the phone through the web app only.
+
 Ordinary agent observations and activity summaries do not create delivery work. The [notification reference](../references/notification/README.md) and [inbound routing reference](../references/inbound-message-routing/README.md) describe channel decisions, routing, and failure behavior.
 
 ### Startup, restart, and shutdown

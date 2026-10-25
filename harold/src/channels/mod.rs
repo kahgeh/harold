@@ -1,15 +1,24 @@
+// Without `imessage`, only the web app uses the shared text helpers.
+#![cfg_attr(not(feature = "imessage"), allow(dead_code))]
+
+#[cfg(feature = "imessage")]
 pub(crate) mod imessage;
 
 use std::process::Command;
+#[cfg(feature = "imessage")]
 use std::sync::Arc;
 
+#[cfg(feature = "imessage")]
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
+#[cfg(feature = "imessage")]
 use crate::inbound::ownership::agent_message_text;
 use crate::settings::get_settings;
-use crate::store::{AwayMessageRequested, HaroldStore, TurnCompleted};
+#[cfg(feature = "imessage")]
+use crate::store::HaroldStore;
+use crate::store::{AwayMessageRequested, TurnCompleted};
 use crate::util::ai_cli_env;
 
 pub(crate) enum AwayNotification {
@@ -229,11 +238,17 @@ pub(crate) fn summarise_with(
 // ---------------------------------------------------------------------------
 
 /// Start the inbound message listener.
+#[cfg(feature = "imessage")]
 pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
     imessage::listen(store, shutdown).await;
 }
 
+/// What the iMessage wrappers answer in a build without `imessage`: that channel is never set up.
+#[cfg(not(feature = "imessage"))]
+const NO_IMESSAGE: &str = "this Harold is built without iMessage";
+
 /// Send a plain message to the away device.
+#[cfg(feature = "imessage")]
 pub fn send(msg: &str) -> Result<(), String> {
     send_unless_paused(
         msg,
@@ -242,8 +257,15 @@ pub fn send(msg: &str) -> Result<(), String> {
     )
 }
 
+/// Send a plain message to the away device: a build without `imessage` has none.
+#[cfg(not(feature = "imessage"))]
+pub fn send(_msg: &str) -> Result<(), String> {
+    Err(NO_IMESSAGE.into())
+}
+
 /// Hand `msg` to `deliver` unless messaging is paused. A paused send reports success:
 /// the reply is dropped on purpose, so the caller must not retry it.
+#[cfg(feature = "imessage")]
 fn send_unless_paused(
     msg: &str,
     messaging_paused: bool,
@@ -257,20 +279,34 @@ fn send_unless_paused(
 }
 
 /// Send an away notification.
+#[cfg(feature = "imessage")]
 pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotification, String> {
     imessage::notify_away(turn, trace_id)
+}
+
+/// Send an away notification: a build without `imessage` has no away channel.
+#[cfg(not(feature = "imessage"))]
+pub fn notify_away(_turn: &TurnCompleted, _trace_id: &str) -> Result<AwayNotification, String> {
+    Err(NO_IMESSAGE.into())
 }
 
 /// Send a message an agent asked for. The caller has already checked the messaging pause.
 /// Unlike a notification the text is not summarised or split, and no duplicate check
 /// applies: the agent chose to send it.
+#[cfg(feature = "imessage")]
 pub(crate) fn send_away_message(message: &AwayMessageRequested) -> Result<(), String> {
     let cfg = get_settings();
     let text = agent_message_text(&cfg.machine_name, &message.pane_label, &message.text);
     imessage::send_imessage(&text)
 }
 
-#[cfg(test)]
+/// Send a message an agent asked for: a build without `imessage` has no away channel.
+#[cfg(not(feature = "imessage"))]
+pub(crate) fn send_away_message(_message: &AwayMessageRequested) -> Result<(), String> {
+    Err(NO_IMESSAGE.into())
+}
+
+#[cfg(all(test, feature = "imessage"))]
 mod tests {
     use super::{
         AwayMessageRequested, TurnCompleted, notify_away, send, send_away_message,

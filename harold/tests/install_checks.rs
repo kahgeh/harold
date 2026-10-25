@@ -64,7 +64,26 @@ impl Drop for Fixture {
     }
 }
 
-const VALID: &str = "[imessage]\nrecipient = 'secret-recipient'\nhandle_ids = [999]\n";
+/// A build without `imessage` refuses `[imessage]` and needs no recipient.
+const VALID: &str = if cfg!(feature = "imessage") {
+    "[imessage]\nrecipient = 'secret-recipient'\nhandle_ids = [999]\n"
+} else {
+    ""
+};
+
+#[test]
+fn build_features_prints_the_features_of_this_build_and_needs_no_config() {
+    let mut expected = String::new();
+    if cfg!(feature = "imessage") {
+        expected.push_str("imessage\n");
+    }
+    if cfg!(feature = "calls") {
+        expected.push_str("calls\n");
+    }
+    let output = Fixture::new(INVALID).run(&["--build-features"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+}
 
 #[test]
 fn conflicting_probe_modes_are_rejected_before_loading_config() {
@@ -117,7 +136,7 @@ fn config_probe_rejects_a_malformed_endpoint_even_with_export_off() {
 fn config_probe_rejects_invalid_typed_config_and_address_without_opening_storage() {
     for overlay in [
         "[imessage]\nhandle_ids = 'wrong type'\n",
-        "",
+        INVALID,
         "[imessage]\nrecipient = 'test'\nhandle_ids = [1]\n[grpc]\nhost = 'invalid host'\n",
     ] {
         let output = Fixture::new(overlay).run(&["--check-config"]);
@@ -753,8 +772,19 @@ fn help_lists_the_away_message_command() {
 
 /// A valid configuration whose gRPC port Harold cannot bind, so a daemon that got past its
 /// start-up checks by mistake exits instead of serving beside the installed Harold.
-const DAEMON: &str =
-    "[imessage]\nrecipient = 'secret-recipient'\nhandle_ids = [999]\n[grpc]\nport = 1\n";
+/// A config that fails validation in every build: an empty one lacks the iMessage recipient,
+/// and without `imessage` a port of the wrong type fails instead.
+const INVALID: &str = if cfg!(feature = "imessage") {
+    ""
+} else {
+    "[grpc]\nport = 'wrong type'\n"
+};
+
+const DAEMON: &str = if cfg!(feature = "imessage") {
+    "[imessage]\nrecipient = 'secret-recipient'\nhandle_ids = [999]\n[grpc]\nport = 1\n"
+} else {
+    "[grpc]\nport = 1\n"
+};
 
 impl Fixture {
     /// The store a daemon run uses: `data/store` in the fixture folder, as in a bundle.
@@ -891,7 +921,7 @@ async fn incompatible_store(fixture: &Fixture) {
 
 #[test]
 fn under_launchd_an_invalid_config_exits_zero_and_says_why() {
-    let fixture = Fixture::new("");
+    let fixture = Fixture::new(INVALID);
     assert_refused(&fixture.daemon(true), "invalid_config");
     assert_failed(&fixture.daemon(false));
 }

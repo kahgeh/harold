@@ -4,6 +4,7 @@
 //! to a commit, through `voice_download.py`, and checks every file. The voice worker never
 //! downloads.
 
+use super::Missing;
 use super::answerer::{GroupGuard, kill_group};
 use crate::settings::{TtsSettings, VoiceInputSettings};
 use crate::tools::BoxFuture;
@@ -170,31 +171,6 @@ enum Want {
         model: String,
         revision: String,
     },
-}
-
-/// A speech model that is not on the Mac, with what the phone shows about it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Missing {
-    pub model: String,
-    pub reason: &'static str,
-    /// The command that fetches it by hand, when the model and commit are fit to show.
-    pub command: Option<String>,
-}
-
-impl Missing {
-    /// The notice on the phone's screen.
-    pub(crate) fn notice(&self) -> String {
-        let mut text = format!(
-            "The speech model {} didn't download ({}).",
-            self.model, self.reason
-        );
-        if let Some(command) = &self.command {
-            text.push_str(&format!(
-                " To get it, run on the Mac: {command}, then call again."
-            ));
-        }
-        text
-    }
 }
 
 /// Where the speech models stand.

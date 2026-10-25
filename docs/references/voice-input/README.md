@@ -4,6 +4,8 @@ A call lets you talk to the chief of pods at the Mac instead of typing. You pres
 
 The chief is the first agent pane of the chief's tmux session among the agents running in a folder `[notify] chief` matches. Other agents in that folder do not hide it.
 
+Calls need the `calls` feature, which is in `mac-defaults`. A build without it has no call answerer, no call models and no echo test page. Its web app call routes answer 409, and it refuses a `[voice_input]` section at start.
+
 ## Problem
 
 Before calls, the chief could talk to you but you could not talk back. The chief answers aloud with `harold speak`, and Harold says the line with the local Kokoro voice. The only way to reach the chief was to type in its pane.

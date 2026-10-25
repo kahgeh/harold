@@ -342,6 +342,8 @@ cd harold
 ./scripts/install.sh
 ```
 
+A plain build uses the `mac-defaults` feature set, which holds the `imessage` and `calls` features. See "Build features" in [prerequisites](../prerequisites.md#build-features). Run `scripts/check_features.sh` before you merge a change.
+
 The source installer builds both programs using the checked-in Cargo lockfile, then performs the same configuration and readiness checks as the release installer.
 
 Run `./scripts/install.sh` again to install the current checkout while retaining settings and data. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings.

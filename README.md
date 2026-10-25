@@ -40,6 +40,22 @@ The web app's todo page: answer the chief's questions from your phone.
 - [Cut or install a release](docs/how-tos/release.md)
 - [Dependency audits](docs/references/dependency-audits.md): always build with `--locked`, and send any `Cargo.lock` change through the rust-supply-chain-auditor first.
 
+## Build features
+
+Harold is built from Cargo features, one for each platform part. A build chooses its features. A setting does not.
+
+| Feature | What it builds in | In `mac-defaults` | In `linux-defaults` |
+| --- | --- | --- | --- |
+| `imessage` | The iMessage channel. macOS only. | yes | no |
+| `calls` | Calls at the desk and in the web app, and the echo test page. macOS only. | yes | no |
+
+- `mac-defaults` is the default set, and the Mac package uses it.
+- `linux-defaults` is the set for the Linux package. It has no feature yet, because both features need macOS.
+- Build another mix by hand. For example, `cargo build --no-default-features --features calls` builds a Mac without iMessage.
+- Run `harold --build-features` to print the features of a build, one on each line.
+- A build refuses a setting that needs a missing feature, and names the setting. Remove the setting from `config/local.toml`.
+- Before every merge and release, run `scripts/check_features.sh`. It checks `linux-defaults`, no feature and each feature alone.
+
 ## Status
 
 Early development.

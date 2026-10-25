@@ -2656,9 +2656,16 @@ fn each_alert_has_its_own_webhook_posting_what_the_alert_address_accepts() {
 // Counting from 0
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "imessage")]
 #[test]
 fn judged_phone_requests_carry_imessage_or_unknown_as_their_channel() {
     assert_eq!(PHONE_CHANNELS, ["imessage", "unknown"]);
+}
+
+#[cfg(not(feature = "imessage"))]
+#[test]
+fn a_build_without_imessage_judges_phone_requests_as_unknown_only() {
+    assert_eq!(PHONE_CHANNELS, ["unknown"]);
 }
 
 #[test]

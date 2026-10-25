@@ -4,12 +4,12 @@
 
 use super::answerer::CallAnswering;
 use super::call::{Ended, lock};
-use super::models::{Missing, Status as ModelsStatus};
+use super::models::Status as ModelsStatus;
 use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::{PooledWorker, TEND_EVERY, WorkerError, WorkerPool};
 use super::{
-    AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker, Said,
-    Speaker, SpeechModels,
+    AudioRefused, AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker,
+    Missing, PhoneSound, PhoneSpeech, PhoneStarted, PhoneView, Said, Speaker, SpeechModels,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -43,48 +43,6 @@ pub(crate) const SPEECH_BASE: Duration = Duration::from_secs(2);
 pub(crate) const SPEECH_PER_CHAR: Duration = Duration::from_millis(80);
 /// How often the view takes the open call's state and transcript.
 pub(super) const STATUS_EVERY: Duration = Duration::from_millis(100);
-
-/// What the phone shows and plays now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PhoneView {
-    pub state: CallState,
-    pub transcript: Option<String>,
-    /// The sound the phone is to fetch and play.
-    pub sound: Option<PhoneSound>,
-    /// The line the phone is to say in its own voice.
-    pub speech: Option<PhoneSpeech>,
-    /// Why the last call ended, once it has.
-    pub ended: Option<&'static str>,
-    /// How far a speech model's download has come, while the call connects.
-    pub model_percent: Option<u8>,
-    /// The speech model that is not on the Mac, when the last call ended because of it.
-    pub missing: Option<Missing>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PhoneSound {
-    pub id: String,
-    pub said: Said,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PhoneSpeech {
-    pub id: String,
-    pub text: String,
-}
-
-/// Why a posted piece was not taken.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AudioRefused {
-    /// No call is open to take it.
-    NoCall,
-    /// An odd number of bytes, or a time too far off to stamp.
-    Malformed,
-    /// More than `PIECE_LIMIT_BYTES`.
-    TooLarge,
-    /// `PIECES_QUEUED` pieces already wait to be read.
-    Full,
-}
 
 /// What the phone's ports and the app's call routes share.
 pub(crate) struct PhoneLine {
@@ -792,14 +750,6 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
     fn no_answer_phrase(&self) -> &'static str {
         NO_ANSWER_IN_THREAD
     }
-}
-
-/// What a START answers: the call's status and, while the call listens, the id the
-/// phone's pieces for it carry.
-#[derive(Debug, Clone)]
-pub(crate) struct PhoneStarted {
-    pub status: CallStatus,
-    pub call: Option<String>,
 }
 
 /// The phone's calls, as the web app holds them: each runs on the shared core through the

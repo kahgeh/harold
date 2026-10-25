@@ -21,7 +21,10 @@ pub(crate) const FEATURES: &[&str] = &[
 /// What `harold --build-features` prints: one feature per line, and nothing for a build with
 /// no feature.
 pub(crate) fn listing(features: &[&str]) -> String {
-    features.iter().map(|feature| format!("{feature}\n")).collect()
+    features
+        .iter()
+        .map(|feature| format!("{feature}\n"))
+        .collect()
 }
 
 #[cfg(test)]

@@ -408,7 +408,11 @@ pub(crate) fn count_app_spans_not_forwarded(spans: u64, reason: &'static str) {
 }
 
 /// Every `channel` a phone request can carry.
+#[cfg(feature = "imessage")]
 pub(crate) const PHONE_CHANNELS: [&str; 2] = ["imessage", "unknown"];
+/// Every `channel` a phone request can carry: a build without `imessage` seeds only `unknown`.
+#[cfg(not(feature = "imessage"))]
+pub(crate) const PHONE_CHANNELS: [&str; 1] = ["unknown"];
 
 /// Records 0 once for every attribute set of the phone-request counters the alerts read.
 /// HyperDX reads the first point of a running total as 0, so without this the first

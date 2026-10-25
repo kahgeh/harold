@@ -24,15 +24,20 @@ PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS'
 # What the mod loads at runtime; a release or checkout missing any of these loads nothing.
 CLAUDE_MOD_FILES = tuple('hooks/claude-mod/' + name for name in (
     '.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts', 'hooks/accept.ts'))
-# The five sentences `harold --check-config` writes to stderr for a setting Harold no longer reads.
-# Keep them identical to the constants in harold/src/settings.rs (TELEGRAM_REMOVED, PEERS_REMOVED,
-# NOTIFY_TELEGRAM_REMOVED, AWAY_CHANNEL_REMOVED, GRPC_HOST_NOT_LOOPBACK).
+# The sentences `harold --check-config` writes to stderr for a setting Harold no longer reads, or
+# for a setting that needs a feature the build lacks. Keep them identical to the constants in
+# harold/src/settings.rs (TELEGRAM_REMOVED, PEERS_REMOVED, NOTIFY_TELEGRAM_REMOVED,
+# AWAY_CHANNEL_REMOVED, GRPC_HOST_NOT_LOOPBACK) and to `needs_feature_sentence` there.
 REFUSAL_SENTENCES = (
     '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.',
     '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.',
     'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.',
     'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.',
     'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.',
+    'notify.imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.',
+    'imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.',
+    'chat_db is set, but this Harold is built without iMessage: remove it from config/local.toml.',
+    'voice_input is set, but this Harold is built without calls: remove it from config/local.toml.',
 )
 SKILL_NAME = 'send-message-to-away-device'
 SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)

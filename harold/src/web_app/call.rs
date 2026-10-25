@@ -15,17 +15,23 @@ use axum::response::{IntoResponse, Response};
 use datastar::prelude::PatchSignals;
 use serde::Deserialize;
 use tokio::sync::watch;
+#[cfg(feature = "calls")]
 use tokio::time::Instant;
 use tracing::{info, warn};
+#[cfg(feature = "calls")]
 use uuid::Uuid;
 
 use super::AppState;
+#[cfg(feature = "calls")]
 use super::route::now_ms;
+#[cfg(feature = "calls")]
 use crate::store::HaroldStore;
 use crate::voice_input::{
-    AudioRefused, CallPorts, CallState, CallStatus, LineTaker, NO_CHIEF, PhoneCalls, PhoneStarted,
-    PhoneView, Speaker, TurnResult, VOICE_FAILED,
+    AudioRefused, CallState, CallStatus, NO_CHIEF, PhoneStarted, PhoneView, TurnResult,
+    VOICE_FAILED,
 };
+#[cfg(feature = "calls")]
+use crate::voice_input::{CallPorts, LineTaker, PhoneCalls, Speaker};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -55,6 +61,7 @@ pub(crate) trait PhoneCallApi: Send + Sync {
 }
 
 /// Ends a call open at the desk, and resolves once it has ended.
+#[cfg(feature = "calls")]
 pub(crate) type EndDeskCall = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// `POST /call`'s answer when no call can start at all.
@@ -63,6 +70,7 @@ const NOT_SET_UP: &str = "Voice is not set up on the Mac";
 /// The phone's calls, as the web app holds them. Starting a phone call ends a call open at
 /// the desk first, so the chief does not get turns from the desk's microphone too; and a
 /// chief's line played on the phone is added to the thread, with no push.
+#[cfg(feature = "calls")]
 pub(crate) struct AppCalls<B: CallPorts> {
     phone: PhoneCalls<B>,
     store: Arc<HaroldStore>,
@@ -72,6 +80,7 @@ pub(crate) struct AppCalls<B: CallPorts> {
     runtime: tokio::runtime::Handle,
 }
 
+#[cfg(feature = "calls")]
 impl<B: CallPorts> AppCalls<B> {
     /// Call inside the daemon's runtime: the calls keep a handle to it.
     pub(crate) fn new(
@@ -88,6 +97,7 @@ impl<B: CallPorts> AppCalls<B> {
     }
 }
 
+#[cfg(feature = "calls")]
 impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
     fn set_up(&self) -> bool {
         self.phone.set_up()
@@ -136,6 +146,7 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
     }
 }
 
+#[cfg(feature = "calls")]
 impl<B: CallPorts> LineTaker for AppCalls<B> {
     /// Plays the chief's line on the phone and, once played, adds it to the thread, where
     /// the phone reads it after the call. A failed write is logged without the line.
@@ -435,6 +446,6 @@ pub(crate) async fn get_answer(State(state): State<AppState>, Path(id): Path<Str
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "calls"))]
 #[path = "call_tests.rs"]
 mod tests;

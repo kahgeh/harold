@@ -3,6 +3,8 @@
 Date: 2026-10-22
 Status: Accepted (remove-telegram, merged at 69039bc). Amends 0002.
 
+Note, 2026-10-26: [ADR 0019](0019-harold-is-built-from-per-part-features-for-the-mac-and-linux.md) makes iMessage a build feature. A build without it, such as the Linux package, reaches the phone through the web app only.
+
 ## Context
 
 Harold supported Telegram as a second text channel. Telegram lets one process read a bot's replies, so two Macs needed a hub and member setup, with two peer RPCs and a shared secret, and a gRPC server listening on each Mac's Tailscale address. The user uses only iMessage, on both Macs, and the hub and member path never ran on two Macs. With iMessage, every Mac reads every reply from its own `chat.db` and decides ownership alone.

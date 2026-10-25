@@ -6,6 +6,7 @@
 # Setting it turns multi-Mac reply routing on. It must include this Mac's name.
 # machines = ["studio", "laptop"]
 
+# [imessage] needs the `imessage` feature, which the Mac package has.
 [imessage]
 recipient = "+61..."
 # All chat.db handle IDs for your Apple ID (phone number, emails).
@@ -59,6 +60,7 @@ command = "say"
 # args = ["-m", "mlx_audio.tts.generate", "--voice", "af_heart", "--play", "--text"]
 
 # Calls with the chief at the desk (tmx-agent-dash: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
+# [voice_input] needs the `calls` feature, which the Mac package has.
 # [voice_input]
 # command = "/Users/you/Dev/xn/mlx-audio/.venv/bin/python"
 # args = ["-m", "mlx_audio.stt.generate", "--model", "mlx-community/whisper-large-v3-turbo"]

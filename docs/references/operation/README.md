@@ -2,6 +2,8 @@
 
 Harold runs as a per-user service on macOS. It starts when you log in, and launchd restarts it after a crash, within limits. The installer provides `haroldctl` to start, stop, restart, and check that service; `haroldctl stop` keeps it off, across logins too, until `haroldctl start`.
 
+The `imessage` and `calls` features are chosen when Harold is built. `harold --build-features` prints the features of the installed build, one on each line.
+
 ## Problem
 
 A listening port alone does not tell you which Harold process owns it or which configuration and database it uses. Starting a second daemon from a hook can also race the first process. Installation, login, crash restarts and hook startup therefore use one service owner, one launchd job, and the same readiness check. That job keeps three properties:

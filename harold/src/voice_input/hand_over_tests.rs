@@ -218,7 +218,11 @@ async fn the_chiefs_turn_for_a_typed_hand_over_joins_the_call_turns_trace() {
 #[test]
 fn the_hand_over_tag_is_dropped_from_the_front_of_a_line() {
     for text in ["H1: green", "H12:  green", "H1:green"] {
-        assert_eq!(super::without_hand_over_tag(text), "green", "{text}");
+        assert_eq!(
+            crate::voice_input::without_hand_over_tag(text),
+            "green",
+            "{text}"
+        );
     }
 }
 
@@ -232,6 +236,6 @@ fn a_line_without_a_leading_tag_is_left_as_it_is() {
         "H1:",
         "H1:  ",
     ] {
-        assert_eq!(super::without_hand_over_tag(text), text);
+        assert_eq!(crate::voice_input::without_hand_over_tag(text), text);
     }
 }
