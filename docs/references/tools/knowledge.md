@@ -71,7 +71,7 @@ Boxes are parts and cylinders are stores. Each dark group is where the parts run
 | The index's local copy | buckwal restores the database from the bucket at the next start |
 | The bucket's objects too | the next pass builds the index again from the vault |
 | TypeDB's data | Harold rebuilds the graph from the two logs, at start or with `graph rebuild` |
-| The two logs | TypeDB still holds the graph until the next `graph rebuild`. That rebuild replays only the records written after the loss, so the older typed relations are lost. The next pass over the vault puts the vault notes and their links back |
+| The two logs | TypeDB still holds the graph until the next `graph rebuild`. That rebuild replays only the records written after the loss, so the older typed relations are lost. The rebuild can also stop at a link or typed relation whose vault notes the new log lacks: see [A record TypeDB refuses](#a-record-typedb-refuses) |
 | The Mac | the vault and the bucket survive, if they live elsewhere. The logs and TypeDB's data are on this Mac only, so the typed relations are lost |
 
 ## The CLI
