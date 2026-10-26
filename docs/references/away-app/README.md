@@ -369,6 +369,8 @@ Harold's own phrases are made into audio on the Mac. A line that has no audio, s
 
 A throwaway page, run once on the iPhone in the installed app, that shows how Safari's speech recognition (`webkitSpeechRecognition`, as dictation and a phone call use it) behaves in a call-shaped use. It is Stage 0 of call-phone-speech, and Stage 1 removes it, with its route and its log line.
 
+**Way back.** The page has the app's back button at its top left, an arrow and the app's name, a plain link to `/`. It works at every step. A run that you leave part of the way stays on the phone, and the page carries on from that step the next time it opens.
+
 **Opening it.** Nothing links to `/speech-check`. The chief sends `/speech-check` in the thread; a tap on a link to the app's own address opens inside the installed app (`pages.js`).
 
 **The checks.** The screen shows one step at a time and says plainly when to switch the network off and when back on. Each check records only a yes or no, a count, milliseconds or the recognizer's error name:
@@ -390,7 +392,7 @@ A throwaway page, run once on the iPhone in the installed app, that shows how Sa
 | Route | What it does |
 |---|---|
 | `GET /speech-check` | The page. |
-| `POST /speech-check/runs` | The run as the page's signals, sent through Datastar as one JSON object: `standalone` and the `check<n>_…` fields above, all optional. Only booleans, whole numbers (at most 600,000 ms, 5 restarts, 3 sentences, 20 words) and error names from the recognizer's list (plus `missing`, `start-failed` and `other`) are accepted. `204` once logged; `400` for any other field, type or name; `413` over 4 KB. Same-origin only, like every post. |
+| `POST /speech-check/runs` | The run as the page's signals, sent through Datastar as one JSON object: `standalone` and the `check<n>_…` fields above, all optional. Only booleans, whole numbers (at most 600,000 ms, 5 restarts, 3 sentences, 20 words) and error names from the recognizer's list (plus `missing`, `start-failed` and `other`) are accepted. In a check 4 time list, `""` means no final result, the same as `null`: Datastar 1.0.2 sends `""` for a `null` inside a list. Any other text there is refused. `204` once logged; `400` for any other field, type or name, with the reason and field in the `app speech check not logged` line; `413` over 4 KB. Same-origin only, like every post. |
 
 **Reading the results.** Search `harold.log` for `app speech check`. It is one line per run with every field above, for example `check0_error="network" check3_started=5 check4_final_at_ms="5100,5100,5100"`.
 
@@ -441,7 +443,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
 | `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
 | `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
-| `app speech check not logged` | `reason` (`bad_request`), logged as a warning |
+| `app speech check not logged` | A warning with `reason` (`not_object`, `unknown_field`, `wrong_type` or `out_of_limit`) and `check_field`, the name of the refused field, or `-` when no field is to blame or the name is not one of the run's own (a name outside the list could hold words). Never a value. `check_field` stays in `harold.log` |
 | `app photo stored` | `photo_bytes` and `kind` (`jpeg` or `png`) |
 | `app photo not shrunk` | A warning, `photo_bytes`, logged beside `app photo stored` for an upload over 3 MB: the phone shrinks to about 0.3 to 1 MB, so it did not, for example a HEIC photo it could not decode |
 | `app photo refused` | A warning with `reason` (`too_large`, `not_an_image`, `store_failed` or `unknown_photo`), and `photo_bytes` when known |

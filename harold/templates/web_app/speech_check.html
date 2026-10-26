@@ -12,7 +12,13 @@
 <script src="/static/speech-check.js" defer></script>
 </head>
 <body class="echo-test">
+<header class="bar top">
+<div class="row">
+<a href="/" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+</div>
+</header>
 <main>
+<div class="notes-page">
 <h1>Speech check</h1>
 <p>This checks how your phone's speech recognition behaves in a phone call. Follow the screen once, about three minutes, with the volume up.</p>
 <section id="speech-step">
@@ -32,6 +38,7 @@
 <li data-check="6">6. Listening after Harold's voice: <span>waiting</span></li>
 </ul>
 <p class="echo-note">Harold gets yes or no answers, counts, times and error names. It never gets a word you say, and nothing is recorded.</p>
+</div>
 </main>
 </body>
 </html>

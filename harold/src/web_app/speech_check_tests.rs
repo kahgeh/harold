@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::origin::loopback_hosts;
-use super::speech_check::{MAX_BODY_BYTES, parse_run};
+use super::speech_check::{ErrorName, MAX_BODY_BYTES, Refused, parse_run};
 use super::{AppState, router};
 use crate::outbound::fake::CapturedLogs;
 use crate::store::HaroldStore;
@@ -140,36 +140,164 @@ fn a_whole_run_and_a_part_run_are_read() {
 fn a_body_with_anything_but_booleans_numbers_and_error_names_is_refused() {
     let refused = [
         // A word the user said, in a field of its own, in a known field, or as a name.
-        r#"{"transcript":"ten eleven twelve"}"#,
-        r#"{"check1_error":"ten eleven twelve"}"#,
-        r#"{"check1_error":"Network"}"#,
-        r#"{"check3_errors":["not-allowed","hello"]}"#,
-        r#"{"check1_started":"yes"}"#,
-        r#"{"check1_started":1}"#,
-        r#"{"check1_first_result_ms":"640"}"#,
-        r#"{"check1_first_result_ms":6.5}"#,
-        r#"{"check1_first_result_ms":-1}"#,
-        r#"{"check1_first_result_ms":600001}"#,
-        r#"{"check1_first_result_ms":{"a":1}}"#,
-        r#"{"check3_started":6}"#,
-        r#"{"check3_heard":6}"#,
-        r#"{"check4_heard":4}"#,
-        r#"{"check1_heard":"yes"}"#,
-        r#"{"check0_offline_at_start":1}"#,
-        r#"{"check3_started":-1}"#,
-        r#"{"check3_errors":["network","network","network","network","network","network"]}"#,
-        r#"{"check4_final_at_ms":[1,2,3,4]}"#,
-        r#"{"check4_gap_ms":[1,"2"]}"#,
-        r#"{"check5_words_heard":21}"#,
-        r#"{"standalone":null}"#,
-        r#"[]"#,
-        r#""ok""#,
-        r#"{"standalone":true"#,
-        "",
+        (
+            r#"{"transcript":"ten eleven twelve"}"#,
+            "unknown_field",
+            "-",
+        ),
+        (
+            r#"{"check1_error":"ten eleven twelve"}"#,
+            "wrong_type",
+            "check1_error",
+        ),
+        (
+            r#"{"check1_error":"Network"}"#,
+            "wrong_type",
+            "check1_error",
+        ),
+        (
+            r#"{"check3_errors":["not-allowed","hello"]}"#,
+            "wrong_type",
+            "check3_errors",
+        ),
+        (
+            r#"{"check1_started":"yes"}"#,
+            "wrong_type",
+            "check1_started",
+        ),
+        (r#"{"check1_started":1}"#, "wrong_type", "check1_started"),
+        (
+            r#"{"check1_first_result_ms":"640"}"#,
+            "wrong_type",
+            "check1_first_result_ms",
+        ),
+        (
+            r#"{"check1_first_result_ms":6.5}"#,
+            "wrong_type",
+            "check1_first_result_ms",
+        ),
+        (
+            r#"{"check1_first_result_ms":-1}"#,
+            "wrong_type",
+            "check1_first_result_ms",
+        ),
+        (
+            r#"{"check1_first_result_ms":600001}"#,
+            "out_of_limit",
+            "check1_first_result_ms",
+        ),
+        (
+            r#"{"check0_first_result_ms":600001}"#,
+            "out_of_limit",
+            "check0_first_result_ms",
+        ),
+        (
+            r#"{"check1_first_result_ms":{"a":1}}"#,
+            "wrong_type",
+            "check1_first_result_ms",
+        ),
+        (r#"{"check3_started":6}"#, "out_of_limit", "check3_started"),
+        (r#"{"check3_heard":6}"#, "out_of_limit", "check3_heard"),
+        (r#"{"check4_heard":4}"#, "out_of_limit", "check4_heard"),
+        (r#"{"check1_heard":"yes"}"#, "wrong_type", "check1_heard"),
+        (
+            r#"{"check0_offline_at_start":1}"#,
+            "wrong_type",
+            "check0_offline_at_start",
+        ),
+        (r#"{"check3_started":-1}"#, "wrong_type", "check3_started"),
+        (
+            r#"{"check3_errors":["network","network","network","network","network","network"]}"#,
+            "out_of_limit",
+            "check3_errors",
+        ),
+        (
+            r#"{"check4_final_at_ms":[1,2,3,4]}"#,
+            "out_of_limit",
+            "check4_final_at_ms",
+        ),
+        (
+            r#"{"check4_final_at_ms":[600001]}"#,
+            "out_of_limit",
+            "check4_final_at_ms",
+        ),
+        (
+            r#"{"check4_gap_ms":[1,"2"]}"#,
+            "wrong_type",
+            "check4_gap_ms",
+        ),
+        (
+            r#"{"check4_gap_ms":[1,"5"]}"#,
+            "wrong_type",
+            "check4_gap_ms",
+        ),
+        (
+            r#"{"check4_gap_ms":["ten"]}"#,
+            "wrong_type",
+            "check4_gap_ms",
+        ),
+        (
+            r#"{"check4_final_at_ms":["ten eleven"]}"#,
+            "wrong_type",
+            "check4_final_at_ms",
+        ),
+        (
+            r#"{"check5_words_heard":21}"#,
+            "out_of_limit",
+            "check5_words_heard",
+        ),
+        (r#"{"standalone":null}"#, "wrong_type", "standalone"),
+        (r#"[]"#, "not_object", "-"),
+        (r#""ok""#, "not_object", "-"),
+        (r#"{"standalone":true"#, "not_object", "-"),
+        ("", "not_object", "-"),
     ];
-    for body in refused {
-        assert!(parse_run(body.as_bytes()).is_err(), "{body}");
+    for (body, reason, field) in refused {
+        assert_eq!(
+            parse_run(body.as_bytes()).unwrap_err(),
+            Refused { reason, field },
+            "{body}"
+        );
     }
+}
+
+#[test]
+fn a_run_with_every_field_names_each_field_and_reads_it() {
+    let all = r#"{
+        "standalone": true,
+        "check0_offline": true, "check0_offline_at_start": true, "check0_started": true,
+        "check0_results": true, "check0_first_result_ms": 1, "check0_error": "network",
+        "check1_started": true, "check1_results": true, "check1_heard": true,
+        "check1_first_result_ms": 2, "check1_error": "aborted",
+        "check2_started": true, "check2_results": true, "check2_heard": true,
+        "check2_error": "no-speech",
+        "check3_started": 5, "check3_heard": 5, "check3_errors": ["network"],
+        "check4_results": true, "check4_heard": 3, "check4_final_at_ms": [1, 2, 3],
+        "check4_gap_ms": [1, 2, 3], "check4_error": "other",
+        "check5_started": true, "check5_kept_running": true, "check5_playback_ok": true,
+        "check5_words_heard": 9, "check5_error": "missing",
+        "check6_restarted": true, "check6_heard": true, "check6_error": "start-failed"
+    }"#;
+    let run = parse_run(all.as_bytes()).expect("every field");
+    assert_eq!(run.check0_first_result_ms, Some(1));
+    assert_eq!(run.check6_error, Some(ErrorName::StartFailed));
+}
+
+#[test]
+fn a_check_4_time_of_null_or_empty_text_means_no_final_result() {
+    for body in [
+        r#"{"check4_final_at_ms":[1500,null,2100]}"#,
+        r#"{"check4_final_at_ms":[1500,"",2100],"check4_gap_ms":["","",""]}"#,
+    ] {
+        let run = parse_run(body.as_bytes()).expect(body);
+        assert_eq!(
+            run.check4_final_at_ms,
+            [Some(1500), None, Some(2100)],
+            "{body}"
+        );
+    }
+    let run = parse_run(br#"{"check4_gap_ms":["","",""]}"#).unwrap();
+    assert_eq!(run.check4_gap_ms, [None, None, None]);
 }
 
 #[test]
@@ -263,6 +391,73 @@ async fn anything_else_gets_400_over_4_kb_gets_413_and_neither_is_logged_as_a_ru
         "only the 4 KB run was logged: {captured}"
     );
     assert!(!captured.contains("ten eleven twelve"), "{captured}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_run_logs_the_reason_and_the_field_and_no_value() {
+    let logs = CapturedLogs::start();
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    for body in [
+        r#"{"check4_final_at_ms":[1500,"ten eleven twelve",2100]}"#,
+        r#"{"secret words":"ten eleven twelve"}"#,
+    ] {
+        assert_eq!(server.post(body).await.status(), 400, "{body}");
+    }
+    let captured = logs.text();
+    let lines: Vec<&str> = captured
+        .lines()
+        .filter(|line| line.contains("app speech check not logged"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{captured}");
+    for wanted in [
+        r#"reason="wrong_type""#,
+        r#"check_field="check4_final_at_ms""#,
+    ] {
+        assert!(
+            lines[0].contains(wanted),
+            "{wanted} missing from {}",
+            lines[0]
+        );
+    }
+    for wanted in [r#"reason="unknown_field""#, r#"check_field="-""#] {
+        assert!(
+            lines[1].contains(wanted),
+            "{wanted} missing from {}",
+            lines[1]
+        );
+    }
+    for word in ["ten eleven", "secret"] {
+        assert!(!captured.contains(word), "{captured}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_has_the_apps_back_button_at_its_top_left() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    let html = server.get("/speech-check").await.text().await.unwrap();
+    let header = html
+        .split(r#"<header class="bar top">"#)
+        .nth(1)
+        .and_then(|rest| rest.split("</header>").next())
+        .expect("the page has a top bar");
+    assert!(
+        header.contains(r#"<a href="/" class="back-button">"#),
+        "{header}"
+    );
+    assert!(
+        header.contains("</svg>Chief</a>"),
+        "the app's name: {header}"
+    );
+    assert!(html.find("<header").unwrap() < html.find("<main>").unwrap());
+    // The bar is fixed, so the content sits in the class that clears it.
+    assert!(
+        html.contains(r#"<div class="notes-page">"#),
+        "the content clears the bar"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

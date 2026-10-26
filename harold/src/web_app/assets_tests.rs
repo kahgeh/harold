@@ -310,6 +310,83 @@ fn the_speech_check_script_posts_only_the_run_and_never_keeps_what_was_said() {
 }
 
 #[test]
+fn datastar_posts_a_run_with_null_check_4_times_as_harold_reads_it() {
+    let script = include_str!("../../static/web_app/speech-check.js");
+    let signals = script
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const RUN_SIGNALS = "))
+        .expect("speech-check.js lacks RUN_SIGNALS")
+        .trim_end_matches(';')
+        .to_string();
+    let directory = std::env::temp_dir().join(format!(
+        "harold-speech-check-datastar-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    // The page's own Datastar module, run with a stub document and a fetch that keeps the body.
+    let module = directory.join("datastar.mjs");
+    std::fs::write(
+        &module,
+        include_str!("../../static/web_app/datastar-1.0.2.js"),
+    )
+    .unwrap();
+    let program = format!(
+        r#"
+globalThis.document = {{
+  addEventListener() {{}}, removeEventListener() {{}}, dispatchEvent() {{ return true; }},
+  createElement() {{ return {{}}; }}, querySelector() {{ return null; }},
+  querySelectorAll() {{ return []; }}, getElementById() {{ return null; }},
+  documentElement: {{}}, body: {{}}, head: {{}}, readyState: "complete",
+  baseURI: "http://harold.test/speech-check",
+}};
+globalThis.window = globalThis;
+globalThis.location = {{ href: "http://harold.test/speech-check", origin: "http://harold.test" }};
+globalThis.MutationObserver = class {{ observe() {{}} disconnect() {{}} }};
+let body;
+globalThis.fetch = async (url, init) => {{ body = init.body; return new Response(null, {{ status: 204 }}); }};
+const RUN_SIGNALS = {signals};
+const {{ actions, mergePatch }} = await import({module:?});
+mergePatch({{
+  standalone: true, check0_offline: false, check0_error: "network",
+  check3_started: 5, check3_errors: ["network"],
+  check4_results: true, check4_heard: 2,
+  check4_final_at_ms: [1500, null, 2100], check4_gap_ms: [400, null, 380],
+  check6_heard: true, notes: "not a run signal",
+}});
+const el = {{ id: "status", isConnected: true, closest() {{ return null; }} }};
+await actions.post(
+  {{ el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() }},
+  "/speech-check/runs",
+  {{ filterSignals: {{ include: RUN_SIGNALS }}, openWhenHidden: true, requestCancellation: "disabled", retry: "never", retryMaxCount: 0 }},
+);
+process.stdout.write(body);
+process.exit(0);
+"#,
+        module = format!("file://{}", module.display()),
+    );
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &program])
+        .output()
+        .expect("the test needs `node` on the PATH, and it is missing");
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(
+        output.status.success(),
+        "node failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = super::speech_check::parse_run(&output.stdout).unwrap_or_else(|refused| {
+        panic!(
+            "{refused:?} for {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(run.check4_final_at_ms, [Some(1500), None, Some(2100)]);
+    assert_eq!(run.check4_gap_ms, [Some(400), None, Some(380)]);
+    assert!(run.standalone && run.check6_heard);
+}
+
+#[test]
 fn the_speech_check_counts_digits_as_heard_words() {
     let script = include_str!("../../static/web_app/speech-check.js");
     let code = script

@@ -63,6 +63,70 @@ impl ErrorName {
     }
 }
 
+/// The names a run may hold: every field of `Run`. A key outside this list is refused and is
+/// never logged, because it could hold words.
+const FIELDS: [&str; 32] = [
+    "standalone",
+    "check0_offline",
+    "check0_offline_at_start",
+    "check0_started",
+    "check0_results",
+    "check0_first_result_ms",
+    "check0_error",
+    "check1_started",
+    "check1_results",
+    "check1_heard",
+    "check1_first_result_ms",
+    "check1_error",
+    "check2_started",
+    "check2_results",
+    "check2_heard",
+    "check2_error",
+    "check3_started",
+    "check3_heard",
+    "check3_errors",
+    "check4_results",
+    "check4_heard",
+    "check4_final_at_ms",
+    "check4_gap_ms",
+    "check4_error",
+    "check5_started",
+    "check5_kept_running",
+    "check5_playback_ok",
+    "check5_words_heard",
+    "check5_error",
+    "check6_restarted",
+    "check6_heard",
+    "check6_error",
+];
+
+/// One time of a check 4 list as it arrives: milliseconds, or text. Datastar 1.0.2 sends `""`
+/// in place of the `null` that the page puts in a list for a sentence with no final result;
+/// that `""` is the only text a time may be.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SentenceTime {
+    Ms(u32),
+    Text(String),
+}
+
+/// Reads a check 4 list: `null` and `""` both mean no final result.
+fn sentence_times<'de, D>(deserializer: D) -> Result<Vec<Option<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let items = Vec::<Option<SentenceTime>>::deserialize(deserializer)?;
+    items
+        .into_iter()
+        .map(|item| match item {
+            None => Ok(None),
+            Some(SentenceTime::Ms(ms)) => Ok(Some(ms)),
+            Some(SentenceTime::Text(text)) if text.is_empty() => Ok(None),
+            Some(SentenceTime::Text(_)) => Err(serde::de::Error::custom("a time is a number")),
+        })
+        .collect()
+}
+
 /// One run as the page sends it: a flat set of `check<n>_<what>` fields, each a yes or no, a
 /// count, milliseconds or an error name. A field the run did not reach is left out.
 /// Anything not named here, or of another type, is refused.
@@ -111,7 +175,9 @@ pub(crate) struct Run {
     pub check4_results: bool,
     /// How many of the 3 sentences had any word heard.
     pub check4_heard: u8,
+    #[serde(deserialize_with = "sentence_times")]
     pub check4_final_at_ms: Vec<Option<u32>>,
+    #[serde(deserialize_with = "sentence_times")]
     pub check4_gap_ms: Vec<Option<u32>>,
     pub check4_error: Option<ErrorName>,
 
@@ -130,42 +196,86 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    /// Whether every number is inside its limit.
-    fn within_limits(&self) -> bool {
-        let times = [self.check0_first_result_ms, self.check1_first_result_ms];
-        let sentence_times = self
-            .check4_final_at_ms
-            .iter()
-            .chain(&self.check4_gap_ms)
-            .copied();
-        times
+    /// The name of the first field outside its limit, if any.
+    fn field_outside_limit(&self) -> Option<&'static str> {
+        let in_times = |times: &[Option<u32>]| times.iter().flatten().all(|&ms| ms <= MAX_MS);
+        let in_time = |ms: Option<u32>| ms.is_none_or(|ms| ms <= MAX_MS);
+        let checks = [
+            (
+                "check0_first_result_ms",
+                in_time(self.check0_first_result_ms),
+            ),
+            (
+                "check1_first_result_ms",
+                in_time(self.check1_first_result_ms),
+            ),
+            (
+                "check3_started",
+                usize::from(self.check3_started) <= RESTARTS,
+            ),
+            ("check3_heard", usize::from(self.check3_heard) <= RESTARTS),
+            ("check3_errors", self.check3_errors.len() <= RESTARTS),
+            ("check4_heard", usize::from(self.check4_heard) <= SENTENCES),
+            (
+                "check4_final_at_ms",
+                self.check4_final_at_ms.len() <= SENTENCES && in_times(&self.check4_final_at_ms),
+            ),
+            (
+                "check4_gap_ms",
+                self.check4_gap_ms.len() <= SENTENCES && in_times(&self.check4_gap_ms),
+            ),
+            ("check5_words_heard", self.check5_words_heard <= MAX_WORDS),
+        ];
+        checks
             .into_iter()
-            .chain(sentence_times)
-            .flatten()
-            .all(|ms| ms <= MAX_MS)
-            && usize::from(self.check3_started) <= RESTARTS
-            && usize::from(self.check3_heard) <= RESTARTS
-            && usize::from(self.check4_heard) <= SENTENCES
-            && self.check3_errors.len() <= RESTARTS
-            && self.check4_final_at_ms.len() <= SENTENCES
-            && self.check4_gap_ms.len() <= SENTENCES
-            && self.check5_words_heard <= MAX_WORDS
+            .find_map(|(field, within)| (!within).then_some(field))
+    }
+}
+
+/// Why `parse_run` refused a body, and the field it refused. `reason` is `not_object`,
+/// `unknown_field`, `wrong_type` or `out_of_limit`. `field` is one of `FIELDS`, or `-` when no
+/// field is to blame or the name is not in the list, so it never holds a word.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Refused {
+    pub reason: &'static str,
+    pub field: &'static str,
+}
+
+impl Refused {
+    fn new(reason: &'static str, field: &'static str) -> Self {
+        Self { reason, field }
     }
 }
 
 /// Reads a run from its body. Err for a body over `MAX_BODY_BYTES`, something that is not a
 /// JSON object of the fields above with the right types, an error name outside the list, or
 /// a number outside its limit.
-pub(crate) fn parse_run(body: &[u8]) -> Result<Run, ()> {
+pub(crate) fn parse_run(body: &[u8]) -> Result<Run, Refused> {
     if body.len() > MAX_BODY_BYTES {
-        return Err(());
+        return Err(Refused::new("out_of_limit", "-"));
     }
-    // serde would also read a struct from a JSON array, field by field in order.
-    if body.trim_ascii_start().first() != Some(&b'{') {
-        return Err(());
+    let Ok(map) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body) else {
+        return Err(Refused::new("not_object", "-"));
+    };
+    if map.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(Refused::new("unknown_field", "-"));
     }
-    let run: Run = serde_json::from_slice(body).map_err(|_| ())?;
-    run.within_limits().then_some(run).ok_or(())
+    // Each field alone, to name the one that fails.
+    for field in FIELDS {
+        let Some(value) = map.get(field) else {
+            continue;
+        };
+        let alone = serde_json::Map::from_iter([(field.to_owned(), value.clone())]);
+        if serde_json::from_value::<Run>(alone.into()).is_err() {
+            return Err(Refused::new("wrong_type", field));
+        }
+    }
+    let run: Run =
+        serde_json::from_value(map.into()).map_err(|_| Refused::new("wrong_type", "-"))?;
+    match run.field_outside_limit() {
+        Some(field) => Err(Refused::new("out_of_limit", field)),
+        None => Ok(run),
+    }
 }
 
 /// The error names as one comma-separated word, `-` for none; the page's lists in the log.
@@ -250,12 +360,15 @@ pub(crate) async fn get_page(State(state): State<AppState>) -> Response {
 }
 
 /// `POST /speech-check/runs`: logs one run and answers `204`. `400`, with nothing logged but
-/// a warning, for a body `parse_run` refuses; the route's body limit answers `413` for a body
-/// over 4 KB.
+/// a warning that names the reason and the field, never a value, for a body `parse_run`
+/// refuses; the route's body limit answers `413` for a body over 4 KB.
 pub(crate) async fn post_run(body: Bytes) -> Response {
-    let Ok(run) = parse_run(&body) else {
-        warn!(reason = "bad_request", "app speech check not logged");
-        return StatusCode::BAD_REQUEST.into_response();
+    let run = match parse_run(&body) {
+        Ok(run) => run,
+        Err(Refused { reason, field }) => {
+            warn!(reason, check_field = field, "app speech check not logged");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     };
     log_run(&run);
     StatusCode::NO_CONTENT.into_response()
