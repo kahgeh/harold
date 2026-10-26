@@ -38,16 +38,16 @@ async fn the_facts_hold_every_field_the_spec_names() {
         let at = time::OffsetDateTime::from_unix_timestamp(now_ms / 1000 - 600).unwrap();
         snapshot.specs = BTreeMap::from([(
             "harold".to_string(),
-            vec![SpecFacts {
-                id: "watch-jobs".into(),
-                state: SpecState::Approved,
-                state_at: at,
-                ready_at: None,
-                approved_at: None,
-                merged_at: None,
-                words: 10,
-                revisions: 0,
-            }],
+            SpecState::ALL
+                .into_iter()
+                .map(|state| SpecFacts {
+                    id: format!("spec-{}", state.as_str()),
+                    state,
+                    state_at: at,
+                    words: 10,
+                    ..SpecFacts::default()
+                })
+                .collect(),
         )]);
     }
     let agents: Arc<dyn Agents> = fake;
@@ -90,11 +90,13 @@ async fn the_facts_hold_every_field_the_spec_names() {
     );
     assert_eq!(
         pod.specs,
-        vec![SpecEntry {
-            id: "watch-jobs".into(),
-            state: "approved",
-            seconds_in_state: 600
-        }]
+        Vec::from(
+            ["open", "approved", "in_progress", "completed", "withdrawn"].map(|state| SpecEntry {
+                id: format!("spec-{state}"),
+                state,
+                seconds_in_state: 600
+            })
+        )
     );
     let json = serde_json::to_value(&facts).unwrap();
     assert_eq!(json["watch"]["run"], 3);

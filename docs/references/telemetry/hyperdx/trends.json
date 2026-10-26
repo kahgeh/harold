@@ -184,20 +184,11 @@
       "w": 12,
       "h": 6,
       "config": {
-        "displayType": "line",
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "select": [
-          {
-            "aggFn": "sum",
-            "valueExpression": "Value",
-            "metricName": "pod.specs",
-            "metricType": "gauge",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "specs"
-          }
-        ],
-        "groupBy": "Attributes['pod.product'], Attributes['state']"
+        "sqlTemplate": "SELECT product, sumIf(specs, state = 'open') AS open, sumIf(specs, state = 'approved') AS approved, sumIf(specs, state = 'in_progress') AS in_progress, sumIf(specs, state = 'completed') AS completed, sumIf(specs, state = 'withdrawn') AS withdrawn FROM (SELECT Attributes['pod.product'] AS product, Attributes['state'] AS state, argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND $__timeFilter(TimeUnix) AND $__filters GROUP BY ResourceAttributes['harold.machine'], product, state) GROUP BY product ORDER BY product"
       }
     },
     {
@@ -225,8 +216,8 @@
       }
     },
     {
-      "id": "start-to-completion",
-      "name": "Start to completion",
+      "id": "withdrawn-and-wasted",
+      "name": "Withdrawn and wasted",
       "x": 0,
       "y": 24,
       "w": 12,
@@ -236,14 +227,44 @@
         "displayType": "table",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT Attributes['pod.product'] AS product, Attributes['phase'] AS phase, quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) AS p50, quantileExactWeighted(0.95)(total_rise / count_rise, toUInt64(count_rise)) AS p95 FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY product, phase ORDER BY product, phase"
+        "sqlTemplate": "SELECT product, reason, reached, count() AS specs, sum(revisions) AS revisions, sum(direction_revisions) AS direction_revisions, if(sum(revisions) = 0, NULL, sum(direction_revisions) / sum(revisions)) AS direction_share, sum(architect_rounds) AS architect_rounds, sum(build_worker_hours) AS build_worker_hours FROM (SELECT Attributes['pod.product'] AS product, Attributes['spec.id'] AS spec, Attributes['withdrawn.reason'] AS reason, Attributes['withdrawn.reached'] AS reached, argMaxIf(Value, TimeUnix, Attributes['measure'] = 'revisions') AS revisions, argMaxIf(Value, TimeUnix, Attributes['measure'] = 'direction_revisions') AS direction_revisions, argMaxIf(Value, TimeUnix, Attributes['measure'] = 'architect_rounds') AS architect_rounds, argMaxIf(Value, TimeUnix, Attributes['measure'] = 'build_worker_hours') AS build_worker_hours FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.effort' AND Attributes['state'] = 'withdrawn' AND $__timeFilter(TimeUnix) AND $__filters GROUP BY ResourceAttributes['harold.machine'], product, spec, reason, reached) GROUP BY product, reason, reached ORDER BY product, reason, reached"
+      }
+    },
+    {
+      "id": "pods-and-agents",
+      "name": "Pods and agents",
+      "x": 12,
+      "y": 24,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, sum(running) AS running_pods, sum(running + stopped) AS registered_pods, sumIf(1, stopped = 1 AND waiting > 0) AS stopped_pods_with_waiting_work, sum(chief) AS chief, sum(pnem) AS pnem, sum(pod_coordination) AS pod_coordination, sum(build_worker) AS build_workers, sum(other) AS other FROM (SELECT $__timeInterval(TimeUnix) AS ts, Attributes['pod.product'] AS product, argMaxIf(Value, TimeUnix, MetricName = 'pod.pods' AND Attributes['state'] = 'running') AS running, argMaxIf(Value, TimeUnix, MetricName = 'pod.pods' AND Attributes['state'] = 'stopped') AS stopped, argMaxIf(Value, TimeUnix, MetricName = 'pod.specs' AND Attributes['state'] = 'open') + argMaxIf(Value, TimeUnix, MetricName = 'pod.specs' AND Attributes['state'] = 'approved') AS waiting, argMaxIf(Value, TimeUnix, MetricName = 'pod.agents' AND Attributes['role'] = 'chief') AS chief, argMaxIf(Value, TimeUnix, MetricName = 'pod.agents' AND Attributes['role'] = 'pnem') AS pnem, argMaxIf(Value, TimeUnix, MetricName = 'pod.agents' AND Attributes['role'] = 'pod_coordination') AS pod_coordination, argMaxIf(Value, TimeUnix, MetricName = 'pod.agents' AND Attributes['role'] = 'build_worker') AS build_worker, argMaxIf(Value, TimeUnix, MetricName = 'pod.agents' AND Attributes['role'] = 'other') AS other FROM $__sourceTable(gauge) WHERE MetricName IN ('pod.pods', 'pod.agents', 'pod.specs') AND $__timeFilter(TimeUnix) AND $__filters GROUP BY ts, ResourceAttributes['harold.machine'], product) GROUP BY ts ORDER BY ts"
+      }
+    },
+    {
+      "id": "time-per-step",
+      "name": "Time per step",
+      "x": 0,
+      "y": 30,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT product, phase, quantileIf(0.5)(seconds, last >= now() - INTERVAL 7 DAY) AS median_7d, maxIf(seconds, last >= now() - INTERVAL 7 DAY) AS slowest_7d, argMaxIf(spec, seconds, last >= now() - INTERVAL 7 DAY) AS slowest_spec_7d, quantile(0.5)(seconds) AS median_30d, max(seconds) AS slowest_30d, argMax(spec, seconds) AS slowest_spec_30d FROM (SELECT Attributes['pod.product'] AS product, Attributes['phase'] AS phase, Attributes['spec.id'] AS spec, max(TimeUnix) AS last, sum(total_rise) / sum(count_rise) AS seconds FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 31 DAY AND TimeUnix <= now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 30 DAY AND count_rise > 0 GROUP BY product, phase, spec) GROUP BY product, phase ORDER BY product, phase"
       }
     },
     {
       "id": "watch-runs-cost-and-duration",
       "name": "Watch runs: cost and duration per run",
       "x": 12,
-      "y": 24,
+      "y": 30,
       "w": 12,
       "h": 6,
       "config": {

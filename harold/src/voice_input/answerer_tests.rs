@@ -115,13 +115,10 @@ fn pods() -> PodSnapshot {
         "harold".into(),
         vec![SpecFacts {
             id: "log-keeps-last-day".into(),
-            state: SpecState::Building,
+            state: SpecState::InProgress,
             state_at: time::OffsetDateTime::now_utc(),
-            ready_at: None,
-            approved_at: None,
-            merged_at: None,
             words: 1200,
-            revisions: 0,
+            ..Default::default()
         }],
     );
     snapshot
@@ -365,11 +362,8 @@ fn spec(id: &str, state: SpecState, age_hours: i64) -> SpecFacts {
         id: id.into(),
         state,
         state_at: time::OffsetDateTime::now_utc() - time::Duration::hours(age_hours),
-        ready_at: None,
-        approved_at: None,
-        merged_at: None,
         words: 100,
-        revisions: 0,
+        ..Default::default()
     }
 }
 
@@ -377,15 +371,15 @@ fn spec(id: &str, state: SpecState, age_hours: i64) -> SpecFacts {
 /// and one rejected 30 hours ago.
 fn crowded_pod() -> PodSnapshot {
     let mut specs: Vec<SpecFacts> = (0..100)
-        .map(|n| spec(&format!("old-{n}"), SpecState::Merged, 48 + n))
+        .map(|n| spec(&format!("old-{n}"), SpecState::Completed, 48 + n))
         .collect();
     specs.extend([
-        spec("drafted-one", SpecState::Drafted, 5),
-        spec("waiting-one", SpecState::Waiting, 5),
-        spec("building-one", SpecState::Building, 5),
-        spec("just-merged", SpecState::Merged, 1),
-        spec("just-rejected", SpecState::Rejected, 1),
-        spec("long-rejected", SpecState::Rejected, 30),
+        spec("drafted-one", SpecState::Open, 5),
+        spec("waiting-one", SpecState::Approved, 5),
+        spec("building-one", SpecState::InProgress, 5),
+        spec("just-merged", SpecState::Completed, 1),
+        spec("just-rejected", SpecState::Withdrawn, 1),
+        spec("long-rejected", SpecState::Withdrawn, 30),
     ]);
     let mut snapshot = PodSnapshot::default();
     snapshot
@@ -462,7 +456,7 @@ async fn the_prompt_holds_the_agents_the_pods_the_todos_the_queue_this_call_and_
     assert_eq!(facts["pods"][0]["product"], "harold");
     assert_eq!(facts["pods"][0]["slots"], json!({"busy": 1, "free": 2}));
     assert_eq!(facts["pods"][0]["specs"][0]["id"], "log-keeps-last-day");
-    assert_eq!(facts["pods"][0]["specs"][0]["state"], "building");
+    assert_eq!(facts["pods"][0]["specs"][0]["state"], "in_progress");
     assert_eq!(
         facts["todos"][0],
         json!({"id": "Q56", "product": "harold", "title": "agent-message-tool", "progress": "picks 2/2"})

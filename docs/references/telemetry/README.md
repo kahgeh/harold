@@ -83,35 +83,76 @@ The `git` commands are read-only: they run with `GIT_OPTIONAL_LOCKS=0`, at most 
 
 ### Spec states
 
-Each pod keeps its specs in `<base checkout>/.superpowers/pod/`. That folder is not in git, so git holds no dates for specs or approvals. Harold reads each state's time from file creation times and from the base branch.
+Each pod keeps its specs in `<base checkout>/.superpowers/pod/`. That folder is not in git, so git holds no dates for specs or approvals. Harold reads each state's time from the pod's files and, for the older sources, from file creation times and the base branch.
 
 | State (`state`) | A spec is in it when | Its time comes from |
 |---|---|---|
-| `drafted` | `specs/<id>.md` exists and `specs/<id>.url` does not | the creation time of `specs/<id>.md` |
-| `waiting_for_approval` | `specs/<id>.url` exists: pod-coordination writes it when it first publishes the spec | the creation time of `specs/<id>.url` |
+| `withdrawn` | `withdrawn/<id>.md` exists, or `rejections.md` has a line `- <id>, <date>` | `withdrawn:` in the file, or the rejection date from the start of the day |
+| `completed` | `merged/<id>.md` exists, or the base branch's reflog has `merge <id>:`, or a worktree went with its commit merged | `merged:` in the file, or that reflog entry's own time, not the commit's time |
+| `in_progress` | `started/<id>.md` exists, or a busy slot's worktree is named for the spec | `started:` in the file, or the creation time of the worktree's `.superpowers/baton/agent-pane` |
 | `approved` | `approvals/<id>.md` exists, written by the chief | that file's creation time |
-| `building` | a busy slot's worktree is named `<id>` | the creation time of its `.superpowers/baton/agent-pane` |
-| `merged` | the base branch's reflog has `merge <id>` | that reflog entry's own time, when the merge happened, not the commit's time |
-| `rejected` | `rejections.md` has a line `- <id>, <date>` | that date, from the start of the day |
+| `open` | `specs/<id>.md` exists | that file's creation time |
 
-A later state wins: a merged spec is merged even though its approval file remains. A file copied or restored loses its creation time, and Harold then uses the time it first sees the file.
+A later state wins, in the order of the table. A completed spec is completed even though its approval file remains. `withdrawn` wins over `completed`: a spec merged into another names it in the `by:` line of its withdrawn file. A file copied or restored loses its creation time, and Harold then uses the time it first sees the file.
 
-**A revision** is published to the same link, so `specs/<id>.url` is not created again and "spec ready" stays at the first publish. Time spent revising counts as waiting for the user. The number of revisions comes from the `## Revision <n>` headings in `requests/<id>.md` and is carried as `spec.revisions`.
+The state names changed. This table maps the old names of `pod.specs`, the `spec state changed` line and the watch facts to the new ones:
+
+| Old `state` | New `state` |
+|---|---|
+| `drafted`, `waiting_for_approval` | `open` |
+| `approved` | `approved` |
+| `building` | `in_progress` |
+| `merged` | `completed` |
+| `rejected` | `withdrawn` |
+
+Old rows in ClickHouse keep the old names until they age out.
+
+**The three pod files** are written once, by the pod's shared tools. Harold never writes them. Harold reads only the `key: value` lines.
+
+| File | Written by | Keys |
+|---|---|---|
+| `withdrawn/<id>.md` | the PnEM, when it withdraws or replaces a spec | `withdrawn` (RFC 3339 time), `reason` (`rejected`, `replaced`, `overtaken` or `merged_into`), `by` (the other spec, for `replaced` and `merged_into`), `note` |
+| `started/<id>.md` | baton's `spawn.sh`, at the first spawn for the spec. A later stage does not overwrite it | `started` (RFC 3339 time), `worktree` |
+| `merged/<id>.md` | pod coordination, when it sends `MERGED` for the spec's last stage. On a code host, `merged` is the time the pull request merged | `merged` (RFC 3339 time), `commit` (the full sha) |
+
+A file that does not parse logs `pod file unreadable` once per file and change, with `pod.product`, `spec.id` and `file` (the file's name inside the pod folder, such as `merged/<id>.md`, never a full path). The spec then falls back to the older sources.
+
+**A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
+
+**A missing merged file.** Harold does not know how many stages a spec has, so it completes a spec without `merged/<id>.md` only when the merge cannot be an early stage. The 7 days run from the latest merge in the reflog or worktree source, not from `started:`.
+
+- A merge without a stage (`merge <id>:`, or a worktree named `<id>` that went with its commit merged): when the latest such merge is over 7 days old, no worktree for the spec is busy and no stage merge is later, the spec becomes `completed` at that merge's time. Harold logs `spec completed without merged file` once, with `pod.product` and `spec.id`, and records no lead time, because the time is a guess.
+- A stage merge (`merge <id>-<stage>:`, such as `<id>-1b`) never completes the spec. When the latest stage merge is over 7 days old and no worktree for the spec is busy, the spec stays `in_progress` and Harold logs `spec stage merged without merged file` once, with `pod.product`, `spec.id` and `spec.stage`. A later stage that waits over 7 days for the user or a slot logs this line too, and the chief decides.
+
+**Revision marks.** `specs/<id>.revisions.md`, written by the PnEM, has one `## ` heading for each entry. The last parenthesis of a heading holds its tags: `first` (the first draft, not a revision), `direction` or `defect`, and `architect` when the architect asked for it, such as `## 2026-10-26, rev 2 (defect, architect)`. A heading with no tags counts as a revision of unknown class. The count of revisions is carried as `spec.revisions`. It replaces the count of `## Revision <n>` headings in `requests/<id>.md`, which stopped on 2026-10-19.
 
 **Repositories with no reflog**, such as `turso-object-store` today, cannot show `merge <id>`. There a spec counts as merged when its busy worktree goes and the commit that worktree last had checked out is in the base branch. Harold asks `git merge-base --is-ancestor` for up to an hour after the worktree goes. This has limits:
 
 - The remembered commit is kept in memory only. A Harold restart between the worktree's removal and the check loses that merge.
 - A worktree removed with no commits of its own counts as merged, because its commit is already in the base branch. So does one whose `agent-pane` file is removed while the worktree stays.
-- A squash or rebase merge makes new commits, so the remembered commit is never found and the merge is not seen.
+- A squash or rebase merge makes new commits, so the remembered commit is never found and the merge is not seen. A `merged/<id>.md` file covers this case.
 
 **Spec size** is the word count of `specs/<id>.md`, leaving out lines that start with `<`, which hold drawn charts.
 
-**Start to completion** (`pod.spec.lead_time`) is recorded when Harold counts a merge, so once per merge, restarts included. It has two phases (`phase`):
+**Effort per spec** (`pod.spec.effort`) is a gauge for each spec, each poll. Its `measure` attribute is `revisions`, `direction_revisions`, `architect_rounds` or `build_worker_hours`. A withdrawn spec also carries `withdrawn.reason` and `withdrawn.reached` (`open`, `approved` or `in_progress`, from the files that exist). Build worker hours run from `started:` (or the agent-pane file's time) to `merged:` or `withdrawn:`, or to now. Model cost is left out, because Harold records no build worker cost. Only specs that are not `completed` or `withdrawn`, and specs that entered one of those states in the last 30 days, send a value. An older spec sends nothing.
 
-- `waiting_for_user`: from "spec ready" to approval, recorded on the spec's first merge only (the oldest in the reflog);
-- `build`: from approval to merge, including any wait for a free slot, recorded on each merge, stages included.
+**Steps** (`pod.spec.lead_time`) are recorded once per spec, when it first becomes `completed` from its `merged/<id>.md`. The `phase` attribute is:
 
-A merge whose spec has no approval file records no lead time, and neither does a merge on a base branch with no reflog, which has no spec.
+- `open_to_approved`: from the creation of `specs/<id>.md` to the creation of `approvals/<id>.md`;
+- `approved_to_started`: from the approval to `started:`;
+- `started_to_completed`: from `started:` to `merged:`.
+
+A step with a missing or negative time is skipped. Harold records a spec's steps in one of two cases:
+
+- The `commit:` of `merged/<id>.md` is on the base branch and is not reachable from the product's counted tip in the tip file, checked before the poll saves the new tip (`git merge-base --is-ancestor`, read-only). This also counts a spec that completed while Harold was stopped.
+- The spec changed to `completed` between two polls of the same Harold, which covers a merged file written after the poll that saw the merge.
+
+A product with no counted tip, at its first poll, records no lead time: specs already completed then never count. A spec without `merged/<id>.md` and without `started/<id>.md` records `open_to_approved` from the reflog source, on the spec's first merge only, because the older sources know no start.
+
+**Pods and agents** come from Harold's agent snapshot, which `pod_stats` reads once a poll for pane ids and folders only ([ADR 0021](../../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)).
+
+- `pod.pods` has `state` = `running` or `stopped` for each registered product. A pod runs when a pane id in its `agent-panes` file (pod coordination first, then the PnEM) is a live agent.
+- `pod.agents` has `role` = `chief`, `pnem`, `pod_coordination`, `build_worker` or `other`, and `pod.product` for the pod roles. The chief is a pane whose folder is `[notify] chief`. A build worker is a pane named in a busy worktree's `.superpowers/baton/agent-pane`. `other` is any live agent that no pod file names.
 
 ## Phone requests
 
@@ -266,13 +307,16 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
-| `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
+| `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
-| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`waiting_for_user`, `build`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
+| `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`) |
 | `watch.cost_usd` | counter, `USD` | `folder` |
 
-`pod.specs` reports every state of every product, 0 included, so a card can read 0.
+`pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product, 0 included.
 
 `harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
 
@@ -392,11 +436,11 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Phone requests | Latency, p95 | the 95th percentile of the phone-request latency | SQL: the 95th percentile of the duration of `harold.phone_request` spans that were typed (they carry `pane_id`) |
 | Turns | Turns | `harold.turns` in the period | SQL: the counter rule |
 | Turns | Turns per session, median | the median of turns per `session.id` | SQL: `harold.turn` spans counted per `session.id`, one span per turn |
-| Specs | Waiting for approval | `pod.specs` in that state at the end of the period | SQL: the last value per product, summed |
-| Specs | Merged | specs that reached merged in the period | SQL: specs whose first `pod.spec.words` sample in state `merged` falls in the period |
-| Specs | Spec size, median words | the median `pod.spec.words` of specs first ready in the period | SQL: specs whose first sample past `drafted` falls in the period |
-| Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | SQL: the counter rule over the histogram's count and sum |
-| Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | SQL: the counter rule over the histogram's count and sum |
+| Specs | Waiting for approval | `pod.specs` in state `open` at the end of the period | SQL: the last value per product, summed |
+| Specs | Merged | specs that reached `completed` in the period | SQL: specs whose first `pod.spec.words` sample in state `completed` falls in the period |
+| Specs | Spec size, median words | the median `pod.spec.words` of specs first seen in the period | SQL: specs whose first sample in a state other than `withdrawn` falls in the period |
+| Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `open_to_approved` | SQL: the counter rule over the histogram's count and sum |
+| Specs | Build, p50 | the median `pod.spec.lead_time`, phase `started_to_completed` | SQL: the counter rule over the histogram's count and sum |
 | Turns | Call turn, time to first sound and to the answer, last 7 days | a table with one row per `call_from` and `answered_by`: the number of `harold.call_turn` spans, and the p50 and p95, in seconds, of `first_sound_ms` and of `answer_ms` over the last 7 days. The aim is an `answer_ms` p50 about 5.5 s for `answerer` (`first_sound_ms` follows it, since the answer is the first sound), and near the chief's own turn time plus 1 s for `chief`. On a day with at least 3 answerer turns, act when the `answer_ms` p50 is above 7 s, or above 15 s for `chief`: look at a turn's trace, where the long child span shows the slow part (`call_answer`'s `model_ms` against `call_transcribe`, and `load_waited_ms` against the worker's `load_ms`). The last column, `waited_for_the_load`, counts the `harold.call_transcribe` spans in those turns with `load_waited_ms` above 0; a call now rings until its worker is ready, so a first turn does not wait for the load and only a worker restarted mid-call can make it non-zero; the early-load signal is `harold.call_ring`. On a day with at least 3 call turns, more `chief` turns than `answerer` turns means the call answerer is failing. Info only: no alert, no earlier tile | SQL: `harold.call_turn` spans, `quantileIf` over the turns that carry the number |
 | Turns | Call answers failed, by day | the number of `harold.call_answer` spans with `result = failed` for each of the last 7 days. Above 2 on a day is the cue to look. Info only: no alert. The release watch already reports any `call answer failed` WARN since an install | SQL: `harold.call_answer` spans counted per day |
 | Turns | Call answerer spend, by day | the sum of `cost_micros` of `harold.call_answer` spans, in dollars, for each of the last 7 days. Above $0.10 on a day, about 300 turns at today's price, means far more turns than expected or a prompt that grew. Act when the median `input_tokens` of a day's answers is above 6,000 (`SELECT quantile(0.5)(toUInt64OrZero(SpanAttributes['input_tokens'])) FROM otel.otel_traces WHERE SpanName = 'harold.call_answer' AND Timestamp > now() - INTERVAL 1 DAY`): the cause is then the pods' spec count. Info only: no alert | SQL: `harold.call_answer` spans, `cost_micros` summed per day |
@@ -419,7 +463,7 @@ The notifications card and the call turn card are the two cards that are tables 
 - HyperDX's own counter reading loses the first point of every new series ([Counters in HyperDX](#counters-in-hyperdx)).
 - A card's number can be computed for any window, so each card can show its earlier number.
 
-"Merged" and "Spec size" look back as far as ClickHouse keeps data, 30 days in the local stack. So on the first day the pod facts are on, every spec already merged counts as merged that day, and every spec already past `drafted` counts as first ready that day.
+"Merged" and "Spec size" look back as far as ClickHouse keeps data, 30 days in the local stack. So on the first day the pod facts are on, every spec already completed counts as completed that day, and every spec that is not withdrawn counts as first seen that day. After the state names changed, the first samples in the new names count as new the same way.
 
 The latency card reads spans, not the `harold.phone_request.latency` histogram. A typed request's `harold.phone_request` span runs from the reply's own time to Enter, which is exactly its latency, and spans have no first-point loss.
 
@@ -457,9 +501,11 @@ Special cases:
 | Phone request latency | How long from my reply to the agent seeing it? | `harold.phone_request.latency`, median and 95th percentile | builder line over the typed `harold.phone_request` spans, as the latency card |
 | One turn, end to end | What happened between my reply and the update on my phone? | the list of `harold.turn` traces, newest first; each opens as a waterfall with its logs | search over the traces source |
 | Turns per session | Which sessions do the most work? | `harold.turns` grouped by `session.id`, and per day | SQL stacked bars per `session.id`, the counter rule |
-| Specs by state | How many specs are where, in each pod? | `pod.specs` per product and state, over time | builder line per product and state |
+| Specs by state | How many specs are open, approved, in progress, completed or withdrawn, in each pod? | the latest `pod.specs` value per product and state, not a sum over time | SQL table per product, the last value of each state |
 | Spec size | How big are the specs, and does a bigger spec mean a bigger change? | `pod.spec.words` per spec, with `pod.merged_lines` for the merged ones | builder table of words per product, spec and state |
-| Start to completion | How long from a spec being ready to it being on main, and how much of that is waiting for me? | `pod.spec.lead_time` per phase, p50 and p95 | SQL table per product and phase, the counter rule over the histogram's count and sum |
+| Withdrawn and wasted | How much work is thrown away, and why? | the latest `pod.spec.effort` of each withdrawn spec, by product, `withdrawn.reason` and `withdrawn.reached`: the number of specs, revisions, the share of revisions that are `direction_revisions`, architect rounds and build worker hours | SQL table, the last value of each measure per spec |
+| Pods and agents | Are the pods and agents I expect running? | `pod.pods` and `pod.agents` over time: running and registered pods, the agents by role, and the number of stopped pods whose product has open or approved specs, because that work waits. A stopped pod with no such spec is normal and is not counted. No alert: the chief starts the pods | SQL line, the last value in each interval |
+| Time per step | Which step of a spec is slow? | `pod.spec.lead_time` per product and phase: the median and the slowest spec (with its `spec.id`) over 7 and over 30 days | SQL table, the counter rule over the histogram's count and sum, per spec |
 | Watch runs: cost and duration per run | Are the watches cheap and quick? As a guide, a run takes under 60 seconds and costs 1 to 2 cents | the `harold.watch.run` spans: median and 95th percentile duration, and the mean `cost_usd` per run | SQL table over the traces source, for the time range |
 
 The SQL panels read the time range's points and, for the counter rule, the day before it.
@@ -510,7 +556,7 @@ SELECT sum(rise) FROM (
 
 `lagInFrame(..., toFloat64(0))` gives a series' first point a previous value of 0. A point written twice rises by 0 the second time. The test `the_counter_rule_counts_rises_new_series_and_resets_from_zero` in `harold/src/telemetry_tests.rs` runs the same rule in Rust on sample series: a rise, a new series, and a reset.
 
-The lead-time cards and the "Start to completion" panel apply the rule to the histogram's count and sum, judging a reset by the count. Each rise in the count, with its rise in the sum, gives the lead times recorded since the previous point. Their median is weighted by the count's rise. Merges are minutes apart and Harold exports every 30 seconds, so a rise holds one merge. Two merges within one export would stand as their mean.
+The lead-time cards and the "Time per step" panel apply the rule to the histogram's count and sum, judging a reset by the count. Each rise in the count, with its rise in the sum, gives the lead times recorded since the previous point. Their median is weighted by the count's rise. Merges are minutes apart and Harold exports every 30 seconds, so a rise holds one merge. Two merges within one export would stand as their mean.
 
 Two limits remain:
 

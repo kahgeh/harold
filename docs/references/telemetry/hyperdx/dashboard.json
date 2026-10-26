@@ -497,7 +497,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT sum(specs) FROM (SELECT argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND Attributes['state'] = 'waiting_for_approval' AND TimeUnix >= now() - INTERVAL 24 HOUR AND TimeUnix < now() AND $__filters GROUP BY ResourceAttributes['harold.machine'], Attributes['pod.product'])"
+        "sqlTemplate": "SELECT sum(specs) FROM (SELECT argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND Attributes['state'] = 'open' AND TimeUnix >= now() - INTERVAL 24 HOUR AND TimeUnix < now() AND $__filters GROUP BY ResourceAttributes['harold.machine'], Attributes['pod.product'])"
       }
     },
     {
@@ -513,7 +513,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT sum(specs) FROM (SELECT argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND Attributes['state'] = 'waiting_for_approval' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters GROUP BY ResourceAttributes['harold.machine'], Attributes['pod.product'])"
+        "sqlTemplate": "SELECT sum(specs) FROM (SELECT argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND Attributes['state'] = 'open' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters GROUP BY ResourceAttributes['harold.machine'], Attributes['pod.product'])"
       }
     },
     {
@@ -529,7 +529,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT count() FROM (SELECT min(TimeUnix) AS first_merged FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] = 'merged' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_merged >= now() - INTERVAL 24 HOUR AND first_merged < now()"
+        "sqlTemplate": "SELECT count() FROM (SELECT min(TimeUnix) AS first_merged FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] = 'completed' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_merged >= now() - INTERVAL 24 HOUR AND first_merged < now()"
       }
     },
     {
@@ -545,7 +545,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT count() FROM (SELECT min(TimeUnix) AS first_merged FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] = 'merged' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_merged >= now() - INTERVAL 48 HOUR AND first_merged < now() - INTERVAL 24 HOUR"
+        "sqlTemplate": "SELECT count() FROM (SELECT min(TimeUnix) AS first_merged FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] = 'completed' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_merged >= now() - INTERVAL 48 HOUR AND first_merged < now() - INTERVAL 24 HOUR"
       }
     },
     {
@@ -561,7 +561,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT median(words) FROM (SELECT argMax(Value, TimeUnix) AS words, min(TimeUnix) AS first_ready FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] != 'drafted' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_ready >= now() - INTERVAL 24 HOUR AND first_ready < now()"
+        "sqlTemplate": "SELECT median(words) FROM (SELECT argMax(Value, TimeUnix) AS words, min(TimeUnix) AS first_ready FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] != 'withdrawn' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_ready >= now() - INTERVAL 24 HOUR AND first_ready < now()"
       }
     },
     {
@@ -577,7 +577,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT median(words) FROM (SELECT argMax(Value, TimeUnix) AS words, min(TimeUnix) AS first_ready FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] != 'drafted' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_ready >= now() - INTERVAL 48 HOUR AND first_ready < now() - INTERVAL 24 HOUR"
+        "sqlTemplate": "SELECT median(words) FROM (SELECT argMax(Value, TimeUnix) AS words, min(TimeUnix) AS first_ready FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] != 'withdrawn' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_ready >= now() - INTERVAL 48 HOUR AND first_ready < now() - INTERVAL 24 HOUR"
       }
     },
     {
@@ -593,7 +593,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 24 HOUR AND count_rise > 0 AND Attributes['phase'] = 'waiting_for_user'",
+        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 24 HOUR AND count_rise > 0 AND Attributes['phase'] = 'open_to_approved'",
         "numberFormat": {
           "output": "time",
           "factor": 1
@@ -613,7 +613,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 72 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 48 HOUR AND count_rise > 0 AND Attributes['phase'] = 'waiting_for_user'",
+        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 72 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 48 HOUR AND count_rise > 0 AND Attributes['phase'] = 'open_to_approved'",
         "numberFormat": {
           "output": "time",
           "factor": 1
@@ -633,7 +633,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 24 HOUR AND count_rise > 0 AND Attributes['phase'] = 'build'",
+        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 24 HOUR AND count_rise > 0 AND Attributes['phase'] = 'started_to_completed'",
         "numberFormat": {
           "output": "time",
           "factor": 1
@@ -653,7 +653,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 72 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 48 HOUR AND count_rise > 0 AND Attributes['phase'] = 'build'",
+        "sqlTemplate": "SELECT quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= now() - INTERVAL 72 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 48 HOUR AND count_rise > 0 AND Attributes['phase'] = 'started_to_completed'",
         "numberFormat": {
           "output": "time",
           "factor": 1

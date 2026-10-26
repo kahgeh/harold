@@ -10,7 +10,9 @@ use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
 use super::*;
+use crate::agent::domain::AgentSnapshot;
 use crate::outbound::fake::CapturedLogs;
+use crate::store::EventVersion;
 use crate::telemetry::test_support;
 
 // --- fake pods ---
@@ -141,7 +143,33 @@ fn test_git() -> SystemGit {
     SystemGit::with_limit(TEST_GIT_LIMIT)
 }
 
+/// An agent list with no live pane.
+fn no_agents() -> AgentSource {
+    Arc::new(Vec::new)
+}
+
+/// An agent snapshot with no pane, for `start`.
+fn empty_hub() -> AgentSnapshotHub {
+    AgentSnapshotHub::new(AgentSnapshot {
+        through_event_version: EventVersion::start(),
+        server_time_ms: 0,
+        monitor_health: Vec::new(),
+        panes: Vec::new(),
+        tts_muted: false,
+        messaging_paused: false,
+    })
+}
+
 fn stats(registry: PathBuf) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
+    stats_with_agents(registry, no_agents(), None)
+}
+
+/// `stats` where the live panes are `agents` and the chief's folder is `chief`.
+fn stats_with_agents(
+    registry: PathBuf,
+    agents: AgentSource,
+    chief: Option<&str>,
+) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
     let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
     let tips = tips_file(&registry.parent().unwrap().join("data/store"));
     (
@@ -151,6 +179,8 @@ fn stats(registry: PathBuf) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
             test_git(),
             Arc::clone(&snapshot),
             UtcOffset::UTC,
+            agents,
+            chief.map(str::to_owned),
         ),
         snapshot,
     )
@@ -871,7 +901,7 @@ async fn the_task_polls_at_start_reports_the_gauges_and_stops_at_shutdown() {
     );
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let handle = start(path, tips_path(&pod), shutdown_rx);
+    let handle = start(path, tips_path(&pod), empty_hub(), None, shutdown_rx);
 
     let snapshot = gauge_snapshot();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -920,116 +950,209 @@ fn by_id(specs: Vec<SpecFacts>) -> HashMap<String, SpecFacts> {
         .collect()
 }
 
+/// A reflog entry at `time` with `subject`.
+fn entry(subject: &str, time: OffsetDateTime) -> ReflogEntry {
+    ReflogEntry {
+        hash: "h".into(),
+        time: time.unix_timestamp(),
+        subject: subject.into(),
+    }
+}
+
+/// What `read_specs` reads from `dir` at `now`, with these worktrees busy, this reflog
+/// and these worktrees gone after a merge.
+fn read_with(
+    dir: &Path,
+    now: OffsetDateTime,
+    offset: UtcOffset,
+    busy: &HashMap<String, OffsetDateTime>,
+    reflog: &[ReflogEntry],
+    gone: &HashMap<String, OffsetDateTime>,
+) -> SpecRead {
+    read_specs(
+        dir,
+        &Sources {
+            busy,
+            reflog,
+            gone,
+            now,
+            offset,
+        },
+    )
+    .unwrap()
+}
+
+/// What `read_specs` reads from `dir` now, from the files alone.
+fn read_files(dir: &Path) -> SpecRead {
+    read_with(
+        dir,
+        OffsetDateTime::now_utc(),
+        UtcOffset::UTC,
+        &HashMap::new(),
+        &[],
+        &HashMap::new(),
+    )
+}
+
+fn put_spec(dir: &Path, id: &str) {
+    write(&dir.join(format!("specs/{id}.md")), "# Spec\n");
+}
+
+fn put_approval(dir: &Path, id: &str) {
+    write(
+        &dir.join(format!("approvals/{id}.md")),
+        "approved: 2026-10-14\n",
+    );
+}
+
+fn put_started(dir: &Path, id: &str, started: &str) {
+    write(
+        &dir.join(format!("started/{id}.md")),
+        &format!("# Started: {id}\n\nstarted: {started}\nworktree: {id}\n"),
+    );
+}
+
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn put_merged(dir: &Path, id: &str, merged: &str, commit: &str) {
+    write(
+        &dir.join(format!("merged/{id}.md")),
+        &format!("# Merged: {id}\n\nmerged: {merged}\ncommit: {commit}\n"),
+    );
+}
+
+fn put_withdrawn(dir: &Path, id: &str, withdrawn: &str, reason: &str) {
+    write(
+        &dir.join(format!("withdrawn/{id}.md")),
+        &format!(
+            "# Withdrawn: {id}\n\nwithdrawn: {withdrawn}\nreason: {reason}\nby: other\nnote: one line\n"
+        ),
+    );
+}
+
 #[test]
-fn each_state_comes_from_its_file_at_that_files_time() {
+fn each_state_comes_from_its_file_and_from_the_older_source_at_its_time() {
     let pod = Pod::new();
     let dir = pod.root.join("pod");
-    for id in ["a", "b", "c", "d", "e", "f"] {
-        write(&dir.join(format!("specs/{id}.md")), "# Spec\n");
+    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        put_spec(&dir, id);
     }
     for id in ["b", "c", "d"] {
-        write(
-            &dir.join(format!("specs/{id}.url")),
-            "https://example.com\n",
-        );
+        put_approval(&dir, id);
     }
-    for id in ["c", "d"] {
-        write(
-            &dir.join(format!("approvals/{id}.md")),
-            "# Approval\napproved: 2026-10-14\n",
-        );
-    }
+    put_started(&dir, "c", "2026-10-20T10:00:00Z");
+    put_merged(&dir, "e", "2026-10-22T09:00:00Z", COMMIT);
+    put_withdrawn(&dir, "g", "2026-10-21T08:30:00Z", "replaced");
     write(
         &dir.join("rejections.md"),
-        "# Rejections\n\n- f, 2026-10-14, too big\n",
+        "# Rejections\n\n- h, 2026-10-14, too big\n",
     );
+    let now = at("2026-10-26T12:00:00Z");
     let t = at("2026-10-14T10:00:00Z");
     let t2 = at("2026-10-14T11:34:00Z");
-    let building = HashMap::from([("d".to_owned(), t)]);
-    let merged = HashMap::from([("e".to_owned(), t2)]);
+    let busy = HashMap::from([("d".to_owned(), t)]);
+    let reflog = [entry("merge f: Fast-forward", t2)];
     let offset = UtcOffset::from_hms(11, 0, 0).unwrap();
 
-    let specs = by_id(read_specs(&dir, &building, &merged, offset).unwrap());
+    let read = read_with(&dir, now, offset, &busy, &reflog, &HashMap::new());
 
+    let specs = by_id(read.specs);
     let state = |id: &str| (specs[id].state, specs[id].state_at);
     assert_eq!(
         state("a"),
-        (SpecState::Drafted, created(&dir.join("specs/a.md")))
+        (SpecState::Open, created(&dir.join("specs/a.md")))
     );
     assert_eq!(
         state("b"),
-        (SpecState::Waiting, created(&dir.join("specs/b.url")))
+        (SpecState::Approved, created(&dir.join("approvals/b.md")))
     );
     assert_eq!(
         state("c"),
-        (SpecState::Approved, created(&dir.join("approvals/c.md")))
+        (SpecState::InProgress, at("2026-10-20T10:00:00Z"))
     );
-    assert_eq!(state("d"), (SpecState::Building, t));
-    assert_eq!(state("e"), (SpecState::Merged, t2));
+    assert_eq!(state("d"), (SpecState::InProgress, t));
     assert_eq!(
-        state("f"),
-        (SpecState::Rejected, at("2026-10-14T00:00:00+11:00"))
+        state("e"),
+        (SpecState::Completed, at("2026-10-22T09:00:00Z"))
     );
-    assert_eq!(specs.len(), 6);
-    assert_eq!(specs["d"].ready_at, Some(created(&dir.join("specs/d.url"))));
+    assert_eq!(state("f"), (SpecState::Completed, t2));
     assert_eq!(
-        specs["d"].approved_at,
-        Some(created(&dir.join("approvals/d.md")))
+        state("g"),
+        (SpecState::Withdrawn, at("2026-10-21T08:30:00Z"))
     );
-    assert_eq!(specs["e"].merged_at, Some(t2));
+    assert_eq!(
+        state("h"),
+        (SpecState::Withdrawn, at("2026-10-14T00:00:00+11:00"))
+    );
+    assert_eq!(specs.len(), 8);
+    assert_eq!(specs["c"].started_at, Some(at("2026-10-20T10:00:00Z")));
+    assert_eq!(specs["e"].merged_commit.as_deref(), Some(COMMIT));
+    assert_eq!(specs["f"].merged_at, Some(t2));
+    assert_eq!(specs["f"].merged_commit, None);
+    assert_eq!(read.notices, Vec::new());
+}
+
+#[test]
+fn a_later_state_wins_and_a_withdrawn_spec_is_withdrawn_though_it_merged_into_another() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["approved", "started", "merged", "withdrawn"] {
+        put_spec(&dir, id);
+        put_approval(&dir, id);
+    }
+    for id in ["started", "merged", "withdrawn"] {
+        put_started(&dir, id, "2026-10-20T10:00:00Z");
+    }
+    for id in ["merged", "withdrawn"] {
+        put_merged(&dir, id, "2026-10-22T09:00:00Z", COMMIT);
+    }
+    put_withdrawn(&dir, "withdrawn", "2026-10-23T09:00:00Z", "merged_into");
+
+    let specs = by_id(read_files(&dir).specs);
+
+    assert_eq!(specs["approved"].state, SpecState::Approved);
+    assert_eq!(specs["started"].state, SpecState::InProgress);
+    assert_eq!(specs["merged"].state, SpecState::Completed);
+    assert_eq!(specs["withdrawn"].state, SpecState::Withdrawn);
+    assert_eq!(
+        specs["withdrawn"].withdrawn,
+        Some(Withdrawal {
+            reason: "merged_into",
+            reached: Reached::InProgress,
+        })
+    );
+}
+
+#[test]
+fn a_withdrawn_spec_says_how_far_it_got() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["o", "a", "p"] {
+        put_spec(&dir, id);
+        put_withdrawn(&dir, id, "2026-10-23T09:00:00Z", "overtaken");
+    }
+    put_approval(&dir, "a");
+    put_approval(&dir, "p");
+    put_started(&dir, "p", "2026-10-20T10:00:00Z");
+    write(&dir.join("rejections.md"), "- o, 2026-10-14, reason\n");
+
+    let specs = by_id(read_files(&dir).specs);
+
+    let reached = |id: &str| specs[id].withdrawn.clone().unwrap();
+    assert_eq!(reached("o").reached, Reached::Open);
+    assert_eq!(reached("a").reached, Reached::Approved);
+    assert_eq!(reached("p").reached, Reached::InProgress);
+    // The withdrawn file wins over the rejection line, and gives the reason.
+    assert_eq!(reached("o").reason, "overtaken");
 }
 
 #[test]
 fn a_pod_without_a_specs_folder_has_no_specs() {
     let pod = Pod::new();
 
-    let specs = read_specs(
-        &pod.root.join("absent"),
-        &HashMap::new(),
-        &HashMap::new(),
-        UtcOffset::UTC,
-    );
+    let read = read_files(&pod.root.join("absent"));
 
-    assert_eq!(specs, Ok(Vec::new()));
-}
-
-#[test]
-fn a_merged_spec_stays_merged_though_its_approval_file_remains() {
-    let pod = Pod::new();
-    let dir = pod.root.join("pod");
-    write(&dir.join("specs/g.md"), "# Spec\n");
-    write(&dir.join("specs/g.url"), "https://example.com\n");
-    write(&dir.join("approvals/g.md"), "approved: 2026-10-14\n");
-    let merged_at = at("2026-10-14T11:34:00Z");
-    let merged = HashMap::from([("g".to_owned(), merged_at)]);
-
-    let specs = read_specs(&dir, &HashMap::new(), &merged, UtcOffset::UTC).unwrap();
-
-    assert_eq!(specs[0].state, SpecState::Merged);
-    assert_eq!(specs[0].state_at, merged_at);
-}
-
-#[test]
-fn a_revision_keeps_ready_and_raises_revisions() {
-    let pod = Pod::new();
-    let dir = pod.root.join("pod");
-    write(&dir.join("specs/b.md"), "# Spec\n");
-    write(&dir.join("specs/b.url"), "https://example.com\n");
-    let read = || read_specs(&dir, &HashMap::new(), &HashMap::new(), UtcOffset::UTC).unwrap();
-    let before = read().remove(0);
-    assert_eq!(before.revisions, 0);
-
-    write(
-        &dir.join("requests/b.md"),
-        "# Requests\n\n## Revision 1, 2026-10-14: revise the drafted spec\ntext\n\n\
-         ## Revision 2, 2026-10-15: shorter\n",
-    );
-    write(&dir.join("specs/b.md"), "# Spec, revised\n");
-    let after = read().remove(0);
-
-    assert_eq!(after.ready_at, before.ready_at);
-    assert_eq!(after.state, SpecState::Waiting);
-    assert_eq!(after.revisions, 2);
+    assert_eq!(read, SpecRead::default());
 }
 
 #[test]
@@ -1040,19 +1163,61 @@ fn a_file_with_a_second_dot_is_not_a_spec() {
     write(&dir.join("specs/a.revisions.md"), "# Revisions\n");
     write(&dir.join("specs/b.revisions.md"), "# Revisions\n");
 
-    let specs = read_specs(&dir, &HashMap::new(), &HashMap::new(), UtcOffset::UTC).unwrap();
+    let specs = read_files(&dir).specs;
 
     let ids: Vec<&str> = specs.iter().map(|spec| spec.id.as_str()).collect();
     assert_eq!(ids, ["a"]);
 }
 
 #[test]
-fn revisions_count_the_revision_headings() {
+fn revision_marks_count_revisions_direction_and_architect_rounds() {
+    let text = "# Revisions\n\
+        ## 2026-10-20, rev 1 (first)\n\
+        ## 2026-10-21, rev 2 (direction)\n\
+        ## 2026-10-22, rev 3 (defect, architect)\n\
+        ## 2026-10-23, rev 4 (direction, architect)\n\
+        ## 2026-10-24, rev 5\n\
+        ### 2026-10-25, a deeper heading (direction)\n\
+        ## 2026-10-26, rev 6 (see the note) (defect)\n";
+
     assert_eq!(
-        revisions("# R\n## Revision 1, x\n## Revisions\n### Revision 2\n"),
-        1
+        revision_marks(text),
+        RevisionMarks {
+            revisions: 5,
+            direction: 2,
+            architect: 2,
+        }
     );
-    assert_eq!(revisions(""), 0);
+    assert_eq!(revision_marks(""), RevisionMarks::default());
+}
+
+#[test]
+fn the_revisions_file_gives_the_specs_revisions() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "b");
+    assert_eq!(read_files(&dir).specs[0].revisions, 0);
+
+    write(
+        &dir.join("specs/b.revisions.md"),
+        "## 2026-10-14, rev 1 (first)\n## 2026-10-15, rev 2 (direction, architect)\n",
+    );
+    // The old count in the request file no longer counts.
+    write(
+        &dir.join("requests/b.md"),
+        "## Revision 1, x\n## Revision 2, y\n",
+    );
+
+    let spec = read_files(&dir).specs.remove(0);
+
+    assert_eq!(
+        (
+            spec.revisions,
+            spec.direction_revisions,
+            spec.architect_rounds
+        ),
+        (1, 1, 1)
+    );
 }
 
 #[test]
@@ -1084,17 +1249,339 @@ fn the_states_have_the_spec_names_and_later_wins() {
     let names: Vec<_> = SpecState::ALL.iter().map(|state| state.as_str()).collect();
     assert_eq!(
         names,
+        ["open", "approved", "in_progress", "completed", "withdrawn"]
+    );
+    assert!(SpecState::Withdrawn > SpecState::Completed);
+    assert!(SpecState::Completed > SpecState::InProgress);
+    assert!(SpecState::InProgress > SpecState::Approved);
+    assert!(SpecState::Approved > SpecState::Open);
+}
+
+#[test]
+fn started_keeps_the_files_time_when_a_later_stage_starts_a_worker() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "s");
+    put_started(&dir, "s", "2026-10-20T10:00:00Z");
+    let now = OffsetDateTime::now_utc();
+    // The worktree of stage 2 is busy now: its pane file is newer than the started file.
+    let busy = HashMap::from([("s-2".to_owned(), now)]);
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &busy, &[], &HashMap::new());
+
+    let spec = &read.specs[0];
+    assert_eq!(spec.state, SpecState::InProgress);
+    assert_eq!(spec.state_at, at("2026-10-20T10:00:00Z"));
+    assert_eq!(spec.started_at, Some(at("2026-10-20T10:00:00Z")));
+}
+
+/// A pod folder with spec `s` that has a started file 20 days before `now`.
+fn staged_spec(pod: &Pod, now: OffsetDateTime) -> PathBuf {
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "s");
+    put_approval(&dir, "s");
+    let started = (now - time::Duration::days(20))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    put_started(&dir, "s", &started);
+    dir
+}
+
+fn days_ago(now: OffsetDateTime, days: i64) -> OffsetDateTime {
+    now - time::Duration::days(days)
+}
+
+fn stage_notice() -> Notice {
+    Notice::StageMergedWithoutFile {
+        id: "s".into(),
+        stage: "1b".into(),
+    }
+}
+
+#[test]
+fn a_stage_merge_with_a_started_file_and_no_merged_file_never_completes_the_spec() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = staged_spec(&pod, now);
+    let none = HashMap::new();
+
+    // Under 7 days ago, though `started:` is 20 days ago: in progress, nothing to log.
+    let fresh = [entry("merge s-1b: Fast-forward", days_ago(now, 2))];
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &fresh, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(read.notices, Vec::new());
+
+    // Over 7 days ago: still in progress, and the stage merge is noted.
+    let old = [entry("merge s-1b: Fast-forward", days_ago(now, 8))];
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &old, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(read.notices, vec![stage_notice()]);
+
+    // A busy worktree of the spec, such as the next stage's, means it is not waiting.
+    let busy = HashMap::from([("s-2".to_owned(), now)]);
+    let read = read_with(&dir, now, UtcOffset::UTC, &busy, &old, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(read.notices, Vec::new());
+}
+
+#[test]
+fn a_merge_without_a_stage_over_seven_days_old_completes_a_spec_with_no_merged_file() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = staged_spec(&pod, now);
+    let none = HashMap::new();
+    // The reflog keeps whole seconds.
+    let merge = days_ago(now, 8).replace_nanosecond(0).unwrap();
+    let whole = [entry("merge s: Fast-forward", merge)];
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &whole, &none);
+
+    let spec = &read.specs[0];
+    assert_eq!((spec.state, spec.state_at), (SpecState::Completed, merge));
+    assert_eq!(spec.merged_commit, None);
+    assert_eq!(
+        read.notices,
+        vec![Notice::CompletedWithoutFile { id: "s".into() }]
+    );
+
+    // A worktree of a worker running for the spec holds it back.
+    let busy = HashMap::from([("s".to_owned(), now)]);
+    let read = read_with(&dir, now, UtcOffset::UTC, &busy, &whole, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(read.notices, Vec::new());
+
+    // A merge under 7 days ago is not yet the end.
+    let recent = [entry("merge s: Fast-forward", days_ago(now, 2))];
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &recent, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(read.notices, Vec::new());
+
+    // A worktree seen gone after its merge counts as a merge without a stage.
+    let gone = HashMap::from([("s".to_owned(), merge)]);
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &[], &gone);
+    assert_eq!(read.specs[0].state, SpecState::Completed);
+}
+
+#[test]
+fn a_later_stage_merge_blocks_the_completion_by_an_older_merge_without_a_stage() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = staged_spec(&pod, now);
+    let none = HashMap::new();
+    // Newest first.
+    let later_stage = [
+        entry("merge s-2: Fast-forward", days_ago(now, 9)),
+        entry("merge s: Fast-forward", days_ago(now, 10)),
+    ];
+    let earlier_stage = [
+        entry("merge s: Fast-forward", days_ago(now, 9)),
+        entry("merge s-1: Fast-forward", days_ago(now, 10)),
+    ];
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &later_stage, &none);
+    assert_eq!(read.specs[0].state, SpecState::InProgress);
+    assert_eq!(
+        read.notices,
+        vec![Notice::StageMergedWithoutFile {
+            id: "s".into(),
+            stage: "2".into()
+        }]
+    );
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &earlier_stage, &none);
+    assert_eq!(read.specs[0].state, SpecState::Completed);
+}
+
+#[test]
+fn a_spec_with_neither_file_completes_from_a_merge_as_before() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "s");
+    put_spec(&dir, "t");
+    let none = HashMap::new();
+    let reflog = [
+        entry("merge s: Fast-forward", now),
+        entry("merge t-1: Fast-forward", now),
+    ];
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &reflog, &none);
+
+    let specs = by_id(read.specs);
+    assert_eq!(specs["s"].state, SpecState::Completed);
+    // A stage merge alone never completed a spec.
+    assert_eq!(specs["t"].state, SpecState::Open);
+    assert_eq!(read.notices, Vec::new());
+}
+
+#[test]
+fn a_merged_file_completes_the_spec_whatever_the_reflog_says() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = staged_spec(&pod, now);
+    put_merged(&dir, "s", "2026-10-22T09:00:00Z", COMMIT);
+    let none = HashMap::new();
+    let stage = [entry("merge s-3: Fast-forward", now)];
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &stage, &none);
+
+    assert_eq!(read.specs[0].state, SpecState::Completed);
+    assert_eq!(read.specs[0].state_at, at("2026-10-22T09:00:00Z"));
+    assert_eq!(read.notices, Vec::new());
+}
+
+#[test]
+fn a_file_that_does_not_parse_falls_back_to_the_older_sources_and_is_noted() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["w", "m", "st"] {
+        put_spec(&dir, id);
+        put_approval(&dir, id);
+    }
+    write(
+        &dir.join("withdrawn/w.md"),
+        "withdrawn: yesterday\nreason: replaced\n",
+    );
+    write(&dir.join("rejections.md"), "- w, 2026-10-14, too big\n");
+    write(
+        &dir.join("merged/m.md"),
+        "merged: 2026-10-22T09:00:00Z\ncommit: not-a-sha\n",
+    );
+    write(&dir.join("started/st.md"), "started: 20 October\n");
+    let now = OffsetDateTime::now_utc();
+    let reflog = [entry("merge m: Fast-forward", now)];
+
+    let read = read_with(
+        &dir,
+        now,
+        UtcOffset::UTC,
+        &HashMap::new(),
+        &reflog,
+        &HashMap::new(),
+    );
+
+    let specs = by_id(read.specs);
+    // Withdrawn by the rejection line, completed by the reflog, approved without a start.
+    assert_eq!(specs["w"].state, SpecState::Withdrawn);
+    assert_eq!(specs["w"].withdrawn.as_ref().unwrap().reason, "rejected");
+    assert_eq!(specs["m"].state, SpecState::Completed);
+    assert_eq!(specs["m"].merged_commit, None);
+    assert_eq!(specs["st"].state, SpecState::Approved);
+    let mut files: Vec<(&str, &str)> = read
+        .notices
+        .iter()
+        .map(|notice| match notice {
+            Notice::Unreadable { id, file, .. } => (id.as_str(), file.as_str()),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
         [
-            "drafted",
-            "waiting_for_approval",
-            "approved",
-            "building",
-            "rejected",
-            "merged"
+            ("m", "merged/m.md"),
+            ("st", "started/st.md"),
+            ("w", "withdrawn/w.md")
         ]
     );
-    assert!(SpecState::Merged > SpecState::Rejected);
-    assert!(SpecState::Rejected > SpecState::Building);
+}
+
+#[test]
+fn a_withdrawn_file_with_an_unknown_reason_does_not_parse() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "w");
+    write(
+        &dir.join("withdrawn/w.md"),
+        "withdrawn: 2026-10-23T09:00:00Z\nreason: bored\n",
+    );
+
+    let read = read_files(&dir);
+
+    assert_eq!(read.specs[0].state, SpecState::Open);
+    assert_eq!(read.notices.len(), 1);
+}
+
+#[test]
+fn the_effort_counts_build_worker_hours_from_the_start_to_the_end_or_to_now() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["done", "gone", "live"] {
+        put_spec(&dir, id);
+        put_started(&dir, id, "2026-10-20T10:00:00Z");
+    }
+    put_merged(&dir, "done", "2026-10-20T12:30:00Z", COMMIT);
+    put_withdrawn(&dir, "gone", "2026-10-20T11:00:00Z", "replaced");
+    let now = at("2026-10-20T14:00:00Z");
+
+    let read = read_with(
+        &dir,
+        now,
+        UtcOffset::UTC,
+        &HashMap::new(),
+        &[],
+        &HashMap::new(),
+    );
+
+    let specs = by_id(read.specs);
+    assert_eq!(specs["done"].build_worker_seconds, 9000);
+    assert_eq!(specs["gone"].build_worker_seconds, 3600);
+    assert_eq!(specs["live"].build_worker_seconds, 14400);
+    let hours = |id: &str| {
+        effort_measures(&specs[id])
+            .into_iter()
+            .find(|(measure, _)| *measure == "build_worker_hours")
+            .unwrap()
+            .1
+    };
+    assert_eq!(hours("done"), 2.5);
+    assert_eq!(hours("live"), 4.0);
+}
+
+fn facts_in(state: SpecState, state_at: &str) -> SpecFacts {
+    SpecFacts {
+        id: format!("spec-{}", state.as_str()),
+        state,
+        state_at: at(state_at),
+        ..SpecFacts::default()
+    }
+}
+
+#[test]
+fn the_effort_gauge_leaves_out_a_spec_that_finished_over_thirty_days_ago() {
+    let now = at("2026-10-26T12:00:00Z");
+    let specs = [
+        facts_in(SpecState::Open, "2026-01-01T00:00:00Z"),
+        facts_in(SpecState::Approved, "2026-01-01T00:00:00Z"),
+        facts_in(SpecState::InProgress, "2026-01-01T00:00:00Z"),
+        SpecFacts {
+            id: "recent-done".into(),
+            ..facts_in(SpecState::Completed, "2026-10-01T00:00:00Z")
+        },
+        SpecFacts {
+            id: "old-done".into(),
+            ..facts_in(SpecState::Completed, "2026-09-25T11:00:00Z")
+        },
+        SpecFacts {
+            id: "old-gone".into(),
+            ..facts_in(SpecState::Withdrawn, "2026-08-01T00:00:00Z")
+        },
+    ];
+
+    let ids: Vec<&str> = effort_specs(&specs, now)
+        .into_iter()
+        .map(|spec| spec.id.as_str())
+        .collect();
+
+    assert_eq!(
+        ids,
+        [
+            "spec-open",
+            "spec-approved",
+            "spec-in_progress",
+            "recent-done"
+        ]
+    );
 }
 
 fn spec(id: &str, state: SpecState, state_at: &str) -> SpecFacts {
@@ -1102,11 +1589,11 @@ fn spec(id: &str, state: SpecState, state_at: &str) -> SpecFacts {
         id: id.into(),
         state,
         state_at: at(state_at),
-        ready_at: Some(at("2026-10-14T10:00:00Z")),
+        open_at: Some(at("2026-10-14T10:00:00Z")),
         approved_at: Some(at("2026-10-14T10:31:00Z")),
-        merged_at: None,
         words: 120,
         revisions: 1,
+        ..SpecFacts::default()
     }
 }
 
@@ -1123,7 +1610,7 @@ fn start_up_reports_no_change() {
 }
 
 #[test]
-fn a_spec_that_merges_is_logged_without_a_lead_time() {
+fn a_spec_that_completes_is_logged_without_a_lead_time() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
     let mut book = SpecBook::default();
@@ -1132,12 +1619,19 @@ fn a_spec_that_merges_is_logged_without_a_lead_time() {
         &[spec("g", SpecState::Approved, "2026-10-14T10:31:00Z")],
     );
     let logs = CapturedLogs::start();
-    let mut merged = spec("g", SpecState::Merged, "2026-10-14T11:34:00Z");
-    merged.merged_at = Some(at("2026-10-14T11:34:00Z"));
+    let mut completed = spec("g", SpecState::Completed, "2026-10-14T11:34:00Z");
+    completed.merged_at = Some(at("2026-10-14T11:34:00Z"));
 
-    let changes = book.observe(&product, &[merged]);
+    let changes = book.observe(&product, &[completed]);
 
-    assert_eq!(changes, vec![("g".to_owned(), SpecState::Merged)]);
+    assert_eq!(
+        changes,
+        vec![SpecChange {
+            id: "g".to_owned(),
+            before: Some(SpecState::Approved),
+            state: SpecState::Completed
+        }]
+    );
     assert_eq!(
         test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
         None
@@ -1145,7 +1639,7 @@ fn a_spec_that_merges_is_logged_without_a_lead_time() {
     let text = logs.text();
     assert!(
         text.contains(&format!(
-            "INFO harold::pod: spec state changed pod.product={product} spec.id=g state=\"merged\" \
+            "INFO harold::pod: spec state changed pod.product={product} spec.id=g state=\"completed\" \
              spec.state_at=2026-10-14T11:34:00Z spec.words=120 spec.revisions=1"
         )),
         "{text}"
@@ -1154,24 +1648,25 @@ fn a_spec_that_merges_is_logged_without_a_lead_time() {
     assert_eq!(
         book.observe(
             &product,
-            &[spec("g", SpecState::Merged, "2026-10-14T11:34:00Z")]
+            &[spec("g", SpecState::Completed, "2026-10-14T11:34:00Z")]
         ),
         Vec::new()
     );
 }
 
 #[test]
-fn a_phase_with_a_missing_time_or_a_negative_length_is_not_recorded() {
+fn a_step_with_a_missing_time_or_a_negative_length_is_not_recorded() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
-    let mut facts = spec("g", SpecState::Merged, "2026-10-14T09:00:00Z");
-    facts.ready_at = None;
+    let mut facts = spec("g", SpecState::Completed, "2026-10-14T09:00:00Z");
+    facts.open_at = None;
     let spec_ref = SpecRef {
         id: "g".into(),
         stage: None,
     };
 
-    // No ready time, and merged before it was approved: the build phase would be negative.
+    // No open time, no started time, and a start that never came: the three steps are
+    // each missing a time.
     record_lead_time(
         &product,
         &spec_ref,
@@ -1179,36 +1674,57 @@ fn a_phase_with_a_missing_time_or_a_negative_length_is_not_recorded() {
         at("2026-10-14T09:00:00Z"),
         true,
     );
+    // Started before it was approved: that step would be negative, but the start to
+    // completion is fine.
+    facts.started_at = Some(at("2026-10-14T10:00:00Z"));
+    record_lead_time(
+        &product,
+        &spec_ref,
+        &facts,
+        at("2026-10-14T12:00:00Z"),
+        true,
+    );
 
+    assert_eq!(lead_time_series(&product, "open_to_approved"), Vec::new());
+    assert_eq!(
+        lead_time_series(&product, "approved_to_started"),
+        Vec::new()
+    );
+    let completed = lead_time_series(&product, "started_to_completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
     assert_eq!(
         test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
-        None
+        Some(7200.0)
     );
 }
 
 #[test]
-fn a_change_short_of_merged_is_logged_without_a_lead_time() {
+fn a_change_short_of_completed_is_logged_without_a_lead_time() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
     let mut book = SpecBook::default();
     book.observe(
         &product,
-        &[spec("g", SpecState::Waiting, "2026-10-14T10:00:00Z")],
+        &[spec("g", SpecState::Open, "2026-10-14T10:00:00Z")],
     );
 
     let changes = book.observe(
         &product,
         &[
             spec("g", SpecState::Approved, "2026-10-14T10:31:00Z"),
-            spec("n", SpecState::Drafted, "2026-10-14T10:40:00Z"),
+            spec("n", SpecState::Open, "2026-10-14T10:40:00Z"),
         ],
     );
 
+    let seen: Vec<_> = changes
+        .iter()
+        .map(|change| (change.id.as_str(), change.before, change.state))
+        .collect();
     assert_eq!(
-        changes,
-        vec![
-            ("g".to_owned(), SpecState::Approved),
-            ("n".to_owned(), SpecState::Drafted)
+        seen,
+        [
+            ("g", Some(SpecState::Open), SpecState::Approved),
+            ("n", None, SpecState::Open)
         ]
     );
     assert_eq!(
@@ -1252,14 +1768,14 @@ async fn a_poll_reports_specs_by_state_and_their_words() {
     stats.poll().await;
 
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["spec-x"].state, SpecState::Merged);
+    assert_eq!(specs["spec-x"].state, SpecState::Completed);
     assert_eq!(specs["spec-x"].words, 6);
-    assert_eq!(specs["spec-y"].state, SpecState::Drafted);
+    assert_eq!(specs["spec-y"].state, SpecState::Open);
     let text = logs.text();
     assert_eq!(text.matches("spec state changed").count(), 1, "{text}");
     assert!(
         text.contains(&format!(
-            "spec state changed pod.product={} spec.id=spec-x state=\"merged\"",
+            "spec state changed pod.product={} spec.id=spec-x state=\"completed\"",
             pod.name
         )),
         "{text}"
@@ -1324,7 +1840,7 @@ async fn a_worktree_gone_after_its_commit_merged_counts_as_merged_without_a_refl
     let (mut stats, snapshot) = stats(one_product(&pod, &repo));
     stats.poll().await;
     let building = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(building["h"].state, SpecState::Building);
+    assert_eq!(building["h"].state, SpecState::InProgress);
     assert_eq!(
         building["h"].state_at,
         created(&h.join(".superpowers/baton/agent-pane"))
@@ -1342,9 +1858,9 @@ async fn a_worktree_gone_after_its_commit_merged_counts_as_merged_without_a_refl
     stats.poll().await;
 
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["h"].state, SpecState::Merged);
+    assert_eq!(specs["h"].state, SpecState::Completed);
     assert!(specs["h"].state_at >= before);
-    assert_eq!(specs["k"].state, SpecState::Drafted);
+    assert_eq!(specs["k"].state, SpecState::Open);
     let line = format!("{GONE_LINE} pod.product={} spec.id=k", pod.name);
     // Within the hour k is still asked about, and nothing is logged.
     let text = logs.text();
@@ -1361,8 +1877,8 @@ async fn a_worktree_gone_after_its_commit_merged_counts_as_merged_without_a_refl
     assert_eq!(text.matches(&line).count(), 1, "{text}");
     assert!(stats.gone[&pod.name].is_empty());
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["h"].state, SpecState::Merged);
-    assert_eq!(specs["k"].state, SpecState::Drafted);
+    assert_eq!(specs["h"].state, SpecState::Completed);
+    assert_eq!(specs["k"].state, SpecState::Open);
 }
 
 #[tokio::test]
@@ -1379,14 +1895,14 @@ async fn a_gone_worktree_is_asked_about_again_until_its_commit_merges() {
     stats.poll().await;
     let seen_by = OffsetDateTime::now_utc();
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["m"].state, SpecState::Drafted);
+    assert_eq!(specs["m"].state, SpecState::Open);
 
     // The merge lands a poll later: it counts from when the worktree was seen gone.
     git(&repo, &["merge", "-q", "--ff-only", "m"]);
     stats.poll().await;
 
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["m"].state, SpecState::Merged);
+    assert_eq!(specs["m"].state, SpecState::Completed);
     assert!(specs["m"].state_at >= before && specs["m"].state_at <= seen_by);
 }
 
@@ -1415,7 +1931,7 @@ async fn a_spec_merged_by_the_reflog_counts_from_the_move_not_the_commit() {
     stats.poll().await;
 
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["spec-late"].state, SpecState::Merged);
+    assert_eq!(specs["spec-late"].state, SpecState::Completed);
     assert!(
         specs["spec-late"].state_at >= before,
         "{}",
@@ -1448,7 +1964,7 @@ async fn an_unreadable_specs_folder_waits_for_the_next_poll() {
     );
     assert_eq!(unreadable.specs.get(&pod.name), None);
     let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
-    assert_eq!(specs["spec-u"].state, SpecState::Waiting);
+    assert_eq!(specs["spec-u"].state, SpecState::Open);
     let text = logs.text();
     assert_eq!(
         text.matches(&format!(
@@ -1499,32 +2015,11 @@ fn lead_time_series(product: &str, phase: &str) -> Vec<(BTreeMap<String, String>
         .unwrap_or_default()
 }
 
-/// The time of the newest reflog entry of `main` in `repo`.
-fn newest_merge_time(repo: &Path) -> OffsetDateTime {
-    let entry = git(
-        repo,
-        &[
-            "reflog",
-            "show",
-            "--date=unix",
-            "--format=%gd",
-            "-1",
-            "refs/heads/main",
-        ],
-    );
-    OffsetDateTime::from_unix_timestamp(reflog_time(&entry).unwrap()).unwrap()
-}
-
-/// Writes the files of a spec `id` that is ready and approved: the spec, its link and its
-/// approval, then waits out the second, so the whole-second merge time that follows is
+/// Writes the files of a spec `id` that is open and approved: the spec and its approval, then waits out the second, so the whole-second merge time that follows is
 /// after the approval's creation time.
 async fn approved_spec(repo: &Path, id: &str) {
     let pod = repo.join(".superpowers/pod");
     write(&pod.join(format!("specs/{id}.md")), "# Spec\n");
-    write(
-        &pod.join(format!("specs/{id}.url")),
-        "https://example.com\n",
-    );
     write(&pod.join(format!("approvals/{id}.md")), "approved\n");
     tokio::time::sleep(Duration::from_millis(1100)).await;
 }
@@ -1534,7 +2029,7 @@ fn keys(attributes: &BTreeMap<String, String>) -> BTreeSet<&str> {
 }
 
 #[tokio::test]
-async fn a_merge_records_both_phases_with_its_spec() {
+async fn a_merge_without_files_records_open_to_approved_with_its_spec() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     approved_spec(&repo, "g").await;
@@ -1545,37 +2040,33 @@ async fn a_merge_records_both_phases_with_its_spec() {
     stats.poll().await;
 
     let files = repo.join(".superpowers/pod");
-    let ready = created(&files.join("specs/g.url"));
+    let open = created(&files.join("specs/g.md"));
     let approved = created(&files.join("approvals/g.md"));
-    let merged = newest_merge_time(&repo);
-    let seconds = |from: OffsetDateTime, to: OffsetDateTime| (to - from).as_seconds_f64();
     assert_eq!(
         test_support::histogram_sum(
             "pod.spec.lead_time",
             &[
                 ("pod.product", pod.name.as_str()),
-                ("phase", "waiting_for_user"),
+                ("phase", "open_to_approved"),
                 ("spec.id", "g"),
                 ("spec.revisions", "0"),
             ]
         ),
-        Some(seconds(ready, approved))
+        Some((approved - open).as_seconds_f64())
+    );
+    // The older sources know no start, so the later steps have no time.
+    assert_eq!(
+        lead_time_series(&pod.name, "approved_to_started"),
+        Vec::new()
     );
     assert_eq!(
-        test_support::histogram_sum(
-            "pod.spec.lead_time",
-            &[
-                ("pod.product", pod.name.as_str()),
-                ("phase", "build"),
-                ("spec.id", "g"),
-            ]
-        ),
-        Some(seconds(approved, merged))
+        lead_time_series(&pod.name, "started_to_completed"),
+        Vec::new()
     );
 }
 
 #[tokio::test]
-async fn a_stage_records_build_but_not_waiting_again() {
+async fn a_stage_does_not_record_open_to_approved_again() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     approved_spec(&repo, "away-web-app").await;
@@ -1587,27 +2078,17 @@ async fn a_stage_records_build_but_not_waiting_again() {
     merge_branch(&repo, "away-web-app-1b", "y\n");
     stats.poll().await;
 
-    let waiting = lead_time_series(&pod.name, "waiting_for_user");
-    assert_eq!(waiting.len(), 1, "{waiting:?}");
-    assert_eq!(waiting[0].1, 1);
+    let steps = lead_time_series(&pod.name, "open_to_approved");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].1, 1);
     assert_eq!(
-        keys(&waiting[0].0),
+        keys(&steps[0].0),
         BTreeSet::from(["pod.product", "phase", "spec.revisions", "spec.id"])
     );
-    let mut build = lead_time_series(&pod.name, "build");
-    build.sort_by_key(|(attributes, _)| attributes.get("spec.stage").cloned());
-    assert_eq!(build.len(), 2, "{build:?}");
-    assert_eq!(build[0].0.get("spec.stage"), None);
-    assert_eq!(build[1].0.get("spec.stage").map(String::as_str), Some("1b"));
-    let base = ["pod.product", "phase", "spec.revisions", "spec.id"];
-    let staged = [base.as_slice(), &["spec.stage"]].concat();
-    assert_eq!(keys(&build[0].0), base.into_iter().collect());
-    assert_eq!(keys(&build[1].0), staged.into_iter().collect());
-    assert_eq!((build[0].1, build[1].1), (1, 1));
 }
 
 #[tokio::test]
-async fn waiting_is_recorded_on_the_specs_oldest_merge() {
+async fn open_to_approved_is_recorded_on_the_specs_oldest_merge() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     approved_spec(&repo, "s").await;
@@ -1625,23 +2106,17 @@ async fn waiting_is_recorded_on_the_specs_oldest_merge() {
     merge_branch(&repo, "t", "d\n");
     stats.poll().await;
 
-    let of = |id: &str, phase: &str| -> Vec<_> {
-        lead_time_series(&pod.name, phase)
+    let of = |id: &str| -> Vec<_> {
+        lead_time_series(&pod.name, "open_to_approved")
             .into_iter()
             .filter(|(attributes, _)| attributes["spec.id"] == id)
             .collect()
     };
-    let waiting = of("s", "waiting_for_user");
-    assert_eq!(waiting.len(), 1, "{waiting:?}");
-    assert_eq!(waiting[0].1, 1);
-    assert_eq!(
-        waiting[0].0.get("spec.stage").map(String::as_str),
-        Some("1")
-    );
-    let waiting = of("t", "waiting_for_user");
-    assert_eq!(waiting.iter().map(|(_, count)| count).sum::<u64>(), 1);
-    let build = of("t", "build");
-    assert_eq!(build.iter().map(|(_, count)| count).sum::<u64>(), 2);
+    let steps = of("s");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].1, 1);
+    assert_eq!(steps[0].0.get("spec.stage").map(String::as_str), Some("1"));
+    assert_eq!(of("t").iter().map(|(_, count)| count).sum::<u64>(), 1);
 }
 
 #[tokio::test]
@@ -1698,6 +2173,8 @@ async fn a_reflog_that_cannot_be_read_keeps_the_slots() {
         NoReflog,
         Arc::clone(&snapshot),
         UtcOffset::UTC,
+        no_agents(),
+        None,
     );
     let logs = CapturedLogs::start();
 
@@ -1730,7 +2207,7 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
     let path = one_product(&pod, &repo);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let handle = start(path, tips_path(&pod), shutdown_rx);
+    let handle = start(path, tips_path(&pod), empty_hub(), None, shutdown_rx);
 
     let snapshot = gauge_snapshot();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1747,14 +2224,8 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
             &[("pod.product", pod.name.as_str()), ("state", state)],
         )
     };
-    assert_eq!(count("drafted"), Some(1));
-    for state in [
-        "waiting_for_approval",
-        "approved",
-        "building",
-        "rejected",
-        "merged",
-    ] {
+    assert_eq!(count("open"), Some(1));
+    for state in ["approved", "in_progress", "completed", "withdrawn"] {
         assert_eq!(count(state), Some(0), "{state}");
     }
     assert_eq!(
@@ -1763,7 +2234,7 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
             &[
                 ("pod.product", pod.name.as_str()),
                 ("spec.id", "spec-z"),
-                ("state", "drafted")
+                ("state", "open")
             ],
         ),
         Some(4)
@@ -1774,6 +2245,516 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
         .await
         .expect("the task stops at shutdown")
         .unwrap();
+}
+
+// --- stages, the 7-day rules, the new files and the steps ---
+
+/// The pod folder of `repo`.
+fn pod_files(repo: &Path) -> PathBuf {
+    repo.join(".superpowers/pod")
+}
+
+fn rfc(time: OffsetDateTime) -> String {
+    time.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+/// Like `merge_branch`, with the reflog entry of the merge dated `days` days ago.
+fn merge_branch_days_ago(repo: &Path, branch: &str, text: &str, days: i64) {
+    git(repo, &["checkout", "-q", "-b", branch]);
+    write(&repo.join("f"), text);
+    git(repo, &["commit", "-q", "-a", "-m", branch]);
+    git(repo, &["checkout", "-q", "main"]);
+    let when = rfc(OffsetDateTime::now_utc() - time::Duration::days(days));
+    git_with(
+        repo,
+        &[("GIT_COMMITTER_DATE", when.as_str())],
+        &["merge", "-q", "--ff-only", branch],
+    );
+}
+
+fn lead_time_total(product: &str) -> Option<f64> {
+    test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product)])
+}
+
+#[tokio::test]
+async fn a_stage_1_merge_with_a_started_file_leaves_the_spec_in_progress_and_records_no_lead_time()
+{
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    put_started(&pod_files(&repo), "s", &rfc(OffsetDateTime::now_utc()));
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "s-1", "x\n");
+    stats.poll().await;
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["s"].state, SpecState::InProgress);
+    assert_eq!(lead_time_total(&pod.name), None);
+    // The merge itself is still counted under its spec and stage.
+    assert_eq!(
+        test_support::counter_value(
+            "pod.merges",
+            &[
+                ("pod.product", pod.name.as_str()),
+                ("spec.id", "s"),
+                ("spec.stage", "1")
+            ]
+        ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_merge_without_a_stage_over_seven_days_old_completes_the_spec_and_logs_once() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    let files = pod_files(&repo);
+    put_started(
+        &files,
+        "s",
+        &rfc(OffsetDateTime::now_utc() - time::Duration::days(20)),
+    );
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let logs = CapturedLogs::start();
+
+    merge_branch_days_ago(&repo, "s", "x\n", 8);
+    stats.poll().await;
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["s"].state, SpecState::Completed);
+    let text = logs.text();
+    let line = format!(
+        "spec completed without merged file pod.product={} spec.id=s",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    // The time is a guess, so no lead time is recorded.
+    assert_eq!(lead_time_total(&pod.name), None);
+}
+
+#[tokio::test]
+async fn a_stage_merge_over_seven_days_old_logs_once_and_the_spec_stays_in_progress() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    let files = pod_files(&repo);
+    put_started(
+        &files,
+        "s",
+        &rfc(OffsetDateTime::now_utc() - time::Duration::days(20)),
+    );
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let logs = CapturedLogs::start();
+
+    merge_branch_days_ago(&repo, "s-1b", "x\n", 8);
+    stats.poll().await;
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["s"].state, SpecState::InProgress);
+    let text = logs.text();
+    let line = format!(
+        "spec stage merged without merged file pod.product={} spec.id=s spec.stage=1b",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert!(
+        !text.contains("spec completed without merged file"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_stage_merge_under_seven_days_old_logs_nothing_though_the_spec_started_earlier() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    let files = pod_files(&repo);
+    put_started(
+        &files,
+        "s",
+        &rfc(OffsetDateTime::now_utc() - time::Duration::days(20)),
+    );
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let logs = CapturedLogs::start();
+
+    merge_branch_days_ago(&repo, "s-1", "x\n", 2);
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["s"].state, SpecState::InProgress);
+    let text = logs.text();
+    assert!(!text.contains("without merged file"), "{text}");
+}
+
+#[tokio::test]
+async fn a_pod_file_that_does_not_parse_is_logged_once_per_change_without_its_path() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    put_spec(&files, "s");
+    write(&files.join("merged/s.md"), "merged: soon\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    let logs = CapturedLogs::start();
+
+    stats.poll().await;
+    stats.poll().await;
+
+    let line = format!(
+        "pod file unreadable pod.product={} spec.id=s file=merged/s.md",
+        pod.name
+    );
+    let text = logs.text();
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert!(
+        !text.contains(repo.to_str().unwrap()),
+        "the log names a full path: {text}"
+    );
+    assert_eq!(
+        snapshot.lock().unwrap().specs[&pod.name][0].state,
+        SpecState::Open
+    );
+
+    write(&files.join("merged/s.md"), "merged: later\n");
+    stats.poll().await;
+    stats.poll().await;
+    assert_eq!(logs.text().matches(&line).count(), 2);
+
+    // Once it parses it is read as the spec's merged file.
+    put_merged(&files, "s", "2026-10-22T09:00:00Z", COMMIT);
+    stats.poll().await;
+    assert_eq!(
+        snapshot.lock().unwrap().specs[&pod.name][0].state,
+        SpecState::Completed
+    );
+    assert_eq!(logs.text().matches(&line).count(), 2);
+}
+
+/// The start, approval and merge of spec `g` for the lead time tests, which waits out the
+/// second after writing the files. Returns the merged file's commit and the times of its
+/// started and merged files.
+async fn spec_with_started_file(repo: &Path) -> (OffsetDateTime, OffsetDateTime) {
+    approved_spec(repo, "g").await;
+    let approved = created(&pod_files(repo).join("approvals/g.md"));
+    let started = approved + time::Duration::hours(1);
+    put_started(&pod_files(repo), "g", &rfc(started));
+    (started, started + time::Duration::hours(2))
+}
+
+#[tokio::test]
+async fn a_merged_file_records_the_three_steps_once() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let (started, merged) = spec_with_started_file(&repo).await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "g", "x\n");
+    let commit = git(&repo, &["rev-parse", "g"]);
+    put_merged(&pod_files(&repo), "g", &rfc(merged), &commit);
+    stats.poll().await;
+    stats.poll().await;
+
+    let files = pod_files(&repo);
+    let open = created(&files.join("specs/g.md"));
+    let approved = created(&files.join("approvals/g.md"));
+    let step = |phase: &str| {
+        test_support::histogram_sum(
+            "pod.spec.lead_time",
+            &[
+                ("pod.product", pod.name.as_str()),
+                ("phase", phase),
+                ("spec.id", "g"),
+            ],
+        )
+    };
+    assert_eq!(
+        step("open_to_approved"),
+        Some((approved - open).as_seconds_f64())
+    );
+    assert_eq!(
+        step("approved_to_started"),
+        Some((started - approved).as_seconds_f64())
+    );
+    assert_eq!(step("started_to_completed"), Some(7200.0));
+    for phase in [
+        "open_to_approved",
+        "approved_to_started",
+        "started_to_completed",
+    ] {
+        let series = lead_time_series(&pod.name, phase);
+        assert_eq!(
+            series.iter().map(|(_, count)| count).sum::<u64>(),
+            1,
+            "{phase}"
+        );
+        assert_eq!(
+            keys(&series[0].0),
+            BTreeSet::from(["pod.product", "phase", "spec.revisions", "spec.id"])
+        );
+    }
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[("pod.product", pod.name.as_str())]),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_merged_file_that_comes_after_the_poll_that_saw_the_merge_still_records_once() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let (_, merged) = spec_with_started_file(&repo).await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    merge_branch(&repo, "g", "x\n");
+    let commit = git(&repo, &["rev-parse", "g"]);
+    stats.poll().await;
+    assert_eq!(lead_time_total(&pod.name), None);
+
+    put_merged(&pod_files(&repo), "g", &rfc(merged), &commit);
+    stats.poll().await;
+    stats.poll().await;
+
+    let series = lead_time_series(&pod.name, "started_to_completed");
+    assert_eq!(series.iter().map(|(_, count)| count).sum::<u64>(), 1);
+}
+
+#[tokio::test]
+async fn completed_specs_at_a_products_first_poll_and_after_a_restart_record_no_lead_time() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let (_, merged) = spec_with_started_file(&repo).await;
+    merge_branch(&repo, "g", "x\n");
+    let commit = git(&repo, &["rev-parse", "g"]);
+    put_merged(&pod_files(&repo), "g", &rfc(merged), &commit);
+    let registry = one_product(&pod, &repo);
+    let (mut first, snapshot) = stats(registry.clone());
+
+    first.poll().await;
+    first.poll().await;
+
+    assert_eq!(
+        snapshot.lock().unwrap().specs[&pod.name][0].state,
+        SpecState::Completed
+    );
+    assert_eq!(lead_time_total(&pod.name), None);
+
+    // A restart: the tip file is in place, and the spec's commit is in the counted tip.
+    let (mut restarted, _) = stats(registry);
+    restarted.poll().await;
+    restarted.poll().await;
+    assert_eq!(lead_time_total(&pod.name), None);
+}
+
+#[tokio::test]
+async fn a_merge_while_harold_was_stopped_records_its_lead_time_at_the_next_start() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let (_, merged) = spec_with_started_file(&repo).await;
+    let registry = one_product(&pod, &repo);
+    let (mut first, _) = stats(registry.clone());
+    first.poll().await;
+    drop(first);
+
+    merge_branch(&repo, "g", "x\n");
+    let commit = git(&repo, &["rev-parse", "g"]);
+    put_merged(&pod_files(&repo), "g", &rfc(merged), &commit);
+    let (mut restarted, _) = stats(registry);
+    restarted.poll().await;
+    restarted.poll().await;
+
+    let series = lead_time_series(&pod.name, "started_to_completed");
+    assert_eq!(series.iter().map(|(_, count)| count).sum::<u64>(), 1);
+}
+
+#[tokio::test]
+async fn a_merged_file_with_no_started_file_skips_the_steps_it_has_no_time_for() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "g").await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "g", "x\n");
+    let commit = git(&repo, &["rev-parse", "g"]);
+    put_merged(
+        &pod_files(&repo),
+        "g",
+        &rfc(OffsetDateTime::now_utc()),
+        &commit,
+    );
+    stats.poll().await;
+
+    assert_eq!(lead_time_series(&pod.name, "open_to_approved").len(), 1);
+    assert_eq!(
+        lead_time_series(&pod.name, "approved_to_started"),
+        Vec::new()
+    );
+    assert_eq!(
+        lead_time_series(&pod.name, "started_to_completed"),
+        Vec::new()
+    );
+}
+
+fn live(pane_id: &str, folder: &str) -> LivePane {
+    LivePane {
+        pane_id: pane_id.into(),
+        folder: folder.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_pod_runs_when_a_pane_of_its_agent_panes_file_is_live_and_agents_count_by_role() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    pod.worktree(&repo, "w", true);
+    write(&pod_files(&repo).join("agent-panes"), "%80\n%81\n");
+    let panes = vec![
+        live("%80", "/pods/harold"),
+        live("%7", "/pods/harold-w"),
+        live("%99", "/work/chief/"),
+        live("%55", "/work/elsewhere"),
+    ];
+    let agents: AgentSource = Arc::new(move || panes.clone());
+    let (mut stats, snapshot) =
+        stats_with_agents(one_product(&pod, &repo), agents, Some("/work/chief"));
+
+    stats.poll().await;
+
+    let snapshot = snapshot.lock().unwrap().clone();
+    assert_eq!(snapshot.pods.get(&pod.name), Some(&true));
+    let count = |role, product: Option<&str>| {
+        snapshot
+            .agents
+            .get(&(role, product.map(str::to_owned)))
+            .copied()
+    };
+    let product = Some(pod.name.as_str());
+    assert_eq!(count(Role::PodCoordination, product), Some(1));
+    // `%81` is not live: the PnEM counts 0, not nothing.
+    assert_eq!(count(Role::Pnem, product), Some(0));
+    assert_eq!(count(Role::BuildWorker, product), Some(1));
+    assert_eq!(count(Role::Chief, None), Some(1));
+    assert_eq!(count(Role::Other, None), Some(1));
+}
+
+#[tokio::test]
+async fn a_pod_with_no_live_pane_is_stopped() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    write(&pod_files(&repo).join("agent-panes"), "%80\n%81\n");
+    let agents: AgentSource = Arc::new(|| vec![live("%12", "/work/elsewhere")]);
+    let (mut stats, snapshot) = stats_with_agents(one_product(&pod, &repo), agents, None);
+
+    stats.poll().await;
+
+    let snapshot = snapshot.lock().unwrap().clone();
+    assert_eq!(snapshot.pods.get(&pod.name), Some(&false));
+    assert_eq!(snapshot.agents[&(Role::Other, None)], 1);
+    assert_eq!(snapshot.agents[&(Role::Chief, None)], 0);
+}
+
+#[tokio::test]
+async fn a_pod_without_an_agent_panes_file_is_stopped() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let agents: AgentSource = Arc::new(|| vec![live("%80", "/work/elsewhere")]);
+    let (mut stats, snapshot) = stats_with_agents(one_product(&pod, &repo), agents, None);
+
+    stats.poll().await;
+
+    assert_eq!(snapshot.lock().unwrap().pods.get(&pod.name), Some(&false));
+}
+
+#[tokio::test]
+async fn the_pod_effort_and_agent_gauges_report_what_the_snapshot_holds() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let now = OffsetDateTime::now_utc();
+    let withdrawn = SpecFacts {
+        id: "gone".into(),
+        state: SpecState::Withdrawn,
+        state_at: now - time::Duration::days(2),
+        withdrawn: Some(Withdrawal {
+            reason: "replaced",
+            reached: Reached::InProgress,
+        }),
+        revisions: 3,
+        direction_revisions: 2,
+        architect_rounds: 1,
+        build_worker_seconds: 5400,
+        ..SpecFacts::default()
+    };
+    let old = SpecFacts {
+        id: "old".into(),
+        state: SpecState::Completed,
+        state_at: now - time::Duration::days(40),
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![withdrawn, old])]),
+        pods: BTreeMap::from([(product.clone(), false)]),
+        agents: BTreeMap::from([
+            ((Role::BuildWorker, Some(product.clone())), 2),
+            ((Role::Chief, None), 1),
+        ]),
+        ..PodSnapshot::default()
+    };
+
+    let effort = |spec: &str, measure: &str| {
+        test_support::gauge_f64_value(
+            "pod.spec.effort",
+            &[
+                ("pod.product", product.as_str()),
+                ("spec.id", spec),
+                ("measure", measure),
+                ("state", "withdrawn"),
+                ("withdrawn.reason", "replaced"),
+                ("withdrawn.reached", "in_progress"),
+            ],
+        )
+    };
+    assert_eq!(effort("gone", "revisions"), Some(3.0));
+    assert_eq!(effort("gone", "direction_revisions"), Some(2.0));
+    assert_eq!(effort("gone", "architect_rounds"), Some(1.0));
+    assert_eq!(effort("gone", "build_worker_hours"), Some(1.5));
+    assert_eq!(
+        test_support::gauge_f64_value(
+            "pod.spec.effort",
+            &[("pod.product", product.as_str()), ("spec.id", "old")]
+        ),
+        None
+    );
+    let pods = |state: &str| {
+        test_support::gauge_value(
+            "pod.pods",
+            &[("pod.product", product.as_str()), ("state", state)],
+        )
+    };
+    assert_eq!((pods("running"), pods("stopped")), (Some(0), Some(1)));
+    assert_eq!(
+        test_support::gauge_value(
+            "pod.agents",
+            &[("pod.product", product.as_str()), ("role", "build_worker")]
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        test_support::gauge_value("pod.agents", &[("role", "chief")]),
+        Some(1)
+    );
+
+    *snapshot.lock().unwrap() = PodSnapshot::default();
 }
 
 // --- the counted-tip file ---
@@ -1887,6 +2868,8 @@ async fn a_git_with_no_answer_records_nothing_and_leaves_the_file() {
         SilentMergeBase(Arc::clone(&silent)),
         Arc::new(Mutex::new(PodSnapshot::default())),
         UtcOffset::UTC,
+        no_agents(),
+        None,
     );
     stats.poll().await;
     let old = tip_file_text(&pod);
@@ -1991,6 +2974,8 @@ async fn an_unwritable_tip_file_counts_nothing_until_it_can_be_written() {
         test_git(),
         Arc::new(Mutex::new(PodSnapshot::default())),
         UtcOffset::UTC,
+        no_agents(),
+        None,
     );
     // A tip is known, then its folder is replaced by a regular file.
     stats.poll().await;

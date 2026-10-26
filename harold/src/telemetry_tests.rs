@@ -150,6 +150,30 @@ fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
 }
 
 #[test]
+fn the_pod_file_and_stage_fields_leave_a_log_record() {
+    test_support::install();
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    tracing::warn!(
+        pod.product = %product,
+        spec.id = "spec-a",
+        spec.stage = "1b",
+        file = "merged/spec-a.md",
+        "pod file unreadable"
+    );
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&product))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["pod.product", "spec.id", "spec.stage", "file"]);
+}
+
+#[test]
 fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
     test_support::install();
     let pane = unique_pane();
@@ -1732,6 +1756,9 @@ const METRICS: &[&str] = &[
     "harold.turn.duration",
     "pod.specs",
     "pod.spec.words",
+    "pod.spec.effort",
+    "pod.pods",
+    "pod.agents",
     "pod.spec.lead_time",
     "watch.runs",
     "watch.cost_usd",
@@ -1766,6 +1793,10 @@ const ATTRIBUTES: &[&str] = &[
     "state",
     "phase",
     "spec.revisions",
+    "measure",
+    "role",
+    "withdrawn.reason",
+    "withdrawn.reached",
     "harold.machine",
     "service.name",
     "folder",
@@ -1882,7 +1913,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
         &[
             "SELECT sum(specs)",
             "argMax(Value, TimeUnix)",
-            "Attributes['state'] = 'waiting_for_approval'",
+            "Attributes['state'] = 'open'",
         ],
     ),
     (
@@ -1892,7 +1923,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
         &[
             "SELECT count()",
             "min(TimeUnix) AS first_merged",
-            "Attributes['state'] = 'merged'",
+            "Attributes['state'] = 'completed'",
         ],
     ),
     (
@@ -1902,7 +1933,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
         &[
             "SELECT median(words)",
             "min(TimeUnix) AS first_ready",
-            "Attributes['state'] != 'drafted'",
+            "Attributes['state'] != 'withdrawn'",
         ],
     ),
     (
@@ -1911,7 +1942,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
         &["pod.spec.lead_time"],
         &[
             "quantileExactWeighted(0.5)",
-            "Attributes['phase'] = 'waiting_for_user'",
+            "Attributes['phase'] = 'open_to_approved'",
         ],
     ),
     (
@@ -1920,7 +1951,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
         &["pod.spec.lead_time"],
         &[
             "quantileExactWeighted(0.5)",
-            "Attributes['phase'] = 'build'",
+            "Attributes['phase'] = 'started_to_completed'",
         ],
     ),
 ];
@@ -1946,7 +1977,7 @@ const HISTOGRAM_RULE: [&str; 4] = [
 ];
 
 /// The spec's trends table, in order.
-const TREND_PANELS: [&str; 10] = [
+const TREND_PANELS: [&str; 12] = [
     "Slots",
     "Merges to main",
     "Phone requests reaching the right agent",
@@ -1955,7 +1986,9 @@ const TREND_PANELS: [&str; 10] = [
     "Turns per session",
     "Specs by state",
     "Spec size",
-    "Start to completion",
+    "Withdrawn and wasted",
+    "Pods and agents",
+    "Time per step",
     "Watch runs: cost and duration per run",
 ];
 
@@ -2507,10 +2540,90 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
 }
 
 #[test]
-fn the_trends_dashboard_has_the_ten_panels() {
+fn the_trends_dashboard_has_the_twelve_panels() {
     let trends = definition("trends.json");
     assert_eq!(trends["name"], "Harold trends");
     assert_eq!(tile_names(&trends), TREND_PANELS);
+}
+
+/// The SQL of the trends panel named `name`.
+fn trends_sql(name: &str) -> String {
+    let trends = definition("trends.json");
+    let tile = tiles(&trends)
+        .iter()
+        .find(|tile| tile["name"] == name)
+        .unwrap_or_else(|| panic!("no panel {name}"));
+    tile["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn the_spec_pod_and_agent_panels_read_the_new_gauges_and_steps() {
+    let trends = definition("trends.json");
+    let reads = |name: &str| {
+        let tile = tiles(&trends)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap();
+        metrics_read(&tile["config"])
+    };
+
+    // The latest value of each product and state, not a sum over time.
+    let by_state = trends_sql("Specs by state");
+    assert_eq!(reads("Specs by state"), ["pod.specs"]);
+    assert!(
+        by_state.contains("argMax(Value, TimeUnix) AS specs"),
+        "{by_state}"
+    );
+    for state in ["open", "approved", "in_progress", "completed", "withdrawn"] {
+        assert!(by_state.contains(&format!("state = '{state}'")), "{state}");
+    }
+
+    let wasted = trends_sql("Withdrawn and wasted");
+    assert_eq!(reads("Withdrawn and wasted"), ["pod.spec.effort"]);
+    for phrase in [
+        "withdrawn.reason",
+        "withdrawn.reached",
+        "'revisions'",
+        "'direction_revisions'",
+        "'architect_rounds'",
+        "'build_worker_hours'",
+        "direction_share",
+    ] {
+        assert!(wasted.contains(phrase), "{phrase}: {wasted}");
+    }
+
+    let pods = trends_sql("Pods and agents");
+    assert_eq!(
+        reads("Pods and agents"),
+        ["pod.agents", "pod.pods", "pod.specs"]
+    );
+    for phrase in [
+        "running_pods",
+        "registered_pods",
+        "stopped_pods_with_waiting_work",
+        "'pod_coordination'",
+        "'pnem'",
+        "'build_worker'",
+        "'chief'",
+        "'other'",
+    ] {
+        assert!(pods.contains(phrase), "{phrase}: {pods}");
+    }
+
+    let steps = trends_sql("Time per step");
+    assert_eq!(reads("Time per step"), ["pod.spec.lead_time"]);
+    for phrase in [
+        "median_7d",
+        "slowest_7d",
+        "median_30d",
+        "slowest_30d",
+        "INTERVAL 7 DAY",
+        "INTERVAL 30 DAY",
+    ] {
+        assert!(steps.contains(phrase), "{phrase}: {steps}");
+    }
+    // The three phases are the ones the metric records.
+    assert!(!steps.contains("waiting_for_user"));
 }
 
 #[test]

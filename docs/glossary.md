@@ -24,13 +24,23 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
-| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions | "coordinator", "main agent" |
+| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` names it | "coordinator", "main agent" |
 | the chief's row | The chief's row in the dash's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
 | pod session | A pod-coordination or PnEM pane | — |
 | build worker | An agent building one spec in its own worktree | "slot" for the worker |
 | slot | A place for one build worker in a pod, busy or free | — |
 | pod registry | The vault's `products.toml`, named by `[telemetry] pod_registry` | — |
+| open spec | A spec that has `specs/<id>.md` and no later state: the user has not approved it. `state` = `open` | "drafted", "waiting" for the state |
+| in-progress spec | A spec with a started file, or with a busy worktree, and no later state. `state` = `in_progress` | "building" for the state |
+| completed spec | A spec with a merged file, or one that the older sources show merged, and no withdrawn state. `state` = `completed` | "merged" for the state |
+| withdrawn spec | A spec with a withdrawn file or a line in `rejections.md`. `state` = `withdrawn` | "rejected" for the state |
+| withdrawn file | The file `withdrawn/<id>.md` in a pod folder, which the PnEM writes when it withdraws or replaces a spec | — |
+| started file | The file `started/<id>.md` in a pod folder, which baton's `spawn.sh` writes at the first spawn for a spec | — |
+| merged file | The file `merged/<id>.md` in a pod folder, which pod coordination writes when it sends `MERGED` for a spec's last stage | — |
+| direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
+| PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
+| pod coordination | A pod's session that starts build workers and merges their work. `role` = `pod_coordination` on `pod.agents` names it | "coordinator", "baton" for the session, "orchestrator" |
 | browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |
 | collector | The OpenTelemetry collector at `http://localhost:4317` and `http://localhost:4318`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC on 4317, and browser spans, which Harold forwards, as OTLP JSON on 4318, and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
 | local stack | The services in `~/code/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |

@@ -128,6 +128,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "spec.state_at",
     "spec.words",
     "spec.revisions",
+    "spec.stage",
+    "file",
     "phase",
     "change",
     "event_type",
@@ -2177,6 +2179,20 @@ pub(crate) mod test_support {
     pub(crate) fn gauge_value(name: &str, wanted: &[(&str, &str)]) -> Option<u64> {
         read_latest(name, |data| {
             let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = data else {
+                return None;
+            };
+            gauge
+                .data_points()
+                .find(|point| carries_all(point.attributes(), wanted))
+                .map(|point| point.value())
+        })
+    }
+
+    /// The value of the `f64` gauge `name` at its data point that carries every attribute
+    /// in `wanted`, or `None` when none does.
+    pub(crate) fn gauge_f64_value(name: &str, wanted: &[(&str, &str)]) -> Option<f64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = data else {
                 return None;
             };
             gauge

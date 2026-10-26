@@ -1388,6 +1388,8 @@ async fn start_telemetry_tasks(
         pod_stats::start(
             registry,
             pod_stats::tips_file(std::path::Path::new(&cfg.store.resolved_path())),
+            snapshots.clone(),
+            cfg.notify.chief.clone(),
             shutdown_rx.clone(),
         )
     });

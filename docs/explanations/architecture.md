@@ -86,7 +86,7 @@ flowchart LR
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
 | timed prompts | Text typed into a pane at a set time each day | `harold/src/timed_prompts.rs` |
 | alerts | HyperDX alerts typed to the chief | `harold/src/alerts.rs` |
-| telemetry and pod stats | OpenTelemetry export, and pod counts from the pod registry | `harold/src/telemetry.rs`, `harold/src/pod_stats.rs` |
+| telemetry and pod stats | OpenTelemetry export, and pod counts from the pod registry: slots, merges, specs by state, the time of each step, and the pods and agents that run. Harold reads three small files that the pod's shared tools write once, `withdrawn/<id>.md`, `started/<id>.md` and `merged/<id>.md`, and never writes in the pod folder. `pod_stats` also reads the agent snapshot for pane ids and folders ([ADR 0021](../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)) | `harold/src/telemetry.rs`, `harold/src/pod_stats.rs` |
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did | `hooks/` |
@@ -142,6 +142,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-25: ADR 0017, Harold serves each product's specs as pages in the web app and on a loopback-only listener, todo links point at those pages, and a spec leaves the machines only when the user presses **Share**, one spec at a time. [ADR 0017](../adr/0017-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md)
 - 2026-10-25: ADR 0018, every post and delete from a web app page goes through Datastar, which sends `Datastar-Request: true`, and the same-origin check reads that header. The call's raw audio post and the browser trace exporter are the two exceptions the user approved; only the user approves another. [ADR 0018](../adr/0018-every-web-app-post-goes-through-datastar-and-only-the-user-approves-an-exception.md)
 - 2026-10-26: ADR 0020, each machine runs one TTS server, built for its platform (the MLX worker on macOS, the ONNX worker on Linux), with Kokoro by default and other models only when they are on the approved model list. The user approved two exceptions: Kokoro for Linux from a GitHub release pinned by SHA-256, and NVIDIA's proprietary CUDA wheels. [ADR 0020](../adr/0020-each-machine-runs-one-tts-server-built-for-its-platform-and-downloads-only-approved-models.md)
+- 2026-10-26: ADR 0021, the pod's shared tools write `withdrawn/`, `started/` and `merged/` files once, and Harold reads them first, with the older git and worktree sources as a fallback. `pod_stats` also reads the agent snapshot, pane ids and folders only, to count pods and agents by role. [ADR 0021](../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)
 
 ## Departures from the standards
 
