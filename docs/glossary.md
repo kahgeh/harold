@@ -24,7 +24,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
-| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` names it | "coordinator", "main agent" |
+| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
 | the chief's row | The chief's row in the dash's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
 | pod session | A pod-coordination or PnEM pane | — |
