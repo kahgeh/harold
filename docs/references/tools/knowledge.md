@@ -71,7 +71,7 @@ Boxes are parts and cylinders are stores. Each dark group is where the parts run
 | The index's local copy | buckwal restores the database from the bucket at the next start |
 | The bucket's objects too | the next pass builds the index again from the vault |
 | TypeDB's data | Harold rebuilds the graph from the two logs, at start or with `graph rebuild` |
-| The two logs | TypeDB still holds the graph until the next `graph rebuild`. That rebuild replays only the records written after the loss, so the older typed relations are lost. The rebuild can also stop at a link or typed relation whose vault notes the new log lacks: see [A record TypeDB refuses](#a-record-typedb-refuses) |
+| The two logs | TypeDB still holds the graph. Harold applies the records of the new logs on top of it and logs `knowledge graph log restarted`. The older typed relations stay until the next `graph rebuild`. That rebuild replays only the records written after the loss, so the older typed relations are lost. The rebuild can also stop at a link or typed relation whose vault notes the new log lacks: see [A record TypeDB refuses](#a-record-typedb-refuses) |
 | The Mac | the vault and the bucket survive, if they live elsewhere. The logs and TypeDB's data are on this Mac only, so the typed relations are lost |
 
 ## The CLI
@@ -237,7 +237,7 @@ The rule is that **the graph must be recoverable**. The graph writer, one task i
 3. **Applies it.** In one TypeDB write transaction, it applies the change and moves the **graph position**.
 4. **Answers.** The caller hears back once the transaction commits.
 
-A change the graph already holds is not logged, so a pass over an unchanged vault logs nothing. Each change is safe to apply twice. Catch-up and replay apply every record whose sequence is greater than the position, never "the position plus one", since log sequences can jump.
+A change the graph already holds is not logged, so a pass over an unchanged vault logs nothing. Each change is safe to apply twice. Catch-up and replay apply every record whose sequence is greater than the position, never "the position plus one", since log sequences can jump. A log that started again is the one exception: when its last sequence is below the position, or it is empty while the position holds a sequence, the catch-up reads it from its start. Harold finds such a log at a catch-up, and at an append, when the log gives a sequence that is not above the last sequence the writer saw there. It applies every record of the log once and logs `knowledge graph log restarted`.
 
 **The relation types:** `relates_to`, `supersedes`, `part_of`, `inspired_by` and `contradicts`. A new type is a schema step, which comes with a Harold release.
 
@@ -340,9 +340,10 @@ idle_minutes = 10                                # the default
 
 | Signal | Fields | When |
 |---|---|---|
-| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change, after a refused or unanswered change, after a catch-up, and every minute, while the graph is on |
+| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position, and all records of a log that started again. Published after each change, after a refused or unanswered change, after a catch-up, and every minute, while the graph is on |
 | `harold.knowledge.typed_relations` (gauge) | none | The typed relations in the graph. Published after a change to them and every minute, while the graph is on |
 | `knowledge graph behind` (warn) | `sequence`, `reason`, `waiting` | TypeDB refuses a record, or records have waited 10 minutes (`reason` = `waiting_too_long`, `sequence` = the first record that waits). Once for each spell. A stopped graph is not judged |
+| `knowledge graph log restarted` (warn) | `kind` (`schema` or `data`), `sequence`, `records` | A log started again below the graph position. `sequence` is the position at a catch-up, or the last sequence seen at an append. `records` is the number of records applied from that log |
 | `knowledge graph record voided` (warn) | `sequence`, `reason` | A record is voided |
 | `knowledge graph rebuilt` (info) | `reason` (`asked` or `missing`), `schema_steps`, `records`, `voided`, `ms` | A rebuild ends |
 | `harold.knowledge.graph_rebuild` (span) | `reason`, `schema_steps`, `records`, `voided`, `ms`, `result` | Each rebuild |

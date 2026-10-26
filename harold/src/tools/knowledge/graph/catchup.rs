@@ -1,5 +1,6 @@
 //! Catch-up and replay: apply every logged record whose sequence is greater than the graph
-//! position, the schema log first, then the data log, passing each voided record.
+//! position, the schema log first, then the data log, passing each voided record. A log that
+//! started again below the position is read from its start.
 
 use std::collections::HashSet;
 
@@ -8,11 +9,13 @@ use super::log::{LogError, RecordLog};
 use super::records::{DataRecord, Op, SchemaRecord};
 
 /// What a catch-up applied.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Applied {
     pub schema_steps: usize,
     pub records: usize,
     pub voided: usize,
+    /// The logs read from their start, since they started again below the graph position.
+    pub restarted: Vec<Which>,
 }
 
 /// A record the database still refuses, or cannot be read.
@@ -47,15 +50,77 @@ fn backend_error(sequence: u64, error: BackendError) -> CatchUpError {
     }
 }
 
-/// Applies the schema log, then the data log, after the graph position.
+/// A log started again when it holds a position but its last sequence is below it, or it is empty.
+fn started_again(position: Option<u64>, end: Option<u64>) -> bool {
+    position.is_some_and(|position| end.is_none_or(|end| end < position))
+}
+
+/// The sequence to read after: `None` (read from the start) for a log that started again,
+/// else the position.
+pub(crate) fn start_after(position: Option<u64>, end: Option<u64>) -> Option<u64> {
+    if started_again(position, end) {
+        None
+    } else {
+        position
+    }
+}
+
+/// Reads the records to apply from one log, and whether the log is read from its start
+/// because it started again or because the caller asked for it.
+async fn read_to_apply(
+    log: &dyn RecordLog,
+    position: Option<u64>,
+    forced: bool,
+) -> Result<(bool, Vec<(u64, Vec<u8>)>), LogError> {
+    // One read of the whole log gives both its end and the records to apply.
+    let mut records = log.read_after(None).await?;
+    let end = records.last().map(|(sequence, _)| *sequence);
+    let restarted = forced || started_again(position, end);
+    if !forced && let Some(after) = start_after(position, end) {
+        records.retain(|(sequence, _)| *sequence > after);
+    }
+    Ok((restarted, records))
+}
+
+#[cfg(test)]
+/// Applies the schema log, then the data log, after the graph position. A log that started
+/// again, or one on `from_start`, is read from its start.
 pub(crate) async fn catch_up(
     backend: &dyn GraphBackend,
     schema_log: &dyn RecordLog,
     data_log: &dyn RecordLog,
+    from_start: &[Which],
 ) -> Result<Applied, CatchUpError> {
-    let position = backend.position().await.map_err(position_error)?;
     let mut applied = Applied::default();
-    for (sequence, value) in schema_log.read_after(position.schema).await? {
+    catch_up_into(backend, schema_log, data_log, from_start, &mut applied).await?;
+    Ok(applied)
+}
+
+/// The catch-up, counting into `applied` as it goes, so a caller still sees the logs found
+/// started again and the records applied when the catch-up stops at an error.
+pub(crate) async fn catch_up_into(
+    backend: &dyn GraphBackend,
+    schema_log: &dyn RecordLog,
+    data_log: &dyn RecordLog,
+    from_start: &[Which],
+    applied: &mut Applied,
+) -> Result<(), CatchUpError> {
+    let position = backend.position().await.map_err(position_error)?;
+    let (schema_restarted, schema_records) = read_to_apply(
+        schema_log,
+        position.schema,
+        from_start.contains(&Which::Schema),
+    )
+    .await?;
+    let (data_restarted, records) =
+        read_to_apply(data_log, position.data, from_start.contains(&Which::Data)).await?;
+    if schema_restarted {
+        applied.restarted.push(Which::Schema);
+    }
+    if data_restarted {
+        applied.restarted.push(Which::Data);
+    }
+    for (sequence, value) in schema_records {
         let record: SchemaRecord = serde_json::from_slice(&value).map_err(|_| {
             CatchUpError::Refused(Refusal {
                 sequence,
@@ -68,7 +133,6 @@ pub(crate) async fn catch_up(
             .map_err(|e| backend_error(sequence, e))?;
         applied.schema_steps += 1;
     }
-    let records = data_log.read_after(position.data).await?;
     // A void is logged after the record it names, so it is in this slice whenever that record is.
     let mut voided = HashSet::new();
     let mut decoded = Vec::with_capacity(records.len());
@@ -108,10 +172,11 @@ pub(crate) async fn catch_up(
             applied.records += 1;
         }
     }
-    Ok(applied)
+    Ok(())
 }
 
-/// How many records wait: those with a sequence greater than the position, in both logs.
+/// How many records wait: those with a sequence greater than the position, in both logs, and
+/// all records of a log that started again.
 pub(crate) async fn waiting(
     backend: &dyn GraphBackend,
     schema_log: &dyn RecordLog,
@@ -133,8 +198,8 @@ pub(crate) async fn waiting_from(
     schema_log: &dyn RecordLog,
     data_log: &dyn RecordLog,
 ) -> Result<Waiting, LogError> {
-    let schema = schema_log.read_after(position.schema).await?;
-    let data = data_log.read_after(position.data).await?;
+    let schema = read_to_apply(schema_log, position.schema, false).await?.1;
+    let data = read_to_apply(data_log, position.data, false).await?.1;
     Ok(Waiting {
         count: schema.len() + data.len(),
         first: schema

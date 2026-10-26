@@ -404,7 +404,16 @@ The [knowledge tool](../tools/knowledge.md#logs-and-spans) logs and traces these
 The [knowledge tool](../tools/knowledge.md#graph-logs-and-spans) logs and traces these. No field holds a vault note's path or text.
 
 1. *Is the graph in step with its logs?* The gauge `harold.knowledge.graph_waiting` counts the schema and data records with a sequence greater than the graph position. It is published after each change, after a change that TypeDB refuses or did not answer, and every minute, while the graph is on.
-   - **Issue detection:** the card "Graph records waiting" shows it, info only, with a line at 0. Over 0 for more than 10 minutes means the graph is short of its logs. The `knowledge graph behind` warn line fires when TypeDB refuses a record (`sequence`, `reason`, `waiting`), and when records have waited 10 minutes (`reason` = `waiting_too_long`, `sequence` = the first record that waits). It logs once for each spell, and the release watch looks for it. It should never happen. A graph that is stopped when idle is not judged. When TypeDB did not answer, the minute tick judges nothing and no warn line is written: the gauge and `graph status` show the records that wait.
+   - **Issue detection:** the card "Graph records waiting" shows it, info only, with a line at 0. Over 0 for more than 10 minutes means the graph is short of its logs. The `knowledge graph behind` warn line fires when TypeDB refuses a record (`sequence`, `reason`, `waiting`), and when records have waited 10 minutes (`reason` = `waiting_too_long`, `sequence` = the first record that waits). It logs once for each spell, and the release watch looks for it. It should never happen. A graph that is stopped when idle is not judged. When TypeDB did not answer, the minute tick judges nothing and no warn line is written: the gauge and `graph status` show the records that wait. The `knowledge graph log restarted` warn line fires when a schema log or data log started again from sequence 0 while TypeDB kept its position (`kind`, `sequence`, `records`). Expected: 0, because only a lost log folder causes it. This query finds any in the last 24 hours:
+
+     ```
+     SELECT Timestamp, LogAttributes['kind'] AS kind, LogAttributes['sequence'] AS sequence, LogAttributes['records'] AS records
+     FROM otel.otel_logs
+     WHERE ServiceName = 'harold' AND Body = 'knowledge graph log restarted'
+       AND Timestamp > now() - INTERVAL 24 HOUR
+     ```
+
+     A row means the graph lost a log.
    - **Error diagnosis:** the warn line names the record's sequence and a reason word. `harold tool knowledge graph status` prints the position, the end of each log, the records waiting and the last refusal. Read the record from the data log by its sequence. A `voided` count above 0 on a rebuild span leads to the `knowledge graph record voided` lines.
 2. *If TypeDB were lost, would the rebuild work, and how long would it take?* The span `harold.knowledge.graph_rebuild` carries `reason` (`asked` or `missing`), `schema_steps`, `records`, `voided`, `ms` and `result`.
    - **Optimisation:** the `ms` for the vault's size is the number a change is judged by. The aim is under 30 s at today's size.

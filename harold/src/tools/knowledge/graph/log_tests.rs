@@ -20,6 +20,13 @@ impl MemoryLog {
         self.inner.lock().unwrap().next = next;
     }
 
+    /// The log is lost and made again: it holds no record and starts at sequence 0.
+    pub(crate) fn start_again(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.next = 0;
+        inner.records.clear();
+    }
+
     pub(crate) fn fail_appends(&self, fail: bool) {
         self.inner.lock().unwrap().fail = fail;
     }

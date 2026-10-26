@@ -619,3 +619,126 @@ async fn a_spell_that_logged_a_refusal_stays_through_a_stop_and_a_start() {
     minutes(15).await;
     assert_eq!(lines.behind().len(), 1, "{}", lines.text());
 }
+
+/// The data log is lost and made again, and `names` are logged without TypeDB getting them.
+async fn lose_data_log_leaving_waiting(rig: &Rig, names: &[&str]) {
+    rig.data.start_again();
+    for name in names {
+        leave_waiting(rig, name).await;
+    }
+}
+
+impl Lines {
+    fn restarted(&self) -> Vec<String> {
+        self.text()
+            .lines()
+            .filter(|line| line.contains("knowledge graph log restarted"))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn a_data_log_that_started_again_is_applied_from_its_start_at_the_next_start() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.data.jump_to(500);
+    writer.submit(note("a"), By::Index).await.unwrap();
+    drop(writer);
+    lose_data_log_leaving_waiting(&rig, &["b", "c"]).await;
+    let writer = rig.start().await.unwrap();
+    assert_eq!(rig.graph.applied(), [500, 0, 1]);
+    let snapshot = rig.graph.snapshot().await.unwrap();
+    assert!(snapshot.notes.contains_key("b") && snapshot.notes.contains_key("c"));
+    let status = writer.status().await.unwrap();
+    assert_eq!((status.data_position, status.waiting), (Some(1), 0));
+    let found = lines.restarted();
+    assert_eq!(found.len(), 1, "{}", lines.text());
+    assert!(found[0].contains("WARN"), "{}", found[0]);
+    assert!(found[0].contains("kind=\"data\""), "{}", found[0]);
+    assert!(found[0].contains("sequence=500"), "{}", found[0]);
+    assert!(found[0].contains("records=2"), "{}", found[0]);
+}
+
+#[tokio::test]
+async fn a_status_counts_the_records_of_a_log_that_started_again_as_waiting() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.data.jump_to(500);
+    writer.submit(note("a"), By::Index).await.unwrap();
+    lose_data_log_leaving_waiting(&rig, &["b", "c", "d"]).await;
+    assert_eq!(writer.status().await.unwrap().waiting, 3);
+}
+
+#[tokio::test]
+async fn a_live_change_after_the_log_started_again_applies_every_record_of_the_new_log() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.data.jump_to(500);
+    writer.submit(note("a"), By::Index).await.unwrap();
+    lose_data_log_leaving_waiting(&rig, &["b", "c", "d"]).await;
+    // The live change gets sequence 3, below the position, while TypeDB answers.
+    let sequence = writer.submit(note("e"), By::Index).await.unwrap();
+    assert_eq!(sequence, Some(3));
+    assert_eq!(rig.graph.applied(), [500, 0, 1, 2, 3]);
+    let snapshot = rig.graph.snapshot().await.unwrap();
+    for name in ["a", "b", "c", "d", "e"] {
+        assert!(snapshot.notes.contains_key(name), "{name}");
+    }
+    let status = writer.status().await.unwrap();
+    assert_eq!((status.data_position, status.waiting), (Some(3), 0));
+    let found = lines.restarted();
+    assert_eq!(found.len(), 1, "{}", lines.text());
+    assert!(found[0].contains("sequence=500"), "{}", found[0]);
+    assert!(found[0].contains("records=4"), "{}", found[0]);
+    // The next change is an ordinary one.
+    assert_eq!(writer.submit(note("f"), By::Index).await.unwrap(), Some(4));
+    assert_eq!(lines.restarted().len(), 1);
+}
+
+#[tokio::test]
+async fn a_void_whose_sequence_is_not_above_the_last_seen_takes_the_same_path() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.data.jump_to(500);
+    writer.submit(note("a"), By::Index).await.unwrap();
+    rig.graph.refuse(501);
+    assert_eq!(
+        writer.submit(note("b"), By::Index).await.unwrap_err(),
+        GraphError::Behind
+    );
+    rig.data.start_again();
+    leave_waiting(&rig, "c").await;
+    let void_sequence = writer.void(501, "typo".into()).await.unwrap();
+    assert_eq!(void_sequence, 1);
+    assert!(rig.graph.snapshot().await.unwrap().notes.contains_key("c"));
+    assert_eq!(lines.restarted().len(), 1, "{}", lines.text());
+    assert_eq!(writer.submit(note("d"), By::Index).await.unwrap(), Some(2));
+}
+
+#[tokio::test]
+async fn a_catch_up_that_stops_part_way_through_a_new_log_still_logs_the_find_once() {
+    let (lines, _guard) = Lines::keep();
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.data.jump_to(500);
+    writer.submit(note("a"), By::Index).await.unwrap();
+    drop(writer);
+    lose_data_log_leaving_waiting(&rig, &["b", "c", "d"]).await;
+    rig.graph.refuse(1);
+    let writer = rig.start().await.unwrap();
+    assert_eq!(lines.restarted().len(), 1, "{}", lines.text());
+    assert_eq!(
+        writer.submit(note("e"), By::Index).await.unwrap_err(),
+        GraphError::Behind
+    );
+    // The void runs a catch-up that applies the rest: the find is not logged a second time.
+    writer.void(1, "typo".into()).await.unwrap();
+    let snapshot = rig.graph.snapshot().await.unwrap();
+    // Record 1 (`c`) is voided; record 2 (`d`) applies.
+    assert!(!snapshot.notes.contains_key("c") && snapshot.notes.contains_key("d"));
+    assert_eq!(lines.restarted().len(), 1, "{}", lines.text());
+}

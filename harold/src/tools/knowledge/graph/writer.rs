@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, info, warn};
 
-use super::backend::{BackendError, GraphBackend, RelationRow, Snapshot};
+use super::backend::{BackendError, GraphBackend, RelationRow, Snapshot, Which};
 use super::catchup::{self, Applied, CatchUpError, Refusal};
 use super::log::{RecordLog, end_sequence};
 use super::metrics;
@@ -186,6 +186,7 @@ impl GraphWriter {
             writer: writer.clone(),
             spell: Mutex::new(None),
             typed: None,
+            last_seen: LastSeen::default(),
         };
         task.open().await?;
         tokio::spawn(task.run(inbox));
@@ -288,6 +289,37 @@ struct Task {
     spell: Mutex<Option<Spell>>,
     /// The typed relations last counted, which the minute tick publishes again.
     typed: Option<usize>,
+    last_seen: LastSeen,
+}
+
+/// The highest sequence the task has seen in each log.
+#[derive(Default)]
+struct LastSeen {
+    schema: Option<u64>,
+    data: Option<u64>,
+}
+
+impl LastSeen {
+    fn get(&self, which: Which) -> Option<u64> {
+        match which {
+            Which::Schema => self.schema,
+            Which::Data => self.data,
+        }
+    }
+
+    fn set(&mut self, which: Which, sequence: Option<u64>) {
+        match which {
+            Which::Schema => self.schema = sequence,
+            Which::Data => self.data = sequence,
+        }
+    }
+}
+
+fn kind_word(which: Which) -> &'static str {
+    match which {
+        Which::Schema => "schema",
+        Which::Data => "data",
+    }
 }
 
 impl Task {
@@ -424,14 +456,53 @@ impl Task {
 
     /// Catches TypeDB up with the logs. A refusal makes the writer behind.
     async fn catch_up(&mut self) -> Result<Applied, GraphError> {
-        let result = catchup::catch_up(
+        self.catch_up_from_start(&[], None).await
+    }
+
+    /// The catch-up, with the logs in `from_start` read from their start. `seen` is the last
+    /// sequence the task saw in those logs, which the warn line names.
+    async fn catch_up_from_start(
+        &mut self,
+        from_start: &[Which],
+        seen: Option<u64>,
+    ) -> Result<Applied, GraphError> {
+        let before = self.writer.backend.position().await.ok();
+        let mut applied = Applied::default();
+        let result = catchup::catch_up_into(
             &*self.writer.backend,
             &*self.writer.schema_log,
             &*self.writer.data_log,
+            from_start,
+            &mut applied,
         )
         .await;
+        self.note_ends().await;
+        // The find is logged also when the catch-up stops part of the way: the position
+        // then is no longer above the new log's end, and no later catch-up finds it. A stop
+        // before any record applied is found again at the next catch-up, so it logs then.
+        for which in &applied.restarted {
+            let records = match which {
+                Which::Schema => applied.schema_steps,
+                Which::Data => applied.records + applied.voided,
+            };
+            if result.is_err() && records == 0 {
+                continue;
+            }
+            let sequence = if from_start.contains(which) {
+                seen
+            } else {
+                before.and_then(|position| match which {
+                    Which::Schema => position.schema,
+                    Which::Data => position.data,
+                })
+            };
+            warn!(
+                kind = kind_word(*which),
+                sequence, records, "knowledge graph log restarted"
+            );
+        }
         match result {
-            Ok(applied) => {
+            Ok(()) => {
                 self.set_phase(Phase::Ready);
                 // A catch-up may clear the records that waited; the gauge must show it.
                 self.publish_metrics(false).await;
@@ -451,6 +522,45 @@ impl Task {
                 Err(GraphError::LogFailed)
             }
         }
+    }
+
+    /// Notes the last sequence of each log, as the logs hold it now.
+    async fn note_ends(&mut self) {
+        for which in [Which::Schema, Which::Data] {
+            let log = match which {
+                Which::Schema => &self.writer.schema_log,
+                Which::Data => &self.writer.data_log,
+            };
+            if let Ok(end) = end_sequence(&**log).await {
+                self.last_seen.set(which, end);
+            }
+        }
+    }
+
+    /// Appends one record to the data log and notes its sequence. Gives the last sequence
+    /// seen before, when the log gave a sequence not above it: the log started again.
+    async fn append_data(&mut self, value: Vec<u8>) -> Result<(u64, Option<u64>), GraphError> {
+        let sequence = self
+            .writer
+            .data_log
+            .append(value)
+            .await
+            .map_err(|_| GraphError::LogFailed)?;
+        let seen = self.last_seen.get(Which::Data);
+        self.last_seen.set(Which::Data, Some(sequence));
+        let restarted = seen.filter(|seen| sequence <= *seen);
+        Ok((sequence, restarted))
+    }
+
+    /// The data log started again: the catch-up reads it from its start and applies the
+    /// record just appended with the rest.
+    async fn apply_restarted_log(&mut self, seen: u64) -> Result<(), GraphError> {
+        let result = self.catch_up_from_start(&[Which::Data], Some(seen)).await;
+        if result.is_err() {
+            // The new record is logged and waits: the gauge must show it.
+            metrics::publish(self.waiting_now().await.max(1), None);
+        }
+        result.map(|_| ())
     }
 
     async fn behind(&self, refusal: Refusal) {
@@ -657,12 +767,11 @@ impl Task {
             by,
         };
         let value = serde_json::to_vec(&record).map_err(|_| GraphError::LogFailed)?;
-        let sequence = self
-            .writer
-            .data_log
-            .append(value)
-            .await
-            .map_err(|_| GraphError::LogFailed)?;
+        let (sequence, restarted) = self.append_data(value).await?;
+        if let Some(seen) = restarted {
+            self.apply_restarted_log(seen).await?;
+            return Ok(sequence);
+        }
         match self.writer.backend.apply(&record.op, sequence).await {
             Ok(()) => Ok(sequence),
             Err(BackendError::Unreachable) => {
@@ -697,14 +806,14 @@ impl Task {
             by: By::Call,
         };
         let value = serde_json::to_vec(&record).map_err(|_| GraphError::LogFailed)?;
-        let void_sequence = self
-            .writer
-            .data_log
-            .append(value)
-            .await
-            .map_err(|_| GraphError::LogFailed)?;
+        let (void_sequence, restarted) = self.append_data(value).await?;
         warn!(sequence, reason = %reason, "knowledge graph record voided");
-        self.catch_up().await?;
+        match restarted {
+            Some(seen) => self.apply_restarted_log(seen).await?,
+            None => {
+                self.catch_up().await?;
+            }
+        }
         Ok(void_sequence)
     }
 }
