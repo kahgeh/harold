@@ -17,6 +17,7 @@
   --on-end: #fff;
   --target: 48px;
   --status-strip: max(8px, calc(env(safe-area-inset-top) - 12px));
+  --status-glass: max(0px, calc(env(safe-area-inset-top) - 12px));
   --header-height: calc(var(--status-strip) + 8px + var(--target) + 1px);
 }
 
@@ -101,11 +102,11 @@ button[hidden] {
   z-index: 10;
   padding: var(--status-strip) 12px 8px 16px;
   border-bottom: 1px solid var(--surface-4);
-  /* Only the strip under the status bar lets the messages show through, blurred. */
+  /* Only the strip under the phone's icons (--status-glass) lets the messages show through, blurred. */
   background: linear-gradient(
     to bottom,
-    color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-strip),
-    var(--surface-1) var(--status-strip)
+    color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-glass),
+    var(--surface-1) var(--status-glass)
   );
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
@@ -120,8 +121,8 @@ button[hidden] {
   .top {
     background: linear-gradient(
       to bottom,
-      var(--status-tint) 0 var(--status-strip),
-      var(--surface-1) var(--status-strip)
+      var(--status-tint) 0 var(--status-glass),
+      var(--surface-1) var(--status-glass)
     );
   }
 

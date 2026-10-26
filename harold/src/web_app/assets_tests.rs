@@ -184,8 +184,8 @@ fn the_status_strip_is_blurred_and_the_header_row_and_notice_are_solid() {
         "\n  backdrop-filter:",
         "\n  -webkit-backdrop-filter:",
         "background: linear-gradient(",
-        "color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-strip),",
-        "var(--surface-1) var(--status-strip)",
+        "color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-glass),",
+        "var(--surface-1) var(--status-glass)",
     ] {
         assert!(top.contains(wanted), ".top lacks {wanted:?}");
     }
@@ -193,6 +193,10 @@ fn the_status_strip_is_blurred_and_the_header_row_and_notice_are_solid() {
     assert!(
         root.contains("--status-strip: max(8px, calc(env(safe-area-inset-top) - 12px));"),
         ":root lacks the --status-strip that starts under the phone's icons"
+    );
+    assert!(
+        root.contains("--status-glass: max(0px, calc(env(safe-area-inset-top) - 12px));"),
+        ":root lacks the --status-glass, the see-through height"
     );
     assert!(
         root.contains("--header-height: calc(var(--status-strip)"),
@@ -1021,8 +1025,8 @@ fn every_home_screen_page_runs_under_the_status_bar_and_the_light_strip_is_tinte
     let tint = &tint[..tint.find("\n}\n").expect("tint is closed")];
     for wanted in [
         ".top {",
-        "var(--status-tint) 0 var(--status-strip),",
-        "var(--surface-1) var(--status-strip)",
+        "var(--status-tint) 0 var(--status-glass),",
+        "var(--surface-1) var(--status-glass)",
     ] {
         assert!(
             tint.contains(wanted),
@@ -1060,6 +1064,6 @@ fn the_light_strip_covers_the_pages_without_a_header_with_the_same_tint() {
     let top = &block[block.find("  .top {").expect("the light block lacks .top")..];
     assert!(
         top[..top.find('}').expect("the .top rule is closed")]
-            .contains("var(--status-tint) 0 var(--status-strip)")
+            .contains("var(--status-tint) 0 var(--status-glass)")
     );
 }
