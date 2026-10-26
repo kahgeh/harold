@@ -254,6 +254,10 @@ impl ModelRunner for FakeRunner {
                     cost,
                     after,
                 } => {
+                    if after >= job.timeout {
+                        tokio::time::sleep(job.timeout).await;
+                        return ModelResult::Killed;
+                    }
                     tokio::time::sleep(after).await;
                     let json = serde_json::json!({
                         "subtype": "success",

@@ -22,7 +22,8 @@ pub(super) const MAX_TURNS_ACCEPTED: bool = true;
 
 pub(super) const MAX_TURNS: &str = "8";
 
-/// A run that has not finished after this long is stopped.
+/// A run that has not finished after this long is stopped, unless its watch was started
+/// with a `--run-limit`: this is the default run limit.
 pub(super) const RUN_LIMIT: Duration = Duration::from_secs(120);
 
 /// The most output read from one run.

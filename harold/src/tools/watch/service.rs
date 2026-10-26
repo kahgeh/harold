@@ -43,6 +43,9 @@ impl WatchService for WatchToolService {
         let checked =
             validate::check_start(&request, &self.settings).map_err(|refusal| match refusal {
                 Refusal::Invalid(field) => Status::invalid_argument(format!("invalid {field}")),
+                Refusal::RunLimitAboveMax(max) => Status::invalid_argument(format!(
+                    "run_limit_secs is above [watch] max_run_limit_secs ({max})"
+                )),
                 Refusal::UnknownSkill => Status::not_found("unknown_skill"),
             })?;
         let name = checked.name.clone();
@@ -96,6 +99,7 @@ impl WatchService for WatchToolService {
                 cost_usd: micros_to_usd(row.cost_usd_micros),
                 last_outcome: row.last_outcome.unwrap_or_default(),
                 stop_reason: row.stop_reason.unwrap_or_default(),
+                run_limit_secs: row.run_limit_secs,
             })
             .collect();
         Ok(Response::new(pb::ListWatchesResponse {

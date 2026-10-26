@@ -174,6 +174,24 @@ fn the_pod_file_and_stage_fields_leave_a_log_record() {
 }
 
 #[test]
+fn the_watch_run_time_fields_leave_a_log_record() {
+    test_support::install();
+    let watch = format!("run-ms-{}", uuid::Uuid::new_v4());
+    tracing::info!(watch = %watch, wait_ms = 12_u64, run_ms = 34_u64, "watch run finished");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&watch))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["watch", "wait_ms", "run_ms"]);
+}
+
+#[test]
 fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
     test_support::install();
     let pane = unique_pane();

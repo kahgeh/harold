@@ -290,8 +290,10 @@ async fn every_log_line_of_the_table_is_written_with_its_fields() {
     let finished = lines(&text, "watch run finished", &name);
     assert!(finished[0].contains("run=1") && finished[0].contains("outcome=\"report\""));
     assert!(finished[0].contains("cost_usd=0.01") && finished[0].contains("duration_ms="));
+    assert!(finished[0].contains("wait_ms=") && finished[0].contains("run_ms="));
     let failed = lines(&text, "watch run failed", &name);
     assert!(failed[0].contains("reason=\"process_failed\"") && failed[0].contains("run="));
+    assert!(failed[0].contains("wait_ms=") && failed[0].contains("run_ms="));
 
     let waiting = lines(&text, "watch report waiting", &name);
     // Once per report while its reason stays the same: the first report, then the second.

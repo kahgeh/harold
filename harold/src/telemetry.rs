@@ -117,6 +117,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "typed_while_busy",
     "photo_bytes",
     "wait_ms",
+    "run_ms",
     "session_by",
     "alert",
     "pod.product",

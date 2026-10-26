@@ -902,7 +902,7 @@ fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
     lines.join("\n")
 }
 
-const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES [--report-to chief|self] [--run-budget USD] [--every-run] | stop NAME | list";
+const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list";
 
 /// A `harold tool watch` command. The numbers stay text here: the daemon checks the
 /// ranges, and the CLI only needs them to be numbers.
@@ -915,6 +915,7 @@ pub(crate) enum WatchCommand {
         for_minutes: u32,
         report_to: Option<String>,
         run_budget_usd: Option<String>,
+        run_limit_secs: Option<u32>,
         every_run: bool,
     },
     Stop {
@@ -936,7 +937,7 @@ fn parse_watch(args: &[&str]) -> Result<WatchCommand, String> {
 
 fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String> {
     let (mut skill, mut every, mut minutes) = (None, None, None);
-    let (mut report_to, mut budget) = (None, None);
+    let (mut report_to, mut budget, mut limit) = (None, None, None);
     let mut every_run = false;
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
@@ -950,6 +951,7 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
             "--for" => &mut minutes,
             "--report-to" => &mut report_to,
             "--run-budget" => &mut budget,
+            "--run-limit" => &mut limit,
             _ => return Err(WATCH_USAGE_LINE.into()),
         };
         let value = rest.next().ok_or_else(|| WATCH_USAGE_LINE.to_string())?;
@@ -970,6 +972,13 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
     {
         return Err("invalid run_budget_usd".into());
     }
+    let run_limit_secs = match limit {
+        Some(text) => match text.parse::<u32>() {
+            Ok(secs) if secs > 0 => Some(secs),
+            _ => return Err("invalid run_limit_secs".into()),
+        },
+        None => None,
+    };
     Ok(WatchCommand::Start {
         name: name.into(),
         skill: skill.ok_or_else(|| WATCH_USAGE_LINE.to_string())?,
@@ -977,6 +986,7 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
         for_minutes: number(minutes, "for_minutes")?,
         report_to,
         run_budget_usd: budget,
+        run_limit_secs,
         every_run,
     })
 }
@@ -1718,10 +1728,11 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
     );
     if watch.running {
         return format!(
-            "{} running in {} until {}, {counts}",
+            "{} running in {} until {}, limit {} s, {counts}",
             watch.name,
             watch.folder,
-            watch_time(watch.ends_at_ms, offset)
+            watch_time(watch.ends_at_ms, offset),
+            watch.run_limit_secs
         );
     }
     let why = match watch.stop_reason.as_str() {
@@ -1756,6 +1767,7 @@ pub(crate) async fn watch_within(
                 for_minutes,
                 report_to,
                 run_budget_usd,
+                run_limit_secs,
                 every_run,
             } => {
                 let started = client
@@ -1771,6 +1783,7 @@ pub(crate) async fn watch_within(
                             .and_then(|text| text.parse().ok())
                             .unwrap_or(0.0),
                         every_run: *every_run,
+                        run_limit_secs: run_limit_secs.unwrap_or(0),
                     })
                     .await
                     .map_err(refused)?
@@ -4801,6 +4814,7 @@ mod tests {
             for_minutes: 120,
             report_to: None,
             run_budget_usd: None,
+            run_limit_secs: None,
             every_run: false,
         };
         assert_eq!(
@@ -4852,7 +4866,32 @@ mod tests {
                 for_minutes: 60,
                 report_to: Some("chief".into()),
                 run_budget_usd: Some("0.03".into()),
+                run_limit_secs: None,
                 every_run: true,
+            })))
+        );
+        assert_eq!(
+            watch(&[
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--every",
+                "5",
+                "--for",
+                "60",
+                "--run-limit",
+                "300",
+            ]),
+            Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::Start {
+                name: "w".into(),
+                skill: "s".into(),
+                every_minutes: 5,
+                for_minutes: 60,
+                report_to: None,
+                run_budget_usd: None,
+                run_limit_secs: Some(300),
+                every_run: false,
             })))
         );
         assert_eq!(
@@ -4869,6 +4908,7 @@ mod tests {
 
     #[test]
     fn tool_watch_refuses_a_malformed_command() {
+        assert!(WATCH_USAGE_LINE.contains("[--run-limit SECONDS]"));
         for args in [
             vec![],
             vec!["start"],
@@ -4909,6 +4949,41 @@ mod tests {
             ]),
             Err("invalid run_budget_usd".into())
         );
+        for limit in ["0", "-5", "x", "1.5", ""] {
+            assert_eq!(
+                watch(&[
+                    "start",
+                    "w",
+                    "--skill",
+                    "s",
+                    "--every",
+                    "10",
+                    "--for",
+                    "5",
+                    "--run-limit",
+                    limit
+                ]),
+                Err("invalid run_limit_secs".into()),
+                "{limit:?}"
+            );
+        }
+        assert_eq!(
+            watch(&[
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--every",
+                "10",
+                "--for",
+                "5",
+                "--run-limit",
+                "60",
+                "--run-limit",
+                "90"
+            ]),
+            Err(WATCH_USAGE_LINE.into())
+        );
         for budget in ["0", "-0.5"] {
             assert_eq!(
                 watch(&[
@@ -4938,6 +5013,7 @@ mod tests {
             for_minutes: 5,
             report_to: None,
             run_budget_usd: None,
+            run_limit_secs: None,
             every_run: false,
         };
         let stop = WatchCommand::Stop { name: "w".into() };
@@ -4993,11 +5069,12 @@ mod tests {
             runs: 3,
             reports: 1,
             cost_usd: 0.03,
+            run_limit_secs: 300,
             ..Default::default()
         };
         assert_eq!(
             watch_list_line(&running, utc),
-            "after-release running in /work/chief-of-pods until 20:45, 3 runs, 1 report, $0.03"
+            "after-release running in /work/chief-of-pods until 20:45, limit 300 s, 3 runs, 1 report, $0.03"
         );
         let ended = watch_api::Watch {
             running: false,
@@ -5054,6 +5131,7 @@ mod tests {
             for_minutes: 120,
             report_to: Some("chief".into()),
             run_budget_usd: None,
+            run_limit_secs: None,
             every_run: false,
         };
 

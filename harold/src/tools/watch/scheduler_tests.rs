@@ -99,6 +99,7 @@ impl Harness {
             for_minutes: minutes,
             every_run: false,
             run_budget_usd_micros: None,
+            run_limit_secs: 120,
         }
     }
 
@@ -554,7 +555,7 @@ async fn the_job_has_the_folder_model_budget_and_facts() {
     assert_eq!(jobs.len(), 2);
     assert_eq!(jobs[0].folder, h.folder.0);
     assert_eq!(jobs[0].model, "haiku");
-    assert_eq!(jobs[0].timeout, RUN_LIMIT);
+    assert_eq!(jobs[0].timeout, Duration::from_secs(120));
     let budgets: Vec<_> = jobs.iter().map(|job| job.run_budget_usd_micros).collect();
     assert!(
         budgets.contains(&Some(50_000)),
@@ -569,6 +570,45 @@ async fn the_job_has_the_folder_model_budget_and_facts() {
     assert_eq!(facts["watch"]["run"], 1);
     assert_eq!(facts["watch"]["runs_left"], 11);
     assert_eq!(facts["agents"][0]["input_box"], "empty");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_job_timeout_is_the_run_limit_of_the_watch() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("default", 10, 120).await;
+    let mut asked = h.checked("long", 10, 120);
+    asked.run_limit_secs = 300;
+    h.scheduler.start(asked).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+
+    let jobs = h.runner.jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 2);
+    let timeouts: Vec<_> = jobs.iter().map(|job| job.timeout).collect();
+    assert!(timeouts.contains(&Duration::from_secs(120)), "{timeouts:?}");
+    assert!(timeouts.contains(&Duration::from_secs(300)), "{timeouts:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_of_150_seconds_completes_under_a_300_second_limit_and_is_killed_under_the_default() {
+    let slow = || Step::Answer {
+        result: "QUIET".into(),
+        cost: 0.01,
+        after: Duration::from_secs(150),
+    };
+    let h = harness(settings(), vec![slow()]).await;
+    let mut asked = h.checked("long", 10, 120);
+    asked.run_limit_secs = 300;
+    h.scheduler.start(asked).await.unwrap();
+    pass(Duration::from_secs(160)).await;
+    assert_eq!(h.row("long").await.last_outcome.as_deref(), Some("quiet"));
+
+    let h = harness(settings(), vec![slow()]).await;
+    h.start("default", 10, 120).await;
+    pass(Duration::from_secs(160)).await;
+    assert_eq!(
+        h.row("default").await.last_outcome.as_deref(),
+        Some("timeout")
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -748,6 +788,7 @@ async fn stopping_a_watch_kills_the_child_its_run_started() {
         for_minutes: 120,
         every_run: false,
         run_budget_usd_micros: None,
+        run_limit_secs: 120,
     };
     scheduler.start(checked).await.unwrap();
 

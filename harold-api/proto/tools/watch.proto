@@ -4,7 +4,8 @@
 //   StartWatch   starts a watch, or replaces a running one of the same name. The CLI
 //                fills `folder` with its working directory; the tool checks it.
 //                `report_to` is "chief" or "self"; empty means "self".
-//                `run_budget_usd` 0 means none given.
+//                `run_budget_usd` 0 means none given. `run_limit_secs` 0 means none given:
+//                the run limit is then 120 seconds.
 //   StopWatch    ends a running watch at once.
 //   ListWatches  every watch running, and every watch that ended today.
 //
@@ -35,6 +36,7 @@ message StartWatchRequest {
   string report_to = 6;
   double run_budget_usd = 7;
   bool every_run = 8;
+  uint32 run_limit_secs = 9;
 }
 
 message StartWatchResponse {
@@ -64,6 +66,8 @@ message Watch {
   double cost_usd = 11;
   string last_outcome = 12;
   string stop_reason = 13;
+  // The most seconds one run may take before Harold stops it.
+  uint32 run_limit_secs = 14;
 }
 
 message ListWatchesResponse {

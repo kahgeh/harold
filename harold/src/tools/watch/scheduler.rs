@@ -16,9 +16,9 @@ use tracing::Instrument as _;
 use super::answer::{self, Answer, Cause, Failure};
 use super::clock::{clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
-use super::obs::{self, EndReason, How, RunObs};
+use super::obs::{self, EndReason, How, RunObs, Timing};
 use super::report::{ReportSlot, Target, Typist};
-use super::runner::{Exit, ModelJob, ModelResult, ModelRunner, RUN_LIMIT};
+use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchStore};
 use super::validate::{Checked, ReportTo, read_skill, to_micros};
 use crate::settings::WatchSettings;
@@ -26,7 +26,14 @@ use crate::tools::{Agents, ChiefPane, PaneTyping, Pods};
 
 /// The answer or the failure, the reported cost, and how the process ended with what
 /// Claude Code reported (for a run that exited).
-type ModelOutcome = (Result<Answer, Failure>, Option<f64>, Option<(Exit, Cause)>);
+/// The answer, the reported cost, why a run that exited failed, and the milliseconds the
+/// Claude Code process ran (0 when none started).
+type ModelOutcome = (
+    Result<Answer, Failure>,
+    Option<f64>,
+    Option<(Exit, Cause)>,
+    u64,
+);
 
 /// At most this many watches run at once.
 pub(super) const MAX_WATCHES: usize = 5;
@@ -96,7 +103,6 @@ pub(super) struct Scheduler {
     /// One `start` at a time, so the limit and a replacement are checked and stored together.
     start_lock: tokio::sync::Mutex<()>,
     model_wait: Duration,
-    run_limit: Duration,
     retry: Duration,
 }
 
@@ -142,7 +148,6 @@ impl Scheduler {
             state: Mutex::default(),
             start_lock: tokio::sync::Mutex::new(()),
             model_wait: MODEL_WAIT,
-            run_limit: RUN_LIMIT,
             retry: RETRY,
         })
     }
@@ -203,6 +208,7 @@ impl Scheduler {
             every_minutes: checked.every_minutes,
             every_run: checked.every_run,
             run_budget_usd_micros: checked.run_budget_usd_micros,
+            run_limit_secs: checked.run_limit_secs,
             started_at_ms: now,
             ends_at_ms,
             next_run_at_ms: now,
@@ -388,6 +394,7 @@ impl Scheduler {
             taken = tokio::time::timeout(self.model_wait, self.model.lock()) => taken,
             () = interrupted(cancelled, shutdown) => return Flow::Over,
         };
+        let wait_ms = began.elapsed().as_millis() as u64;
         let Ok(_guard) = guard else {
             obs.skipped();
             let next = next_on_grid(row.started_at_ms, row.every_minutes, clock_ms());
@@ -417,7 +424,7 @@ impl Scheduler {
             }
         }
 
-        let (answer, reported_cost, why) = {
+        let (answer, reported_cost, why, run_ms) = {
             let model = self
                 .model_result(row, run_no, budget, obs, cancelled, shutdown)
                 .await;
@@ -450,13 +457,16 @@ impl Scheduler {
             Ok(Answer::Report(_)) => ("report".to_owned(), Streak::Worked),
             Err(failure) => (failure.as_str().to_owned(), Streak::Failed),
         };
+        let timing = Timing { wait_ms, run_ms };
         match &answer {
-            Ok(_) => obs.finished(&outcome, cost_usd, duration_ms),
+            Ok(_) => obs.finished(&outcome, cost_usd, duration_ms, timing),
             Err(failure @ (Failure::ProcessFailed | Failure::MaxTurnsReached)) => match &why {
-                Some((exit, cause)) => obs.failed(*failure, cost_usd, Some(*exit), Some(cause)),
-                None => obs.failed(*failure, cost_usd, None, None),
+                Some((exit, cause)) => {
+                    obs.failed(*failure, cost_usd, timing, Some(*exit), Some(cause));
+                }
+                None => obs.failed(*failure, cost_usd, timing, None, None),
             },
-            Err(failure) => obs.failed(*failure, cost_usd, None, None),
+            Err(failure) => obs.failed(*failure, cost_usd, timing, None, None),
         }
         let now = clock_ms();
         let record = RunRecord {
@@ -506,7 +516,7 @@ impl Scheduler {
     ) -> Option<ModelOutcome> {
         let folder = std::path::Path::new(&row.folder);
         let Ok(skill) = read_skill(folder, &row.skill, &self.deps.settings.skill_folders) else {
-            return Some((Err(Failure::SkillMissing), None, None));
+            return Some((Err(Failure::SkillMissing), None, None, 0));
         };
         obs.set_add_dirs(skill.add_dirs.len());
         if skill.tools_unread {
@@ -538,13 +548,15 @@ impl Scheduler {
             add_dirs: skill.add_dirs,
             run_budget_usd_micros: budget,
             facts_json: serde_json::to_vec(&facts).unwrap_or_default(),
-            timeout: self.run_limit,
+            timeout: Duration::from_secs(u64::from(row.run_limit_secs)),
         };
         let model_span = obs.model_span();
+        let process_began = Instant::now();
         let result = tokio::select! {
             result = self.deps.runner.run(&job).instrument(model_span.clone()) => result,
             () = interrupted(cancelled, shutdown) => return None,
         };
+        let run_ms = process_began.elapsed().as_millis() as u64;
         model_span.record(
             "result",
             match &result {
@@ -554,12 +566,12 @@ impl Scheduler {
             },
         );
         Some(match result {
-            ModelResult::FailedToStart => (Err(Failure::ProcessFailed), None, None),
-            ModelResult::Killed => (Err(Failure::Timeout), None, None),
+            ModelResult::FailedToStart => (Err(Failure::ProcessFailed), None, None, run_ms),
+            ModelResult::Killed => (Err(Failure::Timeout), None, None, run_ms),
             ModelResult::Exited { stdout, ok, exit } => {
                 let read = answer::read_output(&stdout, ok);
                 let why = read.cause.map(|cause| (exit, cause));
-                (read.answer, read.cost_usd, why)
+                (read.answer, read.cost_usd, why, run_ms)
             }
         })
     }

@@ -105,6 +105,15 @@ pub(super) fn watch_stopped(watch: &str, reason: EndReason, runs: u32, cost_usd:
     );
 }
 
+/// Where a run's time went, in whole milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Timing {
+    /// From the run's start to the model lock: the wait for the model.
+    pub wait_ms: u64,
+    /// The Claude Code process; 0 when none started.
+    pub run_ms: u64,
+}
+
 /// One run: its `harold.watch.run` span and the lines written inside it.
 pub(super) struct RunObs {
     span: Span,
@@ -185,7 +194,13 @@ impl RunObs {
     }
 
     /// A run that gave `quiet` or `report`.
-    pub(super) fn finished(&self, outcome: &str, cost_usd: Option<f64>, duration_ms: u64) {
+    pub(super) fn finished(
+        &self,
+        outcome: &str,
+        cost_usd: Option<f64>,
+        duration_ms: u64,
+        timing: Timing,
+    ) {
         self.span.record("outcome", outcome);
         self.record_cost(cost_usd);
         self.span.in_scope(|| {
@@ -195,6 +210,8 @@ impl RunObs {
                 outcome,
                 cost_usd,
                 duration_ms,
+                wait_ms = timing.wait_ms,
+                run_ms = timing.run_ms,
                 add_dirs = self.add_dirs.load(Ordering::Relaxed),
                 "watch run finished"
             );
@@ -208,6 +225,7 @@ impl RunObs {
         &self,
         reason: Failure,
         cost_usd: Option<f64>,
+        timing: Timing,
         exit: Option<Exit>,
         cause: Option<&Cause>,
     ) {
@@ -221,6 +239,8 @@ impl RunObs {
                 run = self.run,
                 reason,
                 cost_usd,
+                wait_ms = timing.wait_ms,
+                run_ms = timing.run_ms,
                 add_dirs = self.add_dirs.load(Ordering::Relaxed),
                 exit_code = exit.and_then(|e| e.code),
                 signal = exit.and_then(|e| e.signal),

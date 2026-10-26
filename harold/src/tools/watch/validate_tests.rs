@@ -37,6 +37,7 @@ fn request(folder: &Path) -> StartWatchRequest {
         report_to: String::new(),
         run_budget_usd: 0.0,
         every_run: false,
+        run_limit_secs: 0,
     }
 }
 
@@ -209,6 +210,30 @@ fn run_budgets_follow_the_settings() {
         ..none
     };
     assert_eq!(with(0.0, default_budget), Ok(Some(50_000)));
+}
+
+#[test]
+fn run_limits_follow_the_settings() {
+    let temp = Temp::with_skill("pod-watch", "Check.");
+    let limit = |secs: u32, cfg: &WatchSettings| {
+        let mut asked = request(&temp.0);
+        asked.run_limit_secs = secs;
+        check_start(&asked, cfg).map(|checked| checked.run_limit_secs)
+    };
+    let none = WatchSettings::default();
+    // Left out: the default of 120.
+    assert_eq!(limit(0, &none), Ok(120));
+    assert_eq!(limit(300, &none), Ok(300));
+    // No `max_run_limit_secs`: there is no cap.
+    assert_eq!(limit(86_400, &none), Ok(86_400));
+    let capped = WatchSettings {
+        max_run_limit_secs: Some(300),
+        ..Default::default()
+    };
+    assert_eq!(limit(300, &capped), Ok(300));
+    assert_eq!(limit(301, &capped), Err(Refusal::RunLimitAboveMax(300)));
+    // A watch that gave none still runs with 120, whatever the setting.
+    assert_eq!(limit(0, &capped), Ok(120));
 }
 
 #[test]

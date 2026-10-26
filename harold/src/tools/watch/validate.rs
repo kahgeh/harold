@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use harold_api::tools::watch::v1::StartWatchRequest;
 
+use super::runner::RUN_LIMIT;
 use crate::settings::WatchSettings;
 
 const MAX_NAME_LEN: usize = 64;
@@ -44,12 +45,16 @@ pub(super) struct Checked {
     pub every_run: bool,
     /// `None` when `start` gave none and `[watch] run_budget_usd` is not set.
     pub run_budget_usd_micros: Option<i64>,
+    /// The most seconds one run may take: 120 when `start` gave none.
+    pub run_limit_secs: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Refusal {
     /// The field named in `invalid <field>`.
     Invalid(&'static str),
+    /// `run_limit_secs` is above `[watch] max_run_limit_secs`, which is the value.
+    RunLimitAboveMax(u32),
     UnknownSkill,
 }
 
@@ -103,6 +108,7 @@ pub(super) fn check_start(
         _ => return Err(Refusal::Invalid("report_to")),
     };
     let run_budget_usd_micros = run_budget(request.run_budget_usd, cfg)?;
+    let run_limit_secs = run_limit(request.run_limit_secs, cfg)?;
     skill_path(&folder, &request.skill, &cfg.skill_folders).ok_or(Refusal::UnknownSkill)?;
     Ok(Checked {
         name: request.name.clone(),
@@ -113,7 +119,19 @@ pub(super) fn check_start(
         for_minutes: request.for_minutes,
         every_run: request.every_run,
         run_budget_usd_micros,
+        run_limit_secs,
     })
+}
+
+/// The run limit in seconds. 0 means none given, so the default applies.
+fn run_limit(asked: u32, cfg: &WatchSettings) -> Result<u32, Refusal> {
+    if asked == 0 {
+        return Ok(RUN_LIMIT.as_secs() as u32);
+    }
+    match cfg.max_run_limit_secs {
+        Some(max) if asked > max => Err(Refusal::RunLimitAboveMax(max)),
+        _ => Ok(asked),
+    }
 }
 
 /// The run budget in millionths of a dollar. 0 means none given, so the setting applies

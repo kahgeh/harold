@@ -20,6 +20,7 @@ fn request(h: &Harness, name: &str) -> StartWatchRequest {
         report_to: "chief".into(),
         run_budget_usd: 0.0,
         every_run: false,
+        run_limit_secs: 0,
     }
 }
 
@@ -58,6 +59,7 @@ async fn start_stop_and_list_answer_with_the_fields_the_proto_names() {
         (watch.skill.as_str(), watch.report_to.as_str()),
         ("pod-watch", "chief")
     );
+    assert_eq!(watch.run_limit_secs, 120);
     assert!(watch.running && !watch.every_run);
     assert_eq!((watch.runs, watch.reports, watch.every_minutes), (1, 1, 10));
     assert_eq!(watch.ends_at_ms, started.ends_at_ms);
@@ -197,4 +199,26 @@ async fn a_spent_day_refuses_start_with_daily_budget_spent() {
         refusal(&service, request(&h, "b")).await,
         (tonic::Code::FailedPrecondition, "daily_budget_spent".into())
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_limit_above_the_setting_is_refused_with_the_setting_and_its_value() {
+    let settings = crate::settings::WatchSettings {
+        max_run_limit_secs: Some(300),
+        ..settings()
+    };
+    let h = harness(settings.clone(), vec![answer("QUIET", 0.01)]).await;
+    let service = WatchToolService::new(Arc::clone(&h.scheduler), settings);
+    let mut asked = request(&h, "w");
+    asked.run_limit_secs = 301;
+    assert_eq!(
+        refusal(&service, asked).await,
+        (
+            tonic::Code::InvalidArgument,
+            "run_limit_secs is above [watch] max_run_limit_secs (300)".into()
+        )
+    );
+    let mut asked = request(&h, "w");
+    asked.run_limit_secs = 300;
+    service.start_watch(Request::new(asked)).await.unwrap();
 }

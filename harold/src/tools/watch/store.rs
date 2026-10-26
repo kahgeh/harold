@@ -7,9 +7,17 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use turso::{Connection, Value};
 
+use super::runner::RUN_LIMIT;
+
 const DATABASE: &str = "watch.db";
 
-const MIGRATIONS: [(&str, &str); 1] = [("001_watches", include_str!("migrations/001_watches.sql"))];
+const MIGRATIONS: [(&str, &str); 2] = [
+    ("001_watches", include_str!("migrations/001_watches.sql")),
+    (
+        "002_run_limit",
+        include_str!("migrations/002_run_limit.sql"),
+    ),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StoreError {
@@ -31,6 +39,8 @@ pub(super) struct NewWatch {
     pub every_minutes: u32,
     pub every_run: bool,
     pub run_budget_usd_micros: Option<i64>,
+    /// The most seconds one run may take.
+    pub run_limit_secs: u32,
     pub started_at_ms: i64,
     pub ends_at_ms: i64,
     pub next_run_at_ms: i64,
@@ -46,6 +56,9 @@ pub(super) struct WatchRow {
     pub every_minutes: u32,
     pub every_run: bool,
     pub run_budget_usd_micros: Option<i64>,
+    /// The most seconds one run may take. A watch stored before migration 002 has the
+    /// default, 120.
+    pub run_limit_secs: u32,
     pub running: bool,
     pub started_at_ms: i64,
     pub ends_at_ms: i64,
@@ -85,7 +98,7 @@ pub(super) struct RunRecord {
 
 const COLUMNS: &str = "name, folder, skill, report_to, every_minutes, every_run, \
     run_budget_usd_micros, state, started_at_ms, ends_at_ms, next_run_at_ms, runs, reports, \
-    failed_in_a_row, cost_usd_micros, last_outcome, stop_reason, ended_at_ms";
+    failed_in_a_row, cost_usd_micros, last_outcome, stop_reason, ended_at_ms, run_limit_secs";
 
 pub(super) struct WatchStore {
     conn: Mutex<Connection>,
@@ -121,7 +134,8 @@ impl WatchStore {
             conn.execute(
                 "INSERT OR REPLACE INTO watches (name, folder, skill, report_to, every_minutes, \
                  every_run, run_budget_usd_micros, state, started_at_ms, ends_at_ms, \
-                 next_run_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10)",
+                 next_run_at_ms, run_limit_secs) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10, ?11)",
                 turso::params_from_iter(vec![
                     Value::from(watch.name.as_str()),
                     Value::from(watch.folder.as_str()),
@@ -133,6 +147,7 @@ impl WatchStore {
                     Value::from(watch.started_at_ms),
                     Value::from(watch.ends_at_ms),
                     Value::from(watch.next_run_at_ms),
+                    Value::from(i64::from(watch.run_limit_secs)),
                 ]),
             )
             .await?;
@@ -386,6 +401,11 @@ fn to_watch(row: &turso::Row) -> Result<WatchRow> {
         every_minutes: count(4)?,
         every_run: integer(row, 5)? == 1,
         run_budget_usd_micros: optional_integer(row, 6)?,
+        run_limit_secs: match optional_integer(row, 18)? {
+            Some(secs) => u32::try_from(secs)
+                .map_err(|_| StoreError::Data("column 18 out of range".into()))?,
+            None => RUN_LIMIT.as_secs() as u32,
+        },
         running: text(row, 7)? == "running",
         started_at_ms: integer(row, 8)?,
         ends_at_ms: integer(row, 9)?,

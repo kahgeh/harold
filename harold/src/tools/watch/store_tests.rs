@@ -25,6 +25,7 @@ fn new_watch(name: &str) -> NewWatch {
         every_minutes: 10,
         every_run: false,
         run_budget_usd_micros: None,
+        run_limit_secs: 300,
         started_at_ms: 1_000,
         ends_at_ms: 1_000 + 120 * 60_000,
         next_run_at_ms: 1_000,
@@ -62,6 +63,7 @@ async fn a_watch_round_trips_and_a_second_open_applies_nothing_twice() {
     );
     assert_eq!(row.next_run_at_ms, 1_000);
     assert_eq!(row.run_budget_usd_micros, None);
+    assert_eq!(row.run_limit_secs, 300);
     assert_eq!(row.last_outcome, None);
     assert_eq!(store.get("missing").await.unwrap(), None);
     assert_eq!(store.running().await.unwrap().len(), 1);
@@ -288,4 +290,46 @@ async fn budget_stopped_since_is_true_for_a_budget_stop_today_only() {
         .await
         .unwrap();
     assert!(store.budget_stopped_since(10_000).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_database_with_rows_from_before_migration_002_is_upgraded_and_reads_back_120_seconds() {
+    let temp = Temp::new();
+    {
+        // A database as the first version left it: migration 001 only, with a row.
+        let path = temp.0.join(DATABASE);
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = database.connect().unwrap();
+        let first = include_str!("migrations/001_watches.sql");
+        conn.execute_batch(first).await.unwrap();
+        conn.execute(
+            "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+             checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            ("001_watches", hex::encode(Sha256::digest(first.as_bytes()))),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO watches (name, folder, skill, report_to, every_minutes, every_run, \
+             state, started_at_ms, ends_at_ms, next_run_at_ms) \
+             VALUES ('old', '/work/chief', 'pod-watch', 'chief', 10, 0, 'running', 1, 2, 1)",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    assert_eq!(store.get("old").await.unwrap().unwrap().run_limit_secs, 120);
+    // The upgraded database takes a new watch with its own limit.
+    store.put_watch(&new_watch("new")).await.unwrap();
+    assert_eq!(store.get("new").await.unwrap().unwrap().run_limit_secs, 300);
 }

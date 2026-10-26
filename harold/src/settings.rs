@@ -205,6 +205,8 @@ pub(crate) struct WatchSettings {
     pub run_budget_usd: Option<f64>,
     /// The most `--run-budget` may ask.
     pub max_run_budget_usd: Option<f64>,
+    /// The most `--run-limit` may ask, in seconds. No cap when unset.
+    pub max_run_limit_secs: Option<u32>,
     /// Folders a watch skill's real path may lie in, besides the watch's own
     /// `.claude/skills/`. Absolute paths only.
     pub skill_folders: Vec<String>,
@@ -217,6 +219,7 @@ impl Default for WatchSettings {
             daily_budget_usd: None,
             run_budget_usd: None,
             max_run_budget_usd: None,
+            max_run_limit_secs: None,
             skill_folders: Vec::new(),
         }
     }
@@ -245,6 +248,9 @@ impl WatchSettings {
             if value.is_some_and(|value| !(value.is_finite() && value > 0.0)) {
                 errors.push(format!("watch.{name} must be above 0 when set"));
             }
+        }
+        if self.max_run_limit_secs == Some(0) {
+            errors.push("watch.max_run_limit_secs must be above 0 when set".into());
         }
         // `~/` is not expanded, as for timed prompts' `folder`. A folder that does not
         // exist is not an error: one Mac can list an organisation repository it has not
@@ -2106,6 +2112,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert_eq!(shipped.daily_budget_usd, None);
         assert_eq!(shipped.run_budget_usd, None);
         assert_eq!(shipped.max_run_budget_usd, None);
+        assert_eq!(shipped.max_run_limit_secs, None);
         assert!(shipped.validate().is_empty());
         assert_eq!(super::WatchSettings::default(), shipped);
     }
@@ -2127,6 +2134,16 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             ..Default::default()
         };
         assert_eq!(nan.validate().len(), 1);
+    }
+
+    #[test]
+    fn watch_max_run_limit_must_be_above_zero() {
+        let zero = parse_watch("[watch]\nmax_run_limit_secs = 0\n");
+        let errors = zero.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("watch.max_run_limit_secs"), "{errors:?}");
+        let ok = parse_watch("[watch]\nmax_run_limit_secs = 300\n");
+        assert!(ok.validate().is_empty());
     }
 
     #[test]
