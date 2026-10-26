@@ -10,6 +10,23 @@ use super::*;
 use tokio::time::sleep_until;
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_that_ends_before_it_listens_logs_where_it_came_from() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.ports.0.panes.set(|s| s.view.panes.clear());
+
+    h.calls.start().await;
+    settle().await;
+
+    assert!(
+        logs.text()
+            .contains("call ended reason=\"no_chief\" call_from=\"desk\""),
+        "{}",
+        logs.text()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_worker_that_fails_to_load_mid_turn_ends_the_call_at_once() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
@@ -28,6 +45,12 @@ async fn a_worker_that_fails_to_load_mid_turn_ends_the_call_at_once() {
     assert!(h.worker().transcribed.is_empty());
     assert!(h.keys().is_empty());
     assert!(logs.text().contains("call ended reason=\"voice_failed\""));
+    assert!(
+        logs.text()
+            .contains("call ended reason=\"voice_failed\" call_from=\"desk\""),
+        "{}",
+        logs.text()
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -2261,4 +2284,5 @@ async fn a_burst_of_the_ringing_read_after_the_pick_up_is_muted_and_a_normal_voi
     assert!(text.contains(" background=30 "), "{text}");
     assert!(text.contains(" background_start=30 "), "{text}");
     assert!(text.contains(" backlog_ms="), "{text}");
+    assert!(text.contains(" call_from=\"desk\" "), "{text}");
 }

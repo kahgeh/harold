@@ -1819,4 +1819,5 @@ async fn a_phone_calls_background_stays_fixed_after_2_s_of_quieter_audio() {
     let start = logged_number(&text, "background_start");
     assert!(start > 4000, "{text}");
     assert_eq!(logged_number(&text, "background"), start, "{text}");
+    assert!(text.contains(" call_from=\"phone\" "), "{text}");
 }

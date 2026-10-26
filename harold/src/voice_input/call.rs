@@ -2578,9 +2578,11 @@ impl<P: CallPorts> Call<P> {
         let (reason, loud_frames, speech_cut) =
             (why.as_str(), tally.loud_frames as u64, self.speech_cut);
         let backlog_ms = millis(self.backlog);
+        let call_from = self.ports.call_from();
         match self.detector.background() {
             Some(background) => info!(
                 reason,
+                call_from,
                 heard_ms,
                 first_heard_ms,
                 backlog_ms,
@@ -2596,6 +2598,7 @@ impl<P: CallPorts> Call<P> {
             ),
             None => info!(
                 reason,
+                call_from,
                 heard_ms,
                 first_heard_ms,
                 backlog_ms,
@@ -2757,7 +2760,11 @@ impl<P: CallPorts> NotOpened<'_, P> {
             self.ports.speak_with_tts(VOICE_FAILED).await;
         }
         let _ = std::fs::remove_dir_all(self.dir);
-        info!(reason = why.as_str(), "call ended");
+        info!(
+            reason = why.as_str(),
+            call_from = self.ports.call_from(),
+            "call ended"
+        );
         self.ports.call_ended(why.as_str());
     }
 }

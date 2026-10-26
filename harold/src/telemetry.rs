@@ -151,6 +151,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "busy_reason",
     "heard_ms",
     "first_heard_ms",
+    "backlog_ms",
+    "background_start",
     "background",
     "loudest",
     "problem",

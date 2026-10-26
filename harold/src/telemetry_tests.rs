@@ -178,7 +178,8 @@ fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
     test_support::install();
     let pane = unique_pane();
     tracing::info!(pane_id = %pane, busy_reason = "agent_busy", heard_ms = 2000_u64,
-        first_heard_ms = 40_u64, background = 30_u64, loudest = 5657_u64, loud_frames = 50_u64,
+        first_heard_ms = 40_u64, backlog_ms = 12_u64, background_start = 35_u64, call_from = "desk",
+        background = 30_u64, loudest = 5657_u64, loud_frames = 50_u64,
         speech_cut = 1_u64, text = "TELEMETRY-CANARY-6641", "call ended");
     let logs = test_support::logs();
     let record = logs
@@ -197,6 +198,9 @@ fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
             "busy_reason",
             "heard_ms",
             "first_heard_ms",
+            "backlog_ms",
+            "background_start",
+            "call_from",
             "background",
             "loudest",
             "loud_frames",
