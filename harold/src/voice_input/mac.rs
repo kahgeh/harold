@@ -1000,15 +1000,45 @@ mod tests {
         (spawned, blocks)
     }
 
-    /// The tests run at background priority, where a read can wake late: the middle lag must be
-    /// within 100 ms, and none over 400 ms.
-    fn assert_lags_near_zero(mut lags: Vec<Duration>) {
+    /// The stamps follow the stream, whatever the speed of the reads. The middle lag of the
+    /// blocks read from `settled` after the spawn is within 100 ms: a start fixed too early or
+    /// too late moves every lag. Each stamp is the one before plus the audio of that block, at
+    /// every block but one, where the start moved. A stamp taken from the read time breaks this
+    /// at many blocks. The worst lag is not checked: it shows how late the Mac woke the read.
+    fn assert_stamps_follow_the_stream(
+        spawned: tokio::time::Instant,
+        blocks: &[(tokio::time::Instant, tokio::time::Instant, usize)],
+        settled: Duration,
+    ) {
+        let mut lags: Vec<Duration> = blocks
+            .iter()
+            .filter(|&&(_, read, _)| read >= spawned + settled)
+            .map(|&(stamp, read, len)| {
+                read.saturating_duration_since(stamp + StreamClock::audio(len as u64))
+            })
+            .collect();
         assert!(lags.len() >= 3, "{}", lags.len());
         lags.sort();
         let middle = lags[lags.len() / 2];
         assert!(middle <= Duration::from_millis(100), "{middle:?}");
-        let worst = lags[lags.len() - 1];
-        assert!(worst <= Duration::from_millis(400), "{worst:?}");
+
+        let jumps = blocks
+            .windows(2)
+            .filter(|pair| {
+                let (before, after) = (pair[0], pair[1]);
+                let follows = before.0 + StreamClock::audio(before.2 as u64);
+                let off = if after.0 > follows {
+                    after.0 - follows
+                } else {
+                    follows - after.0
+                };
+                off > Duration::from_micros(1)
+            })
+            .count();
+        assert!(
+            jumps <= 1,
+            "{jumps} stamps do not follow the audio before them"
+        );
     }
 
     #[test]
@@ -1034,14 +1064,44 @@ mod tests {
         assert_eq!(clock.start, lowest.max(spawned));
     }
 
+    #[test]
+    fn a_late_read_after_the_start_is_fixed_does_not_move_the_start() {
+        let spawned = tokio::time::Instant::now();
+        let mut clock = StreamClock::new(spawned);
+        // 3 s with no read, then one read of 3 s of audio.
+        let mut read_at = spawned + Duration::from_secs(3);
+        clock.stamp(48_000, read_at);
+        // 20 ms reads at real time until the start is fixed.
+        while !clock.fixed {
+            read_at += Duration::from_millis(20);
+            let before = clock.samples;
+            let stamp = clock.stamp(320, read_at);
+            assert!(stamp <= read_at);
+            assert_eq!(stamp, clock.start + StreamClock::audio(before));
+        }
+        let start = clock.start;
+
+        // One read 600 ms after the read before it, with the 600 ms of audio made in that time.
+        read_at += Duration::from_millis(600);
+        let mut reads = vec![9_600];
+        reads.extend([320; 50]);
+        for len in reads {
+            let before = clock.samples;
+            let stamp = clock.stamp(len, read_at);
+            assert_eq!(clock.start, start);
+            assert_eq!(stamp, start + StreamClock::audio(before));
+            assert!(stamp <= read_at);
+            read_at += Duration::from_millis(20);
+        }
+    }
+
     #[tokio::test]
     async fn a_late_first_read_is_stamped_from_the_spawn_and_later_reads_from_real_time() {
         let (spawned, blocks) = read_stamped("wait(3)\nburst(3)\nstream(2.5)\n").await;
 
         let burst = Duration::from_secs(3);
         let mut audio = Duration::ZERO;
-        let mut lags = Vec::new();
-        for &(stamp, read, len) in &blocks {
+        for &(stamp, _, len) in &blocks {
             if audio < burst {
                 // The audio of the burst was recorded in the 3 s before it was read.
                 assert!(
@@ -1051,11 +1111,8 @@ mod tests {
                 );
             }
             audio += Duration::from_micros(len as u64 * 1_000_000 / 16_000);
-            if read >= spawned + Duration::from_millis(4_300) {
-                lags.push(read.saturating_duration_since(stamp + StreamClock::audio(len as u64)));
-            }
         }
-        assert_lags_near_zero(lags);
+        assert_stamps_follow_the_stream(spawned, &blocks, Duration::from_millis(4_300));
         assert!(audio >= Duration::from_millis(5_400), "{audio:?}");
         assert!(blocks[0].0 < blocks[0].1 - Duration::from_secs(2));
     }
@@ -1064,15 +1121,10 @@ mod tests {
     async fn a_prompt_stream_is_stamped_within_100_ms_of_its_reads() {
         let (spawned, blocks) = read_stamped("stream(2.5)\n").await;
 
-        let mut lags = Vec::new();
-        for &(stamp, read, len) in &blocks {
+        for &(stamp, read, _) in &blocks {
             assert!(stamp <= read);
-            if read >= spawned + Duration::from_millis(1_300) {
-                // The end of the block, which is the newest audio in it.
-                lags.push(read.saturating_duration_since(stamp + StreamClock::audio(len as u64)));
-            }
         }
-        assert_lags_near_zero(lags);
+        assert_stamps_follow_the_stream(spawned, &blocks, Duration::from_millis(1_300));
     }
 
     #[tokio::test]
