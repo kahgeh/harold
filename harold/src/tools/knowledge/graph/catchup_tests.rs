@@ -197,3 +197,79 @@ async fn a_log_on_the_from_start_list_is_read_from_its_start() {
     assert_eq!(again.restarted, [Which::Data]);
     assert_eq!(again.records, 2);
 }
+
+#[tokio::test]
+async fn a_count_with_the_graph_caught_up_reads_at_most_one_record_from_each_log() {
+    let (graph, schema, data) = fresh().await;
+    schema.append(b"{}".to_vec()).await.unwrap();
+    schema.append(b"{}".to_vec()).await.unwrap();
+    for n in 0..1000 {
+        data.append(encode(note(&format!("n{n}")))).await.unwrap();
+    }
+    graph.advance(Which::Schema, 1).await.unwrap();
+    graph.advance(Which::Data, 999).await.unwrap();
+    let before = schema.records_read() + data.records_read();
+
+    let waiting = waiting_from(graph.position().await.unwrap(), &schema, &data)
+        .await
+        .unwrap();
+    assert_eq!(waiting.count, 0);
+    assert!(schema.records_read() + data.records_read() - before <= 2);
+}
+
+#[tokio::test]
+async fn a_log_that_grew_past_the_position_reads_and_applies_only_the_records_from_it_on() {
+    let (graph, schema, data) = fresh().await;
+    for name in ["a", "b", "c", "d", "e"] {
+        data.append(encode(note(name))).await.unwrap();
+    }
+    graph.advance(Which::Data, 2).await.unwrap();
+    let before = data.records_read();
+    let waiting = waiting_from(graph.position().await.unwrap(), &schema, &data)
+        .await
+        .unwrap();
+    assert_eq!((waiting.count, waiting.first), (2, Some(3)));
+    assert_eq!(data.records_read() - before, 3);
+
+    let applied = catch_up(&*graph, &schema, &data, &[]).await.unwrap();
+    assert!(applied.restarted.is_empty());
+    assert_eq!(applied.records, 2);
+    assert_eq!(graph.applied(), [3, 4]);
+}
+
+#[tokio::test]
+async fn a_position_of_zero_keeps_only_the_records_above_it() {
+    let (graph, schema, data) = fresh().await;
+    data.append(encode(note("a"))).await.unwrap();
+    data.append(encode(note("b"))).await.unwrap();
+    graph.advance(Which::Data, 0).await.unwrap();
+    let applied = catch_up(&*graph, &schema, &data, &[]).await.unwrap();
+    assert!(applied.restarted.is_empty());
+    assert_eq!(graph.applied(), [1]);
+}
+
+#[tokio::test]
+async fn a_sequence_jump_above_the_position_is_not_a_restart() {
+    let (graph, schema, data) = fresh().await;
+    data.append(encode(note("a"))).await.unwrap();
+    graph.advance(Which::Data, 0).await.unwrap();
+    data.jump_to(900);
+    data.append(encode(note("b"))).await.unwrap();
+    let applied = catch_up(&*graph, &schema, &data, &[]).await.unwrap();
+    assert!(applied.restarted.is_empty());
+    assert_eq!(graph.applied(), [900]);
+}
+
+#[tokio::test]
+async fn a_log_that_started_again_and_grew_to_the_position_is_not_found() {
+    // Under the end-below-position rule, and under the read-from-position rule, a log that
+    // started again and then reached the position holds a record there. This is not detected.
+    let (graph, schema, data) = fresh().await;
+    graph.advance(Which::Data, 2).await.unwrap();
+    for name in ["a", "b", "c", "d"] {
+        data.append(encode(note(name))).await.unwrap();
+    }
+    let applied = catch_up(&*graph, &schema, &data, &[]).await.unwrap();
+    assert!(applied.restarted.is_empty());
+    assert_eq!(graph.applied(), [3]);
+}

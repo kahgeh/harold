@@ -13,6 +13,7 @@ struct MemoryInner {
     records: Vec<(u64, Vec<u8>)>,
     fail: bool,
     fail_reads: bool,
+    records_read: usize,
 }
 
 impl MemoryLog {
@@ -35,6 +36,11 @@ impl MemoryLog {
         self.inner.lock().unwrap().fail_reads = fail;
     }
 
+    /// How many records its reads returned so far.
+    pub(crate) fn records_read(&self) -> usize {
+        self.inner.lock().unwrap().records_read
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.inner.lock().unwrap().records.len()
     }
@@ -54,16 +60,18 @@ impl RecordLog for MemoryLog {
     }
 
     async fn read_after(&self, after: Option<u64>) -> Result<Vec<(u64, Vec<u8>)>, LogError> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         if inner.fail_reads {
             return Err(LogError("test read failure".into()));
         }
-        Ok(inner
+        let read: Vec<_> = inner
             .records
             .iter()
             .filter(|(sequence, _)| after.is_none_or(|after| *sequence > after))
             .cloned()
-            .collect())
+            .collect();
+        inner.records_read += read.len();
+        Ok(read)
     }
 }
 

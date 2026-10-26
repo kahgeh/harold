@@ -72,14 +72,18 @@ async fn read_to_apply(
     position: Option<u64>,
     forced: bool,
 ) -> Result<(bool, Vec<(u64, Vec<u8>)>), LogError> {
-    // One read of the whole log gives both its end and the records to apply.
-    let mut records = log.read_after(None).await?;
+    let Some(position) = position.filter(|_| !forced) else {
+        return Ok((forced, log.read_after(None).await?));
+    };
+    // A log that did not start again holds a record at or above the position, so the read from
+    // the position on is not empty. An empty read means the log started again.
+    let mut records = log.read_after(position.checked_sub(1)).await?;
     let end = records.last().map(|(sequence, _)| *sequence);
-    let restarted = forced || started_again(position, end);
-    if !forced && let Some(after) = start_after(position, end) {
-        records.retain(|(sequence, _)| *sequence > after);
-    }
-    Ok((restarted, records))
+    let Some(after) = start_after(Some(position), end) else {
+        return Ok((true, log.read_after(None).await?));
+    };
+    records.retain(|(sequence, _)| *sequence > after);
+    Ok((false, records))
 }
 
 #[cfg(test)]

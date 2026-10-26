@@ -742,3 +742,15 @@ async fn a_catch_up_that_stops_part_way_through_a_new_log_still_logs_the_find_on
     assert!(!snapshot.notes.contains_key("c") && snapshot.notes.contains_key("d"));
     assert_eq!(lines.restarted().len(), 1, "{}", lines.text());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_minute_tick_with_the_graph_caught_up_reads_at_most_two_records() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    with_notes(&writer, &["a", "b", "c", "d"]).await;
+    // The writer task must run once before the count is taken.
+    minutes(1).await;
+    let before = rig.schema.records_read() + rig.data.records_read();
+    minutes(1).await;
+    assert!(rig.schema.records_read() + rig.data.records_read() - before <= 2);
+}
