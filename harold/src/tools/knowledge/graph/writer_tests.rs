@@ -752,5 +752,6 @@ async fn a_minute_tick_with_the_graph_caught_up_reads_at_most_two_records() {
     minutes(1).await;
     let before = rig.schema.records_read() + rig.data.records_read();
     minutes(1).await;
-    assert!(rig.schema.records_read() + rig.data.records_read() - before <= 2);
+    let read = rig.schema.records_read() + rig.data.records_read() - before;
+    assert!((1..=2).contains(&read), "{read}");
 }

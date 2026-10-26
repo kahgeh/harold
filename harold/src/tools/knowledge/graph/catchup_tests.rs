@@ -251,10 +251,14 @@ async fn a_position_of_zero_keeps_only_the_records_above_it() {
 #[tokio::test]
 async fn a_sequence_jump_above_the_position_is_not_a_restart() {
     let (graph, schema, data) = fresh().await;
-    data.append(encode(note("a"))).await.unwrap();
-    graph.advance(Which::Data, 0).await.unwrap();
+    for name in ["a", "b", "c"] {
+        data.append(encode(note(name))).await.unwrap();
+    }
+    graph.advance(Which::Data, 2).await.unwrap();
+    // The log is made again and its sequences jump over the position: no record is at it.
+    data.start_again();
     data.jump_to(900);
-    data.append(encode(note("b"))).await.unwrap();
+    data.append(encode(note("d"))).await.unwrap();
     let applied = catch_up(&*graph, &schema, &data, &[]).await.unwrap();
     assert!(applied.restarted.is_empty());
     assert_eq!(graph.applied(), [900]);
