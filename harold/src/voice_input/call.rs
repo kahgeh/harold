@@ -708,6 +708,8 @@ struct Call<P: CallPorts> {
     heard_samples: u64,
     /// How long after the start the first block came.
     first_heard: Option<Duration>,
+    /// The most audio that arrived ahead of its recorded time in one read.
+    backlog: Duration,
     /// Turns cut.
     speech_cut: u64,
     reader: Option<JoinHandle<()>>,
@@ -797,6 +799,7 @@ impl<P: CallPorts> Call<P> {
         } else {
             None
         };
+        let background_may_fall = source.background_may_fall();
         let blocks = events.clone();
         let reader = tokio::spawn(async move {
             while let Some((samples, captured_at)) = source.next_stamped().await {
@@ -818,7 +821,7 @@ impl<P: CallPorts> Call<P> {
             status,
             events,
             dir,
-            detector: SpeechDetector::new(),
+            detector: SpeechDetector::new().with_falling_background(background_may_fall),
             mode: Mode::Listening,
             worker: None,
             generation: 0,
@@ -850,6 +853,7 @@ impl<P: CallPorts> Call<P> {
             started_at: Instant::now(),
             heard_samples: 0,
             first_heard: None,
+            backlog: Duration::ZERO,
             speech_cut: 0,
             reader: Some(reader),
             updates: Vec::new(),
@@ -976,6 +980,11 @@ impl<P: CallPorts> Call<P> {
     /// when it is read later.
     fn heard_block(&mut self, block: &[i16], captured_at: Instant) {
         self.heard_samples += block.len() as u64;
+        let recorded_to = captured_at
+            + Duration::from_micros(block.len() as u64 * 1_000_000 / u64::from(SAMPLE_RATE));
+        self.backlog = self
+            .backlog
+            .max(Instant::now().saturating_duration_since(recorded_to));
         if self.first_heard.is_none() {
             self.first_heard = Some(self.started_at.elapsed());
         }
@@ -2568,11 +2577,17 @@ impl<P: CallPorts> Call<P> {
         let loudest = tally.loudest.round() as u64;
         let (reason, loud_frames, speech_cut) =
             (why.as_str(), tally.loud_frames as u64, self.speech_cut);
+        let backlog_ms = millis(self.backlog);
         match self.detector.background() {
             Some(background) => info!(
                 reason,
                 heard_ms,
                 first_heard_ms,
+                backlog_ms,
+                background_start = self
+                    .detector
+                    .background_start()
+                    .map_or(0, |start| start.round() as u64),
                 background = background.round() as u64,
                 loudest,
                 loud_frames,
@@ -2581,7 +2596,13 @@ impl<P: CallPorts> Call<P> {
             ),
             None => info!(
                 reason,
-                heard_ms, first_heard_ms, loudest, loud_frames, speech_cut, "call ended"
+                heard_ms,
+                first_heard_ms,
+                backlog_ms,
+                loudest,
+                loud_frames,
+                speech_cut,
+                "call ended"
             ),
         }
     }

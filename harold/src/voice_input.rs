@@ -49,6 +49,8 @@ pub(crate) trait AudioSource: Send + 'static {
     /// The next block with the time it was recorded, so the core can tell speech recorded
     /// while a sound played from speech read while it played. The default stamps the block
     /// when it is read, which is when it was recorded for a source that reads as it records.
+    /// A source that reads later than it records, in bursts, stamps each block with the time
+    /// it was recorded.
     ///
     /// Cancel-safe as `next_block` is.
     fn next_stamped(
@@ -58,6 +60,12 @@ pub(crate) trait AudioSource: Send + 'static {
             let block = self.next_block().await?;
             Some((block, tokio::time::Instant::now()))
         }
+    }
+
+    /// Whether the background level of the call may fall after calibration, because the start
+    /// of the source may have been loud. False by default.
+    fn background_may_fall(&self) -> bool {
+        false
     }
 }
 

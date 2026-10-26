@@ -653,6 +653,17 @@ HAVING started > downloaded
 - **Error diagnosis:** the `reason` on `speech model not downloaded`, then the notice's command, run by hand.
 - **Optimisation:** `ms` per GB from `speech model downloaded`.
 - **The worker's load** is the log line `voice worker ready` with `load_ms` and `started_by` (`page` or `call`), and `voice worker stopped` with `reason` `no_page`, `call_ended` or `exited`. The tap-to-listening time is the `harold.call_ring` span. A worker `started_by = call` while a page was on screen means the page was not seen in time, and the call's `harold.call_ring` has `worker = loaded_now`; `cycles` of 4 or more is slow whichever the worker.
+- **A call that did not hear you** is a `call ended` with `loud_frames = 0` and `heard_ms` above 5,000. Expected: 0 a week. It is not an alert, because you notice a deaf call yourself. The fields `backlog_ms` and `background_start` are in `harold.log` (see the [voice input reference](../voice-input/README.md)); they are not on the export list, so they are not in ClickHouse. `background_start` above 300 with `backlog_ms` above 300 means that late audio from the start still got in. `background` above 300 at the end means that the room itself was loud. No exported field tells a desk call from a phone call, so the query counts both. The query on `otel.otel_logs` with `ServiceName = 'harold'`:
+
+```
+SELECT Timestamp, LogAttributes['heard_ms'] AS heard_ms, LogAttributes['loudest'] AS loudest
+FROM otel.otel_logs
+WHERE ServiceName = 'harold' AND Body = 'call ended'
+  AND LogAttributes['loud_frames'] = '0'
+  AND toUInt64OrZero(LogAttributes['heard_ms']) > 5000
+  AND Timestamp > now() - INTERVAL 7 DAY
+```
+
 - No progress lines are logged. The phone shows progress, and the start and end lines say whether a model was missing or still downloading.
 
 ### The TTS server

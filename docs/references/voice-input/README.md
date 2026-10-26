@@ -168,6 +168,7 @@ Harold finds the end of your speech from the samples, with no model:
 
 - It splits the audio into 20 ms frames and measures each frame's loudness (root mean square).
 - The first half second of a call, 25 frames not played over, gives the room's background level. The level is never taken below 30.0 on the 16-bit scale, so a silent room gives a threshold of 90.0, not 0.
+- In a desk call the background can fall. After the first 25 frames, the call keeps the last 50 quiet frames (1 s) that are unmuted and not in a turn. When the 20th percentile of that window is lower than the background, the background becomes that value, never below 30.0. It never rises. A phone call keeps its background fixed, because a quiet phone room can measure 30 to 60, and a bar of 3 times that would start turns on noise.
 - Speech starts when frames stay above 3 times the background for 0.2 seconds (10 frames).
 - Speech ends when frames stay below it for 1.2 seconds (60 frames).
 - A turn is cut at 60 seconds.
@@ -178,7 +179,7 @@ The background level, the factor of 3 and the 1.2 seconds are fixed values in `h
 
 ## Not hearing the chief
 
-While Harold plays an answer, a phrase or the tick, and for 0.3 seconds after, it takes no sample as speech. `ffmpeg` keeps running, and the call discards those samples. Muted frames count as silence and are not kept. While Harold is transcribing, waiting for the chief or speaking, it also discards samples and forgets any speech in progress, keeping the background level.
+While Harold plays an answer, a phrase or the tick, and for 0.3 seconds after, it takes no sample as speech. A frame is muted by the time it was recorded, not the time Harold read it. On the Mac, `ffmpeg` gives its audio late and in bursts, so `MicSource` stamps each block as the stream's start plus the length of the audio before it. The start is the time Harold spawned `ffmpeg`, until the reads have kept to real time for 1 s; then it is the lowest of read time minus audio so far, never before the spawn. `ffmpeg` keeps running, and the call discards those samples. Muted frames count as silence and are not kept. While Harold is transcribing, waiting for the chief or speaking, it also discards samples and forgets any speech in progress, keeping the background level.
 
 The microphone capture has no echo cancellation, so this muting is the guard. With headphones nothing changes.
 
@@ -337,7 +338,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | Level | Message | Fields |
 |---|---|---|
 | info | `call started` | none |
-| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed`, `shutdown`, `idle` or `voice_muted`. A call that listened also carries whole numbers: `heard_ms` (sound read, in ms), `first_heard_ms` (ms from the start to the first block), `background` (the calibrated level, left out when calibration did not finish), `loudest` (the loudest unmuted frame), `loud_frames` (unmuted frames over 3 times the background) and `speech_cut` (turns cut) |
+| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed`, `shutdown`, `idle` or `voice_muted`. A call that listened also carries whole numbers: `heard_ms` (sound read, in ms), `first_heard_ms` (ms from the start to the first block), `backlog_ms` (the most audio that arrived ahead of its recorded time in one read; on the Mac it includes the start-up time of `ffmpeg` until the stream's start is fixed), `background_start` (the level calibration set, before any fall; left out when calibration did not finish), `background` (the level at the end of the call, left out when calibration did not finish), `loudest` (the loudest unmuted frame), `loud_frames` (unmuted frames over 3 times the background) and `speech_cut` (turns cut) |
 | info | `call not started` | `reason`: `voice_muted` |
 | info | `spoken prompt typed` | `pane_id`, `words` (a count) |
 | info | `spoken prompt held` | `reason`: why the chief was busy, one of `agent_busy`, `agent_state_unknown`, `input_box_holds_text`, `input_box_not_found`, `input_box_unreadable`, `several_agents_in_folder` or `pane_list_failing`; logged when a call first holds a turn |

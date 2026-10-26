@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tracing::{Instrument as _, warn};
 
 pub(crate) const FFMPEG: &str = "ffmpeg";
@@ -54,6 +55,79 @@ pub(crate) struct MicSource {
     stdout: ChildStdout,
     /// An odd byte left over from the last read, the first half of the next sample.
     spare: Option<u8>,
+    clock: StreamClock,
+}
+
+/// How long the reads must keep to real time before the stream's start is taken from them.
+const START_STEADY: Duration = Duration::from_secs(1);
+/// How far the estimate of the stream's start may move and still count as steady.
+const START_DRIFT: Duration = Duration::from_millis(100);
+
+/// The time of each sample in `ffmpeg`'s continuous 16 kHz stream: the stream's start plus the
+/// length of the audio before it. `ffmpeg` gives its audio late and in bursts, so the time a
+/// block is read is not the time it was recorded.
+struct StreamClock {
+    /// When `ffmpeg` was spawned: the first sample cannot be older.
+    spawned: Instant,
+    /// The stream's start, taken to be the spawn until the reads have kept to real time.
+    start: Instant,
+    /// Whether `start` has moved to what the reads show. It moves once.
+    fixed: bool,
+    /// The samples read so far.
+    samples: u64,
+    /// The lowest of read time minus the audio so far. The true start is not later than this.
+    lowest: Option<Instant>,
+    /// The value that `lowest` is compared with for drift, and the read time it was taken.
+    /// It moves when `lowest` falls more than `START_DRIFT` below it.
+    anchor: Option<(Instant, Instant)>,
+}
+
+impl StreamClock {
+    fn new(spawned: Instant) -> Self {
+        Self {
+            spawned,
+            start: spawned,
+            fixed: false,
+            samples: 0,
+            lowest: None,
+            anchor: None,
+        }
+    }
+
+    fn audio(samples: u64) -> Duration {
+        Duration::from_micros(samples * 1_000_000 / u64::from(super::SAMPLE_RATE))
+    }
+
+    /// Takes a block of `len` samples read at `read_at`, and gives the time it was recorded.
+    fn stamp(&mut self, len: usize, read_at: Instant) -> Instant {
+        let before = self.samples;
+        self.samples += len as u64;
+        if !self.fixed {
+            self.watch(read_at);
+        }
+        self.start + Self::audio(before)
+    }
+
+    fn watch(&mut self, read_at: Instant) {
+        let Some(candidate) = read_at.checked_sub(Self::audio(self.samples)) else {
+            return;
+        };
+        let lowest = self
+            .lowest
+            .map_or(candidate, |lowest| lowest.min(candidate));
+        self.lowest = Some(lowest);
+        let (anchor, since) = match self.anchor {
+            Some((anchor, since)) if anchor.saturating_duration_since(lowest) <= START_DRIFT => {
+                (anchor, since)
+            }
+            _ => (lowest, read_at),
+        };
+        self.anchor = Some((anchor, since));
+        if read_at.duration_since(since) >= START_STEADY {
+            self.start = lowest.max(self.spawned);
+            self.fixed = true;
+        }
+    }
 }
 
 impl MicSource {
@@ -62,6 +136,7 @@ impl MicSource {
     }
 
     pub(crate) fn open_with(program: &str, args: &[&str]) -> std::io::Result<Self> {
+        let spawned = Instant::now();
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
@@ -77,6 +152,7 @@ impl MicSource {
             _child: child,
             stdout,
             spare: None,
+            clock: StreamClock::new(spawned),
         })
     }
 }
@@ -111,6 +187,18 @@ impl AudioSource for MicSource {
                 return Some(samples);
             }
         }
+    }
+
+    /// The block with the time `ffmpeg` recorded it, from its place in the stream. Cancel-safe:
+    /// the clock moves only after the read has completed.
+    async fn next_stamped(&mut self) -> Option<(Vec<i16>, Instant)> {
+        let block = self.next_block().await?;
+        let captured_at = self.clock.stamp(block.len(), Instant::now());
+        Some((block, captured_at))
+    }
+
+    fn background_may_fall(&self) -> bool {
+        true
     }
 }
 
@@ -875,6 +963,127 @@ mod tests {
         assert_eq!(mic.next_block().await, Some(vec![1, 2]));
         assert_eq!(mic.next_block().await, None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fake `ffmpeg`: `python3 -c` of `PRELUDE` and `body`. `wait(s)` waits, `burst(s)`
+    /// writes `s` seconds of audio at once, and `stream(s)` writes `s` seconds at real time in
+    /// 20 ms pieces.
+    fn fake_ffmpeg(body: &str) -> Vec<String> {
+        const PRELUDE: &str = "import sys, time\n\
+            out = sys.stdout.buffer\n\
+            def wait(s): time.sleep(s)\n\
+            def burst(s):\n\
+            \tout.write(bytes(int(s * 16000) * 2)); out.flush()\n\
+            def stream(s):\n\
+            \tt0 = time.monotonic()\n\
+            \tfor i in range(int(s * 50)):\n\
+            \t\tout.write(bytes(640)); out.flush()\n\
+            \t\ttime.sleep(max(0, t0 + (i + 1) * 0.02 - time.monotonic()))\n";
+        vec!["-I".into(), "-c".into(), format!("{PRELUDE}{body}")]
+    }
+
+    /// Reads the fake to its end: each block's stamp, the time it was read and its length.
+    async fn read_stamped(
+        body: &str,
+    ) -> (
+        tokio::time::Instant,
+        Vec<(tokio::time::Instant, tokio::time::Instant, usize)>,
+    ) {
+        let args = fake_ffmpeg(body);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let spawned = tokio::time::Instant::now();
+        let mut mic = MicSource::open_with("python3", &args).unwrap();
+        let mut blocks = Vec::new();
+        while let Some((block, stamp)) = mic.next_stamped().await {
+            blocks.push((stamp, tokio::time::Instant::now(), block.len()));
+        }
+        (spawned, blocks)
+    }
+
+    /// The tests run at background priority, where a read can wake late: the middle lag must be
+    /// within 100 ms, and none over 400 ms.
+    fn assert_lags_near_zero(mut lags: Vec<Duration>) {
+        assert!(lags.len() >= 3, "{}", lags.len());
+        lags.sort();
+        let middle = lags[lags.len() / 2];
+        assert!(middle <= Duration::from_millis(100), "{middle:?}");
+        let worst = lags[lags.len() - 1];
+        assert!(worst <= Duration::from_millis(400), "{worst:?}");
+    }
+
+    #[test]
+    fn a_stream_catching_up_in_small_steps_does_not_fix_the_start() {
+        let spawned = tokio::time::Instant::now();
+        let mut clock = StreamClock::new(spawned);
+        // 40 ms blocks read every 27 ms: the value falls by 13 ms a read, 480 ms in 1.5 s.
+        let mut read_at = spawned;
+        for _ in 0..55 {
+            read_at += Duration::from_millis(27);
+            clock.stamp(640, read_at);
+        }
+        assert!(!clock.fixed);
+        assert_eq!(clock.start, spawned);
+
+        // Reads at real time for 1 s fix it at the lowest value.
+        let lowest = clock.lowest.unwrap();
+        for _ in 0..60 {
+            read_at += Duration::from_millis(20);
+            clock.stamp(320, read_at);
+        }
+        assert!(clock.fixed);
+        assert_eq!(clock.start, lowest.max(spawned));
+    }
+
+    #[tokio::test]
+    async fn a_late_first_read_is_stamped_from_the_spawn_and_later_reads_from_real_time() {
+        let (spawned, blocks) = read_stamped("wait(3)\nburst(3)\nstream(2.5)\n").await;
+
+        let burst = Duration::from_secs(3);
+        let mut audio = Duration::ZERO;
+        let mut lags = Vec::new();
+        for &(stamp, read, len) in &blocks {
+            if audio < burst {
+                // The audio of the burst was recorded in the 3 s before it was read.
+                assert!(
+                    stamp <= spawned + audio + Duration::from_millis(100),
+                    "{audio:?} stamped {:?} after the spawn",
+                    stamp - spawned
+                );
+            }
+            audio += Duration::from_micros(len as u64 * 1_000_000 / 16_000);
+            if read >= spawned + Duration::from_millis(4_300) {
+                lags.push(read.saturating_duration_since(stamp + StreamClock::audio(len as u64)));
+            }
+        }
+        assert_lags_near_zero(lags);
+        assert!(audio >= Duration::from_millis(5_400), "{audio:?}");
+        assert!(blocks[0].0 < blocks[0].1 - Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_stream_is_stamped_within_100_ms_of_its_reads() {
+        let (spawned, blocks) = read_stamped("stream(2.5)\n").await;
+
+        let mut lags = Vec::new();
+        for &(stamp, read, len) in &blocks {
+            assert!(stamp <= read);
+            if read >= spawned + Duration::from_millis(1_300) {
+                // The end of the block, which is the newest audio in it.
+                lags.push(read.saturating_duration_since(stamp + StreamClock::audio(len as u64)));
+            }
+        }
+        assert_lags_near_zero(lags);
+    }
+
+    #[tokio::test]
+    async fn no_stamp_is_earlier_than_the_spawn() {
+        // 5 s of audio in the first second would put its start 4 s before the spawn.
+        let (spawned, blocks) = read_stamped("burst(5)\nstream(1.6)\n").await;
+
+        assert!(!blocks.is_empty());
+        for &(stamp, _, _) in &blocks {
+            assert!(stamp >= spawned);
+        }
     }
 
     #[tokio::test]

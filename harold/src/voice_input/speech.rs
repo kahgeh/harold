@@ -1,5 +1,7 @@
 //! Finds where each spoken turn starts and ends, from how loud each 20 ms frame is.
 
+use std::collections::VecDeque;
+
 /// Samples in one 20 ms frame at 16 kHz.
 pub(crate) const FRAME: usize = 320;
 /// Frames, not muted, that set the background level.
@@ -14,6 +16,8 @@ pub(crate) const MAX_TURN_FRAMES: usize = 3000;
 pub(crate) const LOUDNESS_FACTOR: f64 = 3.0;
 /// The lowest background level taken, so a silent room does not give a threshold of 0.
 pub(crate) const BACKGROUND_FLOOR: f64 = 30.0;
+/// Quiet, unmuted frames (1 s) the background may fall to the low end of.
+pub(crate) const FALL_FRAMES: usize = 50;
 
 /// What a detector has been fed, kept across `reset`: only frames that were not muted.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -29,6 +33,12 @@ pub(crate) struct Tally {
 pub(crate) struct SpeechDetector {
     tally: Tally,
     background: Option<f64>,
+    /// The background as calibration set it, before any fall.
+    background_start: Option<f64>,
+    /// Whether the background may fall to the room's level after calibration.
+    may_fall: bool,
+    /// The loudness of the last quiet, unmuted frames outside a turn, while the background may fall.
+    quiet_window: VecDeque<f64>,
     calibration_sum: f64,
     calibration_count: usize,
     partial: Vec<i16>,
@@ -46,6 +56,9 @@ impl SpeechDetector {
         Self {
             tally: Tally::default(),
             background: None,
+            background_start: None,
+            may_fall: false,
+            quiet_window: VecDeque::with_capacity(FALL_FRAMES),
             calibration_sum: 0.0,
             calibration_count: 0,
             partial: Vec::new(),
@@ -57,6 +70,14 @@ impl SpeechDetector {
             turn_frames: 0,
             quiet_run: 0,
         }
+    }
+
+    /// Lets the background fall to the room's level after calibration: the 20th percentile of
+    /// the last `FALL_FRAMES` quiet, unmuted frames outside a turn, never under
+    /// `BACKGROUND_FLOOR`. It never rises. Off by default.
+    pub(crate) fn with_falling_background(mut self, may_fall: bool) -> Self {
+        self.may_fall = may_fall;
+        self
     }
 
     /// Feeds a block of any length. `muted` marks every frame in it as silence that is not kept.
@@ -93,6 +114,11 @@ impl SpeechDetector {
         self.background
     }
 
+    /// The background level as calibration set it, before any fall.
+    pub(crate) fn background_start(&self) -> Option<f64> {
+        self.background_start
+    }
+
     /// Whether speech has started and the turn has not yet ended.
     pub(crate) fn in_turn(&self) -> bool {
         self.in_turn
@@ -119,7 +145,9 @@ impl SpeechDetector {
                 self.calibration_count += 1;
                 if self.calibration_count == CALIBRATION_FRAMES {
                     let mean = self.calibration_sum / CALIBRATION_FRAMES as f64;
-                    self.background = Some(mean.max(BACKGROUND_FLOOR));
+                    let background = mean.max(BACKGROUND_FLOOR);
+                    self.background = Some(background);
+                    self.background_start = Some(background);
                 }
             }
             return None;
@@ -127,6 +155,9 @@ impl SpeechDetector {
         let loud = !muted && rms(frame) > LOUDNESS_FACTOR * background;
         if loud {
             self.tally.loud_frames += 1;
+        }
+        if self.may_fall && !muted && !loud && !self.in_turn {
+            self.fall(rms(frame));
         }
         if !self.in_turn {
             if !loud {
@@ -161,6 +192,28 @@ impl SpeechDetector {
             return Some(turn);
         }
         None
+    }
+}
+
+impl SpeechDetector {
+    /// Adds a quiet frame to the window, and lowers the background to the window's 20th
+    /// percentile once the window is full and that is lower.
+    fn fall(&mut self, level: f64) {
+        if self.quiet_window.len() == FALL_FRAMES {
+            self.quiet_window.pop_front();
+        }
+        self.quiet_window.push_back(level);
+        if self.quiet_window.len() < FALL_FRAMES {
+            return;
+        }
+        let mut sorted: Vec<f64> = self.quiet_window.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        let low = sorted[FALL_FRAMES / 5].max(BACKGROUND_FLOOR);
+        if let Some(background) = self.background.as_mut()
+            && low < *background
+        {
+            *background = low;
+        }
     }
 }
 
@@ -315,5 +368,87 @@ mod tests {
         detector.reset();
         assert_eq!(detector.tally(), before);
         assert_eq!(before.loud_frames, 20);
+    }
+
+    fn falling() -> SpeechDetector {
+        SpeechDetector::new().with_falling_background(true)
+    }
+
+    /// A calibration on loud frames: a background near 5,600, so a bar near 16,900.
+    fn calibrate_on_loud(detector: &mut SpeechDetector) {
+        detector.push(&loud(500), false);
+        assert!(detector.background().unwrap() > 4000.0);
+    }
+
+    #[test]
+    fn the_background_falls_to_the_quiet_level_and_a_normal_voice_then_counts() {
+        let mut detector = falling();
+        calibrate_on_loud(&mut detector);
+        let start = detector.background().unwrap();
+        assert_eq!(detector.background_start(), Some(start));
+        // Speech at 8,000 is under the bar of three times the background.
+        detector.push(&loud(200), false);
+        assert!(!detector.in_turn());
+        detector.push(&quiet(2000), false);
+        assert_eq!(detector.background(), Some(BACKGROUND_FLOOR));
+        assert_eq!(detector.background_start(), Some(start));
+        detector.push(&loud(200), false);
+        assert!(detector.in_turn());
+    }
+
+    #[test]
+    fn frames_in_a_turn_do_not_lower_the_background() {
+        let mut detector = falling();
+        detector.push(&quiet(500), false);
+        detector.push(&loud(400), false);
+        assert!(detector.in_turn());
+        // Quiet frames inside the turn: 1.1 s, which is under the 1.2 s that end it.
+        detector.push(&quiet(1100), false);
+        assert!(detector.in_turn());
+        assert_eq!(detector.background(), Some(BACKGROUND_FLOOR));
+        let mut detector = falling();
+        calibrate_on_loud(&mut detector);
+        let start = detector.background().unwrap();
+        // A turn of loud frames above the bar, then quiet frames inside it.
+        detector.push(&vec![30_000; 16 * 400], false);
+        assert!(detector.in_turn());
+        detector.push(&quiet(1100), false);
+        assert!(detector.in_turn());
+        assert_eq!(detector.background(), Some(start));
+    }
+
+    #[test]
+    fn the_background_never_rises_after_calibration() {
+        let mut detector = falling();
+        detector.push(&quiet(500), false);
+        detector.push(&loud(100), false);
+        detector.push(&quiet(2000), false);
+        assert_eq!(detector.background(), Some(BACKGROUND_FLOOR));
+        assert_eq!(detector.background_start(), Some(BACKGROUND_FLOOR));
+        let mut detector = falling();
+        calibrate_on_loud(&mut detector);
+        let start = detector.background().unwrap();
+        // Frames louder than the start, but under the bar, do not raise it.
+        detector.push(&vec![9000; 16 * 2000], false);
+        assert!(detector.background().unwrap() <= start);
+    }
+
+    #[test]
+    fn muted_frames_do_not_lower_the_background() {
+        let mut detector = falling();
+        calibrate_on_loud(&mut detector);
+        let start = detector.background().unwrap();
+        detector.push(&quiet(2000), true);
+        assert_eq!(detector.background(), Some(start));
+    }
+
+    #[test]
+    fn with_the_setting_off_the_background_stays_where_calibration_set_it() {
+        let mut detector = SpeechDetector::new();
+        calibrate_on_loud(&mut detector);
+        let start = detector.background().unwrap();
+        detector.push(&quiet(2000), false);
+        assert_eq!(detector.background(), Some(start));
+        assert_eq!(detector.background_start(), Some(start));
     }
 }

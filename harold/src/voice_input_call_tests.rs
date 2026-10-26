@@ -2234,3 +2234,31 @@ async fn another_agents_turn_end_update_is_left_out_and_not_said_into_the_call()
     assert!(environment.delivered().is_empty());
     assert_eq!(h.played(), played_before);
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_burst_of_the_ringing_read_after_the_pick_up_is_muted_and_a_normal_voice_then_starts_a_turn()
+ {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.script([text("hello there")]);
+    let started = Instant::now();
+    h.start_ringing().await;
+    // The ringback and the pick-up, and the tail after, have ended when the burst is read.
+    sleep(Duration::from_millis(3_500)).await;
+    settle().await;
+    assert_eq!(h.state(), CallState::Listening);
+
+    // The microphone recorded loud sound while the call rang, and gives it in one burst.
+    h.feed_captured(loud(2000), started + Duration::from_millis(500));
+    settle().await;
+    h.feed(quiet(500));
+    settle().await;
+    h.speak().await;
+
+    assert_eq!(h.keys(), typed("%2", "hello there"));
+    h.calls.stop().await;
+    let text = logs.text();
+    assert!(text.contains(" background=30 "), "{text}");
+    assert!(text.contains(" background_start=30 "), "{text}");
+    assert!(text.contains(" backlog_ms="), "{text}");
+}

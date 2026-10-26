@@ -1777,3 +1777,46 @@ async fn shutdown_lets_go_of_the_worker_held() {
     settle().await;
     assert_eq!(phone.base.worker_log().starts, 1, "the keeper stopped too");
 }
+
+impl Phone {
+    /// Starts a call as `start` does, but gives it `background` to set its level from.
+    async fn start_on(&self, background: Vec<i16>) {
+        self.auto_play(Duration::from_secs(1));
+        self.calls.start().await;
+        for _ in 0..200 {
+            if self.calls.status().state == CallState::Listening {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+            settle().await;
+        }
+        sleep(Duration::from_millis(400)).await;
+        self.post(Instant::now(), background);
+        settle().await;
+    }
+}
+
+/// The number after ` name=` in a log line.
+fn logged_number(text: &str, name: &str) -> u64 {
+    let rest = text.split(&format!(" {name}=")).nth(1).unwrap_or("");
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("no {name} in {text}"))
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_phone_calls_background_stays_fixed_after_2_s_of_quieter_audio() {
+    let logs = CapturedLogs::start();
+    let phone = Phone::new();
+    phone.start_on(loud(500)).await;
+
+    phone.post(Instant::now(), quiet(2000));
+    settle().await;
+    phone.calls.stop(true).await;
+
+    let text = logs.text();
+    let start = logged_number(&text, "background_start");
+    assert!(start > 4000, "{text}");
+    assert_eq!(logged_number(&text, "background"), start, "{text}");
+}
