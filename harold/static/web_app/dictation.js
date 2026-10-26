@@ -11,7 +11,7 @@
 
 (function () {
   const form = document.getElementById("reply");
-  const box = form ? form.querySelector('input[type="text"]') : null;
+  const box = form ? form.querySelector("textarea") : null;
   const mic = document.getElementById("dictation-mic");
   const stop = document.getElementById("dictation-stop");
   const note = document.getElementById("listening-note");

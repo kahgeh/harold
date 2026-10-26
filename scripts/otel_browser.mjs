@@ -4,7 +4,7 @@
 // drives Chrome over the DevTools protocol, with Node's own WebSocket, and adds the login
 // header to every request the way Tailscale Serve does for the phone. Plain Node, no packages.
 //
-//   otel_browser.mjs --scenario reply|todo --url URL --login LOGIN --chrome PATH --out FILE
+//   otel_browser.mjs --scenario reply|keys|todo --url URL --login LOGIN --chrome PATH --out FILE
 //                    [--text WORDS] [--screens FOLDER] [--limit SECONDS]
 //
 // It writes FILE as JSON: when the page loaded, when Send was tapped, and when the answer
@@ -71,11 +71,15 @@ let next = 0;
 const waiting = new Map();
 const consoleErrors = [];
 const requests = [];
+const posts = [];
 socket.onmessage = (event) => {
   const message = JSON.parse(event.data);
   if (message.id && waiting.has(message.id)) {
     waiting.get(message.id)(message);
     waiting.delete(message.id);
+  } else if (message.method === "Network.requestWillBeSent") {
+    const { url, method } = message.params.request;
+    if (method === "POST") posts.push(new URL(url).pathname);
   } else if (message.method === "Network.responseReceived") {
     const { url, status } = message.params.response;
     requests.push(`${status} ${new URL(url).pathname}`);
@@ -113,7 +117,18 @@ const screenshot = async (name) => {
   fs.writeFileSync(path.join(args.screens, `${name}.png`), Buffer.from(shot.result.data, "base64"));
 };
 
-const result = { scenario: args.scenario, consoleErrors, requests };
+// A real key press: DevTools sends it as the keyboard does, so the page's own key rules run.
+const press = async (key, modifiers = 0) => {
+  const base = { key, code: key, windowsVirtualKeyCode: 13, modifiers };
+  await send("Input.dispatchKeyEvent", { type: "keyDown", text: "\r", ...base });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+};
+const SHIFT = 8;
+const expect = (what, ok, seen) => {
+  if (!ok) throw new Error(`${what}, saw ${JSON.stringify(seen)}`);
+};
+
+const result = { scenario: args.scenario, consoleErrors, requests, posts };
 try {
   await send("Runtime.enable");
   await send("Network.enable");
@@ -136,11 +151,32 @@ try {
   if (args.scenario === "reply") {
     // A script error, for the browser.error span.
     await evaluate(`setTimeout(() => { throw new TypeError("deliberate test error"); }, 0)`);
-    await evaluate(`document.querySelector('#reply input[type="text"]').focus()`);
+    await evaluate(`document.querySelector("#reply textarea").focus()`);
     await send("Input.insertText", { text: args.text });
     await sleep(300);
     await screenshot("2-typed");
     result.tappedAt = await evaluate(`(() => { document.querySelector('#reply button[type="submit"]').click(); return Date.now(); })()`);
+  } else if (args.scenario === "keys") {
+    // Shift+Enter adds a line and sends nothing; Enter alone sends both lines.
+    const box = `document.querySelector("#reply textarea")`;
+    await evaluate(`${box}.focus()`);
+    await send("Input.insertText", { text: "line one" });
+    await press("Enter", SHIFT);
+    await send("Input.insertText", { text: "line two" });
+    await sleep(500);
+    const held = await evaluate(`${box}.value`);
+    expect("the box holds the two lines", held === "line one\nline two", held);
+    expect("Shift+Enter makes no POST /replies", !posts.includes("/replies"), posts);
+    result.boxHeightOfTwo = await evaluate(`${box}.offsetHeight`);
+    await screenshot("2-two-lines");
+    await press("Enter");
+    result.tappedAt = await evaluate("Date.now()");
+    await until("the thread to show both lines", `[...document.querySelectorAll("#messages .message .text")].some((p) => p.textContent === "line one\\nline two")`);
+    expect("Enter makes one POST /replies", posts.filter((path) => path === "/replies").length === 1, posts);
+    const sent = requests.filter((entry) => entry.endsWith(" /replies"));
+    expect("the POST /replies is answered 2xx", sent.length === 1 && sent[0].startsWith("2"), sent);
+    result.sent = sent;
+    await until("the box to be empty and one line high", `${box}.value === "" && ${box}.offsetHeight <= 48`);
   } else if (args.scenario === "todo") {
     await evaluate(`document.querySelector("#to-todos").click()`);
     await until("the todo card", `!!document.querySelector("#todos article.card form.todo-form")`, 30000);

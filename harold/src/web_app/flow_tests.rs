@@ -258,6 +258,25 @@ async fn a_reply_is_stored_as_to_chief_and_logged_by_length_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reply_with_a_line_break_is_stored_with_it_and_the_thread_shows_it() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+
+    let response = server
+        .post("/replies", reply_body("  line one\nline two  "))
+        .await;
+
+    assert_eq!(response.status(), 200);
+    let stored = events(&store).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].1["text"], "line one\nline two");
+    store.project_unhandled_events(100).await.unwrap();
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(page.contains("line one\nline two"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn blank_or_over_long_replies_are_refused_and_store_nothing() {
     let directory = TestDirectory::new();
     let store = directory.store().await;

@@ -626,6 +626,8 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         "r.lang = navigator.language;",
         "r.interimResults = true;",
         "r.continuous = true;",
+        // The box is the reply textarea.
+        r#"form.querySelector("textarea")"#,
         // Each result goes into the box and fires its input event, grey until it ends.
         "box.value = words;",
         r#"box.dispatchEvent(new Event("input", { bubbles: true }))"#,
@@ -690,7 +692,7 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
 fn the_dictation_rules_are_in_the_stylesheet() {
     let css = include_str!("../../static/web_app/app.css");
     for wanted in [
-        ".bottom input.interim {\n  color: var(--text-2);\n  border-color: var(--brand);",
+        ".bottom textarea.interim {\n  color: var(--text-2);\n  border-color: var(--brand);",
         ".listening-note {",
         ".listening-note[hidden] {\n  display: none;",
         ".listening-note + .bottom {\n  border-top: 0;",

@@ -622,6 +622,7 @@ async fn the_reply_form_has_the_text_box_the_photo_button_and_send_in_that_order
     let form = &page[page.find(r#"<form id="reply""#).unwrap()..];
     let form = &form[..form.find("</form>").unwrap()];
     let text_box = form.find("data-bind:reply").expect("the text box");
+    super::dictation_tests::assert_reply_box_is_a_textarea(form);
     let photo_button = form
         .find(r#"aria-label="Add a photo""#)
         .expect("the photo button");

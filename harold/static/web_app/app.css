@@ -327,17 +327,24 @@ body.on-todos > #reply {
   border-top: 1px solid var(--surface-4);
 }
 
-.bottom input {
+.bottom textarea {
   flex: 1;
   min-width: 0;
   min-height: var(--target);
-  padding: 0 16px;
+  max-height: calc(5 * 1.4em + 26px);
+  box-sizing: border-box;
+  padding: 11px 16px;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface-1);
+  font: inherit;
+  color: inherit;
+  resize: none;
+  line-height: 1.4;
+  overflow-y: auto;
 }
 
-.bottom input::placeholder {
+.bottom textarea::placeholder {
   color: var(--muted);
 }
 
@@ -397,7 +404,7 @@ body.on-todos > #reply {
 
 /* Dictation: the words as they come, and the strip above the bar while it listens. */
 
-.bottom input.interim {
+.bottom textarea.interim {
   color: var(--text-2);
   border-color: var(--brand);
 }

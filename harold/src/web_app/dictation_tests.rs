@@ -206,6 +206,22 @@ async fn the_check_has_the_login_host_and_origin_checks() {
     }
 }
 
+/// The reply box is a `textarea` that sends on Enter without Shift and grows with its text.
+pub(super) fn assert_reply_box_is_a_textarea(form: &str) {
+    let start = form.find("<textarea").expect("the reply box is a textarea");
+    let tag = &form[start..form[start..].find('>').unwrap() + start];
+    assert!(tag.contains("data-bind:reply"), "{tag}");
+    assert!(tag.contains(r#"enterkeyhint="send""#), "{tag}");
+    assert!(tag.contains(r#"rows="1""#), "{tag}");
+    assert!(
+        tag.contains("evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing"),
+        "{tag}"
+    );
+    assert!(tag.contains("el.form.requestSubmit()"), "{tag}");
+    assert!(tag.contains(r#"data-effect=""#), "{tag}");
+    assert!(!form.contains(r#"<input type="text""#), "{form}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bar_holds_send_the_mic_and_the_stop_button_and_the_listening_strip_sits_above_it() {
     let directory = TestDirectory::new();
@@ -224,6 +240,7 @@ async fn the_bar_holds_send_the_mic_and_the_stop_button_and_the_listening_strip_
         rest[..rest.find("</button>").unwrap()].to_owned()
     };
     let text_box = form.find("data-bind:reply").expect("the text box");
+    assert_reply_box_is_a_textarea(form);
     let photo = form.find(r#"aria-label="Add a photo""#).unwrap();
     let mic = form.find(r#"aria-label="Dictate a reply""#).unwrap();
     let stop = form.find(r#"aria-label="Stop listening""#).unwrap();

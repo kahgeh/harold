@@ -9,7 +9,7 @@ stand-in chief, Claude Code in a tmux session of its own. Besides that it starts
 - a collector stand-in (scripts/otel_collector.mjs) on scratch ports, which takes the test
   Harold's spans over OTLP gRPC and the browser's spans over OTLP HTTP, as Harold forwards them;
 - a headless Chrome at 390 px (scripts/otel_browser.mjs), which opens the test Harold's web app,
-  types a reply and taps Send, then follows a todo to its Send. It adds the login header to
+  types a reply and taps Send, checks that Shift+Enter adds a line and Enter sends, then follows a todo to its Send. It adds the login header to
   every request, as Tailscale Serve does for the phone.
 
 The stand-in chief answers each line it is typed by running `harold send-message-to-away-device`,
@@ -135,7 +135,7 @@ def run_scenario(run, scenario, text, spans_path, screens):
          '--chrome', CHROME, '--out', str(result_path), '--text', text,
          '--screens', str(screens), '--limit', str(LIMIT_SCENARIO)],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
-    marker = text if scenario == 'reply' else 'ANSWERS'
+    marker = text if scenario in ('reply', 'keys') else 'ANSWERS'
     try:
         # The line reaches the stand-in's pane, the stand-in answers, and its box is empty again.
         ct.wait_until(lambda: marker in run.pane_text(), LIMIT_SCENARIO, 'the line is typed into the stand-in')
@@ -228,12 +228,17 @@ def main(argv=None):
         screens = args.screens or run.scratch / 'screens'
 
         reply = run_scenario(run, 'reply', 'please rerun the build', spans_path, screens)
+        keys = run_scenario(run, 'keys', 'line two', spans_path, screens)
         todo = run_scenario(run, 'todo', 'ANSWERS', spans_path, screens)
         time.sleep(8)  # Harold's exporter sends every 5 s
         spans = spans_in(spans_path)
 
         print('browser: reply {}'.format(json.dumps(reply)))
+        print('browser: keys  {}'.format(json.dumps(keys)))
         print('browser: todo  {}'.format(json.dumps(todo)))
+        if not keys.get('ok'):
+            failed = True
+            print('FAIL the keys scenario: {}'.format(keys.get('error')))
         for label, name, url in (('one reply', 'POST', '/replies'), ('one todo answer', 'POST', '/todos/answer')):
             trace_id = trace_of(spans, name, url)
             print('\n== {} ==  trace {}'.format(label, trace_id))

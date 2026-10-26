@@ -54,7 +54,7 @@
 </div>
 <p id="listening-note" class="listening-note" role="status" hidden><span class="listen-dot"></span><span id="listening-text">Listening</span></p>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies', {filterSignals: {include: /^(reply|photo)$/}})">
-<input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
+<textarea rows="1" data-bind:reply maxlength="1000" enterkeyhint="send" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off" data-on:keydown="if (evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing) { evt.preventDefault(); el.form.requestSubmit() }" data-effect="$reply; el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'"></textarea>
 <input type="hidden" id="photo-id" data-bind:photo>
 <input type="hidden" id="beat" data-bind:_beat>
 <input type="hidden" id="stalled" data-bind:stalled>
