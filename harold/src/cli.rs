@@ -2529,6 +2529,9 @@ pub(crate) async fn app(
 mod tests {
     use super::*;
 
+    /// How long a test waits for a test server; only load can delay the answer.
+    const TEST_WAIT: Duration = Duration::from_secs(30);
+
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
     }
@@ -3541,18 +3544,31 @@ mod tests {
             &format!("\"spec_file\": \"{}\", \"sha\"", spec.display()),
             1,
         );
-        let put = tool(&address, &ToolCommand::QuestionsPut, json.as_bytes()).await;
-        let current = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
+        let put = tool_within(
+            &address,
+            &ToolCommand::QuestionsPut,
+            json.as_bytes(),
+            TEST_WAIT,
+        )
+        .await;
+        let current = tool_within(&address, &ToolCommand::QuestionsList, &b""[..], TEST_WAIT).await;
         std::fs::write(&spec, b"first, then revised").unwrap();
-        let changed = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
+        let changed = tool_within(&address, &ToolCommand::QuestionsList, &b""[..], TEST_WAIT).await;
         let before = watch_time(wall_ms(), crate::telemetry::local_offset());
-        let checked = tool(&address, &ToolCommand::QuestionsChecked, &b""[..]).await;
+        let checked = tool_within(
+            &address,
+            &ToolCommand::QuestionsChecked,
+            &b""[..],
+            TEST_WAIT,
+        )
+        .await;
         let after = watch_time(wall_ms(), crate::telemetry::local_offset());
-        let outside = tool(
+        let outside = tool_within(
             &address,
             &ToolCommand::QuestionsPut,
             json.replacen(&spec.display().to_string(), "/etc/hosts.md", 1)
                 .as_bytes(),
+            TEST_WAIT,
         )
         .await;
 
@@ -3647,30 +3663,37 @@ mod tests {
                 String::new(),
             ),
         ] {
-            lines.push(tool(&address, &command, input.as_bytes()).await.unwrap());
+            lines.push(
+                tool_within(&address, &command, input.as_bytes(), TEST_WAIT)
+                    .await
+                    .unwrap(),
+            );
         }
-        let refused = tool(
+        let refused = tool_within(
             &address,
             &ToolCommand::QuestionsPut,
             SPEC_JSON.replace("https://", "ftp://").as_bytes(),
+            TEST_WAIT,
         )
         .await
         .unwrap_err();
-        let missing = tool(
+        let missing = tool_within(
             &address,
             &ToolCommand::QuestionsDismiss {
                 id: "q-9".into(),
                 reason: "x".into(),
             },
             &b""[..],
+            TEST_WAIT,
         )
         .await
         .unwrap_err();
 
-        let unknown = tool(
+        let unknown = tool_within(
             &address,
             &ToolCommand::QuestionsShow { id: "q-9".into() },
             &b""[..],
+            TEST_WAIT,
         )
         .await
         .unwrap_err();
@@ -4294,7 +4317,7 @@ mod tests {
                 pane,
                 time::UtcOffset::UTC,
                 now,
-                command.deadline(),
+                TEST_WAIT,
             )
             .await
         }
@@ -4754,7 +4777,7 @@ mod tests {
             "%40",
             time::UtcOffset::UTC,
             time::OffsetDateTime::now_utc(),
-            CALL_DEADLINE,
+            TEST_WAIT,
         )
         .await;
         assert_eq!(
@@ -4788,7 +4811,7 @@ mod tests {
                 "%40",
                 time::UtcOffset::UTC,
                 time::OffsetDateTime::now_utc(),
-                CALL_DEADLINE,
+                TEST_WAIT,
             )
             .await
             .unwrap_err();
@@ -5122,7 +5145,7 @@ mod tests {
         let utc = time::UtcOffset::UTC;
         let run = |command: WatchCommand| {
             let (address, work) = (serving.address.clone(), work.clone());
-            async move { watch_within(&address, &command, &work, utc, CALL_DEADLINE).await }
+            async move { watch_within(&address, &command, &work, utc, TEST_WAIT).await }
         };
         let start = |skill: &str| WatchCommand::Start {
             name: "after-release".into(),

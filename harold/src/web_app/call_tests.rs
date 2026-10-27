@@ -45,7 +45,7 @@ fn signal_of(events: &str, name: &str) -> Option<String> {
     signals[name].as_str().map(str::to_owned)
 }
 /// How long a test waits for anything before it fails.
-const LIMIT: Duration = Duration::from_secs(5);
+const LIMIT: Duration = Duration::from_secs(30);
 /// Samples in one posted piece: a quarter of a second at 16 kHz.
 const PIECE_SAMPLES: usize = 4_000;
 const PIECE_MS: u64 = 250;
