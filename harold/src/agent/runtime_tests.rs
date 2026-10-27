@@ -5457,6 +5457,7 @@ struct TimingScreen {
     stuck: AtomicBool,
     unblock_reads: AtomicBool,
     capture_fails: AtomicBool,
+    departed: AtomicBool,
     scan_timeouts: AtomicBool,
     scan_fails: AtomicBool,
 }
@@ -5477,6 +5478,9 @@ impl VisibleScreenPort for TimingScreen {
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
+        }
+        if self.departed.load(Ordering::SeqCst) {
+            return Err(ScreenError::PaneDeparted);
         }
         if self.capture_fails.load(Ordering::SeqCst) {
             return Err(ScreenError::CaptureFailed);
@@ -5598,6 +5602,13 @@ async fn two_panes_timing_out_in_one_pass_leave_the_screen_healthy() {
         "{logs}"
     );
     assert!(!logs.contains("agent monitor degraded"), "{logs}");
+
+    // The good second pass cleared both failures: four seconds on, nothing is left to count.
+    tokio::time::pause();
+    tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
+    fixture.handle.screen_tick().await.unwrap();
+    let logs = logged(&captured);
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
     assert!(fixture.health().await.is_empty());
 }
 
@@ -5614,11 +5625,15 @@ async fn a_pane_unread_for_four_seconds_degrades_the_screen_until_a_read_works()
     assert!(fixture.health().await.is_empty());
 
     tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(1_500)).await;
+    fixture.handle.screen_tick().await.unwrap();
+    let logs = logged(&captured);
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+
     tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
     fixture.handle.screen_tick().await.unwrap();
 
     let logs = logged(&captured);
-    println!("{}", logs.trim_end());
     assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
     let line = logs
         .lines()
@@ -5688,29 +5703,39 @@ async fn a_prompt_scan_that_fails_for_another_reason_degrades_the_screen() {
 }
 
 #[tokio::test]
-async fn a_prompt_scan_that_times_out_degrades_the_screen_after_four_seconds() {
+async fn a_prompt_scan_that_times_out_is_cleared_by_the_next_good_screen_read() {
     let screen = TimingScreen::default();
     screen.scan_timeouts.store(true, Ordering::SeqCst);
     let (captured, _guard) = capture_logs();
     let fixture = ScreenHealthFixture::new(screen, 1).await;
     let_slow_reads_finish();
 
+    // The next scan is 30 s away, but every screen read works: the pane is in sight.
+    tokio::time::pause();
+    tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
     fixture.handle.screen_tick().await.unwrap();
+
     let logs = logged(&captured);
     assert!(!logs.contains("agent monitor degraded"), "{logs}");
     assert!(fixture.health().await.is_empty());
+}
+
+#[tokio::test]
+async fn departed_and_busy_panes_start_no_count() {
+    let screen = TimingScreen::default();
+    let fixture = ScreenHealthFixture::new(screen, 1).await;
+    let (captured, _guard) = capture_logs();
+    fixture.screen.departed.store(true, Ordering::SeqCst);
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.departed.store(false, Ordering::SeqCst);
 
     tokio::time::pause();
     tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
     fixture.handle.screen_tick().await.unwrap();
 
     let logs = logged(&captured);
-    let line = logs
-        .lines()
-        .find(|line| line.contains("agent monitor degraded"))
-        .unwrap_or_else(|| panic!("no degraded line in {logs}"));
-    assert!(line.contains("reason=timeout"), "{line}");
-    assert!(line.contains("pane_id=\"%8\""), "{line}");
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(fixture.health().await.is_empty());
 }
 
 #[tokio::test(start_paused = true)]

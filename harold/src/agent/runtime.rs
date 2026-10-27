@@ -1316,6 +1316,14 @@ impl AgentMonitorRuntime {
                 .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
             {
                 tracked.screen_failure = None;
+                // A scan that timed out is slowness, and this read worked: only a scan that
+                // failed for another reason stays until a scan works.
+                if tracked
+                    .recovery_failure
+                    .is_some_and(|failure| failure.reason_code == "timeout")
+                {
+                    tracked.recovery_failure = None;
+                }
             }
             // Recovery triggers consume raw visible state, independently of hook-grace filtering.
             let recovery = self
