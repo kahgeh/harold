@@ -100,7 +100,7 @@ When `editorMode` is `vim`, an empty box is ready only when a row below the lowe
 3. If the box holds only `i`, the box was in INSERT mode with no footer drawn, and the `i` went in as text. Harold removes the `i` (see below) and reads the screen again. If the box is then empty and the footer shows `-- INSERT --`, Harold types the text. Else Harold waits with `input_box_not_insert`.
 4. If the 5th read still shows neither result, Harold waits with `input_box_not_insert`.
 
-Harold removes its own `i` with `BSpace` when the footer shows `-- INSERT --`. Without that footer, the box is in NORMAL mode, where `BSpace` only moves the cursor, so Harold sends `x`. Each removal writes the log line `stray insert key removed`.
+Harold removes its own `i` with `BSpace` or `x`. In the try that sent the `i`, an `i` that shows as text means the box was in INSERT mode already, so Harold sends `BSpace`, with or without the footer. On a later try, Harold sends `BSpace` when the footer shows `-- INSERT --`. Without that footer, the box is in NORMAL mode, where `BSpace` only moves the cursor, so Harold sends `x`. Each removal writes the log line `stray insert key removed`.
 
 Harold remembers when it sent `i` with no text typed after it. On the next try, if that was less than 60 s ago and the box holds only `i`, Harold removes the `i` as above and goes on with the checks. After 60 s, a lone `i` is the user's text, and the line waits with `input_box_holds_text`. Typing a line clears the memory.
 
@@ -126,7 +126,7 @@ Harold writes one line when a prompt is typed, one when it is skipped, and one e
 |---|---|---|---|
 | Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`), `insert_pressed` (`true` when Harold pressed `i` first, for a Vim input box in NORMAL mode) |
 | Waiting, for a reason other than the last one logged for this prompt | info | `timed prompt delayed` | `name`, `reason`, and `agents` (the count) for `several_agents_in_folder` |
-| Harold took its own `i` out of the box | info | `stray insert key removed` | `pane_id`, `state` (`insert` when the footer shows `-- INSERT --`, else `normal`) |
+| Harold took its own `i` out of the box | info | `stray insert key removed` | `pane_id`, `state` (`insert` when Harold sent `BSpace`, `normal` when it sent `x`) |
 | Window ended | warn | `timed prompt skipped` | `name`, `reason`: the last reason it waited for, or `window_passed` when Harold never saw it due |
 | Enter failed after the text was typed | warn | `timed prompt failed` | `name`, `pane`, `error` |
 | The event could not be stored | error | `timed prompt record not stored` | `name`, `error` |
