@@ -1146,3 +1146,90 @@ fn the_light_strip_covers_the_pages_without_a_header_with_the_same_tint() {
             .contains("var(--status-tint) 0 var(--status-glass)")
     );
 }
+
+/// The names a scope declares with `function` more than once. Declarations of one scope share
+/// an indent and follow one run of lines with no shallower line between; a later declaration
+/// silently replaces an earlier one.
+fn repeated_functions(source: &str) -> Vec<String> {
+    let mut seen: Vec<(usize, usize, String)> = Vec::new();
+    let mut repeated = Vec::new();
+    // The last line seen at each indent, by indent: the opener of the scope below it.
+    let mut openers: Vec<usize> = Vec::new();
+    for (number, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        openers.truncate(indent);
+        openers.resize(indent + 1, number);
+        let declaration = trimmed.strip_prefix("async ").unwrap_or(trimmed);
+        let Some(rest) = declaration.strip_prefix("function ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        let scope = openers[..indent].last().copied().unwrap_or(0);
+        if seen.contains(&(indent, scope, name.clone())) {
+            repeated.push(format!("{name} (line {})", number + 1));
+        } else {
+            seen.push((indent, scope, name));
+        }
+    }
+    repeated
+}
+
+#[test]
+fn no_page_script_declares_the_same_function_twice_in_one_scope() {
+    let scripts = page_scripts();
+    for wanted in ["call.js", "pages.js"] {
+        assert!(scripts.iter().any(|(name, _)| name == wanted), "{wanted}");
+    }
+    let found: Vec<_> = scripts
+        .iter()
+        .flat_map(|(name, source)| {
+            repeated_functions(source)
+                .into_iter()
+                .map(move |function| format!("{name}: {function}"))
+        })
+        .collect();
+    assert!(found.is_empty(), "functions declared twice: {found:#?}");
+    // The scan finds a repeat, and keeps a nested function of the same name apart.
+    assert_eq!(
+        repeated_functions("(() => {\n  function a() {}\n  function a() {}\n})();"),
+        ["a (line 3)"]
+    );
+    assert!(
+        repeated_functions("(() => {\n  function a() {\n    function b() {}\n  }\n  function c() {\n    function b() {}\n  }\n})();")
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_call_script_posts_its_signals_with_post_signals_and_reports_a_call_with_no_id() {
+    let script = include_str!("../../static/web_app/call.js");
+    assert!(script.contains("async function postSignals(element, url, signals, include"));
+    assert!(script.contains("return postSignals(null, path, {}, /^none$/"));
+    let check = script
+        .split("function postCheck(body) {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  }\n").next())
+        .expect("postCheck is there");
+    assert!(check.contains("postSignals("), "{check}");
+    // The audio piece poster keeps its name, and the Datastar poster is no longer `post`.
+    assert!(script.contains("function post(current, piece)"));
+    assert!(!script.contains("function post(element"));
+    // A POST /call with no id sends the check before it ends the call.
+    let no_id = script
+        .split("if (status !== 200 || !id) {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n      }\n").next())
+        .expect("the no-id path is there");
+    assert!(
+        no_id.contains(r#"postCheck({ ...facts(current), step: "call" });"#),
+        "{no_id}"
+    );
+    assert!(no_id.find("postCheck").unwrap() < no_id.find("end(current)").unwrap());
+}

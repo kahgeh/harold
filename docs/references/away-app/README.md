@@ -455,7 +455,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
 | `app call check` | One per call, 3 seconds in, from the page's `POST /call/check`: `context_state`, `track_state`, `track_muted`, `pieces_made`, `pieces_posted`, `pieces_dropped` (`playing=n echo_tail=n before_start=n not_open=n`), `posts_failed` and `empty_blocks`. No free text. |
-| `app call microphone failed` | A warning with the same fields plus `problem` (`no_sound`) or `step` (`microphone`, `context`, `worklet` or `call`) and `error_name`, the browser's error name |
+| `app call microphone failed` | A warning with the same fields plus `problem` (`no_sound`) or `step` (`microphone`, `context`, `worklet` or `call`) and `error_name`, the browser's error name. `step="call"` also comes when `POST /call` gives no id |
 | `call audio refused` | `reason` (`full`, `malformed` or `too_large`), a warning logged once per reason per call for a piece of audio the open call refused |
 | `echo test run` | `setup` (`ear`, `speaker` or `headphones`), `kind` (`silent` or `talk`), `verdict` (`pass`, `fail` or `run_silent_first`), `share_over_bar` (silent runs: the share of playback frames over the bar) or `voice_found` (talk runs with a bar), `echo_cancellation` and `standalone` (yes or no) |
 | `echo test run not saved` | `reason` (`write_failed` or `bad_request`), logged as a warning |

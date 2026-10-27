@@ -44,7 +44,7 @@
   // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
   // the request could not be sent. A request is never retried, so one failed post is one
   // post, and a 401 (the device is no longer paired) reloads to the pair screen.
-  async function post(element, url, signals, include, options = {}) {
+  async function postSignals(element, url, signals, include, options = {}) {
     // A request with no element of its own gets one, so another request's error is not taken for its.
     const el = element || document.createElement("span");
     const { actions, mergePatch } = await datastar;
@@ -83,7 +83,7 @@
   // `Datastar-Request: true`: Harold takes no post from a page without a header another site
   // could not send. These send no signal, and one that hides with the page stays open.
   function send(method, path) {
-    return post(null, path, {}, /^none$/, {
+    return postSignals(null, path, {}, /^none$/, {
       action: method === "DELETE" ? "delete" : "post",
       request: { openWhenHidden: true },
     });
@@ -239,6 +239,7 @@
         return;
       }
       if (status !== 200 || !id) {
+        postCheck({ ...facts(current), step: "call" });
         end(current);
         return;
       }
@@ -293,7 +294,7 @@
   }
 
   function postCheck(body) {
-    post(
+    postSignals(
       null,
       "/call/check",
       { ...Object.fromEntries(CHECK_FIELDS.map((field) => [field, null])), ...body },
