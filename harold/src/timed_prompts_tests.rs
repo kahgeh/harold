@@ -2478,12 +2478,13 @@ async fn in_insert_mode_harold_presses_no_key_but_enter() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_box_that_holds_only_i_after_the_key_loses_it_and_waits() {
+async fn a_box_that_holds_only_i_after_the_key_loses_it_and_keeps_waiting_if_it_stays() {
     let fake = vim_fake();
     fake.set(|state| {
         state.screens = [
             Some(vim_screen("❯ ", NORMAL_FOOTER)),
-            Some(vim_screen("❯ i", NORMAL_FOOTER)),
+            Some(vim_screen("❯ i", FOOTER)),
+            Some(vim_screen("❯ i", FOOTER)),
         ]
         .into();
     });
@@ -2620,4 +2621,272 @@ async fn a_timed_prompt_typed_after_i_reports_insert_pressed() {
             ..
         }]
     ));
+}
+
+// --- Harold's own `i`, and a one-letter box ---
+
+/// The rows of a scratch Claude Code 2.1.310 pane with `editorMode` `vim`, as
+/// `capture-pane -e -p` gives them: the rule rows, the box row and the footer row. The
+/// suggestion's letters are `x`. The box row is `❯`, a no-break space, then the box text.
+/// The scratch pane needs a login, so these rows are built by hand from the real codes.
+fn real_screen(box_text: &str, insert: bool) -> String {
+    let rule = format!("\x1b[38;5;240m{RULE}\x1b[39m");
+    let footer = if insert {
+        "  \x1b[2m-- INSERT --\x1b[0m".to_string()
+    } else {
+        format!("  \x1b[2m{}\x1b[0m", NORMAL_FOOTER.trim_start())
+    };
+    [
+        rule.clone(),
+        format!("\x1b[0m❯\u{a0}{box_text}"),
+        rule,
+        footer,
+    ]
+    .join("\n")
+        + "\n"
+}
+
+const SUGGESTION: &str = "\x1b[2mxxxx xxxx xxxxxxx\x1b[0m";
+
+#[test]
+fn real_screens_read_as_the_box_state() {
+    for (box_text, insert, expected) in [
+        (SUGGESTION, true, InputBox::Empty),
+        (SUGGESTION, false, InputBox::NotInsert),
+        ("i", true, InputBox::HoldsText),
+        ("i", false, InputBox::HoldsText),
+        ("", true, InputBox::Empty),
+        ("", false, InputBox::NotInsert),
+    ] {
+        assert_eq!(
+            super::read_input_box(&real_screen(box_text, insert), true),
+            expected,
+            "box {box_text:?}, insert {insert}"
+        );
+    }
+}
+
+#[test]
+fn a_one_letter_box_reads_as_text_with_the_cursor_in_reverse_video() {
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[7mi\x1b[0m")),
+        InputBox::HoldsText
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[7m \x1b[0m")),
+        InputBox::Empty
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[7ms\x1b[0;2muggested\x1b[0m")),
+        InputBox::Empty
+    );
+    // A letter and the cursor after it.
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ i\x1b[7m \x1b[0m")),
+        InputBox::HoldsText
+    );
+}
+
+/// Sets how old Harold's `i` is for the pane `%2`.
+async fn set_insert_key_age(fake: &Fake, age: Duration) {
+    fake.1.for_pane("%2").lock().await.insert_key_at = Some(Instant::now() - age);
+}
+
+async fn insert_key_at(fake: &Fake) -> Option<Instant> {
+    fake.1.for_pane("%2").lock().await.insert_key_at
+}
+
+fn text_keys() -> Vec<Key> {
+    digest_keys()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_footer_is_waited_for_with_one_key() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed {
+            insert_pressed: true,
+            ..
+        }
+    ));
+    let mut keys = vec![pressed("i")];
+    keys.extend(text_keys());
+    assert_eq!(fake.keys(), keys);
+    assert!(insert_key_at(&fake).await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_i_after_the_key_is_removed_and_the_line_is_typed() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ i", FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Typed { .. }));
+    let mut keys = vec![pressed("i"), pressed("BSpace")];
+    keys.extend(text_keys());
+    assert_eq!(fake.keys(), keys);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_i_that_stays_after_the_removal_makes_the_line_wait() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ i", FOOTER)),
+            Some(vim_screen("❯ i", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxNotInsert)));
+    assert_eq!(fake.keys(), [pressed("i"), pressed("BSpace")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn six_reads_without_a_footer_wait_and_keep_the_mark() {
+    let fake = vim_fake();
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxNotInsert)));
+    assert_eq!(fake.keys(), [pressed("i")]);
+    assert_eq!(fake.screen_reads(), 1 + super::INSERT_READS);
+    assert!(insert_key_at(&fake).await.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_next_try_removes_the_lone_i_in_insert_mode() {
+    let fake = vim_fake();
+    set_insert_key_age(&fake, Duration::from_secs(5)).await;
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ i", FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed {
+            insert_pressed: false,
+            ..
+        }
+    ));
+    let mut keys = vec![pressed("BSpace")];
+    keys.extend(text_keys());
+    assert_eq!(fake.keys(), keys);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_next_try_removes_the_lone_i_in_normal_mode_and_presses_i_again() {
+    let fake = vim_fake();
+    set_insert_key_age(&fake, Duration::from_secs(5)).await;
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ i", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed {
+            insert_pressed: true,
+            ..
+        }
+    ));
+    let mut keys = vec![pressed("x"), pressed("i")];
+    keys.extend(text_keys());
+    assert_eq!(fake.keys(), keys);
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_minute_a_lone_i_is_the_users_text() {
+    let fake = vim_fake();
+    set_insert_key_age(&fake, Duration::from_secs(61)).await;
+    fake.set(|state| state.screen = Some(vim_screen("❯ i", FOOTER)));
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxHoldsText)));
+    assert!(fake.keys().is_empty());
+}
+
+/// Log text, kept by a subscriber for the test.
+#[derive(Clone, Default)]
+struct LogText(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogText {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogText {
+    type Writer = LogText;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_removal_logs_the_pane_and_the_state() {
+    let log = LogText::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    for (insert, state) in [(true, "state=\"insert\""), (false, "state=\"normal\"")] {
+        let fake = vim_fake();
+        set_insert_key_age(&fake, Duration::from_secs(5)).await;
+        let footer = if insert { FOOTER } else { NORMAL_FOOTER };
+        fake.set(|fake_state| {
+            fake_state.screens = [Some(vim_screen("❯ i", footer))].into();
+        });
+        let _ = type_digest(&fake).await;
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("stray insert key removed"), "{text}");
+        assert!(text.contains("pane_id=%2"), "{text}");
+        assert!(text.contains(state), "{text}");
+        log.0.lock().unwrap().clear();
+    }
 }

@@ -87,7 +87,7 @@ Check 6 reads the pane's visible screen once with `tmux capture-pane -e`, which 
   -- INSERT -- ⏵⏵ bypass permissions on
 ```
 
-The input box is found when the lowest row that starts with `❯` has a row starting with `─` directly above it and directly below it. It is empty when that row holds nothing but spaces after the `❯`. Harold does not count the text drawn dim, which is a suggested prompt, or in reverse video, which is the cursor. A line that waits for the chief therefore goes in as soon as the chief waits at its prompt, with a suggested prompt in the box.
+The input box is found when the lowest row that starts with `❯` has a row starting with `─` directly above it and directly below it. It is empty when that row holds nothing but spaces after the `❯`. Harold does not count the text drawn dim, which is a suggested prompt. It does not count a reverse-video space, or one reverse-video letter that dim text follows directly: that is the cursor. Other reverse-video text is typed text, so a box with one typed letter holds text. A line that waits for the chief therefore goes in as soon as the chief waits at its prompt, with a suggested prompt in the box.
 
 ### Vim
 
@@ -95,10 +95,14 @@ Harold reads `editorMode` in `settings.json` in `$CLAUDE_CONFIG_DIR`, or in `~/.
 
 When `editorMode` is `vim`, an empty box is ready only when a row below the lower rule holds `-- INSERT --`. In NORMAL mode that row is missing, and a typed key is a Vim command. So Harold does this in check 7:
 
-1. Harold sends the one key `i` and reads the screen again.
-2. If the footer now shows `-- INSERT --` and the box is empty, Harold types the text and sends Enter. The log line for the typed text has `insert_pressed=true`.
-3. If the box holds only `i`, the box was in INSERT mode with no footer drawn. Harold sends `BSpace` once and waits with `input_box_not_insert`.
-4. In every other case Harold waits with `input_box_not_insert`.
+1. Harold sends the one key `i`. It then reads the screen up to 5 times, 200 ms apart (1 s in all), and stops at the first of these results.
+2. If the footer shows `-- INSERT --` and the box is empty, Harold types the text and sends Enter. The log line for the typed text has `insert_pressed=true`.
+3. If the box holds only `i`, the box was in INSERT mode with no footer drawn, and the `i` went in as text. Harold removes the `i` (see below) and reads the screen again. If the box is then empty and the footer shows `-- INSERT --`, Harold types the text. Else Harold waits with `input_box_not_insert`.
+4. If the 5th read still shows neither result, Harold waits with `input_box_not_insert`.
+
+Harold removes its own `i` with `BSpace` when the footer shows `-- INSERT --`. Without that footer, the box is in NORMAL mode, where `BSpace` only moves the cursor, so Harold sends `x`. Each removal writes the log line `stray insert key removed`.
+
+Harold remembers when it sent `i` with no text typed after it. On the next try, if that was less than 60 s ago and the box holds only `i`, Harold removes the `i` as above and goes on with the checks. After 60 s, a lone `i` is the user's text, and the line waits with `input_box_holds_text`. Typing a line clears the memory.
 
 Harold sends `i` at most once in each try, and all of this runs while Harold holds the pane's lock. A box that holds text waits with `input_box_holds_text` in either mode.
 
@@ -106,7 +110,7 @@ Everything else fails a check, so doubt always means not typing:
 
 | The screen shows | Fails |
 |---|---|
-| Text after the `❯`, other than dim text and the cursor | Check 7 (`input_box_holds_text`) |
+| Text after the `❯`, other than dim text and the cursor (a reverse-video letter is text) | Check 7 (`input_box_holds_text`) |
 | In Vim, an empty box with no `-- INSERT --` row below it, after the `i` key did not help | Check 7 (`input_box_not_insert`) |
 | An input box more than one row tall | Check 6 |
 | A permission question, a menu or a picker in place of the input box | Check 6 |
@@ -122,6 +126,7 @@ Harold writes one line when a prompt is typed, one when it is skipped, and one e
 |---|---|---|---|
 | Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`), `insert_pressed` (`true` when Harold pressed `i` first, for a Vim input box in NORMAL mode) |
 | Waiting, for a reason other than the last one logged for this prompt | info | `timed prompt delayed` | `name`, `reason`, and `agents` (the count) for `several_agents_in_folder` |
+| Harold took its own `i` out of the box | info | `stray insert key removed` | `pane_id`, `state` (`insert` when the footer shows `-- INSERT --`, else `normal`) |
 | Window ended | warn | `timed prompt skipped` | `name`, `reason`: the last reason it waited for, or `window_passed` when Harold never saw it due |
 | Enter failed after the text was typed | warn | `timed prompt failed` | `name`, `pane`, `error` |
 | The event could not be stored | error | `timed prompt record not stored` | `name`, `error` |

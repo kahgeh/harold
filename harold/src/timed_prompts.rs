@@ -49,6 +49,12 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long Claude Code gets to redraw its footer after Harold presses `i`.
 const INSERT_REDRAW: Duration = Duration::from_millis(200);
 
+/// How many times Harold reads the screen after it presses `i`, `INSERT_REDRAW` apart.
+const INSERT_READS: usize = 5;
+
+/// How long after Harold pressed `i` a lone `i` in the box still counts as Harold's own.
+const STRAY_INSERT_KEY_AGE: Duration = Duration::from_secs(60);
+
 /// The local date and time come from `/bin/date`: the `time` crate refuses to read the
 /// local offset in a process with more than one thread.
 const DATE_PROGRAM: &str = "/bin/date";
@@ -159,15 +165,15 @@ const INSERT_FOOTER: &str = "-- INSERT --";
 
 /// What the input box holds, read from a screen.
 struct BoxRead {
-    /// The text in the box, without the text drawn dim (a suggested prompt) or in reverse
-    /// video (the cursor).
+    /// The text in the box, without the text drawn dim (a suggested prompt) or the cursor
+    /// (a reverse-video space, or a reverse-video letter that dim text follows directly).
     typed: String,
     /// Whether a row below the lower rule holds `-- INSERT --`.
     insert_footer: bool,
 }
 
 /// One row of a screen with its escape codes removed, and the text the row holds that is
-/// neither dim nor in reverse video.
+/// typed: not dim, and not the cursor.
 struct Row {
     plain: String,
     plain_unstyled: String,
@@ -175,17 +181,31 @@ struct Row {
 
 /// Reads one row of a `capture-pane -e` screen. Only SGR codes change what is dim (2 until
 /// 22) or in reverse video (7 until 27); 0 and an empty code reset both. Every other
-/// escape sequence is dropped. A row with no escape codes reads as it is.
+/// escape sequence is dropped. A row with no escape codes reads as it is. Reverse-video
+/// text is typed text, except a space and except one letter that dim text follows
+/// directly: that is the cursor on the first letter of a suggested prompt.
 fn read_row(raw: &str) -> Row {
     let mut plain = String::new();
     let mut plain_unstyled = String::new();
     let (mut dim, mut reverse) = (false, false);
+    // The reverse-video letters since the last other character. Dim text that follows
+    // them directly drops one letter; any other character keeps them.
+    let mut cursor_letters = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\x1b' {
             plain.push(c);
-            if !dim && !reverse {
+            let kept = std::mem::take(&mut cursor_letters);
+            if !(dim && kept.chars().count() == 1) {
+                plain_unstyled.push_str(&kept);
+            }
+            if dim {
+                continue;
+            }
+            if !reverse {
                 plain_unstyled.push(c);
+            } else if c != ' ' {
+                cursor_letters.push(c);
             }
             continue;
         }
@@ -224,6 +244,7 @@ fn read_row(raw: &str) -> Row {
             None => {}
         }
     }
+    plain_unstyled.push_str(&cursor_letters);
     Row {
         plain,
         plain_unstyled,
@@ -285,7 +306,7 @@ fn read_box(screen: &str) -> Option<BoxRead> {
 
 /// Reads the input box on a screen taken with `capture-pane -e`. The box is empty when
 /// nothing but spaces follows the `❯` once the dim text (a suggested prompt) and the
-/// reverse-video cursor are left out. With `vim`, Claude Code's editor is Vim, and an empty
+/// cursor are left out. With `vim`, Claude Code's editor is Vim, and an empty
 /// box is `Empty` only when the footer shows `-- INSERT --`; else it is `NotInsert`. Text in
 /// the box is `HoldsText` in either mode.
 pub(crate) fn read_input_box(screen: &str, vim: bool) -> InputBox {
@@ -565,6 +586,9 @@ pub(crate) type PaneLock = tokio::sync::Mutex<PaneRecord>;
 pub(crate) struct PaneRecord {
     /// The writer that last typed into the pane, and when its hold ends.
     typed: Option<(Writer, Instant)>,
+    /// When Harold pressed `i` in this pane with no line typed after it. A lone `i` in the
+    /// box soon after is Harold's own and Harold takes it out.
+    insert_key_at: Option<Instant>,
 }
 
 impl PaneRecord {
@@ -598,11 +622,14 @@ impl PaneLocks {
     pub(crate) fn for_pane(&self, pane_id: &str) -> Arc<PaneLock> {
         let mut panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
-        // Forgets the panes no writer holds or waits for that have no hold left.
+        // Forgets the panes no writer holds or waits for that have no hold or recent `i` left.
         panes.retain(|_, lock| {
             Arc::strong_count(lock) > 1
                 || lock.try_lock().map_or(true, |record| {
                     record.typed.is_some_and(|(_, until)| now < until)
+                        || record
+                            .insert_key_at
+                            .is_some_and(|at| now < at + STRAY_INSERT_KEY_AGE)
                 })
         });
         Arc::clone(panes.entry(pane_id.to_string()).or_default())
@@ -1117,8 +1144,26 @@ pub(crate) async fn type_when_ready<P: Ports>(
         return Attempt::Wait(Reason::AgentBusy);
     }
     let vim = ports.editor_is_vim();
-    let screen = ports.read_screen(&pane).await;
+    let mut screen = ports.read_screen(&pane).await;
     let mut insert_pressed = false;
+    // A lone `i` soon after Harold pressed `i` is Harold's own: take it out and check the
+    // box again. After a minute it is the user's text.
+    if let Some(at) = record.insert_key_at
+        && at.elapsed() >= STRAY_INSERT_KEY_AGE
+    {
+        record.insert_key_at = None;
+    }
+    if record.insert_key_at.is_some() && screen.as_deref().is_some_and(|s| box_holds_only(s, 'i')) {
+        if remove_stray_insert_key(ports, &pane, screen.as_deref())
+            .await
+            .is_err()
+        {
+            return Attempt::Wait(Reason::TypingFailed);
+        }
+        record.insert_key_at = None;
+        tokio::time::sleep(INSERT_REDRAW).await;
+        screen = ports.read_screen(&pane).await;
+    }
     if let Some(InputBox::NotInsert) = screen.as_deref().map(|screen| read_input_box(screen, vim)) {
         // The box is empty and in Vim NORMAL mode. One `i` puts it in INSERT mode, and
         // the footer must show that before Harold types. At most one `i` per try: a
@@ -1126,20 +1171,39 @@ pub(crate) async fn type_when_ready<P: Ports>(
         if ports.press_key(&pane, "i").await.is_err() {
             return Attempt::Wait(Reason::TypingFailed);
         }
-        tokio::time::sleep(INSERT_REDRAW).await;
-        let screen = ports.read_screen(&pane).await;
-        match screen.as_deref().map(|screen| read_input_box(screen, vim)) {
-            Some(InputBox::Empty) => insert_pressed = true,
-            Some(InputBox::HoldsText)
-                if screen.as_deref().is_some_and(|s| box_holds_only(s, 'i')) =>
-            {
-                // The box was in INSERT mode already, with no footer drawn, and the `i`
-                // went in as text. Take it out; the next try looks again.
-                let _ = ports.press_key(&pane, "BSpace").await;
-                return Attempt::Wait(Reason::InputBoxNotInsert);
+        record.insert_key_at = Some(Instant::now());
+        let mut removed = false;
+        let mut ready = false;
+        for _ in 0..INSERT_READS {
+            tokio::time::sleep(INSERT_REDRAW).await;
+            let screen = ports.read_screen(&pane).await;
+            match screen.as_deref().map(|screen| read_input_box(screen, vim)) {
+                Some(InputBox::Empty) => {
+                    ready = true;
+                    break;
+                }
+                Some(InputBox::HoldsText)
+                    if !removed && screen.as_deref().is_some_and(|s| box_holds_only(s, 'i')) =>
+                {
+                    // The box was in INSERT mode already, with no footer drawn, and the
+                    // `i` went in as text. Take it out and read again.
+                    if remove_stray_insert_key(ports, &pane, screen.as_deref())
+                        .await
+                        .is_err()
+                    {
+                        return Attempt::Wait(Reason::TypingFailed);
+                    }
+                    record.insert_key_at = None;
+                    removed = true;
+                }
+                _ if removed => break,
+                _ => {}
             }
-            _ => return Attempt::Wait(Reason::InputBoxNotInsert),
         }
+        if !ready {
+            return Attempt::Wait(Reason::InputBoxNotInsert);
+        }
+        insert_pressed = true;
     } else if let Some(reason) = box_reason(screen.as_deref(), vim) {
         return Attempt::Wait(reason);
     }
@@ -1148,6 +1212,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
         return Attempt::Wait(Reason::TypingFailed);
     }
     // Typed, whether or not Enter goes through: the text is in the box either way.
+    record.insert_key_at = None;
     record.typed_by(writer);
     match ports.press_enter(&pane).await {
         Ok(()) => Attempt::Typed {
@@ -1156,6 +1221,27 @@ pub(crate) async fn type_when_ready<P: Ports>(
         },
         Err(error) => Attempt::EnterFailed { pane, error },
     }
+}
+
+/// Takes Harold's own `i` out of the box: `BSpace` in INSERT mode, where the footer shows
+/// it, else `x`, which removes the letter under the cursor in NORMAL mode.
+async fn remove_stray_insert_key<P: Ports>(
+    ports: &P,
+    pane: &str,
+    screen: Option<&str>,
+) -> Result<(), String> {
+    let insert = screen
+        .and_then(read_box)
+        .is_some_and(|read| read.insert_footer);
+    ports
+        .press_key(pane, if insert { "BSpace" } else { "x" })
+        .await?;
+    info!(
+        pane_id = %pane,
+        state = if insert { "insert" } else { "normal" },
+        "stray insert key removed"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
