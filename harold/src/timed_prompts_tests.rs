@@ -2890,3 +2890,23 @@ async fn the_removal_logs_the_pane_and_the_state() {
         log.0.lock().unwrap().clear();
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_i_in_the_same_try_is_removed_with_bspace_without_the_footer() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ i", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Typed { .. }));
+    let mut keys = vec![pressed("i"), pressed("BSpace")];
+    keys.extend(text_keys());
+    assert_eq!(fake.keys(), keys);
+}

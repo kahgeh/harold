@@ -1154,7 +1154,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
         record.insert_key_at = None;
     }
     if record.insert_key_at.is_some() && screen.as_deref().is_some_and(|s| box_holds_only(s, 'i')) {
-        if remove_stray_insert_key(ports, &pane, screen.as_deref())
+        if remove_stray_insert_key(ports, &pane, screen.as_deref(), false)
             .await
             .is_err()
         {
@@ -1187,7 +1187,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
                 {
                     // The box was in INSERT mode already, with no footer drawn, and the
                     // `i` went in as text. Take it out and read again.
-                    if remove_stray_insert_key(ports, &pane, screen.as_deref())
+                    if remove_stray_insert_key(ports, &pane, screen.as_deref(), true)
                         .await
                         .is_err()
                     {
@@ -1223,16 +1223,20 @@ pub(crate) async fn type_when_ready<P: Ports>(
     }
 }
 
-/// Takes Harold's own `i` out of the box: `BSpace` in INSERT mode, where the footer shows
-/// it, else `x`, which removes the letter under the cursor in NORMAL mode.
+/// Takes Harold's own `i` out of the box: `BSpace` in INSERT mode, else `x`, which removes
+/// the letter under the cursor in NORMAL mode. The box is in INSERT mode when the footer
+/// shows it, or when `known_insert` is set: Harold's `i` showed as text in the try that
+/// pressed it, so the box was in INSERT mode already.
 async fn remove_stray_insert_key<P: Ports>(
     ports: &P,
     pane: &str,
     screen: Option<&str>,
+    known_insert: bool,
 ) -> Result<(), String> {
-    let insert = screen
-        .and_then(read_box)
-        .is_some_and(|read| read.insert_footer);
+    let insert = known_insert
+        || screen
+            .and_then(read_box)
+            .is_some_and(|read| read.insert_footer);
     ports
         .press_key(pane, if insert { "BSpace" } else { "x" })
         .await?;
