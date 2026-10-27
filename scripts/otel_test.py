@@ -158,14 +158,21 @@ def run_layout_scenario(run, scenario, screens, width=390):
     """Runs a browser scenario that sends no reply, so no chief turn follows, and returns the
     browser's own result."""
     result_path = run.scratch / '{}-browser.json'.format(scenario if width == 390 else '{}-{}'.format(scenario, width))
-    browser = subprocess.run(
+    browser = subprocess.Popen(
         ['node', str(HERE / 'otel_browser.mjs'), '--scenario', scenario,
          '--url', 'http://127.0.0.1:{}/'.format(run.web_port), '--login', ct.LOGIN,
          '--chrome', CHROME, '--out', str(result_path), '--screens', str(screens / 'w{}'.format(width)),
          '--limit', str(LIMIT_SCENARIO), '--width', str(width)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=LIMIT_SCENARIO, start_new_session=True)
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        browser.wait(timeout=LIMIT_SCENARIO)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        if browser.poll() is None:
+            os.killpg(browser.pid, signal.SIGKILL)
     if not result_path.exists():
-        raise ct.StepFailed('the browser wrote no result: ' + browser.stderr.decode()[:300])
+        raise ct.StepFailed('the browser wrote no result: ' + browser.stderr.read().decode()[:300])
     return json.loads(result_path.read_text())
 
 

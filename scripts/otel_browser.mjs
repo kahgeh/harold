@@ -133,7 +133,7 @@ const VISUAL_VIEWPORT_STAND_IN = (WIDTH) => `(() => {
   const vv = new EventTarget();
   Object.assign(vv, { width: ${WIDTH}, height: 508, offsetTop: 0, offsetLeft: 0, pageTop: 0, pageLeft: 0, scale: 1 });
   Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
-  window.__vv = { set(height) { vv.height = height; vv.dispatchEvent(new Event("resize")); } };
+  window.__vv = { set(height, scale = 1) { vv.height = height; vv.scale = scale; vv.dispatchEvent(new Event("resize")); } };
 })()`;
 const expect = (what, ok, seen) => {
   if (!ok) throw new Error(`${what}, saw ${JSON.stringify(seen)}`);
@@ -249,6 +249,13 @@ try {
     expect("open: the thread is still at its end", result.open.threadEnd <= 1, result.open);
     expect("open: the page is marked keyboard-open", result.open.keyboardOpen, result.open);
     await screenshot("3-keyboard-open");
+    // A pinch zoom shortens the visual viewport too, but it is no keyboard: nothing moves.
+    await evaluate(`window.__vv.set(422, 2)`);
+    await frame();
+    result.zoomed = await measure();
+    expect("zoomed: the reply bar stays where the keyboard put it", Math.abs(result.zoomed.replyBottom - 508) <= 1, result.zoomed);
+    await evaluate(`window.__vv.set(508, 1)`);
+    await frame();
     await evaluate(`window.__vv.set(844)`);
     await frame();
     result.closed = await measure();

@@ -758,6 +758,10 @@ document.addEventListener("datastar-fetch", (event) => {
   const AT_END = 2;
 
   function fit() {
+    // A pinch zoom also shortens the visual viewport, and no keyboard is open then.
+    if (Math.abs(viewport.scale - 1) > 0.01) {
+      return;
+    }
     const atEnd = thread.scrollHeight - thread.scrollTop - thread.clientHeight <= AT_END;
     document.documentElement.style.setProperty("--viewport-height", viewport.height + "px");
     document.body.classList.toggle("keyboard-open", window.innerHeight - viewport.height > KEYBOARD_MIN);
