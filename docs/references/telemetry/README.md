@@ -781,7 +781,7 @@ What the chief does with a line is the chief's own instruction.
 
 ### Waiting for the chief
 
-Typing follows the timed prompts' checks: the pane must be idle and its input box empty. Harold tries every 5 seconds, and a line waits as long as that takes. It also waits while no agent runs in the chief's folder, so a chief that starts later still hears an alert that is still firing. The first refused try logs `alert waiting (<reason>)` once, with `reason = no_chief` when no agent runs in the folder, and the line is logged again only when it is typed.
+Typing follows the timed prompts' checks: the pane must be idle and its input box empty, and in Vim INSERT mode when Claude Code's editor is Vim. Harold presses `i` to put a Vim box in INSERT mode. The `alert typed` line carries `insert_pressed` (`true` when it did). Harold tries every 5 seconds, and a line waits as long as that takes. It also waits while no agent runs in the chief's folder, so a chief that starts later still hears an alert that is still firing. The first refused try logs `alert waiting (<reason>)` once, with `reason = no_chief` when no agent runs in the folder or `reason = input_box_not_insert` when a Vim box stays in NORMAL mode after the `i`, and the line is logged again only when it is typed.
 
 While a line waits, Harold keeps reading posts:
 

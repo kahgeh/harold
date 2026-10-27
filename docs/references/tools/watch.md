@@ -160,7 +160,7 @@ No line carries any of the skill's text, its `allowed-tools`, the paths in its `
 | A skill's `allowed-tools` is a YAML list, at each run | warn | `watch skill tools not read` | `watch`, `reason` (`yaml_list`) |
 | A report waits, logged when its reason changes | info | `watch report waiting` | `watch`, `run`, `reason` (the timed-prompt reasons, such as `agent_busy`) |
 | A waiting report is replaced or dropped | info | `watch report replaced` | `watch`, `run`, `why` (`newer_report` or `watch_ended`) |
-| A report or closing line is typed | info | `watch report typed` | `watch`, `run`, `pane` |
+| A report or closing line is typed | info | `watch report typed` | `watch`, `run`, `pane`, `insert_pressed` |
 | A watch ends | info | `watch stopped` | `watch`, `reason` (`ended`, `stopped`, `daily_budget_spent`, `runs_failing`), `runs`, `cost_usd` |
 
 `watch run finished`, `watch run failed` and `watch run skipped` are written inside the run's `harold.watch.run` span, so they carry its trace id. Counted from 0 at a watch's start, for HyperDX:
