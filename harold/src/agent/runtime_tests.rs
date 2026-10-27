@@ -4760,6 +4760,9 @@ async fn read_that_fails_twice_logs_degraded_once_then_recovered() {
     assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
     assert_eq!(logs.matches("agent monitor recovered").count(), 1, "{logs}");
     assert!(!logs.contains("agent monitor read retried"), "{logs}");
+    assert!(logs.contains("reason=command_failed"), "{logs}");
+    assert!(logs.contains("reason=ok"), "{logs}");
+    assert!(!logs.contains("reason_code"), "{logs}");
 }
 
 #[tokio::test]
@@ -5210,7 +5213,7 @@ async fn a_slow_scan_never_holds_the_monitor_past_inventory_timeout() {
     assert!(inventory.scan_calls.load(Ordering::SeqCst) >= 1);
     let logs = logged(&captured);
     assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
-    assert!(logs.contains("reason_code=timeout"), "{logs}");
+    assert!(logs.contains("reason=timeout"), "{logs}");
     drop(shutdown);
     task.await.unwrap();
 }

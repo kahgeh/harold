@@ -1472,9 +1472,9 @@ impl AgentMonitorRuntime {
             .get(component)
             .or_else(|| self.health.get(component));
         if !next.healthy {
-            tracing::warn!(component, reason_code = %next.reason_code, "agent monitor degraded");
+            tracing::warn!(component, reason = %next.reason_code, "agent monitor degraded");
         } else if previous.is_some_and(|previous| !previous.healthy) {
-            tracing::info!(component, reason_code = %next.reason_code, "agent monitor recovered");
+            tracing::info!(component, reason = %next.reason_code, "agent monitor recovered");
         }
         // Track current-process observations separately so restored failures are logged once,
         // without making a failed durable append suppress its retry.

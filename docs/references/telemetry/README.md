@@ -344,6 +344,15 @@ WHERE ServiceName = 'harold' AND Body = 'agent monitor pane found' AND Timestamp
 GROUP BY program, provider
 ```
 
+**The agent monitor loses sight of the panes.** `agent monitor degraded` (`warn`) and `agent monitor recovered` (`info`) carry `component` (`inventory` or `screen`) and `reason`. The reason is a bounded code, such as `timeout`, `busy`, `command_failed` or `malformed_output`. A recovered line has `reason` = `ok`. This query gives the count by day and reason. A day with more than 20 for one reason needs a look:
+
+```
+SELECT toDate(Timestamp) AS day, LogAttributes['component'] AS component, LogAttributes['reason'] AS reason, count() AS n
+FROM otel.otel_logs
+WHERE ServiceName = 'harold' AND Body = 'agent monitor degraded' AND Timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, component, reason ORDER BY day, n DESC
+```
+
 ## When the collector is down
 
 Export never slows Harold:

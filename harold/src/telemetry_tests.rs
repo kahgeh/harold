@@ -174,6 +174,24 @@ fn the_pod_file_and_stage_fields_leave_a_log_record() {
 }
 
 #[test]
+fn an_agent_monitor_degraded_record_leaves_with_component_and_reason() {
+    test_support::install();
+    let component = format!("degraded-{}", uuid::Uuid::new_v4());
+    tracing::warn!(component = %component, reason = "timeout", reason_code = "timeout", "agent monitor degraded");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&component))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["component", "reason"]);
+}
+
+#[test]
 fn the_watch_run_time_fields_leave_a_log_record() {
     test_support::install();
     let watch = format!("run-ms-{}", uuid::Uuid::new_v4());
