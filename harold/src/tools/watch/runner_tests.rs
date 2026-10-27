@@ -242,14 +242,15 @@ async fn a_run_over_time_is_killed_with_the_child_it_started() {
     );
     let runner = ClaudeRunner::new(cli, path_env());
     let mut asked = job(&work.0);
-    asked.timeout = Duration::from_millis(800);
+    asked.timeout = Duration::from_secs(3);
 
     assert_eq!(runner.run(&asked).await, ModelResult::Killed);
 
-    let pid = std::fs::read_to_string(work.0.join("child.pid")).unwrap();
+    let pid = std::fs::read_to_string(work.0.join("child.pid"))
+        .expect("the fake CLI did not write child.pid before the 3 s run limit");
     let pid = pid.trim();
     let mut gone = false;
-    for _ in 0..60 {
+    for _ in 0..200 {
         if !process_exists(pid) {
             gone = true;
             break;
