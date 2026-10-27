@@ -51,7 +51,7 @@ model = "haiku"                    # the model every watch runs
 # skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 ```
 
-Agents choose a watch's settings within these limits, and only the user changes the limits. Harold refuses to start on an invalid value and names the key, as for every other setting: each budget, when set, is above 0; `max_run_limit_secs`, when set, is above 0; `run_budget_usd` is no more than `max_run_budget_usd` when both are set; each `skill_folders` entry starts with `/` (`~/` is not expanded). An absent budget is never treated as 0. With none set, nothing limits a watch's spending but the timeouts, the turn limit and the number of watches.
+Agents choose a watch's settings within these limits, and only the user changes the limits. Harold refuses to start on an invalid value and names the key, as for every other setting: each budget, when set, is above 0; `max_run_limit_secs`, when set, is above 0; `run_budget_usd` is no more than `max_run_budget_usd` when both are set; each `skill_folders` entry starts with `/` (`~/` is not expanded). `max_run_limit_secs` caps only a run limit that `--run-limit` asks for: a watch started with no `--run-limit` runs with 120 seconds, also when `max_run_limit_secs` is below 120. An absent budget is never treated as 0. With none set, nothing limits a watch's spending but the timeouts, the turn limit and the number of watches.
 
 ## Where a watch skill may live
 
