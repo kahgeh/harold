@@ -331,7 +331,7 @@ body.on-todos > #reply {
   flex: 1;
   min-width: 0;
   min-height: var(--target);
-  max-height: calc(5 * 1.4em + 26px);
+  max-height: calc(5 * 1.4em + 24px);
   box-sizing: border-box;
   padding: 11px 16px;
   border: 1px solid var(--border);

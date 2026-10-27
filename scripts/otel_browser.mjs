@@ -168,6 +168,9 @@ try {
     expect("the box holds the two lines", held === "line one\nline two", held);
     expect("Shift+Enter makes no POST /replies", !posts.includes("/replies"), posts);
     result.boxHeightOfTwo = await evaluate(`${box}.offsetHeight`);
+    expect("the box grows for two lines", result.boxHeightOfTwo > 48, result.boxHeightOfTwo);
+    const clipped = await evaluate(`${box}.scrollHeight > ${box}.clientHeight`);
+    expect("two lines do not scroll", !clipped, clipped);
     await screenshot("2-two-lines");
     await press("Enter");
     result.tappedAt = await evaluate("Date.now()");
