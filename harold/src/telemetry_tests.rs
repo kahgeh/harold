@@ -4079,3 +4079,26 @@ fn the_tts_cards_read_first_audio_by_machine_loaded_and_device_and_the_failures_
     // Nothing in either card reads the text of a line.
     assert!(!speed.contains("text") && !failures.contains("text"));
 }
+
+/// HyperDX refuses a tile or container id of more than 36 characters.
+#[test]
+fn every_dashboard_tile_and_container_id_fits_hyperdx() {
+    const MAX_ID_LENGTH: usize = 36;
+    for file in ["dashboard.json", "trends.json", "machine.json"] {
+        let dashboard = definition(file);
+        for list in ["tiles", "containers"] {
+            let mut seen = std::collections::HashSet::new();
+            for item in dashboard[list].as_array().into_iter().flatten() {
+                let id = item["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{file} has a {list} entry without an id"));
+                let length = id.chars().count();
+                assert!(
+                    (1..=MAX_ID_LENGTH).contains(&length),
+                    "{file} {list} id {id:?} has {length} characters, HyperDX accepts 1 to {MAX_ID_LENGTH}"
+                );
+                assert!(seen.insert(id), "{file} has the {list} id {id:?} twice");
+            }
+        }
+    }
+}

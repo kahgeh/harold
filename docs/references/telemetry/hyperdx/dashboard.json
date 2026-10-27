@@ -821,7 +821,7 @@
       }
     },
     {
-      "id": "thread-opened-at-the-oldest-row-7-days",
+      "id": "thread-opened-at-oldest-row-7-days",
       "name": "Thread opened at the oldest row, 7 days",
       "x": 12,
       "y": 37,
