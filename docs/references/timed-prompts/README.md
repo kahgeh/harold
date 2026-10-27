@@ -178,3 +178,8 @@ after_compactions = 2
 - **The line.** `🔁 Harold: this chief session started 18 Oct 10:04 and has compacted 4 times. Hand off and restart at your next stopping point.` The start is in local time. It is typed with the same idle checks as the `ANSWERS` line, as the writer `restart_reminder`, and does not wait on a busy pane beyond about 3 seconds, which covers the moment before Harold's snapshot shows the pane idle: Harold tries again at the next turn end. The state is saved after the line is typed, so a Harold that stops in between may type it once more after the restart.
 - **Once per session.** `restart-reminder.json` in Harold's data folder (mode 0600) keeps, for each session id, the transcript's path, the offset read so far, the start, the compaction count and when the reminder was typed. Harold reads a transcript in full once, then only the bytes added after the offset. Sessions not seen for 30 days are dropped. A new session starts fresh.
 - **Log lines.** `chief restart reminder typed` carries `session.id`, `age_hours` and `compactions`. `chief restart reminder not typed` carries `session.id` and `reason`: `pane_busy`, `no_chief`, `transcript_unreadable` or `no_transcript_path`. It is written once for each session and reason.
+
+| Line | Fields |
+|---|---|
+| `chief restart reminder typed` | `session.id`, `age_hours` (the session's age), `compactions` (how many times it compacted) |
+| `chief restart reminder not typed` | `session.id`, `reason` |

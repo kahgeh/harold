@@ -441,6 +441,8 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app post refused` | WARN. A post from the app's own origin without `Datastar-Request: true`, on a route that needs it: `route` (the path without its query) and `reason` `not_datastar`. No body. Expected rate: 0. |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
+| `app spec shown` | INFO. `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`), `ms`, and `product` and `id` when the product is in the registry and the id passes the id pattern |
+| `app spec shared` | INFO. `product`, `id` and `sha`, logged when a **Share** reply is stored |
 | `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
 | `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
 | `app speech check not logged` | A warning with `reason` (`not_object`, `unknown_field`, `wrong_type` or `out_of_limit`) and `check_field`, the name of the refused field, or `-` when no field is to blame or the name is not one of the run's own (a name outside the list could hold words). Never a value. `check_field` stays in `harold.log` |

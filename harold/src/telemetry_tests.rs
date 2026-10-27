@@ -374,6 +374,106 @@ fn insert_pressed_is_an_allowed_field() {
 }
 
 #[test]
+fn every_allowed_field_is_in_a_docs_table() {
+    // Does the docs name `doc` match the field? `<n>` is one or more digits and a closing
+    // `…` is any rest.
+    fn names(doc: &str, field: &str) -> bool {
+        let (doc, open) = match doc.strip_suffix('…') {
+            Some(doc) => (doc, true),
+            None => (doc, false),
+        };
+        let mut rest = field;
+        let mut parts = doc.split("<n>");
+        let first = parts.next().unwrap_or_default();
+        let Some(after) = rest.strip_prefix(first) else {
+            return false;
+        };
+        rest = after;
+        for part in parts {
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits == 0 {
+                return false;
+            }
+            let Some(after) = rest[digits..].strip_prefix(part) else {
+                return false;
+            };
+            rest = after;
+        }
+        open || rest.is_empty()
+    }
+
+    fn docs_files(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read docs dir") {
+            let path = entry.expect("read docs entry").path();
+            if path.is_dir() {
+                docs_files(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                found.push(path);
+            }
+        }
+    }
+
+    // The field names a table row holds in backticks: the leading name of each span, so
+    // `name = value` and `name=value` name `name`.
+    fn row_names(row: &str, found: &mut Vec<String>) {
+        for (i, span) in row.split('`').enumerate() {
+            if i % 2 == 0 {
+                continue;
+            }
+            let name: String = span
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '<' | '>' | '…'))
+                .collect();
+            if !name.is_empty() {
+                found.push(name);
+            }
+        }
+    }
+
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/references");
+    let mut files = Vec::new();
+    docs_files(&docs, &mut files);
+    assert!(!files.is_empty(), "no docs found under {}", docs.display());
+
+    let mut named = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("read docs file");
+        let mut in_fields_table = false;
+        let mut in_table = false;
+        for line in text.lines() {
+            if !line.trim_start().starts_with('|') {
+                in_table = false;
+                in_fields_table = false;
+                continue;
+            }
+            if !in_table {
+                // The first row of a table is its header row.
+                in_table = true;
+                in_fields_table = line.split('|').any(|cell| {
+                    let cell = cell.trim();
+                    cell.starts_with("Fields") || cell.starts_with("Attributes")
+                });
+                continue;
+            }
+            if in_fields_table {
+                row_names(line, &mut named);
+            }
+        }
+    }
+
+    let missing: Vec<&str> = ALLOWED_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| !named.iter().any(|doc| names(doc, field)))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these fields on ALLOWED_FIELDS are in no fields table under docs/references:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
 fn internal_and_health_targets_are_not_exported_as_logs() {
     assert!(!is_exported_log_target("harold_api"));
     assert!(!is_exported_log_target("eventsource::x"));

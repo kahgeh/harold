@@ -110,4 +110,10 @@ A failed run also writes the WARN line `call answer failed` with `reason`, and t
 
 Hand-over lines carry `hand_over_id` and never the request: `hand-over typed` (`pane_id`, `typed_while_busy`, `wait_ms`), `hand-over waiting` (once, with `reason`, the first time a check refuses) and `hand-over not typed` (WARN, after 30 minutes).
 
+| Line | Fields |
+|---|---|
+| `hand-over typed` | `hand_over_id`, `pane_id`, `typed_while_busy` (`true` when the chief was busy), `wait_ms` |
+| `hand-over waiting` | `hand_over_id`, `reason` |
+| `hand-over not typed` | `hand_over_id`, `reason` |
+
 No log line, span or event holds your words, the answerer's line, the facts or the request. The [telemetry reference](../telemetry/README.md) has the queries and dashboard cards.

@@ -350,6 +350,10 @@ Hook calls (lifecycle reports, turn-completes, pane resolution) queue behind a t
 
 A retry that works logs one info line, `agent monitor read retried`, with `component` (`inventory` or `screen`), `pane_id` for a screen read, and `elapsed_ms` from the first try's start to the retry's success. For the inventory, that spans the tick between them. It changes no health: there is no warning, and the agent monitor is not marked degraded. When the retry fails too, the component degrades with the retry's reason code, and `agent monitor degraded` is logged at warning level; the next scheduled read, with its own retry, tries again, and `agent monitor recovered` is logged when one works.
 
+| Line | Fields |
+|---|---|
+| `agent monitor read retried` | `component` (`inventory` or `screen`), `pane_id` (for a screen read), `elapsed_ms` |
+
 A worker that does not stop causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
 
 An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents Harold from becoming ready.

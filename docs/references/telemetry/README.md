@@ -117,6 +117,11 @@ Old rows in ClickHouse keep the old names until they age out.
 
 A file that does not parse logs `pod file unreadable` once per file and change, with `pod.product`, `spec.id` and `file` (the file's name inside the pod folder, such as `merged/<id>.md`, never a full path). The spec then falls back to the older sources.
 
+| Line | Fields |
+|---|---|
+| `pod file unreadable` | `pod.product`, `spec.id`, `file` (the file's name inside the pod folder) |
+| `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
+
 **A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
 
 **A missing merged file.** Harold does not know how many stages a spec has, so it completes a spec without `merged/<id>.md` only when the merge cannot be an early stage. The 7 days run from the latest merge in the reflog or worktree source, not from `started:`.
@@ -233,7 +238,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 |---|---|---|
 | `harold.call_turn` | speech starts – the turn's answer has played or been stopped, or the turn is dropped, forgotten, given up, or the call ends | `call_from` (`desk` or `phone`), `pane_id` (set when the turn is typed), `result` (the turn's result: `answered`, `handed_over`, `typed`, `nothing_heard`, `no_chief`, `chief_busy`, `failed`, `voice_muted` or `forgotten`), `answered_by` (`answerer`, `chief` or `none`), `first_sound_ms`, `answer_ms` |
 | `harold.call_speech`, inside it | speech starts – the cut | `cut` (`quiet` after 60 quiet frames, or `max_length` at 60 s) |
-| `harold.call_transcribe`, inside it | the turn's WAV written – the transcript back from Whisper | `audio_ms` (the clip), `waited_ms` (how long the job waited for the worker, which is busy while a Kokoro job runs, and does not count the worker's load), `load_waited_ms` (how long the turn waited for the worker to finish loading: 0 when the worker was ready before the turn was cut), `result` (`text`, `no_speech` or `failed`) |
+| `harold.call_transcribe`, inside it | the turn's WAV written – the transcript back from Whisper | `audio_ms` (the clip), `waited_ms` (how long the job waited for the worker, which is busy while a Kokoro job runs, and does not count the worker's load), `load_waited_ms` (how long the turn waited for the worker to finish loading: 0 when the worker was ready before the turn was cut), `language` (the language code Whisper reports), `result` (`text`, `no_speech` or `failed`) |
 | `harold.turn`, and `harold.turn_complete` inside it | as above, with `started_by = voice` | as above |
 | `harold.call_update` | the chief's turn-end update made by the call answerer's `claude -p` path, as the caller waits for it (8 s at most) | `outcome` (`model` or `fallback`), `reason` (`none`, `failed`, `timeout`, `too_long`, `no_name` or `answerer_off`), `cost_micros`. No text |
 | `harold.call_answer`, inside it | the call answerer's run: the call facts gathered and the `claude -p` run | `result` (`said`, `handed_over` or `failed`), `reason` (on a failure: `not_started`, `exited`, `timed_out` or `no_answer`), `facts_ms`, `model_ms`, `cost_micros`, `input_tokens`, `output_tokens` |
@@ -244,6 +249,10 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 
 
 **A call's start** is a root span of its own, `harold.call_ring`, from the tap to the end of the pick-up sound, with `cycles` (ringback cycles played, 1 or more), `worker` (`ready` when the worker was loaded at the tap, `loaded_now` when the call waited for it) and `warm_ms` (how long the call answerer's warm-up took, 5000 when it was cut at its limit; absent when the call has no answerer). `cycles` should be 1 for a call whose worker the page loaded, and 2 or 3 for a cold one. To see how calls start, count `harold.call_ring` spans by `cycles` per day; act when calls ring 4 or more cycles, which is over 12 s, and read the `voice worker ready` line's `load_ms` and `started_by` from that time. Info only: no alert, and no tile on the dashboard yet.
+
+| Span | From – to | Attributes |
+|---|---|---|
+| `harold.call_ring` | the tap – the end of the pick-up sound | `cycles` (ringback cycles played), `worker` (`ready` or `loaded_now`), `warm_ms` (the call answerer's warm-up time; absent when the call has no answerer) |
 
 The chief's update in a call is the fallback sentence when `harold.call_update` has `outcome = fallback`; its `reason` says why. A run that fails or passes 8 s also writes the WARN line `call update model failed` with `reason` (`failed` or `timeout`) inside the span. No span or line holds the sentence, the prompt or the model's text. To see how the updates go, count `harold.call_update` spans by `outcome` and `reason`, and read their duration, which should be under 5 s. Info only: no alert, because this update is rare and the user hears the fallback sentence.
 
@@ -325,7 +334,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 
 No exported item carries what the user or an agent wrote, a voice line, the AI model's output, an error message, the recipient or a token.
 
-**Allowed fields.** Exported spans and log records keep only the attributes on `ALLOWED_FIELDS` in [`harold/src/telemetry.rs`](../../../harold/src/telemetry.rs). That list is the only source: each field on it is an id, a count, a time, a fixed word or a short name, never free text. A change to what leaves Harold is a change to that list, made in a spec and reviewed with it.
+**Allowed fields.** Exported spans and log records keep only the attributes on `ALLOWED_FIELDS` in [`harold/src/telemetry.rs`](../../../harold/src/telemetry.rs). That list is the only source: each field on it is an id, a count, a time, a fixed word or a short name, never free text. A change to what leaves Harold is a change to that list, made in a spec and reviewed with it. A test checks that each field on the list is in a fields table under `docs/references`.
 
 `model` is a model name from the settings, a Hugging Face repository for the voice or the `[watch] model` setting, never a path or a token. Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
 
@@ -333,7 +342,22 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 
 **The chief's pane.** `chief pane changed` (`info`) carries `state` (`found` or `none`), `count` (the agents in the chief's folder), `pane_id` and `session_by` (`setting` when `chief_session` picked the session, `longest` when the longest-running agent did). More than one move of the chief to another pane with `count > 1` in 7 days means an extra session or pane in the chief's folder to close. With `chief_session` set, a `session_by = longest` row means no agent ran in the named session; check that `chief_session` names the session `bin/pod` starts and that the chief runs in it. With it unset, a chief that restarts while a second session holds an older agent in the folder is replaced by that session's first pane, with `count = 2`, until the second session closes.
 
+| Line | Fields |
+|---|---|
+| `chief pane changed` | `state` (`found` or `none`), `count`, `pane_id`, `session_by` (`setting` or `longest`) |
+
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
+
+| Span | Fields |
+|---|---|
+| `event` | `event_type`, `event_version`: the projector's run for one stored event |
+
+These agent monitor lines carry the fields below:
+
+| Line | Fields |
+|---|---|
+| `agent monitor pane found` | `pane_id`, `provider_id` (the named provider), `program` (the file name of the matched program) |
+| `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason` |
 
 **A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
 
@@ -429,6 +453,13 @@ The [knowledge tool](../tools/knowledge.md#graph-logs-and-spans) logs and traces
 3. *Is the chief using the typed relations?* The gauge `harold.knowledge.typed_relations` counts them. The card "Typed relations, 30 days" shows it, info only. Flat for 30 days means the chief is not using them, and its skill rule is worth a look.
 
 **buckwal's telemetry.** Harold never calls `buckwal::telemetry::init`, which would install a second global subscriber and fail beside Harold's. buckwal's spans and log records (target `buckwal`) go through Harold's own subscriber: they are written to `harold.log` as other crates' lines are, and `span_export_filter` and `is_exported_log_target` in `harold/src/telemetry.rs` also export them under `service.name = harold`. `ALLOWED_FIELDS` adds the buckwal attributes the diagnosis uses. **Detection:** `buckwal.commit` spans with `buckwal.outcome = "error"` counted per hour in ClickHouse are on the card "buckwal commits that failed, per hour". Above 0 in an hour on two hours running matches `knowledge index stale`.
+
+| Span | Fields |
+|---|---|
+| `buckwal.commit` | `buckwal.outcome` (`error` for a failed commit) |
+| `buckwal.upload` | `buckwal.bytes` (the bytes uploaded), `buckwal.generation`, `buckwal.retries`, `s3.status` (the bucket's HTTP status) |
+| `buckwal.checkpoint_upload` | `buckwal.generation`, `buckwal.retries`, `s3.status` |
+| `buckwal.maintenance` | `buckwal.generation`, `buckwal.outcome` |
 
 The dashboard group "Knowledge index" holds the six cards. They read `otel.otel_logs` and the span table directly, so they are tables and numbers without an earlier tile, and the product filter does not reach them.
 
@@ -611,6 +642,10 @@ The disk is the one that holds the home folder. No path is sent.
 - Every 60 seconds Harold compares the mean of the last 15 minutes with the top. `past_normal` changes to 1 at the first comparison where the mean is over the top, and back to 0 at the first comparison where it is at or under the top, or where the hour cannot be judged. A failed reading changes nothing.
 - When `past_normal` changes to 1, Harold logs the warn line `machine use past normal` with `metric`, `value`, `normal_top`, `days` and `top_processes` (3 process names with their share, no arguments or paths). Swap has no use for each process in `sysinfo`, so for swap the processes are the 3 largest in memory. When it changes back, Harold logs the info line `machine use back to normal` with `metric` and `minutes`.
 - Disk use has no normal range. `disk-low` alone alerts on it, and a dashboard card shows its growth per day.
+
+| Line | Fields |
+|---|---|
+| `machine use past normal` | `metric`, `value` (the mean of the last 15 minutes), `normal_top` (the top of the normal range), `days` (the days the range is from), `top_processes` |
 
 **When the alerts clear.** HyperDX 2.40 reduces a gauge to its last sample in each 15-minute window and posts `resolved` at the first check whose window is back under the threshold. `machine-past-normal` clears about 15 to 30 minutes after the last machine's `past_normal` goes back to 0. `disk-low` clears about 15 to 30 minutes after every home disk is under 90%. Both alerts are not grouped, because Harold's alert address keeps one state for each alert name: a grouped alert could clear for one machine while another is still past, and the chief would hear `cleared` too early. Harold types `harold alert: <name> cleared` once for each spell, by the rule in [How an alert reaches the chief](#how-an-alert-reaches-the-chief).
 
@@ -795,6 +830,10 @@ A line is dropped only when:
 - the queue of 32 lines not yet read is full, logged as `alert not delivered (queue_full)`. The post is still answered 204. Repeats are read and held back as they arrive, so they do not fill it;
 - Harold is stopping. A line queued after delivery stopped is logged as `alert not delivered (shutting_down)`; lines still waiting are abandoned without a log line;
 - the line was typed and Enter failed, logged as `alert not delivered (enter_failed)`. It is not typed again, and counts as told, since it sits in the chief's input box.
+
+| Line | Fields |
+|---|---|
+| `alert repeat held back`, `alert not delivered`, `alert waiting` | `alert` (the alert's name), `state` (`firing` or `cleared`), `reason` |
 
 ### After a restart
 
