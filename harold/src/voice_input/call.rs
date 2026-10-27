@@ -196,7 +196,10 @@ async fn try_type<P: CallPorts>(ports: &P, text: &str) -> Typing {
     let view = panes.agents();
     let line = format!("{MARK} {text}");
     match type_when_ready(panes, Writer::Voice, &folder, &line, &view, &[]).await {
-        Attempt::Typed { pane } => Typing::Typed(pane),
+        Attempt::Typed {
+            pane,
+            insert_pressed,
+        } => Typing::Typed(pane, insert_pressed),
         Attempt::Wait(Reason::NoAgentInFolder) => Typing::NoChief,
         Attempt::Wait(reason) => Typing::Busy(reason),
         Attempt::EnterFailed { .. } => Typing::Failed,
@@ -221,13 +224,13 @@ pub(super) fn open_turn(call_from: &'static str) -> tracing::Span {
 }
 
 /// Logs a typed turn on its open `harold.call_turn` span.
-pub(super) fn log_typed(turn: &tracing::Span, pane: &str, text: &str) {
+pub(super) fn log_typed(turn: &tracing::Span, pane: &str, text: &str, insert_pressed: bool) {
     let words = text.split_whitespace().count();
     turn.record("pane_id", pane);
     turn.record("result", TurnResult::Typed.reason());
     // Fails only when no export layer is installed, and then there is no trace to join.
     let cx = turn.context();
-    turn.in_scope(|| info!(pane_id = %pane, words, "spoken prompt typed"));
+    turn.in_scope(|| info!(pane_id = %pane, words, insert_pressed, "spoken prompt typed"));
     telemetry::prompt_typed(
         pane,
         StartedBy::Voice,
@@ -271,9 +274,9 @@ async fn pass_on_when_free<P: CallPorts>(
     loop {
         sleep_until(next_try).await;
         let result = match try_type(&*ports, &text).await {
-            Typing::Typed(pane) => {
+            Typing::Typed(pane, insert_pressed) => {
                 // The call is over: nothing waits on the turn, so its span ends here.
-                log_typed(&open_turn(ports.call_from()), &pane, &text);
+                log_typed(&open_turn(ports.call_from()), &pane, &text, insert_pressed);
                 return;
             }
             Typing::Busy(_) if Instant::now() < gives_up_at => {
@@ -641,7 +644,8 @@ struct HeldTurn {
 
 /// How one try at typing a turn ended.
 enum Typing {
-    Typed(String),
+    /// The pane, and whether Harold pressed `i` to put its Vim box in INSERT mode.
+    Typed(String, bool),
     NoChief,
     Busy(Reason),
     Failed,
@@ -1492,7 +1496,7 @@ impl<P: CallPorts> Call<P> {
     /// Types the turn into the chief's pane, as every turn was before the call answerer.
     async fn turn_to_chief(&mut self, text: String) {
         match try_type(&*self.ports, &text).await {
-            Typing::Typed(pane) => self.typed(pane, text),
+            Typing::Typed(pane, insert_pressed) => self.typed(pane, insert_pressed, text),
             Typing::NoChief => self.no_chief(),
             Typing::Busy(busy) => {
                 self.log_held(&busy);
@@ -1732,7 +1736,7 @@ impl<P: CallPorts> Call<P> {
     /// holds no audio.
     async fn last_turn(&mut self, text: String, gives_up_at: Instant) {
         match try_type(&*self.ports, &text).await {
-            Typing::Typed(pane) => self.typed(pane, text),
+            Typing::Typed(pane, insert_pressed) => self.typed(pane, insert_pressed, text),
             Typing::NoChief => self.dropped(TurnResult::NoChief),
             Typing::Busy(busy) => {
                 self.log_held(&busy);
@@ -1758,14 +1762,14 @@ impl<P: CallPorts> Call<P> {
         log_held(&turn.span, busy);
     }
 
-    fn typed(&mut self, pane: String, text: String) {
+    fn typed(&mut self, pane: String, insert_pressed: bool, text: String) {
         let ports = &self.ports;
         let turn = self
             .turn
             .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
         turn.typed = true;
         turn.span.record("answered_by", "chief");
-        log_typed(&turn.span, &pane, &text);
+        log_typed(&turn.span, &pane, &text, insert_pressed);
         self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
         {
@@ -1942,9 +1946,9 @@ impl<P: CallPorts> Call<P> {
         }
         let text = held.text.clone();
         match try_type(&*self.ports, &text).await {
-            Typing::Typed(pane) => {
+            Typing::Typed(pane, insert_pressed) => {
                 self.held = None;
-                self.typed(pane, text);
+                self.typed(pane, insert_pressed, text);
             }
             Typing::NoChief => {
                 self.held = None;

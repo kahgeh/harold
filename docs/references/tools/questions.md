@@ -212,7 +212,7 @@ A `|` in a field is not changed, so a note that holds `|` reads like a separator
 
 ### Timing and restart
 
-Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` when a spell of waiting starts, with its `reason`, and again each time the `reason` changes, for example `store_failed` when a release fails after `pane_busy`. The spell ends when a batch is typed or nothing is left to send.
+Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` when a spell of waiting starts, with its `reason`, and again each time the `reason` changes, for example `store_failed` when a release fails after `agent_busy`. The spell ends when a batch is typed or nothing is left to send.
 
 The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), a batch built since Harold started is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so an answer given while a batch waits joins it, and the chief gets one line, not two. An answer's `send_now` flag stays set through the retry. If the release fails, it is tried again before anything else. A panic in the typing job counts as a busy pane, so its batch is released too.
 
@@ -238,8 +238,8 @@ Thirteen fixed lines, with only the fields `tool`, `question_id`, `version`, `re
 | `step ticked` | `tool`, `question_id`, `version`, `reason` | `reason` is `ticked` or `unticked`. No step text is logged. |
 | `picks saved` | `tool`, `question_id`, `version` | Info. No pick, key or text is logged. |
 | `picks not saved` | `tool`, `question_id`, `version`, `reason`, `kind`, `error` | A warning; `reason` is `store_failed`; `kind` is `database` for a Turso error or `data` for stored data Harold could not read. `error` is the error's own message and stays in `harold.log`. |
-| `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
-| `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
+| `answers batch typed` | `tool`, `reason`, `count`, `insert_pressed` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning, without `insert_pressed`). `count` is the number of answers in the line, as in `ANSWERS <count>`. `insert_pressed` is `true` when Harold pressed `i` to put the chief's Vim input box in INSERT mode. |
+| `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `no_pane`, `store_failed`, or the timed prompts' reason that made the line wait: `agent_busy`, `agent_state_unknown`, `input_box_holds_text`, `input_box_not_found`, `input_box_not_insert`, `input_box_unreadable`, `several_agents_in_folder`, `pane_list_failing` or `typing_failed`. `pane_busy` stays only for a typing task that panicked. |
 | `todos checked` | `tool`, `count` | Info, on `MarkChecked`. `count` is the todos listed. |
 | `todos not checked` | `tool`, `waiting`, `minutes`, `never` | A warning, once each time the checked line turns red. `minutes` is since the last check, 0 with `never` true when there was none. |
 | `todo changed spec` | `tool`, `question_id`, `version` | A warning, once per question version. |

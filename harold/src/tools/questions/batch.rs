@@ -99,6 +99,14 @@ pub(super) fn batch_line(ready: &Ready) -> String {
     line
 }
 
+/// The number of answers in a batch line, from its `ANSWERS <n>` start.
+fn answers_in(line: &str) -> usize {
+    line.strip_prefix("ANSWERS ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
 fn answer_part(id: &str, question: &Question, answer: &Answer) -> String {
     let id = clean(id);
     let spec = clean(&question.spec);
@@ -180,7 +188,7 @@ struct Sender<S> {
     typing: Arc<dyn PaneTyping>,
     chief: Arc<dyn ChiefPane>,
     /// A batch typed but not yet marked typed; it is marked, never typed again.
-    typed: Option<(i64, Typing)>,
+    typed: Option<(i64, Typing, usize)>,
     /// A batch not typed whose release failed; it is released before anything else.
     unreleased: Option<i64>,
     /// Whether the store was asked, since the sender started, for a started
@@ -243,8 +251,8 @@ pub(super) async fn run<S: QuestionStore>(
 
 impl<S: QuestionStore> Sender<S> {
     async fn round(&mut self) -> Next {
-        if let Some((batch_id, how)) = self.typed {
-            return self.mark_typed(batch_id, how).await;
+        if let Some((batch_id, how, count)) = self.typed {
+            return self.mark_typed(batch_id, how, count).await;
         }
         if let Some(batch_id) = self.unreleased {
             if self.store.release_batch(batch_id).await.is_err() {
@@ -279,17 +287,18 @@ impl<S: QuestionStore> Sender<S> {
         // typing again.
         let typing_from = time::OffsetDateTime::now_utc();
         match self.typing.type_line(&pane, &batch.text).await {
-            how @ (Typing::Typed | Typing::EnterFailed) => {
+            how @ (Typing::Typed { .. } | Typing::EnterFailed) => {
                 // The chief's turn for this line joins the trace of the answer that came
                 // with one; a line of answers from the dash is a root.
                 telemetry::answers_typed(&pane, &batch.traces, typing_from);
                 // The line reached the pane, so this spell of waiting is over.
                 self.waiting_logged = None;
                 self.inherited = None;
-                self.typed = Some((batch.id, how));
-                self.mark_typed(batch.id, how).await
+                let count = answers_in(&batch.text);
+                self.typed = Some((batch.id, how, count));
+                self.mark_typed(batch.id, how, count).await
             }
-            how @ (Typing::PaneBusy | Typing::NoPane) => {
+            how @ (Typing::PaneBusy(_) | Typing::NoPane) => {
                 self.not_typed(batch.id, inherited, how.reason()).await
             }
         }
@@ -357,7 +366,7 @@ impl<S: QuestionStore> Sender<S> {
         Next::Retry
     }
 
-    async fn mark_typed(&mut self, batch_id: i64, how: Typing) -> Next {
+    async fn mark_typed(&mut self, batch_id: i64, how: Typing, count: usize) -> Next {
         if self.store.batch_typed(batch_id, clock_ms()).await.is_err() {
             self.log_waiting("store_failed");
             return Next::Retry;
@@ -366,9 +375,26 @@ impl<S: QuestionStore> Sender<S> {
         self.waiting_logged = None;
         match how {
             Typing::EnterFailed => {
-                warn!(tool = NAME, reason = how.reason(), "answers batch typed")
+                warn!(
+                    tool = NAME,
+                    reason = how.reason(),
+                    count,
+                    "answers batch typed"
+                )
             }
-            _ => info!(tool = NAME, reason = how.reason(), "answers batch typed"),
+            Typing::Typed { insert_pressed } => info!(
+                tool = NAME,
+                reason = how.reason(),
+                count,
+                insert_pressed,
+                "answers batch typed"
+            ),
+            _ => info!(
+                tool = NAME,
+                reason = how.reason(),
+                count,
+                "answers batch typed"
+            ),
         }
         Next::Again
     }

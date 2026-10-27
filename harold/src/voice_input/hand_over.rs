@@ -118,7 +118,7 @@ async fn try_once<P: CallPorts>(ports: &P, line: &str) -> Try {
     let panes = ports.panes();
     let view = panes.agents();
     match type_when_ready(panes, Writer::HandOver, &folder, line, &view, &[]).await {
-        Attempt::Typed { pane } => {
+        Attempt::Typed { pane, .. } => {
             let while_busy = view
                 .panes
                 .iter()

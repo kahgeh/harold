@@ -18,6 +18,16 @@ use crate::store::{HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 pub(crate) const CHIEF: &str = "/work/chief-of-pods";
 
+/// The input box as the tests read it when Claude Code's editor is not Vim.
+fn read_input_box(screen: &str) -> InputBox {
+    super::read_input_box(screen, false)
+}
+
+/// Checks 6 and 7 when Claude Code's editor is not Vim.
+fn box_reason(screen: Option<&str>) -> Option<Reason> {
+    super::box_reason(screen, false)
+}
+
 // --- the clock ---
 
 #[test]
@@ -229,6 +239,7 @@ fn each_reason_has_the_name_the_log_and_the_event_carry() {
         (Reason::AgentStateUnknown, "agent_state_unknown"),
         (Reason::InputBoxNotFound, "input_box_not_found"),
         (Reason::InputBoxHoldsText, "input_box_holds_text"),
+        (Reason::InputBoxNotInsert, "input_box_not_insert"),
         (Reason::TypingFailed, "typing_failed"),
         (Reason::WindowPassed, "window_passed"),
     ];
@@ -510,13 +521,20 @@ pub(crate) enum Key {
     Text(String, String),
     /// Pane id.
     Enter(String),
+    /// Pane id and tmux key name.
+    Press(String, String),
 }
 
 pub(crate) struct FakeState {
     now: Option<LocalNow>,
     pub(crate) view: AgentsView,
     pub(crate) screen: Option<String>,
+    /// Screens the next reads return, one each, before `screen` again.
+    pub(crate) screens: std::collections::VecDeque<Option<String>>,
+    /// Whether Claude Code's `editorMode` reads as `vim`.
+    pub(crate) vim: bool,
     fail_text: bool,
+    fail_press: bool,
     pub(crate) fail_enter: bool,
     pub(crate) keys: Vec<Key>,
     now_reads: usize,
@@ -534,7 +552,10 @@ impl Fake {
                 now: None,
                 view: view(vec![chief("%2")]),
                 screen: Some(screen_with_box(&["❯ "])),
+                screens: std::collections::VecDeque::new(),
+                vim: false,
                 fail_text: false,
+                fail_press: false,
                 fail_enter: false,
                 keys: Vec::new(),
                 now_reads: 0,
@@ -596,7 +617,23 @@ impl Ports for Fake {
     async fn read_screen(&self, _pane_id: &str) -> Option<String> {
         let mut state = self.0.lock().unwrap();
         state.screen_reads += 1;
-        state.screen.clone()
+        match state.screens.pop_front() {
+            Some(screen) => screen,
+            None => state.screen.clone(),
+        }
+    }
+
+    async fn press_key(&self, pane_id: &str, key: &str) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        if state.fail_press {
+            return Err("key refused".into());
+        }
+        state.keys.push(Key::Press(pane_id.into(), key.into()));
+        Ok(())
+    }
+
+    fn editor_is_vim(&self) -> bool {
+        self.0.lock().unwrap().vim
     }
 
     async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {
@@ -739,6 +776,7 @@ async fn due_prompt_is_typed_once_into_the_right_pane_and_stored() {
             name: "digest".into(),
             pane: "%2".into(),
             late_s: 4,
+            insert_pressed: false,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -898,6 +936,7 @@ async fn waiting_prompt_is_typed_once_the_checks_pass() {
             name: "digest".into(),
             pane: "%2".into(),
             late_s: 422,
+            insert_pressed: false,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -964,6 +1003,7 @@ async fn prompt_never_seen_due_is_skipped_as_window_passed_and_typed_the_next_da
             name: "digest".into(),
             pane: "%2".into(),
             late_s: 0,
+            insert_pressed: false,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -1339,7 +1379,7 @@ async fn the_local_time_is_read_from_bin_date() {
 
 #[test]
 fn screen_is_read_as_the_visible_rows_of_one_pane() {
-    assert_eq!(capture_args("%7"), ["capture-pane", "-p", "-t", "%7"]);
+    assert_eq!(capture_args("%7"), ["capture-pane", "-e", "-p", "-t", "%7"]);
 }
 
 #[test]
@@ -1712,7 +1752,7 @@ async fn a_hand_over_types_into_a_busy_claude_code_pane_and_no_other_writer_does
     )
     .await;
 
-    assert!(matches!(typed, Attempt::Typed { ref pane } if pane == "%2"));
+    assert!(matches!(typed, Attempt::Typed { ref pane, .. } if pane == "%2"));
     assert_eq!(
         fake.keys(),
         vec![
@@ -1902,7 +1942,12 @@ async fn type_line_once_types_into_an_idle_pane() {
 
     let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "Q25 revise: no").await;
 
-    assert_eq!(outcome, LineOutcome::Typed);
+    assert_eq!(
+        outcome,
+        LineOutcome::Typed {
+            insert_pressed: false
+        }
+    );
     assert_eq!(
         fake.keys(),
         vec![
@@ -1920,7 +1965,7 @@ async fn type_line_once_at_a_busy_pane_is_pane_busy_at_once() {
 
     let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
 
-    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert!(matches!(outcome, LineOutcome::PaneBusy(_)));
     assert_eq!(started.elapsed(), Duration::ZERO);
     assert!(fake.keys().is_empty());
 }
@@ -1933,7 +1978,7 @@ async fn type_line_once_into_a_box_holding_text_is_pane_busy_at_once() {
 
     let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
 
-    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert!(matches!(outcome, LineOutcome::PaneBusy(_)));
     assert_eq!(started.elapsed(), Duration::ZERO);
     assert!(fake.keys().is_empty());
 }
@@ -1945,7 +1990,7 @@ async fn type_line_once_while_the_listing_failed_is_pane_busy() {
 
     let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
 
-    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert!(matches!(outcome, LineOutcome::PaneBusy(_)));
     assert!(fake.keys().is_empty());
 }
 
@@ -2008,7 +2053,12 @@ async fn a_tool_line_and_a_voice_and_an_alert_give_whole_lines() {
         .await;
         assert!(matches!(retried, Attempt::Typed { .. }));
     }
-    assert_eq!(dash, LineOutcome::Typed);
+    assert_eq!(
+        dash,
+        LineOutcome::Typed {
+            insert_pressed: false
+        }
+    );
     assert!(matches!(voice, Attempt::Typed { .. }));
 
     let keys = fake.keys();
@@ -2108,7 +2158,7 @@ async fn two_agents_in_the_chiefs_folder_report_once_and_type_into_the_first_pan
     let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "a", &two, &[]).await;
     let again = type_when_ready(&fake, Writer::Alert, CHIEF, "b", &two, &["%2".into()]).await;
 
-    assert!(matches!(alert, Attempt::Typed { ref pane } if pane == "%2"));
+    assert!(matches!(alert, Attempt::Typed { ref pane, .. } if pane == "%2"));
     assert!(matches!(again, Attempt::Wait(Reason::AgentBusy)));
     let text = logs.text();
     assert_eq!(text.matches("chief pane changed").count(), 1, "{text}");
@@ -2145,12 +2195,14 @@ async fn another_folder_with_two_agents_still_waits_and_a_second_chief_pane_is_n
     ));
     assert_eq!(
         type_line_once(&fake, Writer::Tool("t"), "%3", "line").await,
-        LineOutcome::PaneBusy
+        LineOutcome::PaneBusy("several_agents_in_folder")
     );
     assert!(fake.keys().is_empty());
     assert_eq!(
         type_line_once(&fake, Writer::Tool("t"), "%2", "line").await,
-        LineOutcome::Typed
+        LineOutcome::Typed {
+            insert_pressed: false
+        }
     );
 }
 
@@ -2183,5 +2235,389 @@ async fn a_home_relative_chief_entry_still_finds_the_first_pane_with_two_agents(
     )
     .await;
 
-    assert!(matches!(alert, Attempt::Typed { ref pane } if pane == "%2"));
+    assert!(matches!(alert, Attempt::Typed { ref pane, .. } if pane == "%2"));
+}
+
+// --- the input box on a screen with escape codes ---
+
+/// The rows of a pane after a turn, as `tmux capture-pane -e -p` gives them while Claude
+/// Code shows a suggested prompt: the rules in a grey colour, the cursor in reverse video
+/// on the first letter and the rest of the suggestion dim. The text is made up.
+fn suggestion_screen() -> String {
+    let rule = format!("\x1b[38;5;240m{RULE}\x1b[39m");
+    [
+        "\x1b[39m⏺ Done.".to_string(),
+        String::new(),
+        rule.clone(),
+        "\x1b[0m❯ \x1b[7ms\x1b[0;2muggested next prompt\x1b[0m".to_string(),
+        rule,
+        "  \x1b[2m-- INSERT --\x1b[0m".to_string(),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+fn screen_with_input_row(row: &str) -> String {
+    suggestion_screen().replace("\x1b[0m❯ \x1b[7ms\x1b[0;2muggested next prompt\x1b[0m", row)
+}
+
+#[test]
+fn a_box_with_only_a_dim_suggested_prompt_is_empty() {
+    assert_eq!(read_input_box(&suggestion_screen()), InputBox::Empty);
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[2msuggested\x1b[22m")),
+        InputBox::Empty
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[2;3msuggested\x1b[0m")),
+        InputBox::Empty
+    );
+}
+
+#[test]
+fn a_box_with_only_the_reverse_video_cursor_is_empty() {
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[7m \x1b[0m")),
+        InputBox::Empty
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[7m \x1b[27m")),
+        InputBox::Empty
+    );
+}
+
+#[test]
+fn plain_text_after_the_dim_text_is_text_in_the_box() {
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[2msuggested\x1b[22m typed")),
+        InputBox::HoldsText
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ typed\x1b[7m \x1b[0m")),
+        InputBox::HoldsText
+    );
+    assert_eq!(
+        read_input_box(&screen_with_input_row("❯ \x1b[38;5;240mcoloured\x1b[39m")),
+        InputBox::HoldsText
+    );
+}
+
+#[test]
+fn the_rules_are_found_after_the_escape_codes_are_removed() {
+    // The input row stays at the box's place whatever codes come before the mark or the
+    // rules.
+    assert_eq!(
+        read_input_box(&screen_with_input_row("\x1b[1m\x1b[0m❯ ")),
+        InputBox::Empty
+    );
+    assert_eq!(
+        read_input_box("\x1b[2mno box here\x1b[0m\n"),
+        InputBox::NotFound
+    );
+}
+
+#[test]
+fn a_screen_without_escape_codes_reads_as_before() {
+    assert_eq!(read_input_box(&screen_with_box(&["❯ "])), InputBox::Empty);
+    assert_eq!(
+        read_input_box(&screen_with_box(&["❯ typed"])),
+        InputBox::HoldsText
+    );
+}
+
+// --- Vim ---
+
+const NORMAL_FOOTER: &str = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+
+fn vim_screen(box_row: &str, footer: &str) -> String {
+    [RULE, box_row, RULE, footer].join("\n") + "\n"
+}
+
+#[test]
+fn in_vim_an_empty_box_without_the_insert_footer_is_not_insert() {
+    let normal = vim_screen("❯ ", NORMAL_FOOTER);
+    assert_eq!(super::read_input_box(&normal, true), InputBox::NotInsert);
+    // A dim suggested prompt does not change that.
+    let suggestion = vim_screen("❯ \x1b[2msuggested\x1b[22m", NORMAL_FOOTER);
+    assert_eq!(
+        super::read_input_box(&suggestion, true),
+        InputBox::NotInsert
+    );
+}
+
+#[test]
+fn in_vim_an_empty_box_with_the_insert_footer_is_empty() {
+    let insert = vim_screen("❯ ", FOOTER);
+    assert_eq!(super::read_input_box(&insert, true), InputBox::Empty);
+    let below = [RULE, "❯ ", RULE, "", FOOTER].join("\n");
+    assert_eq!(super::read_input_box(&below, true), InputBox::Empty);
+}
+
+#[test]
+fn a_box_with_text_holds_text_in_both_modes() {
+    for footer in [FOOTER, NORMAL_FOOTER] {
+        let screen = vim_screen("❯ typed", footer);
+        assert_eq!(super::read_input_box(&screen, true), InputBox::HoldsText);
+        assert_eq!(super::read_input_box(&screen, false), InputBox::HoldsText);
+    }
+}
+
+#[test]
+fn when_the_editor_is_not_vim_the_footer_is_not_read() {
+    let normal = vim_screen("❯ ", NORMAL_FOOTER);
+    assert_eq!(super::read_input_box(&normal, false), InputBox::Empty);
+}
+
+#[test]
+fn box_reason_names_not_insert_in_vim() {
+    let normal = vim_screen("❯ ", NORMAL_FOOTER);
+    assert_eq!(
+        super::box_reason(Some(&normal), true),
+        Some(Reason::InputBoxNotInsert)
+    );
+    assert_eq!(super::box_reason(Some(&normal), false), None);
+}
+
+/// A temporary folder for a Claude config, removed when dropped.
+struct ConfigDir(PathBuf);
+
+impl ConfigDir {
+    fn with_settings(settings: Option<&str>) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("harold-claude-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create the config folder");
+        if let Some(settings) = settings {
+            std::fs::write(path.join("settings.json"), settings).expect("write settings");
+        }
+        Self(path)
+    }
+}
+
+impl Drop for ConfigDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn editor_mode_is_read_from_the_settings_file_of_the_config_folder() {
+    let vim = ConfigDir::with_settings(Some(r#"{"editorMode": "vim", "theme": "dark"}"#));
+    let normal = ConfigDir::with_settings(Some(r#"{"editorMode": "normal"}"#));
+    let unset = ConfigDir::with_settings(Some(r#"{"theme": "dark"}"#));
+    let broken = ConfigDir::with_settings(Some("{ not json"));
+    let missing = ConfigDir::with_settings(None);
+
+    assert!(editor_mode_is_vim(&vim.0));
+    assert!(!editor_mode_is_vim(&normal.0));
+    assert!(!editor_mode_is_vim(&unset.0));
+    assert!(!editor_mode_is_vim(&broken.0));
+    assert!(!editor_mode_is_vim(&missing.0));
+    assert!(!editor_mode_is_vim(&missing.0.join("no-such-folder")));
+}
+
+fn vim_fake() -> Fake {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.vim = true;
+        state.screen = Some(vim_screen("❯ ", NORMAL_FOOTER));
+    });
+    fake
+}
+
+async fn type_digest(fake: &Fake) -> Attempt {
+    let view = fake.agents();
+    type_when_ready(fake, Writer::TimedPrompt, CHIEF, "digest", &view, &[]).await
+}
+
+fn pressed(key: &str) -> Key {
+    Key::Press("%2".into(), key.into())
+}
+
+#[tokio::test(start_paused = true)]
+async fn in_normal_mode_harold_presses_i_and_types_when_the_footer_shows_insert() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed { ref pane, insert_pressed: true } if pane == "%2"
+    ));
+    assert_eq!(
+        fake.keys(),
+        [
+            pressed("i"),
+            Key::Text("%2".into(), "digest".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn in_insert_mode_harold_presses_no_key_but_enter() {
+    let fake = vim_fake();
+    fake.set(|state| state.screen = Some(vim_screen("❯ ", FOOTER)));
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed {
+            insert_pressed: false,
+            ..
+        }
+    ));
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_box_that_holds_only_i_after_the_key_loses_it_and_waits() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ i", NORMAL_FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxNotInsert)));
+    assert_eq!(fake.keys(), [pressed("i"), pressed("BSpace")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_box_that_is_still_not_insert_after_the_key_waits_with_one_key_pressed() {
+    let fake = vim_fake();
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxNotInsert)));
+    assert_eq!(fake.keys(), [pressed("i")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_box_that_holds_other_text_after_the_key_waits_without_a_second_key() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ix", NORMAL_FOOTER)),
+        ]
+        .into();
+    });
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxNotInsert)));
+    assert_eq!(fake.keys(), [pressed("i")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_box_that_holds_text_in_vim_gets_no_key() {
+    let fake = vim_fake();
+    fake.set(|state| state.screen = Some(vim_screen("❯ half a sentence", NORMAL_FOOTER)));
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::InputBoxHoldsText)));
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_that_tmux_refuses_makes_the_line_wait_as_typing_failed() {
+    let fake = vim_fake();
+    fake.set(|state| state.fail_press = true);
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(attempt, Attempt::Wait(Reason::TypingFailed)));
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_suggested_prompt_does_not_hold_the_line_back() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.screen = Some(suggestion_screen()));
+
+    let attempt = type_digest(&fake).await;
+
+    assert!(matches!(
+        attempt,
+        Attempt::Typed {
+            insert_pressed: false,
+            ..
+        }
+    ));
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_once_carries_insert_pressed_and_the_wait_reason() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+    assert_eq!(
+        type_line_once(&fake, Writer::Tool("questions"), "%2", "line").await,
+        LineOutcome::Typed {
+            insert_pressed: true
+        }
+    );
+
+    let holds = Fake::at(DAY, "09:00:00");
+    holds.set(|state| state.screen = Some(screen_with_box(&["❯ typed"])));
+    assert_eq!(
+        type_line_once(&holds, Writer::Tool("questions"), "%2", "line").await,
+        LineOutcome::PaneBusy("input_box_holds_text")
+    );
+
+    let busy = Fake::at(DAY, "09:00:00");
+    busy.set(|state| state.view = view(vec![busy_chief("%2")]));
+    assert_eq!(
+        type_line_once(&busy, Writer::Tool("questions"), "%2", "line").await,
+        LineOutcome::PaneBusy("agent_busy")
+    );
+
+    let normal = vim_fake();
+    assert_eq!(
+        type_line_once(&normal, Writer::Tool("questions"), "%2", "line").await,
+        LineOutcome::PaneBusy("input_box_not_insert")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_prompt_typed_after_i_reports_insert_pressed() {
+    let fake = vim_fake();
+    fake.set(|state| {
+        state.screens = [
+            Some(vim_screen("❯ ", NORMAL_FOOTER)),
+            Some(vim_screen("❯ ", FOOTER)),
+        ]
+        .into();
+    });
+    let store = TestStore::new().await;
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    let reports = prompts.round().await;
+
+    assert!(matches!(
+        reports.as_slice(),
+        [Report::Typed {
+            insert_pressed: true,
+            ..
+        }]
+    ));
 }

@@ -316,6 +316,35 @@ async fn every_log_line_of_the_table_is_written_with_its_fields() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_report_waits_with_the_reason_from_the_typing_and_logs_insert_pressed() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("REPORT first", 0.01)]).await;
+    {
+        let mut script = h.typing.script.lock().unwrap();
+        script.push_back(crate::tools::Typing::PaneBusy("input_box_not_insert"));
+        script.push_back(crate::tools::Typing::Typed {
+            insert_pressed: true,
+        });
+    }
+    let name = unique("reason");
+    h.start(&name, 10, 120).await;
+    pass(Duration::from_secs(60)).await;
+
+    let text = logs.text();
+    let waiting = lines(&text, "watch report waiting", &name);
+    assert_eq!(waiting.len(), 1, "{text}");
+    assert!(
+        waiting[0].contains("reason=\"input_box_not_insert\""),
+        "{}",
+        waiting[0]
+    );
+    let typed = lines(&text, "watch report typed", &name);
+    assert_eq!(typed.len(), 1, "{text}");
+    assert!(typed[0].contains("insert_pressed=true"), "{}", typed[0]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_yaml_list_of_tools_is_logged_once_per_run_and_the_run_gets_no_tools() {
     test_support::install();
     let logs = CapturedLogs::start();

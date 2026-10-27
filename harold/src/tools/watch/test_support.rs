@@ -153,8 +153,10 @@ impl PaneTyping for FakeTyping {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(Typing::Typed);
-        if matches!(answer, Typing::Typed | Typing::EnterFailed) {
+            .unwrap_or(Typing::Typed {
+                insert_pressed: false,
+            });
+        if matches!(answer, Typing::Typed { .. } | Typing::EnterFailed) {
             self.lines
                 .lock()
                 .unwrap()

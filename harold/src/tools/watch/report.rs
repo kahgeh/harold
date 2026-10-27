@@ -33,13 +33,14 @@ pub(super) struct Typist {
 }
 
 impl Typist {
-    /// Tries once. `Ok` holds the pane typed into. `Err` holds the reason it waits, one of
-    /// the timed prompts' reasons.
+    /// Tries once. `Ok` holds the pane typed into and whether Harold pressed `i` to put its
+    /// Vim box in INSERT mode. `Err` holds the reason it waits, one of the timed prompts'
+    /// reasons.
     pub(super) async fn try_type(
         &self,
         target: &Target,
         line: &str,
-    ) -> Result<String, &'static str> {
+    ) -> Result<(String, bool), &'static str> {
         let agents = self.agents.agents();
         let pane = match target {
             Target::Chief => self.chief.chief_pane().ok_or("no_agent_in_folder")?,
@@ -65,14 +66,16 @@ impl Typist {
             EffectiveAgentState::Idle => {}
         }
         match self.agents.input_box(&pane).await {
-            Some(InputBox::Empty) => {}
+            // A box in Vim NORMAL mode is ready: the typing step presses `i`.
+            Some(InputBox::Empty | InputBox::NotInsert) => {}
             Some(InputBox::HoldsText) => return Err("input_box_holds_text"),
             Some(InputBox::NotFound) | None => return Err("input_box_not_found"),
         }
         match self.typing.type_line(&pane, line).await {
             // Enter failing leaves the text in the box: typing again would repeat it.
-            Typing::Typed | Typing::EnterFailed => Ok(pane),
-            Typing::PaneBusy => Err("agent_busy"),
+            Typing::Typed { insert_pressed } => Ok((pane, insert_pressed)),
+            Typing::EnterFailed => Ok((pane, false)),
+            Typing::PaneBusy(reason) => Err(reason),
             Typing::NoPane => Err("no_agent_in_folder"),
         }
     }
@@ -191,9 +194,9 @@ impl ReportSlot {
                     .as_ref()
                     .is_some_and(|waiting| waiting.generation == generation);
                 match (tried, current) {
-                    (Ok(pane), true) => {
+                    (Ok((pane, insert_pressed)), true) => {
                         if let Some(waiting) = inner.waiting.take() {
-                            waiting.obs.typed(&pane);
+                            waiting.obs.typed(&pane, insert_pressed);
                         }
                         continue;
                     }

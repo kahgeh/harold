@@ -83,6 +83,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent monitor | The part of Harold that finds agents and works out their state | "monitor" alone |
 | inventory, process inventory | The agent monitor's regular scan of tmux panes and the agent processes in them | — |
 | screen adapter | The per-provider reader of an agent's visible screen, such as `claude-v1` | — |
+| input box | The row where Claude Code shows the text the user types, between two rows of `─`. Harold types a line into it only when it is empty | "prompt box", "text box" |
+| suggested prompt | The dim text Claude Code draws in an empty input box after a turn. It is not typed text, and the input box still counts as empty | "grey suggestion", "autocomplete" |
 | hook | A small script a provider runs to tell Harold what an agent did | — |
 | Claude Code mod | The Claude Code plugin in `hooks/claude-mod` that reports a working pane | "plugin" for it. OpenCode's is an OpenCode plugin |
 | Busy, Idle, Unknown | An agent's state. Unknown: an agent runs in the pane, and neither its hooks nor its screen say Busy or Idle yet. A pane with no agent program has no state and is not listed | "unknown" for a pane with no agent |

@@ -319,11 +319,12 @@ impl ReportObs {
     }
 
     /// `watch report typed`.
-    pub(super) fn typed(self, pane: &str) {
+    pub(super) fn typed(self, pane: &str, insert_pressed: bool) {
         info!(
             watch = self.watch.as_str(),
             run = self.run,
             pane,
+            insert_pressed,
             "watch report typed"
         );
     }

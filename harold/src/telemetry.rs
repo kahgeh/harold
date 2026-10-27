@@ -97,6 +97,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "turn.start",
     "state",
     "count",
+    "insert_pressed",
     "text_cut",
     "call_from",
     "cut",

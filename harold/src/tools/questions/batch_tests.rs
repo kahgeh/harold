@@ -575,8 +575,16 @@ async fn a_busy_pane_waits_logs_once_and_types_when_idle() {
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
     answer_a(&*store, "Q1").await;
-    let busy = Step::Answer(Typing::PaneBusy);
-    let sender = spawn_sender(&store, FakeTyping::new(vec![busy; 3], Typing::Typed));
+    let busy = Step::Answer(Typing::PaneBusy("agent_busy"));
+    let sender = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![busy; 3],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     until("the first try", || sender.typing.calls().len() == 1).await;
     // The first try waits out the settle; each try is then one attempt, and
     // between rounds the batch is released, not waited on.
@@ -599,7 +607,7 @@ async fn a_busy_pane_waits_logs_once_and_types_when_idle() {
         ["tool", "reason"]
     );
     assert!(
-        waiting[0].contains("reason=\"pane_busy\""),
+        waiting[0].contains("reason=\"agent_busy\""),
         "{}",
         waiting[0]
     );
@@ -610,6 +618,56 @@ async fn a_busy_pane_waits_logs_once_and_types_when_idle() {
         "evidence: 3 busy tries, one a round, then typed after {elapsed:?}; log: {}; log: {}",
         waiting[0], typed[0]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_logs_the_reason_from_the_typing_and_the_typed_line_logs_count_and_insert_pressed() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    answer_a(&*store, "Q2").await;
+    let script = vec![
+        Step::Answer(Typing::PaneBusy("input_box_holds_text")),
+        Step::Answer(Typing::PaneBusy("input_box_not_insert")),
+    ];
+    let sender = spawn_sender(
+        &store,
+        FakeTyping::new(
+            script,
+            Typing::Typed {
+                insert_pressed: true,
+            },
+        ),
+    );
+    until("the batch is typed", || {
+        logs.with("answers batch typed").len() == 1
+    })
+    .await;
+
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 2, "{:#?}", logs.lines());
+    assert!(
+        waiting[0].contains("reason=\"input_box_holds_text\""),
+        "{}",
+        waiting[0]
+    );
+    assert!(
+        waiting[1].contains("reason=\"input_box_not_insert\""),
+        "{}",
+        waiting[1]
+    );
+    assert!(waiting.iter().all(|line| !line.contains("pane_busy")));
+    let typed = logs.with("answers batch typed");
+    assert_eq!(
+        field_names(&typed[0], "answers batch typed"),
+        ["tool", "reason", "count", "insert_pressed"]
+    );
+    assert!(typed[0].contains("count=2"), "{}", typed[0]);
+    assert!(typed[0].contains("insert_pressed=true"), "{}", typed[0]);
+    assert!(sender.typing.texts()[0].starts_with("ANSWERS 2"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -643,7 +701,15 @@ async fn a_started_batch_is_typed_once_after_a_restart() {
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
     answer_a(&*store, "Q1").await;
-    let first = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    let first = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![Step::Hang],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     until("the first sender is typing", || {
         first.typing.calls().len() == 1
     })
@@ -705,7 +771,12 @@ async fn enter_failed_counts_as_typed_and_logs_its_reason() {
     answer_a(&*store, "Q1").await;
     let sender = spawn_sender(
         &store,
-        FakeTyping::new(vec![Step::Answer(Typing::EnterFailed)], Typing::Typed),
+        FakeTyping::new(
+            vec![Step::Answer(Typing::EnterFailed)],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
     );
     until("the batch is typed", || sender.typing.calls().len() == 1).await;
     until_no_started_batch(&*store).await;
@@ -715,9 +786,10 @@ async fn enter_failed_counts_as_typed_and_logs_its_reason() {
     assert_eq!(typed.len(), 1, "{:#?}", logs.lines());
     assert_eq!(
         field_names(&typed[0], "answers batch typed"),
-        ["tool", "reason"]
+        ["tool", "reason", "count"]
     );
     assert!(typed[0].contains("reason=\"enter_failed\""), "{}", typed[0]);
+    assert!(typed[0].contains("count=1"), "{}", typed[0]);
     assert!(logs.with("answers batch waiting").is_empty());
     println!(
         "evidence: one line typed, batch marked typed, log: {}",
@@ -733,7 +805,10 @@ async fn shutdown_stops_a_waiting_batch() {
     answer_a(&*store, "Q1").await;
 
     // Waiting for a busy pane between tries: nothing was typed, so the batch was released.
-    let busy = spawn_sender(&store, FakeTyping::new(vec![], Typing::PaneBusy));
+    let busy = spawn_sender(
+        &store,
+        FakeTyping::new(vec![], Typing::PaneBusy("agent_busy")),
+    );
     until("the first try", || busy.typing.calls().len() == 1).await;
     busy.shutdown.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), busy.task)
@@ -747,7 +822,15 @@ async fn shutdown_stops_a_waiting_batch() {
     assert_eq!(ready.answers.len(), 1);
 
     // Inside a `type_line` that has not returned: the line may have reached the pane.
-    let typing = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    let typing = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![Step::Hang],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     until("typing", || typing.typing.calls().len() == 1).await;
     typing.shutdown.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), typing.task)
@@ -927,7 +1010,10 @@ async fn a_question_added_while_a_batch_waits() -> (Vec<String>, Vec<String>) {
     let folder = TempFolder::new();
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
-    let sender = spawn_sender(&store, FakeTyping::new(vec![], Typing::PaneBusy));
+    let sender = spawn_sender(
+        &store,
+        FakeTyping::new(vec![], Typing::PaneBusy("agent_busy")),
+    );
 
     // t = 0: the user answers Q1, the only question; the pane is busy.
     answer_a(&*store, "Q1").await;
@@ -946,7 +1032,9 @@ async fn a_question_added_while_a_batch_waits() -> (Vec<String>, Vec<String>) {
     );
 
     // The pane goes idle; the next retry types the line, Q2 or not.
-    sender.typing.set_fallback(Typing::Typed);
+    sender.typing.set_fallback(Typing::Typed {
+        insert_pressed: false,
+    });
     let tries = sender.typing.calls().len();
     until("the batch is typed", || {
         sender.typing.calls().len() == tries + 1
@@ -960,7 +1048,7 @@ async fn a_question_added_while_a_batch_waits() -> (Vec<String>, Vec<String>) {
     let waiting = logs.with("answers batch waiting");
     assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
     assert!(
-        waiting[0].contains("reason=\"pane_busy\""),
+        waiting[0].contains("reason=\"agent_busy\""),
         "{}",
         waiting[0]
     );
@@ -989,7 +1077,15 @@ async fn a_batch_in_flight_at_shutdown_is_typed_again_once_after_a_restart() {
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
     answer_a(&*store, "Q1").await;
-    let first = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    let first = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![Step::Hang],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     until("the first sender is typing", || {
         first.typing.calls().len() == 1
     })
@@ -1157,7 +1253,15 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
     answer_a(&*store, "Q1").await;
-    let first = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    let first = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![Step::Hang],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     until("the first sender is typing", || {
         first.typing.calls().len() == 1
     })
@@ -1170,7 +1274,10 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
 
     // The restart: the chief is busy reading B1, and puts Q2 meanwhile.
     let store: Arc<TursoQuestionStore> = open_store(&folder).await;
-    let second = spawn_sender(&store, FakeTyping::new(vec![], Typing::PaneBusy));
+    let second = spawn_sender(
+        &store,
+        FakeTyping::new(vec![], Typing::PaneBusy("agent_busy")),
+    );
     until("the restarted sender tries B1", || {
         !second.typing.calls().is_empty()
     })
@@ -1197,7 +1304,9 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
     );
 
     // The pane goes idle: B1 is typed once, though Q2 waits.
-    second.typing.set_fallback(Typing::Typed);
+    second.typing.set_fallback(Typing::Typed {
+        insert_pressed: false,
+    });
     until("B1 is typed", || second.typing.calls().len() == tries + 1).await;
     until_no_started_batch(&*store).await;
     second.wake.notify_one();
@@ -1213,7 +1322,7 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
     let waiting = logs.with("answers batch waiting");
     assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
     assert!(
-        waiting[0].contains("reason=\"pane_busy\""),
+        waiting[0].contains("reason=\"agent_busy\""),
         "{}",
         waiting[0]
     );
@@ -1243,9 +1352,12 @@ async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
     let failing = FailingStore::new(Arc::clone(&inner));
     failing.writes.store(false, Ordering::SeqCst);
     failing.releases.store(true, Ordering::SeqCst);
-    let sender = spawn_sender(&failing, FakeTyping::new(vec![], Typing::PaneBusy));
+    let sender = spawn_sender(
+        &failing,
+        FakeTyping::new(vec![], Typing::PaneBusy("agent_busy")),
+    );
     until("the first try", || sender.typing.calls().len() == 1).await;
-    // The failed release is logged in the same round, after its `pane_busy`.
+    // The failed release is logged in the same round, after its `agent_busy`.
     pass(1).await;
     assert_eq!(
         logs.with("reason=\"store_failed\"").len(),
@@ -1260,7 +1372,9 @@ async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
 
     failing.releases.store(false, Ordering::SeqCst);
     until_no_started_batch(&*inner).await;
-    sender.typing.set_fallback(Typing::Typed);
+    sender.typing.set_fallback(Typing::Typed {
+        insert_pressed: false,
+    });
     until("the batch is typed", || {
         logs.with("answers batch typed").len() == 1
     })
@@ -1269,7 +1383,7 @@ async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
     let waiting = logs.with("answers batch waiting");
     assert!(waiting.len() >= 2, "{:#?}", logs.lines());
     assert!(
-        waiting[0].contains("reason=\"pane_busy\""),
+        waiting[0].contains("reason=\"agent_busy\""),
         "{}",
         waiting[0]
     );
@@ -1593,8 +1707,16 @@ async fn a_busy_pane_retry_adds_no_second_settle() {
     let folder = TempFolder::new();
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
-    let busy = Step::Answer(Typing::PaneBusy);
-    let sender = spawn_sender(&store, FakeTyping::new(vec![busy; 2], Typing::Typed));
+    let busy = Step::Answer(Typing::PaneBusy("agent_busy"));
+    let sender = spawn_sender(
+        &store,
+        FakeTyping::new(
+            vec![busy; 2],
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        ),
+    );
     pass(1).await;
     let answered_at = tokio::time::Instant::now();
     answer_a(&*store, "Q1").await;

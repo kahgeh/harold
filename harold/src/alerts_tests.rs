@@ -288,7 +288,7 @@ fn texts(fake: &Fake) -> Vec<String> {
         .into_iter()
         .filter_map(|key| match key {
             Key::Text(_, text) => Some(text),
-            Key::Enter(_) => None,
+            Key::Enter(_) | Key::Press(..) => None,
         })
         .collect()
 }

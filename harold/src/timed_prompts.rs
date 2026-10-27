@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
@@ -44,6 +45,9 @@ pub(crate) const ROUND_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The longest the task waits for `/bin/date` or for a screen capture.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long Claude Code gets to redraw its footer after Harold presses `i`.
+const INSERT_REDRAW: Duration = Duration::from_millis(200);
 
 /// The local date and time come from `/bin/date`: the `time` crate refuses to read the
 /// local offset in a process with more than one thread.
@@ -144,35 +148,184 @@ impl Window {
 pub(crate) enum InputBox {
     Empty,
     HoldsText,
+    /// The box is empty and Claude Code's editor is Vim, but the footer does not show
+    /// `-- INSERT --`: the box is in NORMAL mode, where a typed key is a Vim command.
+    NotInsert,
     NotFound,
 }
 
+/// The footer text Claude Code shows below the input box in Vim INSERT mode.
+const INSERT_FOOTER: &str = "-- INSERT --";
+
+/// What the input box holds, read from a screen.
+struct BoxRead {
+    /// The text in the box, without the text drawn dim (a suggested prompt) or in reverse
+    /// video (the cursor).
+    typed: String,
+    /// Whether a row below the lower rule holds `-- INSERT --`.
+    insert_footer: bool,
+}
+
+/// One row of a screen with its escape codes removed, and the text the row holds that is
+/// neither dim nor in reverse video.
+struct Row {
+    plain: String,
+    plain_unstyled: String,
+}
+
+/// Reads one row of a `capture-pane -e` screen. Only SGR codes change what is dim (2 until
+/// 22) or in reverse video (7 until 27); 0 and an empty code reset both. Every other
+/// escape sequence is dropped. A row with no escape codes reads as it is.
+fn read_row(raw: &str) -> Row {
+    let mut plain = String::new();
+    let mut plain_unstyled = String::new();
+    let (mut dim, mut reverse) = (false, false);
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            if !dim && !reverse {
+                plain_unstyled.push(c);
+            }
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                let mut params = String::new();
+                let mut last = None;
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        last = Some(next);
+                        break;
+                    }
+                    params.push(next);
+                }
+                if last == Some('m') {
+                    apply_sgr(&params, &mut dim, &mut reverse);
+                }
+            }
+            Some(']') => {
+                // An operating system command ends with BEL or ESC \.
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\x1b' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    Row {
+        plain,
+        plain_unstyled,
+    }
+}
+
+fn apply_sgr(params: &str, dim: &mut bool, reverse: &mut bool) {
+    let mut codes = params.split([';', ':']);
+    while let Some(code) = codes.next() {
+        match code {
+            "" | "0" => (*dim, *reverse) = (false, false),
+            "2" => *dim = true,
+            "22" => *dim = false,
+            "7" => *reverse = true,
+            "27" => *reverse = false,
+            // A colour with its own arguments: 38;5;n or 38;2;r;g;b.
+            "38" | "48" | "58" => match codes.next() {
+                Some("5") => {
+                    codes.next();
+                }
+                Some("2") => {
+                    codes.nth(2);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
 /// Reads Claude Code's input box from a pane's visible screen. The box is the lowest row
-/// that starts with `❯`, when the rows directly above and below it start with `─`. It is
-/// empty when nothing but spaces follows the `❯`. Anything else is not found, so doubt
-/// always means not typing: a box more than one row tall, a permission question or a
-/// menu in its place.
-pub(crate) fn read_input_box(screen: &str) -> InputBox {
-    let rows: Vec<&str> = screen
+/// that starts with `❯`, when the rows directly above and below it start with `─`. Anything
+/// else is not found, so doubt always means not typing: a box more than one row tall, a
+/// permission question or a menu in its place.
+fn read_box(screen: &str) -> Option<BoxRead> {
+    let rows: Vec<Row> = screen
         .lines()
-        .map(|row| row.trim_end_matches('\r'))
+        .map(|row| read_row(row.trim_end_matches('\r')))
         .collect();
-    let Some(row) = rows.iter().rposition(|row| row.starts_with('❯')) else {
-        return InputBox::NotFound;
-    };
+    let row = rows.iter().rposition(|row| row.plain.starts_with('❯'))?;
     let is_rule = |index: Option<usize>| {
         index
             .and_then(|index| rows.get(index))
-            .is_some_and(|row| row.starts_with('─'))
+            .is_some_and(|row| row.plain.starts_with('─'))
     };
     if !is_rule(row.checked_sub(1)) || !is_rule(Some(row + 1)) {
-        return InputBox::NotFound;
+        return None;
     }
-    let typed = &rows[row]['❯'.len_utf8()..];
-    if typed.chars().all(char::is_whitespace) {
-        InputBox::Empty
-    } else {
+    // A row with no escape codes keeps its text whole; the `❯` itself is never text.
+    let typed = rows[row].plain_unstyled.trim_start_matches('❯').to_string();
+    let insert_footer = rows[row + 2..]
+        .iter()
+        .any(|row| row.plain.contains(INSERT_FOOTER));
+    Some(BoxRead {
+        typed,
+        insert_footer,
+    })
+}
+
+/// Reads the input box on a screen taken with `capture-pane -e`. The box is empty when
+/// nothing but spaces follows the `❯` once the dim text (a suggested prompt) and the
+/// reverse-video cursor are left out. With `vim`, Claude Code's editor is Vim, and an empty
+/// box is `Empty` only when the footer shows `-- INSERT --`; else it is `NotInsert`. Text in
+/// the box is `HoldsText` in either mode.
+pub(crate) fn read_input_box(screen: &str, vim: bool) -> InputBox {
+    let Some(read) = read_box(screen) else {
+        return InputBox::NotFound;
+    };
+    if !read.typed.chars().all(char::is_whitespace) {
         InputBox::HoldsText
+    } else if vim && !read.insert_footer {
+        InputBox::NotInsert
+    } else {
+        InputBox::Empty
+    }
+}
+
+/// Whether the box holds the one letter `key` and nothing else.
+fn box_holds_only(screen: &str, key: char) -> bool {
+    read_box(screen).is_some_and(|read| read.typed.trim() == key.to_string())
+}
+
+/// Whether Claude Code's `editorMode` is `vim`, in `settings.json` in `config_dir`. A file
+/// that is missing or cannot be read counts as not `vim`.
+fn editor_mode_is_vim(config_dir: &Path) -> bool {
+    std::fs::read_to_string(config_dir.join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|settings| {
+            settings
+                .get("editorMode")
+                .and_then(serde_json::Value::as_str)
+                .map(|mode| mode == "vim")
+        })
+        .unwrap_or(false)
+}
+
+/// Claude Code's config folder: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn claude_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => std::env::var_os("HOME").map(|home| Path::new(&home).join(".claude")),
     }
 }
 
@@ -194,6 +347,9 @@ pub(crate) enum Reason {
     AgentStateUnknown,
     InputBoxNotFound,
     InputBoxHoldsText,
+    /// Claude Code's editor is Vim and the empty box is not in INSERT mode, and typing `i`
+    /// did not put it there.
+    InputBoxNotInsert,
     /// Every check passed and typing the text failed.
     TypingFailed,
     /// The window ended and Harold never saw the prompt due.
@@ -214,6 +370,7 @@ impl Reason {
             Self::AgentStateUnknown => "agent_state_unknown",
             Self::InputBoxNotFound => "input_box_not_found",
             Self::InputBoxHoldsText => "input_box_holds_text",
+            Self::InputBoxNotInsert => "input_box_not_insert",
             Self::TypingFailed => "typing_failed",
             Self::WindowPassed => "window_passed",
             Self::NewStore => "new_store",
@@ -363,12 +520,14 @@ pub(crate) fn pick_pane<'a>(
 }
 
 /// Checks 6 and 7 on a fresh read of the pane's screen, where `None` is a read that
-/// failed or timed out. Returns the reason of the check that fails, or `None` when the
-/// input box is there and empty.
-pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
-    match screen.map(read_input_box) {
+/// failed or timed out, and `vim` says whether Claude Code's editor is Vim. Returns the
+/// reason of the check that fails, or `None` when the input box is there and empty and in
+/// INSERT mode (always so when the editor is not Vim).
+pub(crate) fn box_reason(screen: Option<&str>, vim: bool) -> Option<Reason> {
+    match screen.map(|screen| read_input_box(screen, vim)) {
         None | Some(InputBox::NotFound) => Some(Reason::InputBoxNotFound),
         Some(InputBox::HoldsText) => Some(Reason::InputBoxHoldsText),
+        Some(InputBox::NotInsert) => Some(Reason::InputBoxNotInsert),
         Some(InputBox::Empty) => None,
     }
 }
@@ -509,6 +668,19 @@ pub(crate) trait Ports: Send + Sync + 'static {
     /// Sends Enter to the pane.
     fn press_enter(&self, pane_id: &str) -> impl Future<Output = Result<(), String>> + Send;
 
+    /// Sends one key to the pane by its tmux name, such as `i` or `BSpace`.
+    fn press_key(
+        &self,
+        pane_id: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Whether Claude Code's `editorMode` is `vim`. Read at each call, so a change shows at
+    /// once. A setting that cannot be read counts as not `vim`.
+    fn editor_is_vim(&self) -> bool {
+        false
+    }
+
     /// The pane locks every writer through these ports shares.
     fn pane_locks(&self) -> &PaneLocks;
 
@@ -532,6 +704,7 @@ pub(crate) enum Report {
         pane: String,
         /// Seconds after the prompt's time.
         late_s: u32,
+        insert_pressed: bool,
     },
     /// The prompt is waiting, and for a reason other than the last one reported.
     Delayed {
@@ -563,8 +736,13 @@ pub(crate) enum Report {
 
 pub(crate) fn log_report(report: &Report) {
     match report {
-        Report::Typed { name, pane, late_s } => {
-            info!(name = %name, pane = %pane, late_s, "timed prompt typed");
+        Report::Typed {
+            name,
+            pane,
+            late_s,
+            insert_pressed,
+        } => {
+            info!(name = %name, pane = %pane, late_s, insert_pressed, "timed prompt typed");
         }
         Report::Delayed {
             name,
@@ -627,8 +805,15 @@ struct TypedPane {
 /// How one try at typing a text ended.
 pub(crate) enum Attempt {
     Wait(Reason),
-    Typed { pane: String },
-    EnterFailed { pane: String, error: String },
+    Typed {
+        pane: String,
+        /// Harold pressed `i` to put a Vim box in INSERT mode before it typed.
+        insert_pressed: bool,
+    },
+    EnterFailed {
+        pane: String,
+        error: String,
+    },
 }
 
 /// The configured prompts and what has become of each.
@@ -806,8 +991,12 @@ impl<P: Ports> TimedPrompts<P> {
                             reason,
                         });
                     }
-                    Attempt::Typed { pane } => {
+                    Attempt::Typed {
+                        pane,
+                        insert_pressed,
+                    } => {
                         reports.push(Report::Typed {
+                            insert_pressed,
                             name: prompt.name.clone(),
                             pane: pane.clone(),
                             late_s: now.seconds_of_day - prompt.window.at_s,
@@ -875,7 +1064,7 @@ async fn attempt<P: Ports>(
         typed_into,
     )
     .await;
-    if let Attempt::Typed { pane } = &attempt {
+    if let Attempt::Typed { pane, .. } = &attempt {
         // The next turn end on the pane starts at this typing, unless the hook sends its
         // transcript time.
         crate::telemetry::prompt_typed(
@@ -927,8 +1116,31 @@ pub(crate) async fn type_when_ready<P: Ports>(
     if record.held_against(writer, Instant::now()) {
         return Attempt::Wait(Reason::AgentBusy);
     }
+    let vim = ports.editor_is_vim();
     let screen = ports.read_screen(&pane).await;
-    if let Some(reason) = box_reason(screen.as_deref()) {
+    let mut insert_pressed = false;
+    if let Some(InputBox::NotInsert) = screen.as_deref().map(|screen| read_input_box(screen, vim)) {
+        // The box is empty and in Vim NORMAL mode. One `i` puts it in INSERT mode, and
+        // the footer must show that before Harold types. At most one `i` per try: a
+        // second one would type the letter into a box already in INSERT mode.
+        if ports.press_key(&pane, "i").await.is_err() {
+            return Attempt::Wait(Reason::TypingFailed);
+        }
+        tokio::time::sleep(INSERT_REDRAW).await;
+        let screen = ports.read_screen(&pane).await;
+        match screen.as_deref().map(|screen| read_input_box(screen, vim)) {
+            Some(InputBox::Empty) => insert_pressed = true,
+            Some(InputBox::HoldsText)
+                if screen.as_deref().is_some_and(|s| box_holds_only(s, 'i')) =>
+            {
+                // The box was in INSERT mode already, with no footer drawn, and the `i`
+                // went in as text. Take it out; the next try looks again.
+                let _ = ports.press_key(&pane, "BSpace").await;
+                return Attempt::Wait(Reason::InputBoxNotInsert);
+            }
+            _ => return Attempt::Wait(Reason::InputBoxNotInsert),
+        }
+    } else if let Some(reason) = box_reason(screen.as_deref(), vim) {
         return Attempt::Wait(reason);
     }
     // Nothing is in the box yet, so a failure here is safe to try again later.
@@ -938,7 +1150,10 @@ pub(crate) async fn type_when_ready<P: Ports>(
     // Typed, whether or not Enter goes through: the text is in the box either way.
     record.typed_by(writer);
     match ports.press_enter(&pane).await {
-        Ok(()) => Attempt::Typed { pane },
+        Ok(()) => Attempt::Typed {
+            pane,
+            insert_pressed,
+        },
         Err(error) => Attempt::EnterFailed { pane, error },
     }
 }
@@ -950,10 +1165,12 @@ pub(crate) async fn type_when_ready<P: Ports>(
 /// How a `type_line_once` call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LineOutcome {
-    Typed,
+    Typed {
+        insert_pressed: bool,
+    },
     /// The pane was busy, its input box held text, or the pane list could not be read;
-    /// nothing was typed.
-    PaneBusy,
+    /// nothing was typed. Carries the name of the `Reason` that made the line wait.
+    PaneBusy(&'static str),
     /// No agent pane has the id.
     NoPane,
     /// The text went into the box but Enter failed.
@@ -972,7 +1189,7 @@ pub(crate) async fn type_line_once<P: Ports>(
     let view = ports.agents();
     // A failed listing says nothing about the pane: try again later.
     if view.listing_failed {
-        return LineOutcome::PaneBusy;
+        return LineOutcome::PaneBusy(Reason::PaneListFailing.as_str());
     }
     let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
         return LineOutcome::NoPane;
@@ -982,13 +1199,14 @@ pub(crate) async fn type_line_once<P: Ports>(
     if let Ok(target) = target_pane(&view, &pane.folder, ports.chief())
         && target.pane_id != pane_id
     {
-        return LineOutcome::PaneBusy;
+        // A second agent in the chief's folder: the same reason `target_pane` gives.
+        return LineOutcome::PaneBusy("several_agents_in_folder");
     }
     match type_when_ready(ports, writer, &pane.folder, text, &view, &[]).await {
-        Attempt::Typed { .. } => LineOutcome::Typed,
+        Attempt::Typed { insert_pressed, .. } => LineOutcome::Typed { insert_pressed },
         Attempt::EnterFailed { .. } => LineOutcome::Failed,
         Attempt::Wait(Reason::NoAgentInFolder) => LineOutcome::NoPane,
-        Attempt::Wait(_) => LineOutcome::PaneBusy,
+        Attempt::Wait(reason) => LineOutcome::PaneBusy(reason.as_str()),
     }
 }
 
@@ -1026,9 +1244,24 @@ async fn bounded_stdout(program: &str, args: &[&str], timeout: Duration) -> Opti
     String::from_utf8(output.stdout).ok()
 }
 
-/// The visible screen of one pane, as plain text.
-fn capture_args(pane_id: &str) -> [&str; 4] {
-    ["capture-pane", "-p", "-t", pane_id]
+/// The visible screen of one pane, with the escape codes that say which text is dim or in
+/// reverse video (`-e`).
+fn capture_args(pane_id: &str) -> [&str; 5] {
+    ["capture-pane", "-e", "-p", "-t", pane_id]
+}
+
+/// Sends one key to the pane by its tmux name.
+fn press_key_in_tmux_pane(pane_id: &str, key: &str) -> Result<(), String> {
+    let status = std::process::Command::new("tmux")
+        .args(["send-keys", "-t", pane_id, key])
+        .status()
+        .map_err(|error| format!("failed to start tmux key {key} for {pane_id}: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "tmux send-keys {key} failed for {pane_id}: {status}"
+        ));
+    }
+    Ok(())
 }
 
 /// Runs one of the blocking typing steps off the async threads.
@@ -1097,6 +1330,15 @@ impl Ports for TmuxPorts {
     async fn press_enter(&self, pane_id: &str) -> Result<(), String> {
         let pane_id = pane_id.to_string();
         typing_step(move || press_enter_in_tmux_pane(&pane_id)).await
+    }
+
+    async fn press_key(&self, pane_id: &str, key: &str) -> Result<(), String> {
+        let (pane_id, key) = (pane_id.to_string(), key.to_string());
+        typing_step(move || press_key_in_tmux_pane(&pane_id, &key)).await
+    }
+
+    fn editor_is_vim(&self) -> bool {
+        claude_config_dir().is_some_and(|dir| editor_mode_is_vim(&dir))
     }
 
     fn pane_locks(&self) -> &PaneLocks {

@@ -40,12 +40,14 @@ const REGISTRY_UNREADABLE: &str = "registry_unreadable";
 /// How typing one line into a pane went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Typing {
-    /// Typed and sent with Enter.
-    Typed,
+    /// Typed and sent with Enter. `insert_pressed` says whether Harold pressed `i` first,
+    /// to put a Vim input box in INSERT mode.
+    Typed { insert_pressed: bool },
     /// The text is in the input box but Enter failed; typing again would repeat it.
     EnterFailed,
-    /// The pane was busy, or its input box held text; nothing was typed.
-    PaneBusy,
+    /// The pane was busy, or its input box was not ready; nothing was typed. Carries the
+    /// name of the `Reason` that made the line wait.
+    PaneBusy(&'static str),
     /// The pane is gone; nothing was typed.
     NoPane,
 }
@@ -53,9 +55,9 @@ pub(crate) enum Typing {
 impl Typing {
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Typing::Typed => "typed",
+            Typing::Typed { .. } => "typed",
             Typing::EnterFailed => "enter_failed",
-            Typing::PaneBusy => "pane_busy",
+            Typing::PaneBusy(reason) => reason,
             Typing::NoPane => "no_pane",
         }
     }
@@ -380,7 +382,7 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
         });
         Box::pin(async move {
             match typing.await {
-                Ok(LineOutcome::Typed) => Typing::Typed,
+                Ok(LineOutcome::Typed { insert_pressed }) => Typing::Typed { insert_pressed },
                 Ok(LineOutcome::Failed) => Typing::EnterFailed,
                 // A panic in the typing task (`Err(_)`) is reported as `PaneBusy`,
                 // which is safe only because `TmuxPorts`' `typing_step` in
@@ -391,7 +393,8 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
                 // safe because nothing was typed. Any `Ports` used by a tool must not
                 // panic after `type_text`, or a typed batch would be released and sent
                 // twice.
-                Ok(LineOutcome::PaneBusy) | Err(_) => Typing::PaneBusy,
+                Ok(LineOutcome::PaneBusy(reason)) => Typing::PaneBusy(reason),
+                Err(_) => Typing::PaneBusy("pane_busy"),
                 Ok(LineOutcome::NoPane) => Typing::NoPane,
             }
         })
@@ -470,7 +473,10 @@ impl<P: Ports> Agents for SnapshotAgents<P> {
     fn input_box<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<InputBox>> {
         Box::pin(async move {
             let screen = self.ports.read_screen(pane_id).await?;
-            Some(timed_prompts::read_input_box(&screen))
+            Some(timed_prompts::read_input_box(
+                &screen,
+                self.ports.editor_is_vim(),
+            ))
         })
     }
 }

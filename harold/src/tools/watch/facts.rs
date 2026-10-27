@@ -84,7 +84,8 @@ fn state_name(state: EffectiveAgentState) -> &'static str {
 
 fn box_name(reading: Option<InputBox>) -> &'static str {
     match reading {
-        Some(InputBox::Empty) => "empty",
+        // A Vim box in NORMAL mode is empty here: the typing step presses `i`.
+        Some(InputBox::Empty | InputBox::NotInsert) => "empty",
         Some(InputBox::HoldsText) => "holds_text",
         Some(InputBox::NotFound) | None => "not_found",
     }

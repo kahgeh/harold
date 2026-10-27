@@ -205,7 +205,7 @@ impl<P: Ports> RestartReminder<P> {
         let outcome = type_when_idle(&*shared.ports, pane_id, &line).await;
         match outcome {
             // Enter failing leaves the line in the box, so it counts as typed.
-            LineOutcome::Typed | LineOutcome::Failed => {
+            LineOutcome::Typed { .. } | LineOutcome::Failed => {
                 if let Some(session) = inner.state.sessions.get_mut(key) {
                     session.reminded_at = now.format(&Rfc3339).ok();
                 }
@@ -218,7 +218,7 @@ impl<P: Ports> RestartReminder<P> {
                     "chief restart reminder typed"
                 );
             }
-            LineOutcome::PaneBusy => {
+            LineOutcome::PaneBusy(_) => {
                 inner.save(&shared.state_path, now);
                 inner.not_typed(key, NotTyped::PaneBusy);
             }
@@ -280,13 +280,13 @@ const IDLE_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 /// Tries `type_line_once`, again after a short wait while the pane reads busy: Harold's
 /// snapshot shows the pane idle only a moment after the turn end is stored.
 async fn type_when_idle<P: Ports>(ports: &P, pane_id: &str, line: &str) -> LineOutcome {
-    let mut outcome = LineOutcome::PaneBusy;
+    let mut outcome = LineOutcome::PaneBusy("pane_busy");
     for attempt in 0..IDLE_TRIES {
         if attempt > 0 {
             tokio::time::sleep(IDLE_RETRY).await;
         }
         outcome = type_line_once(ports, Writer::Tool("restart_reminder"), pane_id, line).await;
-        if outcome != LineOutcome::PaneBusy {
+        if !matches!(outcome, LineOutcome::PaneBusy(_)) {
             break;
         }
     }

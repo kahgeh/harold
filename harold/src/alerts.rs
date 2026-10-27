@@ -388,8 +388,11 @@ async fn try_line<P: Ports>(
         None => Attempt::Wait(Reason::NoAgentInFolder),
     };
     match attempt {
-        Attempt::Typed { pane } => {
-            info!(alert, state, pane_id = %pane, outcome = "typed", "alert typed");
+        Attempt::Typed {
+            pane,
+            insert_pressed,
+        } => {
+            info!(alert, state, pane_id = %pane, outcome = "typed", insert_pressed, "alert typed");
             *held = Some(HeldPane::new(pane));
             desk.told_oldest();
         }
@@ -462,6 +465,12 @@ fn log_waiting(alert: &str, state: &str, reason: &Reason) {
             state,
             reason = name,
             "alert waiting (input_box_holds_text)"
+        ),
+        Reason::InputBoxNotInsert => info!(
+            alert,
+            state,
+            reason = name,
+            "alert waiting (input_box_not_insert)"
         ),
         Reason::TypingFailed => info!(alert, state, reason = name, "alert waiting (typing_failed)"),
         // Timed prompts only: a try at typing never gives these.

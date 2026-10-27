@@ -369,6 +369,11 @@ fn the_machine_stats_fields_are_allowed() {
 }
 
 #[test]
+fn insert_pressed_is_an_allowed_field() {
+    assert!(ALLOWED_FIELDS.contains(&"insert_pressed"));
+}
+
+#[test]
 fn internal_and_health_targets_are_not_exported_as_logs() {
     assert!(!is_exported_log_target("harold_api"));
     assert!(!is_exported_log_target("eventsource::x"));

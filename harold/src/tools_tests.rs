@@ -306,7 +306,12 @@ async fn the_host_types_as_writer_tool_questions() {
     };
     let line = "ANSWERS 1 | Q1 s1 sha abc: Which? A";
 
-    assert_eq!(typing.type_line("%2", line).await, Typing::Typed);
+    assert_eq!(
+        typing.type_line("%2", line).await,
+        Typing::Typed {
+            insert_pressed: false
+        }
+    );
 
     assert_eq!(
         fake.keys(),
@@ -369,7 +374,10 @@ async fn a_busy_pane_is_pane_busy_at_once() {
 
     let started = tokio::time::Instant::now();
 
-    assert_eq!(typing.type_line("%2", "line").await, Typing::PaneBusy);
+    assert_eq!(
+        typing.type_line("%2", "line").await,
+        Typing::PaneBusy("agent_busy")
+    );
     assert_eq!(started.elapsed(), Duration::ZERO, "one try, no wait");
     assert!(fake.keys().is_empty());
 }

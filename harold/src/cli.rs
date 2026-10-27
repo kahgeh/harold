@@ -3419,7 +3419,11 @@ mod tests {
             _pane_id: &'a str,
             _text: &'a str,
         ) -> crate::tools::BoxFuture<'a, crate::tools::Typing> {
-            Box::pin(async { crate::tools::Typing::Typed })
+            Box::pin(async {
+                crate::tools::Typing::Typed {
+                    insert_pressed: false,
+                }
+            })
         }
     }
     struct NoChief;

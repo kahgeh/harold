@@ -65,7 +65,7 @@ For each due prompt, in the order of the list, Harold checks these in order and 
 | 4 | That agent is Claude Code (its provider uses the `claude-v1` screen adapter) | `input_box_unreadable` |
 | 5 | Harold's current state for that agent is idle | `agent_busy` or `agent_state_unknown` |
 | 6 | A fresh read of the pane's screen finds the input box | `input_box_not_found` |
-| 7 | The input box is empty | `input_box_holds_text` |
+| 7 | The input box is empty, and in Vim INSERT mode when Claude Code's editor is Vim | `input_box_holds_text`, `input_box_not_insert` |
 
 When all seven pass, Harold types `text` into the pane as literal keys and then sends Enter. Harold adds nothing before or after the text. Two of the [limits](#limits) say when tmux types less than the text.
 
@@ -78,7 +78,7 @@ If the text is typed and Enter fails, Harold records the prompt as failed and do
 
 ## Reading the input box
 
-Check 6 reads the pane's visible screen once with `tmux capture-pane`. Claude Code draws its input box as a row starting with `❯` between two rows of `─`:
+Check 6 reads the pane's visible screen once with `tmux capture-pane -e`, which keeps the codes for dim text and reverse video. Claude Code draws its input box as a row starting with `❯` between two rows of `─`:
 
 ```
 ────────────────────────────────
@@ -87,13 +87,27 @@ Check 6 reads the pane's visible screen once with `tmux capture-pane`. Claude Co
   -- INSERT -- ⏵⏵ bypass permissions on
 ```
 
-The input box is found when the lowest row that starts with `❯` has a row starting with `─` directly above it and directly below it. It is empty when that row holds nothing but spaces after the `❯`.
+The input box is found when the lowest row that starts with `❯` has a row starting with `─` directly above it and directly below it. It is empty when that row holds nothing but spaces after the `❯`. Harold does not count the text drawn dim, which is a suggested prompt, or in reverse video, which is the cursor. A line that waits for the chief therefore goes in as soon as the chief waits at its prompt, with a suggested prompt in the box.
+
+### Vim
+
+Harold reads `editorMode` in `settings.json` in `$CLAUDE_CONFIG_DIR`, or in `~/.claude` when that is not set, at each read. A file that is missing or cannot be read counts as not `vim`.
+
+When `editorMode` is `vim`, an empty box is ready only when a row below the lower rule holds `-- INSERT --`. In NORMAL mode that row is missing, and a typed key is a Vim command. So Harold does this in check 7:
+
+1. Harold sends the one key `i` and reads the screen again.
+2. If the footer now shows `-- INSERT --` and the box is empty, Harold types the text and sends Enter. The log line for the typed text has `insert_pressed=true`.
+3. If the box holds only `i`, the box was in INSERT mode with no footer drawn. Harold sends `BSpace` once and waits with `input_box_not_insert`.
+4. In every other case Harold waits with `input_box_not_insert`.
+
+Harold sends `i` at most once in each try, and all of this runs while Harold holds the pane's lock. A box that holds text waits with `input_box_holds_text` in either mode.
 
 Everything else fails a check, so doubt always means not typing:
 
 | The screen shows | Fails |
 |---|---|
-| Text after the `❯` | Check 7 |
+| Text after the `❯`, other than dim text and the cursor | Check 7 (`input_box_holds_text`) |
+| In Vim, an empty box with no `-- INSERT --` row below it, after the `i` key did not help | Check 7 (`input_box_not_insert`) |
 | An input box more than one row tall | Check 6 |
 | A permission question, a menu or a picker in place of the input box | Check 6 |
 | Nothing, because the capture failed or took more than 2 seconds | Check 6 |
@@ -106,7 +120,7 @@ Harold writes one line when a prompt is typed, one when it is skipped, and one e
 
 | Moment | Level | Line | Fields |
 |---|---|---|---|
-| Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`) |
+| Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`), `insert_pressed` (`true` when Harold pressed `i` first, for a Vim input box in NORMAL mode) |
 | Waiting, for a reason other than the last one logged for this prompt | info | `timed prompt delayed` | `name`, `reason`, and `agents` (the count) for `several_agents_in_folder` |
 | Window ended | warn | `timed prompt skipped` | `name`, `reason`: the last reason it waited for, or `window_passed` when Harold never saw it due |
 | Enter failed after the text was typed | warn | `timed prompt failed` | `name`, `pane`, `error` |
@@ -142,7 +156,6 @@ If the event cannot be stored after a prompt was typed, Harold logs the error an
 ## Limits
 
 - **Claude Code only.** Harold must read the input box to know it is empty, and it knows how for Claude Code's screen only. A prompt whose folder holds an agent whose provider uses another screen adapter, such as Codex or OpenCode, waits with `input_box_unreadable` and is skipped when its window ends. A custom agent whose provider is configured with `screen_adapter = "claude-v1"` passes check 4, and Harold reads its screen as Claude Code's.
-- **A grey suggestion reads as typed text.** If Claude Code shows a suggestion in an empty input box, Harold waits with `input_box_holds_text`.
 - **A gap of about half a second.** If you start typing between Harold's read of the screen and its typing, the text is added to yours. Nothing in tmux closes that gap.
 - **A text that starts with `-` is never typed.** Harold runs `tmux send-keys -t <pane> -l <text>` with nothing between `-l` and the text, and by tmux's rules a text that starts with `-` is read as options. Most such texts are refused, and the prompt then waits with `typing_failed` and is skipped when its window ends. A text made only of letters tmux accepts as options, such as `-R` or `-l`, is accepted with nothing typed. Harold then presses Enter and records the prompt as typed.
 - **A `;` at the end of `text` is not typed.** By tmux's rules a `;` at the end of an argument ends the tmux command. A `text` that is only `;` types nothing.

@@ -91,7 +91,12 @@ impl FakeTyping {
     }
 
     pub(super) fn typed_ok() -> Arc<Self> {
-        Self::new(Vec::new(), Typing::Typed)
+        Self::new(
+            Vec::new(),
+            Typing::Typed {
+                insert_pressed: false,
+            },
+        )
     }
 
     /// Changes what the pane answers once the script has run out.
