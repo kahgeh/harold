@@ -4080,25 +4080,45 @@ fn the_tts_cards_read_first_audio_by_machine_loaded_and_device_and_the_failures_
     assert!(!speed.contains("text") && !failures.contains("text"));
 }
 
+/// Checks the ids of one dashboard value. `tiles` must hold at least one item; `containers` is optional.
+fn check_dashboard_ids(file: &str, dashboard: &serde_json::Value) {
+    const MAX_ID_LENGTH: usize = 36;
+    let tiles = dashboard["tiles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{file} has no tiles list"));
+    assert!(!tiles.is_empty(), "{file} has an empty tiles list");
+    for list in ["tiles", "containers"] {
+        let mut seen = std::collections::HashSet::new();
+        for item in dashboard[list].as_array().into_iter().flatten() {
+            let id = item["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{file} has a {list} entry without an id"));
+            let length = id.chars().count();
+            assert!(
+                (1..=MAX_ID_LENGTH).contains(&length),
+                "{file} {list} id {id:?} has {length} characters, HyperDX accepts 1 to {MAX_ID_LENGTH}"
+            );
+            assert!(seen.insert(id), "{file} has the {list} id {id:?} twice");
+        }
+    }
+}
+
 /// HyperDX refuses a tile or container id of more than 36 characters.
 #[test]
 fn every_dashboard_tile_and_container_id_fits_hyperdx() {
-    const MAX_ID_LENGTH: usize = 36;
     for file in ["dashboard.json", "trends.json", "machine.json"] {
-        let dashboard = definition(file);
-        for list in ["tiles", "containers"] {
-            let mut seen = std::collections::HashSet::new();
-            for item in dashboard[list].as_array().into_iter().flatten() {
-                let id = item["id"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{file} has a {list} entry without an id"));
-                let length = id.chars().count();
-                assert!(
-                    (1..=MAX_ID_LENGTH).contains(&length),
-                    "{file} {list} id {id:?} has {length} characters, HyperDX accepts 1 to {MAX_ID_LENGTH}"
-                );
-                assert!(seen.insert(id), "{file} has the {list} id {id:?} twice");
-            }
-        }
+        check_dashboard_ids(file, &definition(file));
     }
+}
+
+#[test]
+#[should_panic(expected = "has no tiles list")]
+fn the_dashboard_id_check_fails_when_tiles_is_missing() {
+    check_dashboard_ids("x.json", &serde_json::json!({ "containers": [] }));
+}
+
+#[test]
+#[should_panic(expected = "has an empty tiles list")]
+fn the_dashboard_id_check_fails_when_tiles_is_empty() {
+    check_dashboard_ids("x.json", &serde_json::json!({ "tiles": [] }));
 }

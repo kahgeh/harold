@@ -863,10 +863,11 @@ done
 ```sh
 dashboard() { hdx "$HYPERDX_URL/api/v2/dashboards" | jq -c --arg name "$1" '.data[] | select(.name == $name)'; }
 
-# "Harold": an update must keep each filter's id, as it keeps the product filter's. The tiles keep theirs by the ids in the file.
+# "Harold": an update keeps each filter's live id, found by name, and gives a filter that is not live yet a new id. The tiles keep theirs by the ids in the file.
 old=$(dashboard "Harold")
+fresh=$(for _ in $(seq "$(fill dashboard.json | jq '.filters | length')"); do openssl rand -hex 12; done | jq -R . | jq -sc .)
 fill dashboard.json \
-  | jq --argjson old "$old" '.filters |= map(. as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | if $id then .id = $id else . end)' \
+  | jq --argjson old "$old" --argjson fresh "$fresh" '.filters |= [to_entries[] | .key as $i | .value | . as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | .id = ($id // $fresh[$i])]' \
   | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
 
 # "Harold trends" and "Machine resources" have no filters.
