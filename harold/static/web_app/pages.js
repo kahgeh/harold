@@ -742,3 +742,35 @@ document.addEventListener("datastar-fetch", (event) => {
   syncPage();
   syncSends();
 })();
+
+// With the iPhone keyboard open, the page keeps its full height and the keyboard covers the
+// bottom of it. Only the visual viewport, the part of the page that shows, gets shorter. So
+// the body takes the visual viewport's height, and the reply bar ends at the keyboard's top.
+(function () {
+  const viewport = window.visualViewport;
+  const thread = document.getElementById("thread");
+  if (!viewport || !thread) {
+    return;
+  }
+  // How much shorter than the window the visual viewport must be to count as a keyboard, in pixels.
+  const KEYBOARD_MIN = 120;
+  // How far from its end the thread may be and still count as at its end, in pixels.
+  const AT_END = 2;
+
+  function fit() {
+    const atEnd = thread.scrollHeight - thread.scrollTop - thread.clientHeight <= AT_END;
+    document.documentElement.style.setProperty("--viewport-height", viewport.height + "px");
+    document.body.classList.toggle("keyboard-open", window.innerHeight - viewport.height > KEYBOARD_MIN);
+    // iOS may slide the page up under the keyboard; the header goes back to the top.
+    if (viewport.offsetTop > 0) {
+      window.scrollTo(0, 0);
+    }
+    if (atEnd) {
+      thread.scrollTop = thread.scrollHeight;
+    }
+  }
+
+  viewport.addEventListener("resize", fit);
+  viewport.addEventListener("scroll", fit);
+  fit();
+})();

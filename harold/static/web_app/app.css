@@ -48,6 +48,7 @@ body {
 }
 
 body {
+  height: var(--viewport-height, 100%);
   display: flex;
   flex-direction: column;
   background: var(--surface-1);
@@ -325,6 +326,11 @@ body.on-todos > #reply {
 .bottom {
   padding: 8px 10px max(8px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--surface-4);
+}
+
+/* The keyboard covers the home bar, so the bar under the reply box needs no gap for it. */
+body.keyboard-open .bottom {
+  padding-bottom: 8px;
 }
 
 .bottom textarea {

@@ -154,6 +154,21 @@ def run_scenario(run, scenario, text, spans_path, screens):
     return json.loads(result_path.read_text())
 
 
+def run_layout_scenario(run, scenario, screens, width=390):
+    """Runs a browser scenario that sends no reply, so no chief turn follows, and returns the
+    browser's own result."""
+    result_path = run.scratch / '{}-browser.json'.format(scenario if width == 390 else '{}-{}'.format(scenario, width))
+    browser = subprocess.run(
+        ['node', str(HERE / 'otel_browser.mjs'), '--scenario', scenario,
+         '--url', 'http://127.0.0.1:{}/'.format(run.web_port), '--login', ct.LOGIN,
+         '--chrome', CHROME, '--out', str(result_path), '--screens', str(screens / 'w{}'.format(width)),
+         '--limit', str(LIMIT_SCENARIO), '--width', str(width)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=LIMIT_SCENARIO, start_new_session=True)
+    if not result_path.exists():
+        raise ct.StepFailed('the browser wrote no result: ' + browser.stderr.decode()[:300])
+    return json.loads(result_path.read_text())
+
+
 def tree(spans, trace_id):
     """The spans of one trace as indented lines with their start and length in milliseconds
     from the first span's start."""
@@ -229,13 +244,21 @@ def main(argv=None):
 
         reply = run_scenario(run, 'reply', 'please rerun the build', spans_path, screens)
         keys = run_scenario(run, 'keys', 'line two', spans_path, screens)
+        keyboard = run_layout_scenario(run, 'keyboard', screens)
+        keyboard_narrow = run_layout_scenario(run, 'keyboard', screens, width=320)
         todo = run_scenario(run, 'todo', 'ANSWERS', spans_path, screens)
         time.sleep(8)  # Harold's exporter sends every 5 s
         spans = spans_in(spans_path)
 
         print('browser: reply {}'.format(json.dumps(reply)))
         print('browser: keys  {}'.format(json.dumps(keys)))
+        print('browser: keyboard {}'.format(json.dumps(keyboard)))
         print('browser: todo  {}'.format(json.dumps(todo)))
+        print('browser: keyboard at 320 px {}'.format(json.dumps(keyboard_narrow)))
+        for shown in (keyboard, keyboard_narrow):
+            if not shown.get('ok'):
+                failed = True
+                print('FAIL the keyboard scenario: {}'.format(shown.get('error')))
         if not keys.get('ok'):
             failed = True
             print('FAIL the keys scenario: {}'.format(keys.get('error')))

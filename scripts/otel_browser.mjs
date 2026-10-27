@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// The phone's side of scripts/otel_test.py: a headless Chrome at 390 px that opens the test
+// The phone's side of scripts/otel_test.py: a headless Chrome at 390 px (or --width) that opens the test
 // Harold's web app, does one thing a person does and waits for the chief's answer row. It
 // drives Chrome over the DevTools protocol, with Node's own WebSocket, and adds the login
 // header to every request the way Tailscale Serve does for the phone. Plain Node, no packages.
 //
-//   otel_browser.mjs --scenario reply|keys|todo --url URL --login LOGIN --chrome PATH --out FILE
-//                    [--text WORDS] [--screens FOLDER] [--limit SECONDS]
+//   otel_browser.mjs --scenario reply|keys|todo|keyboard --url URL --login LOGIN --chrome PATH --out FILE
+//                    [--text WORDS] [--screens FOLDER] [--limit SECONDS] [--width PIXELS]
 //
 // It writes FILE as JSON: when the page loaded, when Send was tapped, and when the answer
 // row was drawn, all in the page's clock (Date.now(), milliseconds), and the console errors.
@@ -21,6 +21,7 @@ const args = Object.fromEntries(
     return pairs;
   }, []),
 );
+const width = Number(args.width ?? 390);
 const limitMs = Number(args.limit ?? 240) * 1000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,8 +35,9 @@ const chrome = spawn(
     `--user-data-dir=${profile}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--mute-audio",
     "--disable-extensions",
-    "--window-size=390,844",
+    `--window-size=${width},844`,
     "about:blank",
   ],
   { stdio: "ignore" },
@@ -124,6 +126,15 @@ const press = async (key, modifiers = 0) => {
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
 };
 const SHIFT = 8;
+// The iPhone keyboard shortens the visual viewport and nothing else, and headless Chrome has no
+// keyboard. So the keyboard scenario swaps window.visualViewport for a stand-in that holds the
+// same numbers and sends the same "resize" event; window.__vv.set(height) plays the keyboard.
+const VISUAL_VIEWPORT_STAND_IN = (WIDTH) => `(() => {
+  const vv = new EventTarget();
+  Object.assign(vv, { width: ${WIDTH}, height: 508, offsetTop: 0, offsetLeft: 0, pageTop: 0, pageLeft: 0, scale: 1 });
+  Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
+  window.__vv = { set(height) { vv.height = height; vv.dispatchEvent(new Event("resize")); } };
+})()`;
 const expect = (what, ok, seen) => {
   if (!ok) throw new Error(`${what}, saw ${JSON.stringify(seen)}`);
 };
@@ -135,11 +146,14 @@ try {
   await send("Page.enable");
   await send("Network.setExtraHTTPHeaders", { headers: { "Tailscale-User-Login": args.login } });
   await send("Emulation.setDeviceMetricsOverride", {
-    width: 390,
+    width,
     height: 844,
     deviceScaleFactor: 2,
     mobile: true,
   });
+  if (args.scenario === "keyboard") {
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: VISUAL_VIEWPORT_STAND_IN(width) });
+  }
   await send("Page.navigate", { url: args.url });
   await until("the page to load", `document.readyState === "complete" && !!document.querySelector("#reply")`, 60000);
   await sleep(1500);
@@ -192,6 +206,58 @@ try {
     await sleep(1500);
     await screenshot("2-picked");
     result.tappedAt = await evaluate(`(() => { document.querySelector("#todos article.card form.todo-form button.send").click(); return Date.now(); })()`);
+  } else if (args.scenario === "keyboard") {
+    // The stand-in starts 508 px tall in an 844 px window, so the page loads with the keyboard "open".
+    const frame = () => evaluate(`new Promise((resolve) => requestAnimationFrame(() => resolve(true)))`);
+    const measure = () =>
+      evaluate(`(() => {
+        const thread = document.getElementById("thread");
+        return {
+          replyBottom: document.getElementById("reply").getBoundingClientRect().bottom,
+          headerTop: document.querySelector(".top").getBoundingClientRect().top,
+          threadEnd: thread.scrollHeight - thread.scrollTop - thread.clientHeight,
+          threadScrolls: thread.scrollHeight > thread.clientHeight,
+          keyboardOpen: document.body.classList.contains("keyboard-open"),
+          viewportHeight: document.documentElement.style.getPropertyValue("--viewport-height"),
+        };
+      })()`);
+    // Enough rows to scroll, whatever the earlier scenarios left in the thread.
+    await evaluate(`(() => {
+      const thread = document.getElementById("thread");
+      if (thread.scrollHeight > thread.clientHeight * 2) return;
+      const filler = document.createElement("div");
+      filler.style.height = "1500px";
+      document.getElementById("messages").prepend(filler);
+    })()`);
+    await evaluate(`document.querySelector("#reply textarea").focus()`);
+    await evaluate(`window.__vv.set(844)`);
+    await frame();
+    const closed = await measure();
+    expect("closed: the reply bar ends at the window bottom", Math.abs(closed.replyBottom - 844) <= 1, closed);
+    expect("closed: the page is not marked keyboard-open", !closed.keyboardOpen, closed);
+    await screenshot("2-keyboard-closed");
+    // The reader is at the end of the thread when the keyboard opens.
+    await evaluate(`(() => { const thread = document.getElementById("thread"); thread.scrollTop = thread.scrollHeight; })()`);
+    await sleep(300);
+    result.atEndBefore = await measure();
+    expect("the thread scrolls and sits at its end", result.atEndBefore.threadScrolls && result.atEndBefore.threadEnd <= 1, result.atEndBefore);
+    await evaluate(`window.__vv.set(508)`);
+    await frame();
+    result.open = await measure();
+    expect("open: the reply bar ends at the keyboard top, 508", Math.abs(result.open.replyBottom - 508) <= 1, result.open);
+    expect("open: the header stays at the top", Math.abs(result.open.headerTop) <= 1, result.open);
+    expect("open: the thread is still at its end", result.open.threadEnd <= 1, result.open);
+    expect("open: the page is marked keyboard-open", result.open.keyboardOpen, result.open);
+    await screenshot("3-keyboard-open");
+    await evaluate(`window.__vv.set(844)`);
+    await frame();
+    result.closed = await measure();
+    expect("closed again: the reply bar ends at 844", Math.abs(result.closed.replyBottom - 844) <= 1, result.closed);
+    expect("closed again: no keyboard-open", !result.closed.keyboardOpen, result.closed);
+    await screenshot("4-keyboard-closed-again");
+    result.ok = true;
+    fs.writeFileSync(args.out, JSON.stringify(result, null, 2));
+    await finish(0);
   } else {
     throw new Error("unknown scenario " + args.scenario);
   }

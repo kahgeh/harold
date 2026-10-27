@@ -445,6 +445,23 @@ if (wrong.length > 0) {{
 }
 
 #[test]
+fn the_reply_bar_follows_the_visual_viewport_when_the_keyboard_opens() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in ["visualViewport", "--viewport-height", "keyboard-open"] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+    let css = include_str!("../../static/web_app/app.css");
+    assert!(
+        css.contains("height: var(--viewport-height, 100%)"),
+        "app.css lacks the body height from --viewport-height"
+    );
+    assert!(
+        css.contains("body.keyboard-open .bottom"),
+        "app.css lacks the bottom padding with the keyboard open"
+    );
+}
+
+#[test]
 fn pages_js_keeps_a_same_origin_link_in_the_app() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [
