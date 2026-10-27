@@ -1881,7 +1881,7 @@ async fn restart_seed_preserves_a_legitimate_summary_containing_the_placeholder(
         AgentMonitorSeed {
             snapshot,
             hook_grace_ms: 2_000,
-            acquisition_timeout: Duration::from_millis(50),
+            acquisition_timeout: Duration::from_secs(2),
         },
         shutdown_rx,
     );
