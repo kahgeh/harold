@@ -192,6 +192,24 @@ fn an_agent_monitor_degraded_record_leaves_with_component_and_reason() {
 }
 
 #[test]
+fn an_agent_monitor_read_retried_record_leaves_with_elapsed_ms() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::info!(component = "screen", pane_id = %pane, elapsed_ms = 634_u64, "agent monitor read retried");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["component", "pane_id", "elapsed_ms"]);
+}
+
+#[test]
 fn the_watch_run_time_fields_leave_a_log_record() {
     test_support::install();
     let watch = format!("run-ms-{}", uuid::Uuid::new_v4());

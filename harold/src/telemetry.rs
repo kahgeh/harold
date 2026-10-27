@@ -79,6 +79,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "buckwal.generation",
     "s3.status",
     "pane_id",
+    "elapsed_ms",
     "provider_id",
     "program",
     "pane",

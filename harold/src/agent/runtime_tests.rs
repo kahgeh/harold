@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,9 +17,10 @@ use super::domain::{
 use super::inventory::{AgentInventoryPort, InventoryError};
 use super::reducer::GraceWindows;
 use super::runtime::{
-    AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, SCREEN_RETRY_TIMEOUT,
-    coalesced_tick_channel_for_test, read_with_retry_for_test, spawn_agent_monitor_for_test,
-    spawn_agent_monitor_seeded_for_test, spawn_agent_monitor_with_graces_for_test,
+    AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, ReadFailure, SCREEN_DEGRADE_AFTER,
+    SCREEN_RETRY_TIMEOUT, coalesced_tick_channel_for_test, read_with_retry_for_test,
+    spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
+    spawn_agent_monitor_with_graces_for_test,
 };
 use super::screen::{
     CommandOutput, CommandRunner, PromptBlock, PromptScan, ScreenError, StopSignal,
@@ -5444,4 +5445,299 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the
     assert!(tick.await.unwrap().is_err());
     drop(shutdown);
     task.await.unwrap();
+}
+
+/// A screen whose reads follow a per-pane script. A slow read waits in real time, so the
+/// monitor's short deadline gives up on it; a stop request ends it early.
+#[derive(Default)]
+struct TimingScreen {
+    /// Observe calls that wait `SLOW_READ`, per pane, before each answers.
+    slow_first_reads: Mutex<std::collections::HashMap<String, usize>>,
+    /// Panes whose reads wait until they are stopped or `unblock_reads` is set.
+    stuck: AtomicBool,
+    unblock_reads: AtomicBool,
+    capture_fails: AtomicBool,
+    scan_timeouts: AtomicBool,
+    scan_fails: AtomicBool,
+}
+
+const SLOW_READ: Duration = Duration::from_millis(80);
+const SHORT_DEADLINE: Duration = Duration::from_millis(20);
+
+impl VisibleScreenPort for TimingScreen {
+    fn observe(
+        &self,
+        pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<ScreenObservation, ScreenError> {
+        if self.stuck.load(Ordering::SeqCst) {
+            while !self.unblock_reads.load(Ordering::SeqCst) {
+                if super::screen::stop_requested() {
+                    return Err(ScreenError::CaptureFailed);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if self.capture_fails.load(Ordering::SeqCst) {
+            return Err(ScreenError::CaptureFailed);
+        }
+        let slow = {
+            let mut slow = self.slow_first_reads.lock().unwrap();
+            slow.get_mut(&pane.incarnation.pane_id)
+                .filter(|calls| **calls > 0)
+                .map(|calls| *calls -= 1)
+                .is_some()
+        };
+        if slow {
+            std::thread::sleep(SLOW_READ);
+        }
+        Ok(screen(pane, Some(ObservedAgentState::Busy), None, 200))
+    }
+
+    fn scan_prompts(
+        &self,
+        _pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<PromptScan, ScreenError> {
+        if self.scan_fails.load(Ordering::SeqCst) {
+            return Err(ScreenError::CaptureFailed);
+        }
+        if self.scan_timeouts.load(Ordering::SeqCst) {
+            std::thread::sleep(SLOW_READ);
+        }
+        Ok(PromptScan::default())
+    }
+}
+
+struct ScreenHealthFixture {
+    handle: AgentMonitorHandle,
+    store: Arc<HaroldStore>,
+    screen: Arc<TimingScreen>,
+    _directory: TestDirectory,
+    _shutdown: watch::Sender<()>,
+}
+
+impl ScreenHealthFixture {
+    /// Tracks the panes `%8`, `%9`, ... with a 20 ms first deadline.
+    async fn new(screen: TimingScreen, pane_count: usize) -> Self {
+        let directory = TestDirectory::new();
+        let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+        let panes: Vec<_> = (0..pane_count)
+            .map(|index| {
+                pane(
+                    &format!("%{}", 8 + index),
+                    80 + index as u32,
+                    800,
+                    1_000,
+                    100,
+                )
+            })
+            .collect();
+        let screen = Arc::new(screen);
+        let (shutdown, shutdown_rx) = watch::channel(());
+        let (handle, _task) = spawn_agent_monitor_seeded_for_test(
+            Arc::clone(&store),
+            Arc::new(FakeInventory::scans(vec![Ok(panes)])),
+            Arc::clone(&screen),
+            vec![provider()],
+            AgentMonitorSeed {
+                snapshot: empty_snapshot(),
+                hook_grace_ms: 2_000,
+                acquisition_timeout: SHORT_DEADLINE,
+            },
+            shutdown_rx,
+        );
+        handle.inventory_tick().await.unwrap();
+        Self {
+            handle,
+            store,
+            screen,
+            _directory: directory,
+            _shutdown: shutdown,
+        }
+    }
+
+    async fn health(&self) -> Vec<super::domain::AgentMonitorHealthChanged> {
+        let events = self
+            .store
+            .stream()
+            .load_after_version(EventVersion::start(), 200)
+            .await
+            .unwrap();
+        health_events(&events)
+    }
+}
+
+/// Real time for the slow reads' threads to let go of the gate.
+fn let_slow_reads_finish() {
+    std::thread::sleep(Duration::from_millis(250));
+}
+
+#[tokio::test]
+async fn two_panes_timing_out_in_one_pass_leave_the_screen_healthy() {
+    let screen = TimingScreen::default();
+    for pane_id in ["%8", "%9"] {
+        screen
+            .slow_first_reads
+            .lock()
+            .unwrap()
+            .insert(pane_id.into(), 1);
+    }
+    let fixture = ScreenHealthFixture::new(screen, 2).await;
+    let (captured, _guard) = capture_logs();
+
+    // One pane gets the pass's retry and the other times out.
+    fixture.handle.screen_tick().await.unwrap();
+    let_slow_reads_finish();
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(fixture.health().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_pane_unread_for_four_seconds_degrades_the_screen_until_a_read_works() {
+    let screen = TimingScreen::default();
+    screen.stuck.store(true, Ordering::SeqCst);
+    let fixture = ScreenHealthFixture::new(screen, 1).await;
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.screen_tick().await.unwrap();
+    let logs = logged(&captured);
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(fixture.health().await.is_empty());
+
+    tokio::time::pause();
+    tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    let line = logs
+        .lines()
+        .find(|line| line.contains("agent monitor degraded"))
+        .unwrap();
+    assert!(line.contains("component=\"screen\""), "{line}");
+    assert!(line.contains("reason=timeout"), "{line}");
+    assert!(line.contains("pane_id=\"%8\""), "{line}");
+    let elapsed_ms: u128 = line
+        .split("elapsed_ms=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("no elapsed_ms in {line}"));
+    assert!(elapsed_ms >= SCREEN_DEGRADE_AFTER.as_millis(), "{line}");
+    let health = fixture.health().await;
+    assert_eq!(health.len(), 1);
+    assert!(!health[0].healthy);
+    assert_eq!(health[0].reason_code, "timeout");
+
+    fixture.screen.stuck.store(false, Ordering::SeqCst);
+    let_slow_reads_finish();
+    fixture.handle.screen_tick().await.unwrap();
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor recovered").count(), 1, "{logs}");
+    assert_eq!(fixture.health().await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_read_that_fails_for_another_reason_degrades_the_screen_in_the_same_pass() {
+    let screen = TimingScreen::default();
+    screen.capture_fails.store(true, Ordering::SeqCst);
+    let fixture = ScreenHealthFixture::new(screen, 1).await;
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    let line = logs
+        .lines()
+        .find(|line| line.contains("agent monitor degraded"))
+        .unwrap_or_else(|| panic!("no degraded line in {logs}"));
+    assert!(line.contains("reason=capture_failed"), "{line}");
+    assert!(line.contains("pane_id=\"%8\""), "{line}");
+    let health = fixture.health().await;
+    assert_eq!(health.len(), 1);
+    assert_eq!(health[0].reason_code, "capture_failed");
+}
+
+#[tokio::test]
+async fn a_prompt_scan_that_fails_for_another_reason_degrades_the_screen() {
+    // The pane's first scan runs when the inventory finds it.
+    let screen = TimingScreen::default();
+    screen.scan_fails.store(true, Ordering::SeqCst);
+    let (captured, _guard) = capture_logs();
+    let fixture = ScreenHealthFixture::new(screen, 1).await;
+
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    let line = logs
+        .lines()
+        .find(|line| line.contains("agent monitor degraded"))
+        .unwrap_or_else(|| panic!("no degraded line in {logs}"));
+    assert!(line.contains("reason=capture_failed"), "{line}");
+    assert!(line.contains("pane_id=\"%8\""), "{line}");
+}
+
+#[tokio::test]
+async fn a_prompt_scan_that_times_out_degrades_the_screen_after_four_seconds() {
+    let screen = TimingScreen::default();
+    screen.scan_timeouts.store(true, Ordering::SeqCst);
+    let (captured, _guard) = capture_logs();
+    let fixture = ScreenHealthFixture::new(screen, 1).await;
+    let_slow_reads_finish();
+
+    fixture.handle.screen_tick().await.unwrap();
+    let logs = logged(&captured);
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(fixture.health().await.is_empty());
+
+    tokio::time::pause();
+    tokio::time::advance(SCREEN_DEGRADE_AFTER).await;
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    let line = logs
+        .lines()
+        .find(|line| line.contains("agent monitor degraded"))
+        .unwrap_or_else(|| panic!("no degraded line in {logs}"));
+    assert!(line.contains("reason=timeout"), "{line}");
+    assert!(line.contains("pane_id=\"%8\""), "{line}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timeout_degrades_after_four_seconds_and_nothing_else_waits() {
+    let failure = ReadFailure::after(None, "timeout").unwrap();
+    let start = tokio::time::Instant::now();
+    assert!(!failure.degrades(start));
+    tokio::time::advance(SCREEN_DEGRADE_AFTER - Duration::from_millis(1)).await;
+    assert!(!failure.degrades(tokio::time::Instant::now()));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(failure.degrades(tokio::time::Instant::now()));
+
+    // Another timeout keeps the time of the first failure.
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let again = ReadFailure::after(Some(failure), "timeout").unwrap();
+    assert_eq!(again.since, failure.since);
+
+    // Any other reason degrades at once.
+    let other = ReadFailure::after(None, "capture_failed").unwrap();
+    assert!(other.degrades(tokio::time::Instant::now()));
+    let later = ReadFailure::after(Some(failure), "capture_failed").unwrap();
+    assert!(later.degrades(tokio::time::Instant::now()));
+
+    // A busy gate changes nothing: it starts no count and keeps the one running.
+    assert!(ReadFailure::after(None, "busy").is_none());
+    assert_eq!(
+        ReadFailure::after(Some(failure), "busy").unwrap().since,
+        failure.since
+    );
 }

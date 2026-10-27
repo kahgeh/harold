@@ -33,6 +33,9 @@ use super::summary::completion_summary_update;
 const COMMAND_CAPACITY: usize = 64;
 /// A screen read's retry gets the capture command's own limit (`screen.rs`'s `SystemCommandRunner`).
 pub(super) const SCREEN_RETRY_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// How long one pane's screen can stay unread, by timeouts, before the screen is degraded. Two
+/// passes: a busy Mac makes a read time out now and then, and the next pass reads again.
+pub(super) const SCREEN_DEGRADE_AFTER: Duration = Duration::from_secs(4);
 /// The part of an inventory tick kept for a timed-out scan's worker to stop and let go of the
 /// gate, so the calls queued behind the tick find it free. At most a tenth of the timeout.
 const INVENTORY_STOP_GRACE: Duration = Duration::from_millis(50);
@@ -187,7 +190,10 @@ impl AgentMonitorHandle {
 
 struct TrackedPane {
     prompt_checkpoint: PromptAcquisitionCheckpoint,
-    recovery_failure: Option<&'static str>,
+    /// The failed prompt scan, until a scan works.
+    recovery_failure: Option<ReadFailure>,
+    /// The failed screen read, until a read works.
+    screen_failure: Option<ReadFailure>,
     pane: AgentPaneObservation,
     consecutive_absences: u8,
     last_hook: Option<(ObservedAgentState, i64)>,
@@ -209,6 +215,7 @@ impl TrackedPane {
             pane,
             prompt_checkpoint: PromptAcquisitionCheckpoint::default(),
             recovery_failure: None,
+            screen_failure: None,
             consecutive_absences: 0,
             last_hook: None,
             lifecycle_adapter_id: None,
@@ -276,6 +283,40 @@ pub(crate) struct AgentMonitorSeed {
     pub(crate) snapshot: AgentSnapshot,
     pub(crate) hook_grace_ms: u64,
     pub(crate) acquisition_timeout: Duration,
+}
+
+/// A pane's reads, failing since `since`. `reason_code` is the last failure's.
+#[derive(Clone, Copy)]
+pub(super) struct ReadFailure {
+    pub(super) since: tokio::time::Instant,
+    pub(super) reason_code: &'static str,
+}
+
+impl ReadFailure {
+    /// The failure after one more failed read: the first failure's time stays.
+    pub(super) fn after(previous: Option<Self>, reason_code: &'static str) -> Option<Self> {
+        // A previous worker still owns the gate: no read ran, so nothing changes.
+        if reason_code == "busy" {
+            return previous;
+        }
+        let now = tokio::time::Instant::now();
+        Some(Self {
+            since: previous.map_or(now, |failure| failure.since),
+            reason_code,
+        })
+    }
+
+    /// Any reason but `timeout` degrades at once. A timeout degrades after `SCREEN_DEGRADE_AFTER`.
+    pub(super) fn degrades(&self, now: tokio::time::Instant) -> bool {
+        self.reason_code != "timeout" || now.duration_since(self.since) >= SCREEN_DEGRADE_AFTER
+    }
+}
+
+/// The pane that tripped the screen rule, and how long it has been unread.
+struct DegradedPane {
+    reason_code: &'static str,
+    pane_id: String,
+    elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -600,6 +641,7 @@ fn panes_from_snapshot(
                 pane,
                 prompt_checkpoint: PromptAcquisitionCheckpoint::default(),
                 recovery_failure: None,
+                screen_failure: None,
                 consecutive_absences: 0,
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
                 lifecycle_adapter_id: projection.lifecycle_adapter_id.clone(),
@@ -1134,13 +1176,6 @@ impl AgentMonitorRuntime {
             return Ok(());
         };
         self.recover_prompts(&pane, &provider, None).await;
-        if let Some(reason) = self
-            .panes
-            .get(pane_id)
-            .and_then(|tracked| tracked.recovery_failure)
-        {
-            self.set_health("screen", false, reason).await?;
-        }
         Ok(())
     }
 
@@ -1177,10 +1212,12 @@ impl AgentMonitorRuntime {
             }
             Err(failure) => {
                 // A closed pane is no degradation: the inventory departs it in time.
-                tracked.recovery_failure =
-                    (failure.reason_code != "pane_departed").then_some(failure.reason_code);
                 if failure.reason_code == "pane_departed" {
+                    tracked.recovery_failure = None;
                     log_pane_gone(tracked);
+                } else {
+                    tracked.recovery_failure =
+                        ReadFailure::after(tracked.recovery_failure, failure.reason_code);
                 }
                 tracked.prompt_checkpoint.capture_failed(state);
                 return None;
@@ -1203,7 +1240,6 @@ impl AgentMonitorRuntime {
             .map(|tracked| tracked.pane.clone())
             .collect();
         let mut attempted = false;
-        let mut failure_reason = None;
         // One retry per pass, whether it works or not: the rest of the pass reads each pane
         // once, so a slow tmux does not hold queued hook calls for a retry per pane.
         let mut retried = false;
@@ -1260,12 +1296,26 @@ impl AgentMonitorRuntime {
                     continue;
                 }
                 Err(failure) => {
-                    failure_reason.get_or_insert(failure.reason_code);
+                    if let Some(tracked) = self
+                        .panes
+                        .get_mut(&pane.incarnation.pane_id)
+                        .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
+                    {
+                        tracked.screen_failure =
+                            ReadFailure::after(tracked.screen_failure, failure.reason_code);
+                    }
                     continue;
                 }
             };
             if observation.incarnation != pane.incarnation {
                 continue;
+            }
+            if let Some(tracked) = self
+                .panes
+                .get_mut(&pane.incarnation.pane_id)
+                .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
+            {
+                tracked.screen_failure = None;
             }
             // Recovery triggers consume raw visible state, independently of hook-grace filtering.
             let recovery = self
@@ -1356,17 +1406,38 @@ impl AgentMonitorRuntime {
                 self.schedule_summary(&pane_id, summary.as_deref(), None);
             }
         }
-        let failure_reason = failure_reason.or_else(|| {
-            self.panes
-                .values()
-                .find_map(|tracked| tracked.recovery_failure)
-        });
-        if let Some(reason_code) = failure_reason {
-            self.set_health("screen", false, reason_code).await?;
+        if let Some(degraded) = self.degraded_screen_pane() {
+            self.set_health_of_pane("screen", false, degraded.reason_code, Some(&degraded))
+                .await?;
         } else if attempted {
             self.set_health("screen", true, "ok").await?;
         }
         Ok(())
+    }
+
+    /// The pane that makes the screen degraded: the one unread longest among those whose failure
+    /// degrades.
+    fn degraded_screen_pane(&self) -> Option<DegradedPane> {
+        let now = tokio::time::Instant::now();
+        self.panes
+            .values()
+            .flat_map(|tracked| {
+                [tracked.screen_failure, tracked.recovery_failure]
+                    .into_iter()
+                    .flatten()
+                    .filter(|failure| failure.degrades(now))
+                    .map(|failure| DegradedPane {
+                        reason_code: failure.reason_code,
+                        pane_id: tracked.pane.incarnation.pane_id.clone(),
+                        elapsed_ms: u64::try_from(now.duration_since(failure.since).as_millis())
+                            .unwrap_or(u64::MAX),
+                    })
+            })
+            .max_by(|a, b| {
+                a.elapsed_ms
+                    .cmp(&b.elapsed_ms)
+                    .then_with(|| b.pane_id.cmp(&a.pane_id))
+            })
     }
 
     fn reject_configured_placeholder_update(
@@ -1432,6 +1503,18 @@ impl AgentMonitorRuntime {
         healthy: bool,
         reason_code: &'static str,
     ) -> Result<(), MonitorCommandError> {
+        self.set_health_of_pane(component, healthy, reason_code, None)
+            .await
+    }
+
+    /// `set_health`, the degraded line naming the pane that tripped the rule.
+    async fn set_health_of_pane(
+        &mut self,
+        component: &'static str,
+        healthy: bool,
+        reason_code: &'static str,
+        pane: Option<&DegradedPane>,
+    ) -> Result<(), MonitorCommandError> {
         // A previous timed-out worker still owns the gate: there is no new observation.
         if reason_code == "busy" {
             return Ok(());
@@ -1440,7 +1523,7 @@ impl AgentMonitorRuntime {
             healthy,
             reason_code: reason_code.into(),
         };
-        self.log_health_transition(component, &next);
+        self.log_health_transition(component, &next, pane);
         if self.health.get(component) == Some(&next)
             || (healthy && !self.health.contains_key(component))
         {
@@ -1463,7 +1546,12 @@ impl AgentMonitorRuntime {
         Ok(())
     }
 
-    fn log_health_transition(&mut self, component: &'static str, next: &HealthState) {
+    fn log_health_transition(
+        &mut self,
+        component: &'static str,
+        next: &HealthState,
+        pane: Option<&DegradedPane>,
+    ) {
         if self.logged_health.get(component) == Some(next) {
             return;
         }
@@ -1472,7 +1560,18 @@ impl AgentMonitorRuntime {
             .get(component)
             .or_else(|| self.health.get(component));
         if !next.healthy {
-            tracing::warn!(component, reason = %next.reason_code, "agent monitor degraded");
+            match pane {
+                Some(pane) => tracing::warn!(
+                    component,
+                    reason = %next.reason_code,
+                    pane_id = pane.pane_id.as_str(),
+                    elapsed_ms = pane.elapsed_ms,
+                    "agent monitor degraded"
+                ),
+                None => {
+                    tracing::warn!(component, reason = %next.reason_code, "agent monitor degraded");
+                }
+            }
         } else if previous.is_some_and(|previous| !previous.healthy) {
             tracing::info!(component, reason = %next.reason_code, "agent monitor recovered");
         }

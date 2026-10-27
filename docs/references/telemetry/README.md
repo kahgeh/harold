@@ -357,7 +357,8 @@ These agent monitor lines carry the fields below:
 | Line | Fields |
 |---|---|
 | `agent monitor pane found` | `pane_id`, `provider_id` (the named provider), `program` (the file name of the matched program) |
-| `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason` |
+| `agent monitor read retried` | `component`, `pane_id` (for a screen read), `elapsed_ms` (from the first try's start to the retry's success) |
+| `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
 
 **A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
 
