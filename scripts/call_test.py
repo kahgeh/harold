@@ -63,6 +63,10 @@ KOKORO_MODEL = 'mlx-community/Kokoro-82M-bf16'
 KOKORO_REVISION = 'a71e4d38b236d968966a2002c4c895dbd12b1c3c'
 # How often the phone says a page is on screen (Harold counts a page for 75 s).
 SEEN_EVERY = 20
+STAND_IN = 'claude --model haiku "Hello"'
+# How long the test sends no other key after Enter on the folder question, and after a move key.
+LIMIT_FOLDER_QUESTION = 5
+FOLDER_KEY_GAP = 1
 
 # The time limit of each step, in seconds. The ones after the question is posted count from
 # when the question ended.
@@ -507,6 +511,12 @@ class Run:
         self.log_file = None
         self.pane = None
         self.pane_snapshot = ''
+        self.stand_in_text = ''
+        self.stand_in_started = None
+        self.stand_in_screens = []
+        self.stand_in_keys = []
+        self.folder_key_at = None
+        self.folder_enter = False
         self.phone = None
         self.env = {
             key: value for key, value in os.environ.items()
@@ -580,27 +590,123 @@ class Run:
         # HAROLD_CONFIG_DIR's, so a turn here would reach the real Harold as the pane %0.
         (self.chief_dir / '.claude' / 'settings.json').write_text(
             '{{"disableAllHooks": true, "permissions": {{"allow": ["Bash({}:*)"]}}}}\n'.format(speak))
-        # One first turn, so the input box has no suggestion in it, which Harold reads as text.
-        tmux(self.env, 'respawn-pane', '-k', '-t', self.pane, 'claude --model haiku "Hello"')
+        self.run_stand_in()
+
+    def run_stand_in(self):
+        """Runs Claude Code in the stand-in's pane, with one first turn, so the input box has no
+        suggestion in it, which Harold reads as text. CALL_TEST_STAND_IN runs another command
+        there (for the forced-stop test). The pane stays when its program ends, so the test can
+        read its last screen."""
+        tmux(self.env, 'set-option', '-w', '-t', self.pane, 'remain-on-exit', 'on')
+        self.stand_in_started = time.monotonic()
+        tmux(self.env, 'respawn-pane', '-k', '-t', self.pane, os.environ.get('CALL_TEST_STAND_IN') or STAND_IN)
 
     def pane_text(self):
         return tmux(self.env, 'capture-pane', '-p', '-t', self.pane, check=False).stdout
 
+    def pane_state(self):
+        """Answers (pane_dead, pane_dead_status) as tmux words, or None when tmux does not answer."""
+        shown = tmux(self.env, 'display-message', '-p', '-t', self.pane,
+                     '#{pane_dead} #{pane_dead_status}', check=False)
+        if shown.returncode != 0:
+            return None
+        words = shown.stdout.split()
+        return (words[0], words[1] if len(words) > 1 else '') if words else None
+
+    def stand_in_ms(self):
+        return _ms_since(self.stand_in_started) if self.stand_in_started is not None else 0
+
+    def see_screen(self):
+        """Keeps the pane's history and screen when it differs from the one kept last."""
+        shown = tmux(self.env, 'capture-pane', '-p', '-S', '-200', '-t', self.pane, check=False).stdout.rstrip()
+        if not self.stand_in_screens or self.stand_in_screens[-1][1] != shown:
+            self.stand_in_screens.append((self.stand_in_ms(), shown))
+
+    def send_key(self, key):
+        self.stand_in_keys.append((self.stand_in_ms(), key))
+        tmux(self.env, 'send-keys', '-t', self.pane, key, check=False)
+
+    def stand_in_report(self):
+        """What the test knows of the stand-in: whether its program ended, the time since its
+        start, the last 3 different screens and every key sent, each with its time."""
+        try:
+            self.see_screen()
+            state = self.pane_state()
+        except subprocess.SubprocessError:
+            state = None
+        if state is None:
+            ended = 'pane_dead and pane_dead_status: tmux did not answer'
+        else:
+            ended = 'pane_dead={} pane_dead_status={}'.format(state[0], state[1])
+        lines = ["the stand-in chief's report, {} ms after its start".format(self.stand_in_ms()), ended]
+        for at, shown in self.stand_in_screens[-3:]:
+            lines.append('--- screen at {} ms ---'.format(at))
+            lines.append(shown)
+        lines.append('--- keys sent ---')
+        lines.extend('{} ms  {}'.format(at, key) for at, key in self.stand_in_keys)
+        if not self.stand_in_keys:
+            lines.append('none')
+        return '\n'.join(lines)
+
+    def stand_in_stop(self):
+        """The report, also written to stand-in.log in the scratch folder."""
+        text = self.stand_in_report()
+        try:
+            (self.scratch / 'stand-in.log').write_text(text + '\n')
+        except OSError:
+            pass
+        return text
+
     def wait_for_chief_idle(self):
-        """Waits for Claude Code's empty input box, trusting its scratch folder when it asks."""
+        """Waits for Claude Code's empty input box, trusting its scratch folder when it asks. It
+        fails at once when the stand-in's program has ended."""
         def idle():
             text = self.pane_text()
-            # The first choice of the folder question is "No, exit": pick the second.
+            self.see_screen()
+            state = self.pane_state()
+            if state is None:
+                raise StepFailed('tmux does not answer: the stand-in chief is gone after {} ms'.format(self.stand_in_ms()))
+            if state[0] == '1':
+                raise StepFailed('the stand-in chief exited with {} after {} ms'.format(
+                    state[1] or 'no status', self.stand_in_ms()))
             if 'Yes, I trust this folder' in text:
-                tmux(self.env, 'send-keys', '-t', self.pane, 'Down', check=False)
-                time.sleep(0.3)
-                tmux(self.env, 'send-keys', '-t', self.pane, 'Enter', check=False)
+                self.answer_folder_question(text)
                 return False
             return '⏺' in text and '❯' in text and 'esc to interrupt' not in text
 
-        wait_until(idle, LIMIT_READY, 'the stand-in chief shows its input box', every=0.5)
+        try:
+            wait_until(idle, LIMIT_READY, 'the stand-in chief shows its input box', every=0.5)
+        except StepFailed:
+            self.stand_in_stop()
+            raise
         # Harold reads the panes every 1.2 s.
         time.sleep(3)
+
+    def answer_folder_question(self, text):
+        """Moves the highlight to the "Yes" choice, found by its text, and sends Enter when the
+        screen shows the highlight there. Claude Code can drop a key it gets while it starts, so
+        Enter waits for the screen to show the move. It sends one key at a time, and no key
+        for FOLDER_KEY_GAP seconds after a key."""
+        choices = []
+        chosen = 0
+        for line in text.splitlines():
+            found = re.match(r'\s*(❯|>)?\s*(?:\d+\.\s*)?((?:Yes|No)\b.*?)\s*$', line)
+            if found:
+                if found.group(1):
+                    chosen = len(choices)
+                choices.append(found.group(2))
+        wanted = [number for number, name in enumerate(choices) if name.startswith('Yes')]
+        if not wanted:
+            raise StepFailed('the folder question shows no "Yes" choice:\n' + text.rstrip())
+        gap = LIMIT_FOLDER_QUESTION if self.folder_enter else FOLDER_KEY_GAP
+        if self.folder_key_at is not None and time.monotonic() - self.folder_key_at < gap:
+            return
+        self.folder_key_at = time.monotonic()
+        if wanted[0] == chosen:
+            self.folder_enter = True
+            self.send_key('Enter')
+        else:
+            self.send_key('Down' if wanted[0] > chosen else 'Up')
 
     def seed_todo(self):
         """One todo in the scratch store, through the test Harold's question tool."""
@@ -630,6 +736,7 @@ class Run:
         try:
             if self.pane is not None:
                 self.pane_snapshot = self.pane_text().rstrip()
+                self.stand_in_text = self.stand_in_report()
         except subprocess.SubprocessError:
             pass
         if self.phone is not None:
@@ -994,6 +1101,7 @@ def main(argv=None):
     for name in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(name, lambda number, frame: sys.exit(128 + number))
     results = []
+    chief = StepResult('', True, 0)
     try:
         run.write_config()
         socket_path = run.scratch / 't' / 'tmux-{}'.format(os.getuid()) / 'default'
@@ -1022,6 +1130,8 @@ def main(argv=None):
     if code and run.pane_snapshot:
         print("the stand-in's pane at the failure:")
         print(run.pane_snapshot)
+    if code and not chief.ok:
+        print(run.stand_in_text)
     if code and run.phone is not None:
         print('what #call showed:')
         for at, shown in run.phone.events:

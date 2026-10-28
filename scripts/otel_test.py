@@ -83,7 +83,7 @@ class OtelRun(ct.Run):
         (self.chief_dir / '.claude' / 'settings.json').write_text(
             '{{"disableAllHooks": true, "promptSuggestionEnabled": false, "permissions": {{"allow": ["Bash({}:*)"]}}}}\n'.format(
                 '{} send-message-to-away-device'.format(self.binary)))
-        ct.tmux(self.env, 'respawn-pane', '-k', '-t', self.pane, 'claude --model haiku "Hello"')
+        self.run_stand_in()
 
     def chief_idle(self):
         text = self.pane_text()
@@ -317,7 +317,7 @@ def main(argv=None):
     except ct.StepFailed as error:
         failed = True
         print('FAIL ' + str(error))
-        print("the stand-in's pane:\n" + run.pane_text())
+        print(run.stand_in_stop())
     finally:
         run.tear_down()
         if collector is not None and collector.poll() is None:
