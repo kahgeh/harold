@@ -126,6 +126,12 @@ const press = async (key, modifiers = 0) => {
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
 };
 const SHIFT = 8;
+// A real tap: DevTools sends the press and the release as a finger or a mouse does.
+const tap = async (x, y) => {
+  const point = { x, y, button: "left", clickCount: 1 };
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", ...point });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point });
+};
 // The iPhone keyboard shortens the visual viewport and nothing else, and headless Chrome has no
 // keyboard. So the keyboard scenario swaps window.visualViewport for a stand-in that holds the
 // same numbers and sends the same "resize" event; window.__vv.set(height) plays the keyboard.
@@ -267,6 +273,23 @@ try {
           replyBottom: document.getElementById("reply").getBoundingClientRect().bottom,
         };
       })()`);
+    // A tap in the space around the text, inside the border, focuses the text box: the top band
+    // (the box's top + 5 px, at its middle) and the left band (its left + 6 px, at its middle).
+    const tapBand = async (name, where) => {
+      await evaluate(`${box}.blur()`);
+      const point = await evaluate(`(() => {
+        const wrap = ${box}.closest(".reply-box").getBoundingClientRect();
+        return ${where};
+      })()`);
+      const before = await evaluate(`document.activeElement === ${box}`);
+      await tap(point.x, point.y);
+      await sleep(100);
+      const after = await evaluate(`document.activeElement === ${box}`);
+      result[name] = { point, focusedBefore: before, focusedAfter: after };
+      expect(`a tap in the ${name} focuses the text box`, !before && after, result[name]);
+    };
+    await tapBand("topBand", `({ x: wrap.left + wrap.width / 2, y: wrap.top + 5 })`);
+    await tapBand("leftBand", `({ x: wrap.left + 6, y: wrap.top + wrap.height / 2 })`);
     const fill = async (text) => {
       await evaluate(`(() => { const b = ${box}; b.focus(); b.value = ${JSON.stringify(text)}; b.dispatchEvent(new Event("input", { bubbles: true })); })()`);
       await sleep(300);

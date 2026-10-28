@@ -733,10 +733,14 @@ fn the_reply_box_is_3_lines_tall_and_scrolls_inside() {
     assert!(!wrapper.contains("gradient") && !text.contains("gradient"));
     let page = include_str!("../../templates/web_app/thread.html");
     let start = page
-        .find(r#"<div class="reply-box">"#)
-        .expect("the textarea sits in .reply-box");
+        .find(r#"<label class="reply-box">"#)
+        .expect("the textarea sits in <label class=\"reply-box\">");
+    assert!(
+        !page.contains(r#"<div class="reply-box">"#),
+        "a tap on a div does not focus the text box"
+    );
     let wrapped = &page[start..];
-    assert!(wrapped[..wrapped.find("</div>").unwrap()].contains("<textarea"));
+    assert!(wrapped[..wrapped.find("</label>").unwrap()].contains("<textarea"));
     let tag = &wrapped[wrapped.find("<textarea").unwrap()..];
     let tag = &tag[..tag.find('>').unwrap()];
     assert!(tag.contains(r#"rows="3""#), "{tag}");

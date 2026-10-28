@@ -54,7 +54,7 @@
 </div>
 <p id="listening-note" class="listening-note" role="status" hidden><span class="listen-dot"></span><span id="listening-text">Listening</span></p>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies', {filterSignals: {include: /^(reply|photo)$/}})">
-<div class="reply-box"><textarea rows="3" data-bind:reply maxlength="1000" enterkeyhint="send" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off" data-on:keydown="if (evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing) { evt.preventDefault(); if (!$sending) el.form.requestSubmit() }" data-effect="$reply; if (el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight"></textarea></div>
+<label class="reply-box"><textarea rows="3" data-bind:reply maxlength="1000" enterkeyhint="send" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off" data-on:keydown="if (evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing) { evt.preventDefault(); if (!$sending) el.form.requestSubmit() }" data-effect="$reply; if (el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight"></textarea></label>
 <input type="hidden" id="photo-id" data-bind:photo>
 <input type="hidden" id="beat" data-bind:_beat>
 <input type="hidden" id="stalled" data-bind:stalled>

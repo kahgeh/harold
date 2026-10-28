@@ -274,6 +274,11 @@ def main(argv=None):
                     or abs(shown['box10']['replyBottom'] - 508) > 1:
                 failed = True
                 print('FAIL the reply box is not 3 lines tall and scrolling inside')
+            taps = [shown.get(key, {}).get('focusedAfter') for key in ('topBand', 'leftBand')]
+            print('tap in the top band, in the left band focuses the text box: {}'.format(taps))
+            if taps != [True, True]:
+                failed = True
+                print('FAIL a tap inside the reply box border does not focus the text box')
             edges = [(shown[key]['edgeTop'], shown[key]['edgeBottom']) for key in ('box0', 'box10', 'dictated')]
             print('edge space top/bottom with 0, 10 typed and 10 dictated lines: {}; lines from the end: {}, {}'.format(
                 edges, shown['box10']['linesFromEnd'], shown['dictated']['linesFromEnd']))
