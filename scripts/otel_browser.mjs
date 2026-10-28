@@ -174,6 +174,7 @@ try {
     // Shift+Enter adds a line and sends nothing; Enter alone sends both lines.
     const box = `document.querySelector("#reply textarea")`;
     await evaluate(`${box}.focus()`);
+    result.boxHeightEmpty = await evaluate(`${box}.offsetHeight`);
     await send("Input.insertText", { text: "line one" });
     await press("Enter", SHIFT);
     await send("Input.insertText", { text: "line two" });
@@ -182,7 +183,7 @@ try {
     expect("the box holds the two lines", held === "line one\nline two", held);
     expect("Shift+Enter makes no POST /replies", !posts.includes("/replies"), posts);
     result.boxHeightOfTwo = await evaluate(`${box}.offsetHeight`);
-    expect("the box grows for two lines", result.boxHeightOfTwo > 48, result.boxHeightOfTwo);
+    expect("the box holds its 3-line height for two lines", result.boxHeightOfTwo === result.boxHeightEmpty, [result.boxHeightEmpty, result.boxHeightOfTwo]);
     const clipped = await evaluate(`${box}.scrollHeight > ${box}.clientHeight`);
     expect("two lines do not scroll", !clipped, clipped);
     await screenshot("2-two-lines");
@@ -193,7 +194,7 @@ try {
     const sent = requests.filter((entry) => entry.endsWith(" /replies"));
     expect("the POST /replies is answered 2xx", sent.length === 1 && sent[0].startsWith("2"), sent);
     result.sent = sent;
-    await until("the box to be empty and one line high", `${box}.value === "" && ${box}.offsetHeight <= 48`);
+    await until("the box to be empty and one line high", `${box}.value === "" && ${box}.offsetHeight === ${result.boxHeightEmpty}`);
   } else if (args.scenario === "todo") {
     await evaluate(`document.querySelector("#to-todos").click()`);
     await until("the todo card", `!!document.querySelector("#todos article.card form.todo-form")`, 30000);
@@ -243,6 +244,32 @@ try {
     expect("the thread scrolls and sits at its end", result.atEndBefore.threadScrolls && result.atEndBefore.threadEnd <= 1, result.atEndBefore);
     await evaluate(`window.__vv.set(508)`);
     await frame();
+    // The box keeps one height with 0, 1 and 10 lines typed, scrolls inside, and the bar stays at the keyboard.
+    const box = `document.querySelector("#reply textarea")`;
+    const boxNow = () => evaluate(`(() => { const b = ${box}; return { height: b.offsetHeight, scrollHeight: b.scrollHeight, clientHeight: b.clientHeight, bottom: b.getBoundingClientRect().bottom, replyBottom: document.getElementById("reply").getBoundingClientRect().bottom }; })()`);
+    const fill = async (text) => {
+      await evaluate(`(() => { const b = ${box}; b.focus(); b.value = ${JSON.stringify(text)}; b.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await sleep(300);
+    };
+    result.box0 = await boxNow();
+    await fill("one line");
+    result.box1 = await boxNow();
+    await fill(Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n"));
+    result.box10 = await boxNow();
+    expect("the box is the same height with 1 line typed", result.box1.height === result.box0.height, [result.box0, result.box1]);
+    expect("the box is the same height with 10 lines typed", result.box10.height === result.box0.height, [result.box0, result.box10]);
+    expect("with 10 lines the box scrolls inside", result.box10.scrollHeight > result.box10.clientHeight, result.box10);
+    expect("with 10 lines the reply bar still ends at the keyboard top", Math.abs(result.box10.replyBottom - 508) <= 1, result.box10);
+    // The same box in both colour schemes, empty and with 10 lines.
+    for (const scheme of ["light", "dark"]) {
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
+      await fill("");
+      await screenshot(`3a-box-${scheme}-empty`);
+      await fill(Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n"));
+      await screenshot(`3b-box-${scheme}-ten-lines`);
+    }
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+    await fill("");
     result.open = await measure();
     expect("open: the reply bar ends at the keyboard top, 508", Math.abs(result.open.replyBottom - 508) <= 1, result.open);
     expect("open: the header stays at the top", Math.abs(result.open.headerTop) <= 1, result.open);

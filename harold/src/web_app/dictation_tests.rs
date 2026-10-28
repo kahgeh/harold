@@ -206,13 +206,13 @@ async fn the_check_has_the_login_host_and_origin_checks() {
     }
 }
 
-/// The reply box is a `textarea` that sends on Enter without Shift and grows with its text.
+/// The reply box is a `textarea` that sends on Enter without Shift and is 3 lines tall.
 pub(super) fn assert_reply_box_is_a_textarea(form: &str) {
     let start = form.find("<textarea").expect("the reply box is a textarea");
     let tag = &form[start..form[start..].find('>').unwrap() + start];
     assert!(tag.contains("data-bind:reply"), "{tag}");
     assert!(tag.contains(r#"enterkeyhint="send""#), "{tag}");
-    assert!(tag.contains(r#"rows="1""#), "{tag}");
+    assert!(tag.contains(r#"rows="3""#), "{tag}");
     assert!(
         tag.contains("evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing"),
         "{tag}"
@@ -221,8 +221,7 @@ pub(super) fn assert_reply_box_is_a_textarea(form: &str) {
         tag.contains("if (!$sending) el.form.requestSubmit()"),
         "Enter while a send runs must not send again: {tag}"
     );
-    assert!(tag.contains(r#"data-effect="$reply;"#), "{tag}");
-    assert!(tag.contains("el.offsetHeight - el.clientHeight"), "{tag}");
+    assert!(!tag.contains("style.height"), "{tag}");
     assert!(!form.contains(r#"<input type="text""#), "{form}");
 }
 

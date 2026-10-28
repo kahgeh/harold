@@ -179,7 +179,7 @@ While Harold cannot list the tmux panes, it does not know which pane is the chie
 
 ### Replies with a photo
 
-The reply bar reads: text box, photo button, **Send**, which is an up-arrow icon in a round button. Tap the photo button and the phone's own chooser opens (Photo Library, Take Photo, Choose File). The chosen photo shows above the bar with its size and **✕** to take it off. **Send** works with a photo and no text.
+The reply bar reads: text box (always 3 lines tall; longer text scrolls inside it), photo button, **Send**, which is an up-arrow icon in a round button. Tap the photo button and the phone's own chooser opens (Photo Library, Take Photo, Choose File). The chosen photo shows above the bar with its size and **✕** to take it off. **Send** works with a photo and no text.
 
 With the phone's keyboard open, the page takes the height of the part of the screen above the keyboard (`pages.js` reads `visualViewport`). The reply bar then ends at the top of the keyboard, the header stays at the top, and a thread that showed its newest message still shows it. With the keyboard closed, the page keeps the gap for the home bar under the reply bar.
 

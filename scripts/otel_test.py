@@ -266,6 +266,14 @@ def main(argv=None):
             if not shown.get('ok'):
                 failed = True
                 print('FAIL the keyboard scenario: {}'.format(shown.get('error')))
+                continue
+            heights = [shown[key]['height'] for key in ('box0', 'box1', 'box10')]
+            print('box height with 0, 1 and 10 lines: {}; scrollHeight/clientHeight at 10 lines: {}/{}; bar bottom {}'.format(
+                heights, shown['box10']['scrollHeight'], shown['box10']['clientHeight'], shown['box10']['replyBottom']))
+            if len(set(heights)) != 1 or shown['box10']['scrollHeight'] <= shown['box10']['clientHeight'] \
+                    or abs(shown['box10']['replyBottom'] - 508) > 1:
+                failed = True
+                print('FAIL the reply box is not 3 lines tall and scrolling inside')
         if not keys.get('ok'):
             failed = True
             print('FAIL the keys scenario: {}'.format(keys.get('error')))

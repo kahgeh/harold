@@ -706,6 +706,22 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
 }
 
 #[test]
+fn the_reply_box_is_3_lines_tall_and_scrolls_inside() {
+    let css = include_str!("../../static/web_app/app.css");
+    let rule = &css[css.find(".bottom textarea {").unwrap()..];
+    let rule = &rule[..rule.find('}').unwrap()];
+    assert!(rule.contains("height: calc(3 * 1.4em + 24px);"), "{rule}");
+    assert!(!rule.contains("max-height"), "{rule}");
+    assert!(rule.contains("overflow-y: auto;"), "{rule}");
+    let page = include_str!("../../templates/web_app/thread.html");
+    let tag = &page[page.find("<textarea").unwrap()..];
+    let tag = &tag[..tag.find('>').unwrap()];
+    assert!(tag.contains(r#"rows="3""#), "{tag}");
+    assert!(!tag.contains("style.height"), "{tag}");
+    assert!(!tag.contains("data-effect"), "{tag}");
+}
+
+#[test]
 fn the_dictation_rules_are_in_the_stylesheet() {
     let css = include_str!("../../static/web_app/app.css");
     for wanted in [
