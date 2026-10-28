@@ -194,7 +194,7 @@ try {
     const sent = requests.filter((entry) => entry.endsWith(" /replies"));
     expect("the POST /replies is answered 2xx", sent.length === 1 && sent[0].startsWith("2"), sent);
     result.sent = sent;
-    await until("the box to be empty and one line high", `${box}.value === "" && ${box}.offsetHeight === ${result.boxHeightEmpty}`);
+    await until("the box to be empty and at its 3-line height", `${box}.value === "" && ${box}.offsetHeight === ${result.boxHeightEmpty}`);
   } else if (args.scenario === "todo") {
     await evaluate(`document.querySelector("#to-todos").click()`);
     await until("the todo card", `!!document.querySelector("#todos article.card form.todo-form")`, 30000);
@@ -254,8 +254,17 @@ try {
     result.box0 = await boxNow();
     await fill("one line");
     result.box1 = await boxNow();
-    await fill(Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n"));
+    // Typed as a person types (the caret line shows; 16 px allows for the 11 px bottom padding): Shift+Enter between lines, so the browser keeps the caret in view.
+    await fill("");
+    await evaluate(`${box}.focus()`);
+    for (let i = 1; i <= 10; i++) {
+      if (i > 1) await press("Enter", SHIFT);
+      await send("Input.insertText", { text: "line " + i });
+    }
+    await sleep(300);
     result.box10 = await boxNow();
+    result.box10.atEnd = await evaluate(`${box}.scrollTop + ${box}.clientHeight >= ${box}.scrollHeight - 16`);
+    expect("with 10 lines typed the newest line stays in view", result.box10.atEnd, result.box10);
     expect("the box is the same height with 1 line typed", result.box1.height === result.box0.height, [result.box0, result.box1]);
     expect("the box is the same height with 10 lines typed", result.box10.height === result.box0.height, [result.box0, result.box10]);
     expect("with 10 lines the box scrolls inside", result.box10.scrollHeight > result.box10.clientHeight, result.box10);
