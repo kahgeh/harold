@@ -185,6 +185,12 @@ async fn open_and_run(mut task: Opening) {
             }
         }
     };
+    serve(task, store).await;
+}
+
+/// Serves the index from the opened store and keeps it current until shutdown, then waits for
+/// the graph to stop and closes the database.
+async fn serve(task: Opening, store: Arc<store::Store>) {
     let index = index::Index::new(
         store,
         task.embedder.clone(),

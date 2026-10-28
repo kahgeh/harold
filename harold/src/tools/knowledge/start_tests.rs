@@ -172,3 +172,68 @@ async fn the_knowledge_task_waits_for_the_graph_to_stop_before_it_ends() {
         "the task ended before the graph had stopped"
     );
 }
+
+#[tokio::test]
+async fn the_knowledge_task_waits_for_the_graph_to_stop_after_the_index_has_run() {
+    use harold_api::tools::knowledge::v1::{
+        RecentRequest, knowledge_service_server::KnowledgeService,
+    };
+    let (vault, data, store_folder) = (TempFolder::new(), TempFolder::new(), TempFolder::new());
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opening = Arc::new(service::Opening::default());
+    let runtime = graph::runtime::GraphRuntime::new(
+        graph::runtime::GraphFolders::under(&data.0),
+        Arc::new(Slow(Arc::clone(&ended))),
+    );
+    let _ = opening.graph.set(Arc::new(runtime));
+    let (stop, shutdown) = tokio::sync::watch::channel(());
+    let embedder = embed::WorkerEmbedder::new(
+        embed::WorkerCommand {
+            python: "python3".into(),
+            args: Vec::new(),
+            model_path: PathBuf::from("/no/such/model.gguf"),
+            model_sha256: None,
+            folder: data.0.join("worker"),
+        },
+        embed::IDLE_LIMIT,
+    );
+    let bucket_config = store::BucketConfig {
+        endpoint: "http://127.0.0.1:1".into(),
+        bucket: "b".into(),
+        prefix: "m".into(),
+        access_key: "a".into(),
+        secret_key: "b".into(),
+        encryption_key_file: store_folder.0.join("key"),
+    };
+    let service = service::KnowledgeToolService::new(Arc::clone(&opening));
+    let task = tokio::spawn(serve(
+        Opening {
+            opening,
+            db_folder: data.0.join("index"),
+            bucket_config,
+            embedder,
+            vault: vault.0.clone(),
+            exclude: Vec::new(),
+            shutdown,
+        },
+        test_support::memory_store(&store_folder),
+    ));
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // The service answers `Unavailable` until the index is opened.
+        while service
+            .recent(tonic::Request::new(RecentRequest { limit: 1 }))
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        stop.send(()).unwrap();
+        task.await.unwrap();
+    })
+    .await;
+    assert!(finished.is_ok(), "the task did not end within 5 s");
+    assert!(
+        ended.load(std::sync::atomic::Ordering::SeqCst),
+        "the task ended before the graph had stopped"
+    );
+}
