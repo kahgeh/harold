@@ -515,6 +515,7 @@ class Run:
         self.stand_in_started = None
         self.stand_in_screens = []
         self.stand_in_keys = []
+        self.stand_in_to_print = False
         self.folder_key_at = None
         self.folder_enter = False
         self.phone = None
@@ -629,6 +630,8 @@ class Run:
     def stand_in_report(self):
         """What the test knows of the stand-in: whether its program ended, the time since its
         start, the last 3 different screens and every key sent, each with its time."""
+        if self.pane is None:
+            return 'the stand-in chief was not started'
         try:
             self.see_screen()
             state = self.pane_state()
@@ -651,6 +654,7 @@ class Run:
     def stand_in_stop(self):
         """The report, also written to stand-in.log in the scratch folder."""
         text = self.stand_in_report()
+        self.stand_in_to_print = False
         try:
             (self.scratch / 'stand-in.log').write_text(text + '\n')
         except OSError:
@@ -678,6 +682,7 @@ class Run:
             wait_until(idle, LIMIT_READY, 'the stand-in chief shows its input box', every=0.5)
         except StepFailed:
             self.stand_in_stop()
+            self.stand_in_to_print = True
             raise
         # Harold reads the panes every 1.2 s.
         time.sleep(3)
@@ -761,6 +766,8 @@ class Run:
             self.log_file.close()
 
     def finish(self, passed):
+        if not passed and self.stand_in_to_print:
+            print(self.stand_in_text)
         if passed and not self.keep:
             shutil.rmtree(self.scratch, ignore_errors=True)
             return
@@ -1101,7 +1108,6 @@ def main(argv=None):
     for name in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(name, lambda number, frame: sys.exit(128 + number))
     results = []
-    chief = StepResult('', True, 0)
     try:
         run.write_config()
         socket_path = run.scratch / 't' / 'tmux-{}'.format(os.getuid()) / 'default'
@@ -1130,8 +1136,6 @@ def main(argv=None):
     if code and run.pane_snapshot:
         print("the stand-in's pane at the failure:")
         print(run.pane_snapshot)
-    if code and not chief.ok:
-        print(run.stand_in_text)
     if code and run.phone is not None:
         print('what #call showed:')
         for at, shown in run.phone.events:
