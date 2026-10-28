@@ -333,16 +333,30 @@ body.keyboard-open .bottom {
   padding-bottom: 8px;
 }
 
-.bottom textarea {
+/* The box's border and its 11 px space are on .reply-box, so the space does not scroll away
+   with the text: the textarea inside shows 3 whole lines and scrolls only those. */
+.reply-box {
   flex: 1;
   min-width: 0;
-  min-height: var(--target);
-  height: calc(3 * 1.4em + 24px);
-  box-sizing: border-box;
   padding: 11px 16px;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface-1);
+}
+
+.reply-box:focus-within {
+  outline: auto 1px -webkit-focus-ring-color;
+}
+
+.bottom textarea {
+  display: block;
+  width: 100%;
+  height: calc(3 * 1.4em);
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: none;
   font: inherit;
   color: inherit;
   resize: none;
@@ -412,6 +426,9 @@ body.keyboard-open .bottom {
 
 .bottom textarea.interim {
   color: var(--text-2);
+}
+
+.reply-box:has(textarea.interim) {
   border-color: var(--brand);
 }
 

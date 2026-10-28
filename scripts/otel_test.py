@@ -267,13 +267,20 @@ def main(argv=None):
                 failed = True
                 print('FAIL the keyboard scenario: {}'.format(shown.get('error')))
                 continue
-            heights = [shown[key]['height'] for key in ('box0', 'box1', 'box10')]
-            print('box height with 0, 1 and 10 lines: {}; scrollHeight/clientHeight at 10 lines: {}/{}; bar bottom {}'.format(
+            heights = [shown[key]['height'] for key in ('box0', 'box1', 'box10', 'dictated')]
+            print('box height with 0, 1, 10 typed and 10 dictated lines: {}; scrollHeight/clientHeight at 10 lines: {}/{}; bar bottom {}'.format(
                 heights, shown['box10']['scrollHeight'], shown['box10']['clientHeight'], shown['box10']['replyBottom']))
             if len(set(heights)) != 1 or shown['box10']['scrollHeight'] <= shown['box10']['clientHeight'] \
                     or abs(shown['box10']['replyBottom'] - 508) > 1:
                 failed = True
                 print('FAIL the reply box is not 3 lines tall and scrolling inside')
+            edges = [(shown[key]['edgeTop'], shown[key]['edgeBottom']) for key in ('box0', 'box10', 'dictated')]
+            print('edge space top/bottom with 0, 10 typed and 10 dictated lines: {}; lines from the end: {}, {}'.format(
+                edges, shown['box10']['linesFromEnd'], shown['dictated']['linesFromEnd']))
+            if any(abs(a - edges[0][0]) > 0.5 or abs(b - edges[0][1]) > 0.5 for a, b in edges) \
+                    or any(shown[key]['fromEnd'] >= 1 for key in ('box10', 'dictated')):
+                failed = True
+                print('FAIL the reply box edge space changes or the last line is out of view')
         if not keys.get('ok'):
             failed = True
             print('FAIL the keys scenario: {}'.format(keys.get('error')))

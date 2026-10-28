@@ -708,13 +708,36 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
 #[test]
 fn the_reply_box_is_3_lines_tall_and_scrolls_inside() {
     let css = include_str!("../../static/web_app/app.css");
-    let rule = &css[css.find(".bottom textarea {").unwrap()..];
-    let rule = &rule[..rule.find('}').unwrap()];
-    assert!(rule.contains("height: calc(3 * 1.4em + 24px);"), "{rule}");
-    assert!(!rule.contains("max-height"), "{rule}");
-    assert!(rule.contains("overflow-y: auto;"), "{rule}");
+    let rule_of = |selector: &str| -> String {
+        let rule = &css[css.find(&format!("\n{selector} {{")).unwrap()..];
+        rule[..rule.find('}').unwrap()].to_string()
+    };
+    // The border and the 11 px space are on the wrapper, so the space does not scroll away.
+    let wrapper = rule_of(".reply-box");
+    assert!(wrapper.contains("padding: 11px 16px;"), "{wrapper}");
+    assert!(
+        wrapper.contains("border: 1px solid var(--border);"),
+        "{wrapper}"
+    );
+    assert!(wrapper.contains("border-radius: 24px;"), "{wrapper}");
+    let text = rule_of(".bottom textarea");
+    assert!(text.contains("height: calc(3 * 1.4em);"), "{text}");
+    assert!(text.contains("padding: 0;"), "{text}");
+    assert!(text.contains("border: 0;"), "{text}");
+    assert!(text.contains("outline: 0;"), "{text}");
+    assert!(text.contains("resize: none;"), "{text}");
+    assert!(text.contains("overflow-y: auto;"), "{text}");
+    assert!(!text.contains("max-height"), "{text}");
+    assert!(css.contains(".reply-box:focus-within {"));
+    assert!(!css.contains("mask-image"), "the box has no fade");
+    assert!(!wrapper.contains("gradient") && !text.contains("gradient"));
     let page = include_str!("../../templates/web_app/thread.html");
-    let tag = &page[page.find("<textarea").unwrap()..];
+    let start = page
+        .find(r#"<div class="reply-box">"#)
+        .expect("the textarea sits in .reply-box");
+    let wrapped = &page[start..];
+    assert!(wrapped[..wrapped.find("</div>").unwrap()].contains("<textarea"));
+    let tag = &wrapped[wrapped.find("<textarea").unwrap()..];
     let tag = &tag[..tag.find('>').unwrap()];
     assert!(tag.contains(r#"rows="3""#), "{tag}");
     assert!(!tag.contains("style.height"), "{tag}");
@@ -728,7 +751,8 @@ fn the_reply_box_is_3_lines_tall_and_scrolls_inside() {
 fn the_dictation_rules_are_in_the_stylesheet() {
     let css = include_str!("../../static/web_app/app.css");
     for wanted in [
-        ".bottom textarea.interim {\n  color: var(--text-2);\n  border-color: var(--brand);",
+        ".bottom textarea.interim {\n  color: var(--text-2);\n}",
+        ".reply-box:has(textarea.interim) {\n  border-color: var(--brand);",
         ".listening-note {",
         ".listening-note[hidden] {\n  display: none;",
         ".listening-note + .bottom {\n  border-top: 0;",

@@ -246,15 +246,37 @@ try {
     await frame();
     // The box keeps one height with 0, 1 and 10 lines typed, scrolls inside, and the bar stays at the keyboard.
     const box = `document.querySelector("#reply textarea")`;
-    const boxNow = () => evaluate(`(() => { const b = ${box}; return { height: b.offsetHeight, scrollHeight: b.scrollHeight, clientHeight: b.clientHeight, bottom: b.getBoundingClientRect().bottom, replyBottom: document.getElementById("reply").getBoundingClientRect().bottom }; })()`);
+    // The numbers of the reply box: the .reply-box's height, the textarea's scroll state, the space
+    // between the border box and the text on both edges, and how far the text is from its end.
+    const boxNow = () =>
+      evaluate(`(() => {
+        const b = ${box};
+        const wrap = b.closest(".reply-box").getBoundingClientRect();
+        const text = b.getBoundingClientRect();
+        const line = parseFloat(getComputedStyle(b).lineHeight);
+        const fromEnd = b.scrollHeight - b.clientHeight - b.scrollTop;
+        return {
+          height: b.closest(".reply-box").offsetHeight,
+          scrollHeight: b.scrollHeight,
+          clientHeight: b.clientHeight,
+          lineHeight: line,
+          fromEnd,
+          linesFromEnd: fromEnd / line,
+          edgeTop: text.top - wrap.top,
+          edgeBottom: wrap.bottom - text.bottom,
+          replyBottom: document.getElementById("reply").getBoundingClientRect().bottom,
+        };
+      })()`);
     const fill = async (text) => {
       await evaluate(`(() => { const b = ${box}; b.focus(); b.value = ${JSON.stringify(text)}; b.dispatchEvent(new Event("input", { bubbles: true })); })()`);
       await sleep(300);
     };
+    const wholeLines = (shown) => Math.abs(shown.linesFromEnd - Math.round(shown.linesFromEnd)) < 0.02;
+    const tenLines = Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n");
     result.box0 = await boxNow();
     await fill("one line");
     result.box1 = await boxNow();
-    // Typed as a person types (the caret line shows; 16 px allows for the 11 px bottom padding): Shift+Enter between lines, so the browser keeps the caret in view.
+    // Typed as a person types: Shift+Enter between lines, so the browser keeps the caret in view.
     await fill("");
     await evaluate(`${box}.focus()`);
     for (let i = 1; i <= 10; i++) {
@@ -263,22 +285,25 @@ try {
     }
     await sleep(300);
     result.box10 = await boxNow();
-    result.box10.atEnd = await evaluate(`${box}.scrollTop + ${box}.clientHeight >= ${box}.scrollHeight - 16`);
-    expect("with 10 lines typed the newest line stays in view", result.box10.atEnd, result.box10);
     expect("the box is the same height with 1 line typed", result.box1.height === result.box0.height, [result.box0, result.box1]);
     expect("the box is the same height with 10 lines typed", result.box10.height === result.box0.height, [result.box0, result.box10]);
     expect("with 10 lines the box scrolls inside", result.box10.scrollHeight > result.box10.clientHeight, result.box10);
     expect("with 10 lines the reply bar still ends at the keyboard top", Math.abs(result.box10.replyBottom - 508) <= 1, result.box10);
-    // Dictation writes box.value and fires "input": the end of the words must show too.
-    await fill(Array.from({ length: 12 }, (_, i) => "word " + (i + 1)).join("\n"));
-    const dictated = await evaluate(`${box}.scrollTop + ${box}.clientHeight >= ${box}.scrollHeight - 16`);
-    expect("with 12 lines written as dictation writes them the end stays in view", dictated, await boxNow());
+    expect("with 10 lines typed the newest line is in view", result.box10.fromEnd < 1, result.box10);
+    expect("with 10 lines typed the text is a whole number of lines from its end", wholeLines(result.box10), result.box10);
+    expect("the edge space is the same with 0 and 10 lines", Math.abs(result.box10.edgeTop - result.box0.edgeTop) < 0.5 && Math.abs(result.box10.edgeBottom - result.box0.edgeBottom) < 0.5, [result.box0, result.box10]);
+    // Dictation writes box.value and fires "input": the last of 10 lines must show too.
+    await fill("");
+    await fill(tenLines);
+    result.dictated = await boxNow();
+    expect("with 10 lines written as dictation writes them the last line is in view", result.dictated.fromEnd < 1 && wholeLines(result.dictated), result.dictated);
+    expect("the edge space is the same after a dictated write", Math.abs(result.dictated.edgeTop - result.box0.edgeTop) < 0.5 && Math.abs(result.dictated.edgeBottom - result.box0.edgeBottom) < 0.5, [result.box0, result.dictated]);
     // The same box in both colour schemes, empty and with 10 lines.
     for (const scheme of ["light", "dark"]) {
       await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
       await fill("");
       await screenshot(`3a-box-${scheme}-empty`);
-      await fill(Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n"));
+      await fill(tenLines);
       await screenshot(`3b-box-${scheme}-ten-lines`);
     }
     await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
