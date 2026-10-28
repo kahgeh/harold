@@ -269,6 +269,10 @@ try {
     expect("the box is the same height with 10 lines typed", result.box10.height === result.box0.height, [result.box0, result.box10]);
     expect("with 10 lines the box scrolls inside", result.box10.scrollHeight > result.box10.clientHeight, result.box10);
     expect("with 10 lines the reply bar still ends at the keyboard top", Math.abs(result.box10.replyBottom - 508) <= 1, result.box10);
+    // Dictation writes box.value and fires "input": the end of the words must show too.
+    await fill(Array.from({ length: 12 }, (_, i) => "word " + (i + 1)).join("\n"));
+    const dictated = await evaluate(`${box}.scrollTop + ${box}.clientHeight >= ${box}.scrollHeight - 16`);
+    expect("with 12 lines written as dictation writes them the end stays in view", dictated, await boxNow());
     // The same box in both colour schemes, empty and with 10 lines.
     for (const scheme of ["light", "dark"]) {
       await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });

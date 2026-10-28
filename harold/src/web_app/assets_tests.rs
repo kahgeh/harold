@@ -718,7 +718,10 @@ fn the_reply_box_is_3_lines_tall_and_scrolls_inside() {
     let tag = &tag[..tag.find('>').unwrap()];
     assert!(tag.contains(r#"rows="3""#), "{tag}");
     assert!(!tag.contains("style.height"), "{tag}");
-    assert!(!tag.contains("data-effect"), "{tag}");
+    assert!(
+        tag.contains(r#"data-effect="$reply; if (el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight""#),
+        "the scroll-only effect keeps the end of a dictated text in view: {tag}"
+    );
 }
 
 #[test]
