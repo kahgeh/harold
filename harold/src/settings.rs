@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
@@ -1578,33 +1579,50 @@ fn config_location() -> (String, String) {
     (config_dir, env)
 }
 
+/// The `HAROLD__` environment layer. Harold passes `None`, so the layer reads the process
+/// environment. A test passes the variables, so it sets none in the test process.
+fn harold_environment(vars: Option<HashMap<String, String>>) -> config::Environment {
+    config::Environment::with_prefix("HAROLD")
+        .separator("__")
+        .try_parsing(true)
+        .source(vars)
+}
+
 /// The `default` file, the local file and the `HAROLD__` environment, laid over each other.
 fn merged_config() -> Result<Config, ConfigError> {
     let (config_dir, env) = config_location();
+    merged_config_in(&config_dir, &env, None)
+}
+
+fn merged_config_in(
+    config_dir: &str,
+    env: &str,
+    vars: Option<HashMap<String, String>>,
+) -> Result<Config, ConfigError> {
     Config::builder()
         .add_source(File::new(
             &format!("{config_dir}/default"),
             FileFormat::Toml,
         ))
         .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
-        .add_source(
-            config::Environment::with_prefix("HAROLD")
-                .separator("__")
-                .try_parsing(true),
-        )
+        .add_source(harold_environment(vars))
         .build()
 }
 
 /// The local file and the `HAROLD__` environment alone: what the operator set.
 fn local_config() -> Result<Config, ConfigError> {
     let (config_dir, env) = config_location();
+    local_config_in(&config_dir, &env, None)
+}
+
+fn local_config_in(
+    config_dir: &str,
+    env: &str,
+    vars: Option<HashMap<String, String>>,
+) -> Result<Config, ConfigError> {
     Config::builder()
         .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
-        .add_source(
-            config::Environment::with_prefix("HAROLD")
-                .separator("__")
-                .try_parsing(true),
-        )
+        .add_source(harold_environment(vars))
         .build()
 }
 
@@ -1617,6 +1635,18 @@ fn has_key(config: &Config, key: &str) -> bool {
 /// holds a value. A config that cannot be built returns nothing; `Settings::load` refuses it.
 pub(crate) fn removed_setting_messages() -> Vec<String> {
     match (local_config(), merged_config()) {
+        (Ok(local), Ok(merged)) => removed_setting_messages_from(&local, &merged),
+        _ => Vec::new(),
+    }
+}
+
+/// `removed_setting_messages` for the config folder `config_dir` and the environment `vars`.
+#[cfg(test)]
+fn removed_setting_messages_in(config_dir: &str, vars: HashMap<String, String>) -> Vec<String> {
+    match (
+        local_config_in(config_dir, "local", Some(vars.clone())),
+        merged_config_in(config_dir, "local", Some(vars)),
+    ) {
         (Ok(local), Ok(merged)) => removed_setting_messages_from(&local, &merged),
         _ => Vec::new(),
     }
@@ -3850,5 +3880,85 @@ encryption_key_file = "/work/key"
     fn the_approved_model_list_sits_beside_local_toml() {
         let path = tts_models_path();
         assert_eq!(path.file_name().unwrap(), "tts-models.toml");
+    }
+
+    /// The messages for a scratch config folder that holds the shipped `default.toml` and an
+    /// empty `local.toml`, with `name` set to `value` in the `HAROLD__` environment map.
+    fn removed_from_environment(test: &str, name: &str, value: &str) -> Vec<String> {
+        let dir = unique_temp_dir(test);
+        let _guard = TempDirGuard(dir.clone());
+        std::fs::copy(
+            format!("{}/config/default.toml", env!("CARGO_MANIFEST_DIR")),
+            dir.join("default.toml"),
+        )
+        .expect("copy default.toml");
+        std::fs::write(dir.join("local.toml"), "").expect("write local.toml");
+        let vars = std::collections::HashMap::from([(name.to_owned(), value.to_owned())]);
+        super::removed_setting_messages_in(dir.to_str().expect("utf-8 temp dir"), vars)
+    }
+
+    #[cfg(not(feature = "calls"))]
+    #[test]
+    fn a_build_without_calls_refuses_voice_input_from_the_harold_environment() {
+        assert_eq!(
+            removed_from_environment(
+                "env-refusal-voice-input",
+                "HAROLD__VOICE_INPUT__COMMAND",
+                "python"
+            ),
+            [
+                "voice_input is set, but this Harold is built without calls: remove it from config/local.toml or the HAROLD__ environment variables."
+            ]
+        );
+    }
+
+    #[cfg(not(feature = "imessage"))]
+    #[test]
+    fn a_build_without_imessage_refuses_each_imessage_variable_from_the_harold_environment() {
+        for (test, name, value, setting) in [
+            (
+                "env-refusal-chat-db",
+                "HAROLD__CHAT_DB__PATH",
+                "/x",
+                "chat_db",
+            ),
+            (
+                "env-refusal-notify-imessage",
+                "HAROLD__NOTIFY__IMESSAGE",
+                "a",
+                "notify.imessage",
+            ),
+        ] {
+            assert_eq!(
+                removed_from_environment(test, name, value),
+                [format!(
+                    "{setting} is set, but this Harold is built without iMessage: remove it from config/local.toml or the HAROLD__ environment variables."
+                )],
+                "{name}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "imessage", feature = "calls"))]
+    #[test]
+    fn a_full_build_accepts_the_part_variables_from_the_harold_environment() {
+        for (test, name, value) in [
+            (
+                "env-accept-voice-input",
+                "HAROLD__VOICE_INPUT__COMMAND",
+                "python",
+            ),
+            ("env-accept-chat-db", "HAROLD__CHAT_DB__PATH", "/x"),
+            (
+                "env-accept-notify-imessage",
+                "HAROLD__NOTIFY__IMESSAGE",
+                "a",
+            ),
+        ] {
+            assert!(
+                removed_from_environment(test, name, value).is_empty(),
+                "{name}"
+            );
+        }
     }
 }
