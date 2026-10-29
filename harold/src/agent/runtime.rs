@@ -58,6 +58,7 @@ pub(crate) enum AgentMonitorCommand {
     },
     ResolvePane {
         pane_id: String,
+        sent: Instant,
         reply: oneshot::Sender<Result<AgentPaneObservation, MonitorCommandError>>,
     },
     #[cfg(test)]
@@ -152,7 +153,11 @@ impl AgentMonitorHandle {
         }
         let (reply, response) = oneshot::channel();
         self.sender
-            .send(AgentMonitorCommand::ResolvePane { pane_id, reply })
+            .send(AgentMonitorCommand::ResolvePane {
+                pane_id,
+                sent: Instant::now(),
+                reply,
+            })
             .await
             .map_err(|_| MonitorCommandError::RuntimeStopped)?;
         response
@@ -806,11 +811,17 @@ impl AgentMonitorRuntime {
             AgentMonitorCommand::TurnCompleted { turn, reply } => {
                 let _ = reply.send(self.turn_completed(turn).await);
             }
-            AgentMonitorCommand::ResolvePane { pane_id, reply } => {
+            AgentMonitorCommand::ResolvePane {
+                pane_id,
+                sent,
+                reply,
+            } => {
+                let wait_ms = duration_ms(sent.elapsed());
                 let pane = self
                     .resolve_pane(pane_id)
                     .await
                     .and_then(|pane| pane.ok_or(MonitorCommandError::AgentNotFound));
+                log_resolve_if_slow(sent, wait_ms, &pane);
                 let _ = reply.send(pane);
             }
             #[cfg(test)]
@@ -1876,6 +1887,27 @@ fn log_pane_gone(tracked: &mut TrackedPane) {
 }
 
 /// A retried read that worked, `started` being when its first try began.
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A resolve over 1 s, or one that did not find the pane, with the wait behind the monitor's tick.
+fn log_resolve_if_slow(
+    sent: Instant,
+    wait_ms: u64,
+    pane: &Result<AgentPaneObservation, MonitorCommandError>,
+) {
+    let elapsed_ms = duration_ms(sent.elapsed());
+    let outcome = match pane {
+        Ok(_) => "ok",
+        Err(MonitorCommandError::AgentNotFound) => "not_found",
+        Err(_) => "inventory_unavailable",
+    };
+    if elapsed_ms > 1_000 || outcome != "ok" {
+        tracing::warn!(wait_ms, elapsed_ms, outcome, "agent pane resolve slow");
+    }
+}
+
 fn log_read_retried(component: &'static str, pane_id: Option<&str>, started: tokio::time::Instant) {
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match pane_id {

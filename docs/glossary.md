@@ -23,6 +23,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | pairing lock | What stops pairing for good after 5 wrong tries in all, until the code changes or `harold app pair --unlock` | "ban", "rate limit" |
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
+| pane resolve | The look-up of one pane by its id (`resolve_pane` in the code), which runs its own scan after it waits for the monitor's current tick. Harold logs a slow one as `agent pane resolve slow` | "pane lookup" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
 | the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
 | the chief's row | The chief's row in the dash's agent list | — |

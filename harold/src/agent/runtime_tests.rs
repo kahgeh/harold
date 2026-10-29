@@ -5774,3 +5774,108 @@ async fn a_timeout_degrades_after_four_seconds_and_nothing_else_waits() {
         failure.since
     );
 }
+
+/// An inventory whose scan and resolve take set times, to time the resolve's log line.
+struct TimedInventory {
+    scan_takes: Duration,
+    resolve_takes: Duration,
+    observed: AgentPaneObservation,
+}
+
+impl AgentInventoryPort for TimedInventory {
+    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        std::thread::sleep(self.scan_takes);
+        Ok(Vec::new())
+    }
+
+    fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
+        std::thread::sleep(self.resolve_takes);
+        Ok(Some(self.observed.clone()))
+    }
+
+    fn program(&self, _incarnation: &AgentIncarnation) -> Option<String> {
+        None
+    }
+
+    fn is_current(&self, _incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
+        Ok(true)
+    }
+}
+
+/// The text a resolve of `%8` logs, and the field value `name` on its `agent pane resolve slow`
+/// line. With `tick_takes`, the resolve is sent while an inventory tick of that time runs.
+async fn resolve_logs(
+    scan_takes: Duration,
+    resolve_takes: Duration,
+    tick: bool,
+) -> (String, Option<u64>, Option<u64>) {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        Arc::new(TimedInventory {
+            scan_takes,
+            resolve_takes,
+            observed: pane("%8", 80, 800, 1_000, 100),
+        }),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        2_000,
+        shutdown_rx,
+    );
+    let (captured, _guard) = capture_logs();
+    let ticking = tick.then(|| {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.inventory_tick().await })
+    });
+    if ticking.is_some() {
+        // Let the monitor take the tick before the resolve queues behind it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    handle.resolve_agent_pane("%8".to_string()).await.unwrap();
+    if let Some(ticking) = ticking {
+        ticking.await.unwrap().unwrap();
+    }
+    drop(shutdown);
+    task.await.unwrap();
+    let logs = logged(&captured);
+    let field = |name: &str| {
+        let line = logs
+            .lines()
+            .find(|l| l.contains("agent pane resolve slow"))?;
+        let rest = line.split(&format!("{name}=")).nth(1)?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let (wait_ms, elapsed_ms) = (field("wait_ms"), field("elapsed_ms"));
+    (logs, wait_ms, elapsed_ms)
+}
+
+#[tokio::test]
+async fn a_resolve_over_one_second_logs_its_wait_and_total_time() {
+    let (logs, wait_ms, elapsed_ms) =
+        resolve_logs(Duration::ZERO, Duration::from_millis(1_100), false).await;
+    assert_eq!(logs.matches("agent pane resolve slow").count(), 1, "{logs}");
+    assert!(logs.contains("outcome=\"ok\""), "{logs}");
+    assert!(elapsed_ms.unwrap() >= 1_100, "{logs}");
+    assert!(wait_ms.unwrap() < elapsed_ms.unwrap(), "{logs}");
+}
+
+#[tokio::test]
+async fn a_fast_resolve_logs_no_resolve_line() {
+    let (logs, _, _) = resolve_logs(Duration::ZERO, Duration::ZERO, false).await;
+    assert!(!logs.contains("agent pane resolve slow"), "{logs}");
+}
+
+#[tokio::test]
+async fn a_resolve_sent_during_a_tick_waits_at_least_the_rest_of_that_tick() {
+    // The tick runs 1,200 ms and the resolve is sent 100 ms in, so it waits about 1,100 ms.
+    let (logs, wait_ms, elapsed_ms) =
+        resolve_logs(Duration::from_millis(1_200), Duration::ZERO, true).await;
+    assert_eq!(logs.matches("agent pane resolve slow").count(), 1, "{logs}");
+    assert!(wait_ms.unwrap() >= 1_000, "{logs}");
+    assert!(elapsed_ms.unwrap() >= wait_ms.unwrap(), "{logs}");
+}
