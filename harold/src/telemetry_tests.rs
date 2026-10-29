@@ -2665,8 +2665,9 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
     for tile in tiles(&dashboard) {
         let name = tile["name"].as_str().unwrap();
         // A log card reads `otel.otel_logs`, which the product filter does not reach.
-        let filtered =
-            containers[tile["containerId"].as_str().unwrap()] && name != SPOKEN_LINES_DROPPED_CARD;
+        let filtered = containers[tile["containerId"].as_str().unwrap()]
+            && name != SPOKEN_LINES_DROPPED_CARD
+            && name != INVENTORY_FULL_READS_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.
