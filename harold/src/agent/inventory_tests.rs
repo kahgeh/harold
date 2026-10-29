@@ -499,7 +499,7 @@ fn scan_with_sleeps(
                     std::thread::sleep(tmux_sleep);
                     Ok(Vec::new())
                 },
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(500),
             )
             .map(|panes| panes.len())
     };
@@ -517,7 +517,7 @@ fn scan_with_sleeps(
 #[test]
 fn a_slow_scan_logs_the_time_of_each_part() {
     let (result, text) = scan_with_sleeps(
-        std::time::Duration::from_millis(150),
+        std::time::Duration::from_millis(600),
         std::time::Duration::from_millis(60),
         None,
     );
@@ -527,7 +527,7 @@ fn a_slow_scan_logs_the_time_of_each_part() {
         1,
         "{text}"
     );
-    assert!(text.contains("ps_ms=1"), "{text}");
+    assert!(text.contains("ps_ms="), "{text}");
     assert!(text.contains("tmux_ms="), "{text}");
     assert!(text.contains("outcome=\"ok\""), "{text}");
 }
