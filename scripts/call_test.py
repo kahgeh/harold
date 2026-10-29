@@ -64,7 +64,8 @@ KOKORO_MODEL = 'mlx-community/Kokoro-82M-bf16'
 KOKORO_REVISION = 'a71e4d38b236d968966a2002c4c895dbd12b1c3c'
 # How often the phone says a page is on screen (Harold counts a page for 75 s).
 SEEN_EVERY = 20
-STAND_IN = 'claude --model haiku "Hello"'
+# `--tools=Bash` has an equals sign because `--tools Bash "Hello"` reads "Hello" as a second tool.
+STAND_IN = 'claude --model haiku --permission-mode dontAsk --tools=Bash "Hello"'
 # How long the test sends no other key after Enter on the folder question, and after a move key.
 LIMIT_FOLDER_QUESTION = 5
 FOLDER_KEY_GAP = 1
@@ -591,7 +592,11 @@ class Run:
             '-x', '160', '-y', '50', '-P', '-F', '#{pane_id}', 'cat')
         self.pane = created.stdout.strip()
         # harold speak takes a tmux pane id as --src-id, so the stand-in's own pane id goes in.
-        speak = '{} speak --src-id {}'.format(self.binary, self.pane)
+        # The command runs through a link in the stand-in's folder, so no file names a path outside it.
+        link = self.chief_dir / 'bin' / 'harold'
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(self.binary)
+        speak = '{} speak --src-id {}'.format(link, self.pane)
         (self.chief_dir / 'CLAUDE.md').write_text(
             'Each line that starts with 🎙 is a spoken request or question. Answer it by running exactly\n'
             '`{} "{}"` and do nothing else: no other command, no other text.\n'
@@ -599,7 +604,8 @@ class Run:
         # No hooks: the user's own Stop hook reports to the installed Harold's address, not to
         # HAROLD_CONFIG_DIR's, so a turn here would reach the real Harold as the pane %0.
         (self.chief_dir / '.claude' / 'settings.json').write_text(
-            '{{"disableAllHooks": true, "permissions": {{"allow": ["Bash({}:*)"]}}}}\n'.format(speak))
+            '{{"disableAllHooks": true, "permissions": {{"defaultMode": "dontAsk", '
+            '"allow": ["Bash({}:*)"]}}}}\n'.format(speak))
         self.run_stand_in()
 
     def run_stand_in(self):
