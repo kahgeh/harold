@@ -80,6 +80,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "s3.status",
     "pane_id",
     "elapsed_ms",
+    "ps_ms",
+    "tmux_ms",
     "provider_id",
     "program",
     "pane",

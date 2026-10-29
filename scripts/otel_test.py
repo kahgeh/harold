@@ -131,12 +131,13 @@ LIST_PANES_FORMAT = '#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}
 SAMPLE_EVERY = 5
 REPORT_SAMPLES = 300
 REPORT_LOG = 300
-HAROLD_TROUBLE = ('agent monitor degraded', 'agent monitor recovered', 'event handler cycle failed')
+HAROLD_TROUBLE = ('agent monitor degraded', 'agent monitor recovered', 'event handler cycle failed',
+                  'agent inventory scan slow')
 
 
 class LoadSampler(threading.Thread):
-    """From the stand-in's start until the tear-down, every 5 s: how long Harold's pane listing
-    takes on the scratch tmux server, and the 1-minute load average."""
+    """From the stand-in's start until the tear-down, every 5 s: how long Harold's `ps` and its pane
+    listing on the scratch tmux server take, and the 1-minute load average."""
 
     def __init__(self, env):
         super().__init__(daemon=True)
@@ -146,18 +147,24 @@ class LoadSampler(threading.Thread):
 
     def run(self):
         while not self.done.is_set():
-            started = time.monotonic()
-            try:
-                subprocess.run(
-                    ['tmux', '-f', '/dev/null', '-u', 'list-panes', '-a', '-F', LIST_PANES_FORMAT],
-                    env=self.env, capture_output=True, timeout=10)
-                listing = '{} ms'.format(int((time.monotonic() - started) * 1000))
-            except subprocess.TimeoutExpired:
-                listing = 'over 10000 ms'
-            except OSError as error:
-                listing = 'failed: {}'.format(error)
-            self.samples.append((datetime.now(timezone.utc), listing, load_average()))
+            ps_time = self.time_command(
+                ['ps', '-axo', 'pid=,ppid=,pgid=,tpgid=,tty=,lstart=,command='],
+                dict(self.env, LC_ALL='C', TZ='UTC'))
+            listing = self.time_command(
+                ['tmux', '-f', '/dev/null', '-u', 'list-panes', '-a', '-F', LIST_PANES_FORMAT], self.env)
+            self.samples.append((datetime.now(timezone.utc), ps_time, listing, load_average()))
             self.done.wait(SAMPLE_EVERY)
+
+    @staticmethod
+    def time_command(command, env):
+        started = time.monotonic()
+        try:
+            subprocess.run(command, env=env, capture_output=True, timeout=10)
+            return '{} ms'.format(int((time.monotonic() - started) * 1000))
+        except subprocess.TimeoutExpired:
+            return 'over 10000 ms'
+        except OSError as error:
+            return 'failed: {}'.format(error)
 
     def stop(self):
         self.done.set()
@@ -181,8 +188,9 @@ def load_report(run):
     lines = ['load report, {}'.format(now.strftime('%H:%M:%SZ'))]
     samples = list(run.sampler.samples) if run.sampler is not None else []
     recent = [sample for sample in samples if now - sample[0] <= timedelta(seconds=REPORT_SAMPLES)]
-    lines.append('samples of the last {} s (time, tmux list-panes, load average):'.format(REPORT_SAMPLES))
-    lines.extend('  {}  {}  {}'.format(at.strftime('%H:%M:%SZ'), listing, load) for at, listing, load in recent)
+    lines.append('samples of the last {} s (time, ps, tmux list-panes, load average):'.format(REPORT_SAMPLES))
+    lines.extend('  {}  {}  {}  {}'.format(at.strftime('%H:%M:%SZ'), ps_time, listing, load)
+                 for at, ps_time, listing, load in recent)
     if not recent:
         lines.append('  none')
     lines.append("the test Harold's monitor lines of the last {} s:".format(REPORT_LOG))

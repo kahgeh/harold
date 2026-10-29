@@ -2,8 +2,9 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
-    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, command_program, command_stdout,
-    observe_pane, parse_process_table, parse_tmux_panes, resolve_provider,
+    InventoryError, ProcessInfo, ProviderResolution, TmuxAgentInventory, TmuxPaneInfo,
+    command_program, command_stdout, observe_pane, parse_process_table, parse_tmux_panes,
+    resolve_provider,
 };
 use super::screen::{StopSignal, run_stoppable};
 
@@ -444,4 +445,115 @@ fn the_program_is_the_file_name_of_the_command_or_of_an_interpreters_script() {
     ] {
         assert_eq!(command_program(command), program, "{command}");
     }
+}
+
+/// Log text, kept by a subscriber for the test.
+#[derive(Clone, Default)]
+struct LogText(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogText {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogText {
+    type Writer = LogText;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Runs one scan of an inventory whose reads sleep, and returns the result and the log text.
+fn scan_with_sleeps(
+    ps_sleep: std::time::Duration,
+    tmux_sleep: std::time::Duration,
+    signal: Option<StopSignal>,
+) -> (Result<usize, InventoryError>, String) {
+    let log = LogText::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let fail_ps = signal.is_some();
+    let scan = || {
+        inventory
+            .scan_with(
+                || {
+                    std::thread::sleep(ps_sleep);
+                    if fail_ps {
+                        Err(InventoryError::CommandFailed)
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                || {
+                    std::thread::sleep(tmux_sleep);
+                    Ok(Vec::new())
+                },
+                std::time::Duration::from_millis(100),
+            )
+            .map(|panes| panes.len())
+    };
+    let result = match signal {
+        Some(signal) => {
+            signal.request();
+            run_stoppable(signal, scan)
+        }
+        None => scan(),
+    };
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    (result, text)
+}
+
+#[test]
+fn a_slow_scan_logs_the_time_of_each_part() {
+    let (result, text) = scan_with_sleeps(
+        std::time::Duration::from_millis(150),
+        std::time::Duration::from_millis(60),
+        None,
+    );
+    assert_eq!(result, Ok(0));
+    assert_eq!(
+        text.matches("agent inventory scan slow").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("ps_ms=1"), "{text}");
+    assert!(text.contains("tmux_ms="), "{text}");
+    assert!(text.contains("outcome=\"ok\""), "{text}");
+}
+
+#[test]
+fn a_fast_scan_logs_nothing() {
+    let (result, text) =
+        scan_with_sleeps(std::time::Duration::ZERO, std::time::Duration::ZERO, None);
+    assert_eq!(result, Ok(0));
+    assert!(!text.contains("agent inventory scan slow"), "{text}");
+}
+
+#[test]
+fn a_scan_stopped_during_ps_logs_no_tmux_time() {
+    let (result, text) = scan_with_sleeps(
+        std::time::Duration::from_millis(20),
+        std::time::Duration::ZERO,
+        Some(StopSignal::default()),
+    );
+    assert_eq!(result, Err(InventoryError::CommandFailed));
+    assert_eq!(
+        text.matches("agent inventory scan slow").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("ps_ms="), "{text}");
+    assert!(!text.contains("tmux_ms"), "{text}");
+    assert!(text.contains("outcome=\"stopped\""), "{text}");
 }

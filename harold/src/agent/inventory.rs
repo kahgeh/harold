@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::process::Command;
 use std::sync::{Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -12,7 +12,10 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 use super::domain::{
     AgentIncarnation, AgentPaneObservation, UNKNOWN_PROVIDER_DISPLAY_NAME, UNKNOWN_PROVIDER_ID,
 };
-use super::screen::stoppable_output;
+use super::screen::{stop_requested, stoppable_output};
+
+/// A scan that takes longer than this logs how long each part took.
+const SLOW_SCAN: Duration = Duration::from_secs(1);
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ProcessInfo {
@@ -100,10 +103,50 @@ impl TmuxAgentInventory {
     }
 }
 
-impl AgentInventoryPort for TmuxAgentInventory {
-    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
-        let processes = read_process_table()?;
-        let panes = read_tmux_panes()?;
+impl TmuxAgentInventory {
+    /// Runs one scan with the two reads given, so a test can slow them down. Logs one `warn`
+    /// line when the scan takes more than `slow_after` or does not succeed.
+    pub(super) fn scan_with(
+        &self,
+        read_processes: impl FnOnce() -> Result<Vec<ProcessInfo>, InventoryError>,
+        read_panes: impl FnOnce() -> Result<Vec<TmuxPaneInfo>, InventoryError>,
+        slow_after: Duration,
+    ) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        let started = Instant::now();
+        let mut ps_ms = 0;
+        let mut tmux_ms = None;
+        let result = self.scan_parts(read_processes, read_panes, &mut ps_ms, &mut tmux_ms);
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(_) if stop_requested() => "stopped",
+            Err(_) => "failed",
+        };
+        if started.elapsed() > slow_after || outcome != "ok" {
+            match tmux_ms {
+                Some(tmux_ms) => {
+                    tracing::warn!(ps_ms, tmux_ms, outcome, "agent inventory scan slow");
+                }
+                None => tracing::warn!(ps_ms, outcome, "agent inventory scan slow"),
+            }
+        }
+        result
+    }
+
+    fn scan_parts(
+        &self,
+        read_processes: impl FnOnce() -> Result<Vec<ProcessInfo>, InventoryError>,
+        read_panes: impl FnOnce() -> Result<Vec<TmuxPaneInfo>, InventoryError>,
+        ps_ms: &mut u64,
+        tmux_ms: &mut Option<u64>,
+    ) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        let part_started = Instant::now();
+        let processes = read_processes();
+        *ps_ms = elapsed_ms(part_started);
+        let processes = processes?;
+        let part_started = Instant::now();
+        let panes = read_panes();
+        *tmux_ms = Some(elapsed_ms(part_started));
+        let panes = panes?;
         let observed_at_ms = now_ms()?;
         let observed: Vec<AgentPaneObservation> = panes
             .iter()
@@ -126,6 +169,16 @@ impl AgentInventoryPort for TmuxAgentInventory {
             .collect();
         *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
         Ok(observed)
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+impl AgentInventoryPort for TmuxAgentInventory {
+    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        self.scan_with(read_process_table, read_tmux_panes, SLOW_SCAN)
     }
 
     fn program(&self, incarnation: &AgentIncarnation) -> Option<String> {
