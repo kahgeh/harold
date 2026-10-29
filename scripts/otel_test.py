@@ -175,7 +175,7 @@ def load_average():
 
 
 def load_report(run):
-    """What a stop needs to tell the machine from the test Harold: the sampler's last 120 s, the
+    """What a stop needs to tell the machine from the test Harold: the sampler's last 300 s, the
     test Harold's monitor lines of the last 300 s, and the busiest processes now."""
     now = datetime.now(timezone.utc)
     lines = ['load report, {}'.format(now.strftime('%H:%M:%SZ'))]
