@@ -20,6 +20,7 @@ Needs node, tmux, claude, grpcurl and Google Chrome. Python 3 standard library o
 """
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import call_test as ct
@@ -45,6 +47,7 @@ class OtelRun(ct.Run):
     def __init__(self, binary, default_toml, keep, ports):
         super().__init__(ct.INSTALL_DIR, keep, binary=binary, default_toml=default_toml)
         self.ports = ports
+        self.sampler = None
 
     def write_config(self):
         for folder in (self.config_dir, self.chief_dir / '.claude', self.scratch / 't'):
@@ -74,7 +77,8 @@ class OtelRun(ct.Run):
         say = '{} send-message-to-away-device --src-id {} "{}"'.format(self.binary, self.pane, ANSWER)
         (self.chief_dir / 'CLAUDE.md').write_text(
             'Two kinds of line need an answer, and the answer is always the same command.\n'
-            '1. A line that starts with 📱 is a reply from the phone.\n'
+            '1. A message whose first line starts with 📱 is one reply from the phone, with all its lines.\n'
+            '   Run the command once for the whole message.\n'
             '2. A line that starts with the word ANSWERS holds answers to todos. It is not a question for you:\n'
             '   it only needs the acknowledgement.\n'
             'For either kind, run exactly `{}` and do nothing else: no other command, no other text.\n'
@@ -84,6 +88,8 @@ class OtelRun(ct.Run):
             '{{"disableAllHooks": true, "promptSuggestionEnabled": false, "permissions": {{"allow": ["Bash({}:*)"]}}}}\n'.format(
                 '{} send-message-to-away-device'.format(self.binary)))
         self.run_stand_in()
+        self.sampler = LoadSampler(self.env)
+        self.sampler.start()
 
     def chief_idle(self):
         text = self.pane_text()
@@ -105,6 +111,99 @@ class OtelRun(ct.Run):
             capture_output=True, text=True, timeout=20)
         if done.returncode != 0:
             raise ct.StepFailed('TurnComplete failed: ' + (done.stdout + done.stderr).strip()[:300])
+
+
+LIST_PANES_FORMAT = '#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}'
+SAMPLE_EVERY = 5
+REPORT_SAMPLES = 120
+REPORT_LOG = 300
+HAROLD_TROUBLE = ('agent monitor degraded', 'agent monitor recovered', 'event handler cycle failed')
+
+
+class LoadSampler(threading.Thread):
+    """From the stand-in's start until the tear-down, every 5 s: how long Harold's pane listing
+    takes on the scratch tmux server, and the 1-minute load average."""
+
+    def __init__(self, env):
+        super().__init__(daemon=True)
+        self.env = env
+        self.done = threading.Event()
+        self.samples = []
+
+    def run(self):
+        while not self.done.is_set():
+            started = time.monotonic()
+            try:
+                subprocess.run(
+                    ['tmux', '-f', '/dev/null', '-u', 'list-panes', '-a', '-F', LIST_PANES_FORMAT],
+                    env=self.env, capture_output=True, timeout=10)
+                listing = '{} ms'.format(int((time.monotonic() - started) * 1000))
+            except subprocess.TimeoutExpired:
+                listing = 'over 10000 ms'
+            except OSError as error:
+                listing = 'failed: {}'.format(error)
+            self.samples.append((datetime.now(timezone.utc), listing, load_average()))
+            self.done.wait(SAMPLE_EVERY)
+
+    def stop(self):
+        self.done.set()
+        if self.is_alive():
+            self.join(timeout=12)
+
+
+def load_average():
+    try:
+        done = subprocess.run(['sysctl', '-n', 'vm.loadavg'], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return 'unknown'
+    fields = done.stdout.strip('{} \n').split()
+    return fields[0] if fields else 'unknown'
+
+
+def load_report(run):
+    """What a stop needs to tell the machine from the test Harold: the sampler's last 120 s, the
+    test Harold's monitor lines of the last 300 s, and the busiest processes now."""
+    now = datetime.now(timezone.utc)
+    lines = ['load report, {}'.format(now.strftime('%H:%M:%SZ'))]
+    samples = list(run.sampler.samples) if run.sampler is not None else []
+    recent = [sample for sample in samples if now - sample[0] <= timedelta(seconds=REPORT_SAMPLES)]
+    lines.append('samples of the last {} s (time, tmux list-panes, load average):'.format(REPORT_SAMPLES))
+    lines.extend('  {}  {}  {}'.format(at.strftime('%H:%M:%SZ'), listing, load) for at, listing, load in recent)
+    if not recent:
+        lines.append('  none')
+    lines.append("the test Harold's monitor lines of the last {} s:".format(REPORT_LOG))
+    shown = 0
+    for line in run.log().splitlines():
+        if not any(text in line for text in HAROLD_TROUBLE):
+            continue
+        try:
+            at = datetime.fromisoformat(line.split(' ', 1)[0].replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if now - at > timedelta(seconds=REPORT_LOG):
+            continue
+        shown += 1
+        lines.append('  {}  {}'.format(at.strftime('%H:%M:%SZ'), line.split(' ', 1)[1].strip()))
+    if not shown:
+        lines.append('  none')
+    lines.append('the 5 processes with the most CPU now (CPU %, name):')
+    try:
+        listed = subprocess.run(['ps', '-Ao', 'pcpu,comm', '-r'], capture_output=True, text=True, timeout=10).stdout
+        for row in listed.splitlines()[1:6]:
+            cpu, _, name = row.strip().partition(' ')
+            lines.append('  {}  {}'.format(cpu, Path(name.strip()).name))
+    except (OSError, subprocess.SubprocessError):
+        lines.append('  unknown')
+    return '\n'.join(lines)
+
+
+def write_load_report(run):
+    text = load_report(run)
+    try:
+        (run.scratch / 'load.log').write_text(text + '\n')
+    except OSError:
+        pass
+    return text
 
 
 def start_collector(scratch, ports):
@@ -318,7 +417,11 @@ def main(argv=None):
         failed = True
         print('FAIL ' + str(error))
         print(run.stand_in_stop())
+        if run.sampler is not None:
+            print(write_load_report(run))
     finally:
+        if run.sampler is not None:
+            run.sampler.stop()
         run.tear_down()
         if collector is not None and collector.poll() is None:
             os.killpg(collector.pid, signal.SIGTERM)
