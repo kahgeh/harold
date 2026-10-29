@@ -5802,8 +5802,8 @@ impl AgentInventoryPort for TimedInventory {
     }
 }
 
-/// The text a resolve of `%8` logs, and the field value `name` on its `agent pane resolve slow`
-/// line. With `tick_takes`, the resolve is sent while an inventory tick of that time runs.
+/// The text a resolve of `%8` logs, with `wait_ms` and `elapsed_ms` of its `agent pane resolve
+/// slow` line. With `tick`, the resolve is sent while an inventory tick of `scan_takes` runs.
 async fn resolve_logs(
     scan_takes: Duration,
     resolve_takes: Duration,

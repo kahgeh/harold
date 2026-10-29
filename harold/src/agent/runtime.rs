@@ -1886,12 +1886,11 @@ fn log_pane_gone(tracked: &mut TrackedPane) {
     }
 }
 
-/// A retried read that worked, `started` being when its first try began.
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// A resolve over 1 s, or one that did not find the pane, with the wait behind the monitor's tick.
+/// A resolve over 1 s, or one that did not answer `ok`, with the wait behind the monitor's tick.
 fn log_resolve_if_slow(
     sent: Instant,
     wait_ms: u64,
@@ -1908,6 +1907,7 @@ fn log_resolve_if_slow(
     }
 }
 
+/// A retried read that worked, `started` being when its first try began.
 fn log_read_retried(component: &'static str, pane_id: Option<&str>, started: tokio::time::Instant) {
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match pane_id {
