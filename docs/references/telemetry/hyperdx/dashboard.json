@@ -1000,10 +1000,10 @@
       "id": "inventory-full-reads-by-day",
       "name": "Agent inventory full reads per day, by reason",
       "x": 6,
-      "y": 15,
+      "y": 3,
       "w": 12,
       "h": 3,
-      "containerId": "phone",
+      "containerId": "pods",
       "config": {
         "configType": "sql",
         "displayType": "table",
