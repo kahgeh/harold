@@ -43,10 +43,11 @@ SESSION = 'harold-call-test'
 LOGIN = 'call-test'
 # The call answerer answers the first question from the todo seeded in the scratch store; the
 # second is a request for work, which it hands over to the stand-in chief.
-QUESTION = 'How many todos are waiting'
-REQUEST = 'Ask the chief to rerun the harold build'
+QUESTION = 'How many to do items are waiting'
+REQUEST = 'Ask the chief to start the build again'
 FROM_THE_CHIEF = 'From the chief.'
 ONE_MOMENT = 'One moment.'
+NO_CHIEF = "There's no chief running."
 TODO_ID = 'QCALLTEST'
 NO_RECIPIENT = 'call-test@harold.invalid'
 ANSWER_LINE = 'Call test answer.'
@@ -404,7 +405,15 @@ class Phone:
         headers = {'Tailscale-User-Login': LOGIN}
         if method != 'GET':
             headers['Origin'] = 'http://' + self.host
-            headers['Content-Type'] = content_type
+            if path.split('?')[0] == '/call/audio':
+                # `call.js` posts the audio with `fetch`, not Datastar (ADR 0018).
+                headers['Content-Type'] = content_type
+            else:
+                # What Datastar's `@post` and `@delete` send.
+                headers['Datastar-Request'] = 'true'
+                headers['Content-Type'] = 'application/json'
+                if body is None:
+                    body = '{}'
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
         try:
             connection.request(method, path, body=body, headers=headers)
@@ -808,10 +817,11 @@ class Call:
         with self.phone.changed:
             return [shown for _, shown in self.phone.events[mark:] if shown['sound']]
 
-    def wait_for_line(self, test, limit, what, since):
-        """Waits for a sound whose line `test` accepts, serving every sound meanwhile."""
+    def wait_for_line(self, test, limit, what, since, mark):
+        """Waits for a sound at or after event `mark` whose line `test` accepts, serving every
+        sound meanwhile."""
         def found():
-            for shown in self.sounds_since(self.mark):
+            for shown in self.sounds_since(mark):
                 self.serve(shown)
                 if shown['line'] and test(shown['line']):
                     return shown
@@ -862,16 +872,21 @@ def play(run):
         if not add(run_step('the voice worker loads for the open page', LIMIT_PAGE_LOAD, page_load)):
             return results
 
-    # 1. POST /call, retried while the test Harold has not yet seen the stand-in chief.
+    # 1. POST /call answers a Datastar event that patches `_callId`, or `_callWhy` when no call
+    # starts. Retried while the test Harold has not yet seen the stand-in chief.
     def post_call():
         started = time.monotonic()
         while True:
             status, _, body = phone.request('POST', '/call')
-            if status == 200:
-                call.call_id = body.decode().strip()
-                return 'call {}'.format(call.call_id[:8])
-            if status != 409 or time.monotonic() - started > LIMIT_CALL:
+            if status != 200:
                 raise StepFailed('POST /call answered {} {}'.format(status, body.decode(errors='replace')))
+            signals = call_signals(body.decode(errors='replace'))
+            if signals.get('_callId'):
+                call.call_id = signals['_callId']
+                return 'call {}'.format(call.call_id[:8])
+            why = signals.get('_callWhy', '')
+            if why != NO_CHIEF or time.monotonic() - started > LIMIT_CALL:
+                raise StepFailed('POST /call started no call: {}'.format(why or body.decode(errors='replace')))
             time.sleep(1)
 
     call.call_sent = time.monotonic()
@@ -950,7 +965,7 @@ def play(run):
     def todos_answer():
         shown = call.wait_for_line(
             lambda line: line != ONE_MOMENT and bool(re.search(r'\b(1|one)\b', line.lower())), LIMIT_ANSWER,
-            "the call answerer's answer naming one todo", until)
+            "the call answerer's answer naming one todo", until, call.mark)
         answer_marks['todos'] = shown['sound']
         log = run.log()
         if 'spoken prompt typed' in log or 'hand-over typed' in log:
@@ -978,7 +993,7 @@ def play(run):
 
     def passed_on():
         shown = call.wait_for_line(lambda line: 'chief' in line.lower() and line != FROM_THE_CHIEF,
-                                   LIMIT_ANSWER, 'the answerer says it passed the request on', until)
+                                   LIMIT_ANSWER, 'the answerer says it passed the request on', until, leg_mark)
         return '"{}"'.format(shown['line'])
 
     if not add(run_step("the answerer says it passed the request on", LIMIT_ANSWER, passed_on, since=until)):
@@ -999,7 +1014,7 @@ def play(run):
 
     # 4. The chief's report, after "From the chief.".
     def chief_line():
-        call.wait_for_line(lambda line: line == ANSWER_LINE, LIMIT_SOUND, "the chief's answer in #call", until)
+        call.wait_for_line(lambda line: line == ANSWER_LINE, LIMIT_SOUND, "the chief's answer in #call", until, leg_mark)
         lines = [shown['line'] for shown in call.sounds_since(leg_mark) if shown['line']]
         if FROM_THE_CHIEF not in lines or lines.index(FROM_THE_CHIEF) > lines.index(ANSWER_LINE):
             raise StepFailed('"From the chief." did not come before the answer: {}'.format(lines))
@@ -1022,6 +1037,30 @@ def play(run):
     if ready:
         results.append(StepResult('the log says how the voice worker loaded', True, 0, ready))
     return results
+
+
+def call_signals(events):
+    """The signals a Datastar event patches, from its `data: signals` line."""
+    for line in events.splitlines():
+        if line.startswith('data: signals '):
+            try:
+                signals = json.loads(line[len('data: signals '):])
+            except ValueError:
+                return {}
+            return signals if isinstance(signals, dict) else {}
+    return {}
+
+
+def no_post_refused(log):
+    """Fails when the test Harold's log has an `app post refused` line, naming each route."""
+    routes = []
+    for line in clean_log(log).splitlines():
+        if 'app post refused' in line:
+            found = re.search(r'route="([^"]*)"', line)
+            routes.append(found.group(1) if found else line.strip())
+    if routes:
+        raise StepFailed('the test Harold refused posts to: {}'.format(', '.join(sorted(set(routes)))))
+    return 'none refused'
 
 
 def worker_ready_line(log):
@@ -1125,6 +1164,7 @@ def main(argv=None):
                     results.append(seeded)
                     if seeded.ok:
                         results.extend(play(run))
+                        results.append(run_step('no post refused', 5, lambda: no_post_refused(run.log())))
                     results.append(run_step('log shows nothing beyond the scratch pane', 5,
                                             lambda: isolation(run)))
     except Exception as error:  # a crash is a failed run, and the teardown still happens
