@@ -408,7 +408,8 @@ pub(crate) struct AppState {
     pub loopback_hosts: Arc<[String]>,
     /// Changes, or closes, when Harold shuts down.
     pub shutdown: watch::Receiver<()>,
-    /// The phone's calls; `None` when Harold has none, and every call route answers `409`.
+    /// The phone's calls. `None` when Harold has none: `POST /call` then answers 200 with
+    /// `_callWhy`, and the other call routes answer `409`.
     pub calls: Option<Arc<dyn PhoneCallApi>>,
     /// The app's name and icon.
     pub identity: Arc<WebAppIdentity>,
