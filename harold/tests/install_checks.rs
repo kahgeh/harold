@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -1012,6 +1012,22 @@ fn under_launchd_a_crash_loop_exits_zero_and_says_why() {
     assert_eq!(crashes.lines().next(), Some("gave-up"));
 }
 
+/// Keeps everything a child writes to a pipe, for the test to read while the child runs.
+fn collect_output(mut pipe: impl std::io::Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let sink = kept.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(read) = pipe.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            sink.lock().unwrap().extend_from_slice(&chunk[..read]);
+        }
+    });
+    kept
+}
+
 #[test]
 fn under_launchd_a_clean_shutdown_marks_the_crash_file_clean() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1019,24 +1035,60 @@ fn under_launchd_a_clean_shutdown_marks_the_crash_file_clean() {
     drop(listener);
     let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
     let mut child = fixture.daemon_command(true).spawn().unwrap();
-    let deadline = Instant::now() + HANG_LIMIT;
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("the daemon did not start listening: {output:?}");
+    // The test reads the daemon's output while it runs, so it can wait for the `Harold listening` line.
+    let stdout = collect_output(child.stdout.take().unwrap());
+    let stderr = collect_output(child.stderr.take().unwrap());
+    let output_so_far = || {
+        format!(
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&stdout.lock().unwrap()),
+            String::from_utf8_lossy(&stderr.lock().unwrap())
+        )
+    };
+    // A port that accepts a connection while the crash file is missing belongs to another
+    // process, so the test waits for the file, then the line, then the port, in this order.
+    let wait_for = |step: &str, child: &mut std::process::Child, ready: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + HANG_LIMIT;
+        while !ready() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let status = child.wait().unwrap();
+                panic!(
+                    "the daemon did not get to: {step} ({status})\n{}",
+                    output_so_far()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let running = std::fs::read_to_string(fixture.crashes()).unwrap();
-    assert_eq!(running.lines().next(), Some("running"));
+    };
+    wait_for("the crash file reads `running`", &mut child, &|| {
+        std::fs::read_to_string(fixture.crashes())
+            .is_ok_and(|text| text.lines().next() == Some("running"))
+    });
+    wait_for("the `Harold listening` line", &mut child, &|| {
+        output_so_far().contains("Harold listening")
+    });
+    wait_for("a connection on its port", &mut child, &|| {
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    });
     let signalled = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
     assert!(signalled.success());
-    let output = wait_for_exit(child);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let deadline = Instant::now() + HANG_LIMIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("the daemon did not exit after SIGTERM\n{}", output_so_far());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(0), "{status:?}\n{}", output_so_far());
     assert_eq!(
         std::fs::read_to_string(fixture.crashes()).unwrap(),
         "clean\n"
