@@ -92,6 +92,8 @@ pub(crate) struct TmuxAgentInventory {
     settings: AgentSettings,
     /// Each observed agent process's program, from the last scan, by pane id and agent pid.
     programs: Mutex<HashMap<(String, u32), String>>,
+    /// Each (pane id, agent pid) pair whose full read did not join the chain to the pane's process.
+    unjoined: Mutex<HashSet<(String, u32)>>,
 }
 
 impl TmuxAgentInventory {
@@ -99,23 +101,25 @@ impl TmuxAgentInventory {
         Self {
             settings,
             programs: Mutex::new(HashMap::new()),
+            unjoined: Mutex::new(HashSet::new()),
         }
     }
 }
 
 impl TmuxAgentInventory {
-    /// Runs one scan with the two reads given, so a test can slow them down. Logs one `warn`
-    /// line when the scan takes more than `slow_after` or does not succeed.
+    /// Runs one scan with the two reads given, so a test can slow them down. The pane read comes
+    /// first. The process read gets the panes' ttys (a tty read), or `None` for a full read.
+    /// Logs one `warn` line when the scan takes more than `slow_after` or does not succeed.
     pub(super) fn scan_with(
         &self,
-        read_processes: impl FnOnce() -> Result<Vec<ProcessInfo>, InventoryError>,
         read_panes: impl FnOnce() -> Result<Vec<TmuxPaneInfo>, InventoryError>,
+        read_processes: impl FnMut(Option<&[String]>) -> Result<Vec<ProcessInfo>, InventoryError>,
         slow_after: Duration,
     ) -> Result<Vec<AgentPaneObservation>, InventoryError> {
         let started = Instant::now();
         let mut ps_ms = 0;
         let mut tmux_ms = None;
-        let result = self.scan_parts(read_processes, read_panes, &mut ps_ms, &mut tmux_ms);
+        let result = self.scan_parts(read_panes, read_processes, &mut ps_ms, &mut tmux_ms);
         let outcome = match &result {
             Ok(_) => "ok",
             Err(_) if stop_requested() => "stopped",
@@ -134,19 +138,76 @@ impl TmuxAgentInventory {
 
     fn scan_parts(
         &self,
-        read_processes: impl FnOnce() -> Result<Vec<ProcessInfo>, InventoryError>,
         read_panes: impl FnOnce() -> Result<Vec<TmuxPaneInfo>, InventoryError>,
+        mut read_processes: impl FnMut(Option<&[String]>) -> Result<Vec<ProcessInfo>, InventoryError>,
         ps_ms: &mut u64,
         tmux_ms: &mut Option<u64>,
     ) -> Result<Vec<AgentPaneObservation>, InventoryError> {
         let part_started = Instant::now();
-        let processes = read_processes();
-        *ps_ms = elapsed_ms(part_started);
-        let processes = processes?;
-        let part_started = Instant::now();
         let panes = read_panes();
         *tmux_ms = Some(elapsed_ms(part_started));
         let panes = panes?;
+        if panes.is_empty() {
+            self.programs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            return Ok(Vec::new());
+        }
+        let mut ttys: Vec<String> = Vec::new();
+        for pane in &panes {
+            if !ttys.contains(&pane.tty) {
+                ttys.push(pane.tty.clone());
+            }
+        }
+        let part_started = Instant::now();
+        let processes = read_processes(Some(&ttys));
+        *ps_ms = elapsed_ms(part_started);
+        let mut processes = processes?;
+        let candidates = broken_chain_candidates(&panes, &processes, &self.settings);
+        let known_broken = self
+            .unjoined
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        // A pair that an earlier full read could not join stays out of the next one, while it lives.
+        let wanted: Vec<&(String, u32)> = candidates
+            .iter()
+            .filter(|pair| !known_broken.contains(*pair))
+            .collect();
+        let mut unjoined: HashSet<(String, u32)> = candidates
+            .iter()
+            .filter(|pair| known_broken.contains(*pair))
+            .cloned()
+            .collect();
+        if let Some(first) = wanted.first() {
+            let part_started = Instant::now();
+            let full = read_processes(None);
+            *ps_ms += elapsed_ms(part_started);
+            processes = full?;
+            let by_pid: HashMap<u32, &ProcessInfo> = processes
+                .iter()
+                .map(|process| (process.pid, process))
+                .collect();
+            let mut reason = "chain_broken";
+            let mut logged_pane = first.0.as_str();
+            for pair in &wanted {
+                let joined = panes
+                    .iter()
+                    .find(|pane| pane.pane_id == pair.0)
+                    .is_some_and(|pane| descendant_depth(pair.1, pane.pane_pid, &by_pid).is_some());
+                if joined {
+                    if reason == "chain_broken" {
+                        reason = "chain_joined";
+                        logged_pane = pair.0.as_str();
+                    }
+                } else {
+                    unjoined.insert((*pair).clone());
+                }
+            }
+            tracing::warn!(reason, pane_id = logged_pane, "agent inventory full read");
+        }
+        *self.unjoined.lock().unwrap_or_else(PoisonError::into_inner) = unjoined;
         let observed_at_ms = now_ms()?;
         let observed: Vec<AgentPaneObservation> = panes
             .iter()
@@ -172,13 +233,40 @@ impl TmuxAgentInventory {
     }
 }
 
+/// The (pane id, process id) pairs for a process on a pane's tty that matches an agent command
+/// but whose parent chain does not reach the pane's process in the tty read.
+fn broken_chain_candidates(
+    panes: &[TmuxPaneInfo],
+    processes: &[ProcessInfo],
+    settings: &AgentSettings,
+) -> Vec<(String, u32)> {
+    let by_pid: HashMap<u32, &ProcessInfo> = processes
+        .iter()
+        .map(|process| (process.pid, process))
+        .collect();
+    panes
+        .iter()
+        .flat_map(|pane| {
+            let by_pid = &by_pid;
+            processes
+                .iter()
+                .filter(move |process| {
+                    normalize_tty(&process.tty) == normalize_tty(&pane.tty)
+                        && settings.matches_command(command_program(&process.command))
+                        && descendant_depth(process.pid, pane.pane_pid, by_pid).is_none()
+                })
+                .map(move |process| (pane.pane_id.clone(), process.pid))
+        })
+        .collect()
+}
+
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 impl AgentInventoryPort for TmuxAgentInventory {
     fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
-        self.scan_with(read_process_table, read_tmux_panes, SLOW_SCAN)
+        self.scan_with(read_tmux_panes, read_process_table, SLOW_SCAN)
     }
 
     fn program(&self, incarnation: &AgentIncarnation) -> Option<String> {
@@ -434,14 +522,72 @@ fn parse_start_time(month: &str, day: &str, time: &str, year: &str) -> Option<i6
     )
 }
 
-fn read_process_table() -> Result<Vec<ProcessInfo>, InventoryError> {
-    let stdout = command_stdout(
-        Command::new("ps")
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC")
-            .args(["-axo", "pid=,ppid=,pgid=,tpgid=,tty=,lstart=,command="]),
-    )?;
-    parse_process_table(&stdout)
+/// The `ps` columns Harold reads.
+const PS_COLUMNS: &str = "pid=,ppid=,pgid=,tpgid=,tty=,lstart=,command=";
+
+fn ps_stdout(ttys: Option<&[String]>) -> Result<String, InventoryError> {
+    let mut command = Command::new("ps");
+    command
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .args(["-o", PS_COLUMNS]);
+    match ttys {
+        Some(ttys) => {
+            for tty in ttys {
+                command.args(["-t", tty]);
+            }
+        }
+        None => {
+            command.arg("-ax");
+        }
+    }
+    command_stdout(&mut command)
+}
+
+/// A tty read of the ttys given, or a full read for `None`.
+pub(super) fn read_process_table(
+    ttys: Option<&[String]>,
+) -> Result<Vec<ProcessInfo>, InventoryError> {
+    let Some(ttys) = ttys else {
+        return parse_process_table(&ps_stdout(None)?);
+    };
+    read_tty_table(
+        ttys,
+        |tty| std::path::Path::new("/dev").join(tty).exists(),
+        |ttys| ps_stdout(Some(ttys)),
+    )
+}
+
+/// The tty read. `ps` answers one unknown tty with exit status 1 and no rows for any tty. So it
+/// runs for the ttys that exist, and once more for those still there if it failed and a tty went.
+/// (The shared command runner drops stderr, so the check of `/dev/<tty>` takes the place of the
+/// stderr line that names the tty.)
+pub(super) fn read_tty_table(
+    ttys: &[String],
+    exists: impl Fn(&str) -> bool,
+    mut run: impl FnMut(&[String]) -> Result<String, InventoryError>,
+) -> Result<Vec<ProcessInfo>, InventoryError> {
+    let known: Vec<String> = ttys
+        .iter()
+        .filter(|tty| !tty.is_empty() && exists(tty))
+        .cloned()
+        .collect();
+    if known.is_empty() {
+        return Ok(Vec::new());
+    }
+    match run(&known) {
+        Err(InventoryError::CommandFailed) => {
+            let remaining: Vec<String> = known.iter().filter(|tty| exists(tty)).cloned().collect();
+            if remaining.len() == known.len() {
+                return Err(InventoryError::CommandFailed);
+            }
+            if remaining.is_empty() {
+                return Ok(Vec::new());
+            }
+            parse_process_table(&run(&remaining)?)
+        }
+        result => parse_process_table(&result?),
+    }
 }
 
 pub(super) fn tmux_panes_command() -> Command {

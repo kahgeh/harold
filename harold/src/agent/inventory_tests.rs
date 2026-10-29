@@ -4,7 +4,7 @@ use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
     InventoryError, ProcessInfo, ProviderResolution, TmuxAgentInventory, TmuxPaneInfo,
     command_program, command_stdout, observe_pane, parse_process_table, parse_tmux_panes,
-    resolve_provider,
+    read_tty_table, resolve_provider,
 };
 use super::screen::{StopSignal, run_stoppable};
 
@@ -488,16 +488,16 @@ fn scan_with_sleeps(
         inventory
             .scan_with(
                 || {
+                    std::thread::sleep(tmux_sleep);
+                    Ok(vec![pane()])
+                },
+                |_| {
                     std::thread::sleep(ps_sleep);
                     if fail_ps {
                         Err(InventoryError::CommandFailed)
                     } else {
                         Ok(Vec::new())
                     }
-                },
-                || {
-                    std::thread::sleep(tmux_sleep);
-                    Ok(Vec::new())
                 },
                 std::time::Duration::from_millis(500),
             )
@@ -541,7 +541,7 @@ fn a_fast_scan_logs_nothing() {
 }
 
 #[test]
-fn a_scan_stopped_during_ps_logs_no_tmux_time() {
+fn a_scan_stopped_during_ps_logs_both_times() {
     let (result, text) = scan_with_sleeps(
         std::time::Duration::from_millis(20),
         std::time::Duration::ZERO,
@@ -554,6 +554,321 @@ fn a_scan_stopped_during_ps_logs_no_tmux_time() {
         "{text}"
     );
     assert!(text.contains("ps_ms="), "{text}");
-    assert!(!text.contains("tmux_ms"), "{text}");
+    assert!(text.contains("tmux_ms="), "{text}");
     assert!(text.contains("outcome=\"stopped\""), "{text}");
+}
+
+/// What the fake process reads were asked for: `Some(ttys)` is a tty read, `None` a full read.
+type Reads = std::cell::RefCell<Vec<Option<Vec<String>>>>;
+
+fn pane_on(pane_id: &str, pane_pid: u32, tty: &str) -> TmuxPaneInfo {
+    TmuxPaneInfo {
+        pane_id: pane_id.to_string(),
+        tty: tty.to_string(),
+        pane_pid,
+        ..pane()
+    }
+}
+
+fn process_on(pid: u32, ppid: u32, tty: &str, command: &str) -> ProcessInfo {
+    ProcessInfo {
+        tty: tty.to_string(),
+        ..process(pid, ppid, i32::try_from(pid).unwrap(), command)
+    }
+}
+
+/// One scan with fake reads. The tty read gives `tty_rows`, the full read gives `full_rows`.
+fn fake_scan(
+    inventory: &TmuxAgentInventory,
+    panes: &[TmuxPaneInfo],
+    tty_rows: &[ProcessInfo],
+    full_rows: &[ProcessInfo],
+    reads: &Reads,
+) -> Result<Vec<u32>, InventoryError> {
+    inventory
+        .scan_with(
+            || Ok(panes.to_vec()),
+            |ttys| {
+                reads.borrow_mut().push(ttys.map(<[String]>::to_vec));
+                Ok(if ttys.is_some() { tty_rows } else { full_rows }.to_vec())
+            },
+            std::time::Duration::from_secs(60),
+        )
+        .map(|observed| {
+            observed
+                .iter()
+                .map(|pane| pane.incarnation.agent_pid)
+                .collect()
+        })
+}
+
+fn with_log<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let log = LogText::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let result = run();
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    (result, text)
+}
+
+#[test]
+fn the_scan_reads_each_panes_tty_once_without_dev() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let panes = [
+        pane_on("%1", 10, "ttys001"),
+        pane_on("%2", 20, "ttys002"),
+        pane_on("%3", 10, "ttys001"),
+    ];
+    let rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(11, 10, "ttys001", "codex"),
+        process_on(20, 1, "ttys002", "/bin/zsh"),
+    ];
+    let reads = Reads::default();
+
+    let agents = fake_scan(&inventory, &panes, &rows, &[], &reads).unwrap();
+
+    assert_eq!(agents, vec![11, 11]);
+    assert_eq!(
+        *reads.borrow(),
+        vec![Some(vec!["ttys001".to_string(), "ttys002".to_string()])]
+    );
+}
+
+#[test]
+fn an_empty_pane_list_runs_no_process_read() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let reads = Reads::default();
+
+    let agents = fake_scan(&inventory, &[], &[], &[], &reads).unwrap();
+
+    assert!(agents.is_empty());
+    assert!(reads.borrow().is_empty());
+}
+
+#[test]
+fn a_pane_whose_tty_the_process_read_does_not_know_does_not_fail_the_scan() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let panes = [pane_on("%1", 10, "ttys001"), pane_on("%2", 20, "ttys404")];
+    let rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(11, 10, "ttys001", "claude"),
+    ];
+    let reads = Reads::default();
+
+    let agents = fake_scan(&inventory, &panes, &rows, &[], &reads).unwrap();
+
+    assert_eq!(agents, vec![11]);
+}
+
+#[test]
+fn a_broken_chain_does_one_full_read_and_finds_the_agent() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let panes = [pane_on("%1", 10, "ttys001")];
+    // The middle process has no terminal, so the tty read lacks it.
+    let tty_rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(12, 11, "ttys001", "codex"),
+    ];
+    let full_rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(11, 10, "??", "launcher"),
+        process_on(12, 11, "ttys001", "codex"),
+    ];
+    let reads = Reads::default();
+
+    let (agents, text) = with_log(|| fake_scan(&inventory, &panes, &tty_rows, &full_rows, &reads));
+
+    assert_eq!(agents.unwrap(), vec![12]);
+    assert_eq!(
+        reads.borrow().iter().filter(|read| read.is_none()).count(),
+        1
+    );
+    assert_eq!(
+        text.matches("agent inventory full read").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("reason=\"chain_joined\""), "{text}");
+    assert!(text.contains("pane_id=\"%1\""), "{text}");
+}
+
+#[test]
+fn a_chain_that_a_full_read_cannot_join_causes_one_full_read_only() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let panes = [pane_on("%1", 10, "ttys001")];
+    let rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(12, 1, "ttys001", "codex"),
+    ];
+    let reads = Reads::default();
+
+    let (agents, text) = with_log(|| {
+        let first = fake_scan(&inventory, &panes, &rows, &rows, &reads);
+        let later: Vec<_> = (0..5)
+            .map(|_| fake_scan(&inventory, &panes, &rows, &rows, &reads))
+            .collect();
+        (first, later)
+    });
+
+    assert_eq!(agents.0.unwrap(), Vec::<u32>::new());
+    assert!(agents.1.iter().all(|scan| scan.is_ok()));
+    assert_eq!(
+        reads.borrow().iter().filter(|read| read.is_none()).count(),
+        1
+    );
+    assert_eq!(
+        text.matches("agent inventory full read").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("reason=\"chain_broken\""), "{text}");
+}
+
+#[test]
+fn two_broken_panes_in_one_scan_do_one_full_read_and_log_one_line() {
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let panes = [pane_on("%1", 10, "ttys001"), pane_on("%2", 20, "ttys002")];
+    let rows = [
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(12, 1, "ttys001", "codex"),
+        process_on(20, 1, "ttys002", "/bin/zsh"),
+        process_on(22, 1, "ttys002", "claude"),
+    ];
+    let reads = Reads::default();
+
+    let (result, text) = with_log(|| fake_scan(&inventory, &panes, &rows, &rows, &reads));
+
+    assert!(result.is_ok());
+    assert_eq!(
+        reads.borrow().iter().filter(|read| read.is_none()).count(),
+        1
+    );
+    assert_eq!(
+        text.matches("agent inventory full read").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("pane_id=\"%1\""), "{text}");
+}
+
+#[test]
+fn an_unknown_tty_is_dropped_and_the_others_are_read_again() {
+    let present = std::cell::RefCell::new(vec!["ttys001", "ttys002"]);
+    let runs = std::cell::RefCell::new(Vec::new());
+    let ttys = ["ttys001".to_string(), "ttys002".to_string()];
+
+    let rows = read_tty_table(
+        &ttys,
+        |tty| present.borrow().contains(&tty),
+        |asked| {
+            runs.borrow_mut().push(asked.to_vec());
+            // The pane closes while the first `ps` starts.
+            if asked.iter().any(|tty| tty == "ttys002") {
+                present.borrow_mut().retain(|tty| *tty != "ttys002");
+                return Err(InventoryError::CommandFailed);
+            }
+            Ok("11 10 11 11 ttys001 Thu Oct 29 10:00:00 2026 codex\n".to_string())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(runs.borrow().len(), 2);
+    assert_eq!(runs.borrow()[1], vec!["ttys001".to_string()]);
+}
+
+#[test]
+fn a_tty_that_does_not_exist_is_not_asked_of_ps() {
+    let runs = std::cell::RefCell::new(0);
+    let ttys = ["ttys404".to_string()];
+
+    let rows = read_tty_table(
+        &ttys,
+        |_| false,
+        |_| {
+            *runs.borrow_mut() += 1;
+            Ok(String::new())
+        },
+    );
+
+    assert_eq!(rows, Ok(Vec::new()));
+    assert_eq!(*runs.borrow(), 0);
+}
+
+#[test]
+fn a_second_ps_failure_or_another_failure_fails_the_scan() {
+    let ttys = ["ttys001".to_string(), "ttys002".to_string()];
+    let gone = std::cell::Cell::new(false);
+    let second = read_tty_table(
+        &ttys,
+        |tty| !(gone.get() && tty == "ttys002"),
+        |_| {
+            gone.set(true);
+            Err(InventoryError::CommandFailed)
+        },
+    );
+    assert_eq!(second, Err(InventoryError::CommandFailed));
+
+    let other = read_tty_table(&ttys, |_| true, |_| Err(InventoryError::CommandFailed));
+    assert_eq!(other, Err(InventoryError::CommandFailed));
+}
+
+#[test]
+#[ignore = "requires a private tmux server named by TMUX; compares the tty read with the full read"]
+fn live_tty_read_finds_the_same_agents_as_the_full_read() {
+    use super::inventory::read_process_table;
+
+    let output = super::inventory::tmux_panes_command().output().unwrap();
+    assert!(output.status.success(), "tmux listing failed");
+    let panes = parse_tmux_panes(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let mut ttys: Vec<String> = Vec::new();
+    for pane in &panes {
+        if !ttys.contains(&pane.tty) {
+            ttys.push(pane.tty.clone());
+        }
+    }
+    let tty_rows = read_process_table(Some(&ttys)).unwrap();
+    let full_rows = read_process_table(None).unwrap();
+    let settings = named_settings();
+    let (mut agents, mut different) = (0, Vec::new());
+    for pane in &panes {
+        let from = |rows: &[ProcessInfo]| {
+            observe_pane(pane, rows, &settings, 0)
+                .unwrap()
+                .map(|observation| observation.incarnation.agent_pid)
+        };
+        let (short, full) = (from(&tty_rows), from(&full_rows));
+        agents += usize::from(full.is_some());
+        if short != full {
+            different.push(pane.pane_id.clone());
+        }
+    }
+    println!(
+        "panes={} with_agent={agents} different={different:?}",
+        panes.len()
+    );
+    assert!(agents > 0);
+    assert!(different.is_empty(), "{different:?}");
+}
+
+#[test]
+fn a_pane_with_an_empty_tty_is_not_asked_of_ps() {
+    let ttys = [String::new(), "ttys001".to_string()];
+    let asked = std::cell::RefCell::new(Vec::new());
+
+    let rows = read_tty_table(
+        &ttys,
+        |_| true,
+        |ttys| {
+            asked.borrow_mut().push(ttys.to_vec());
+            Ok(String::new())
+        },
+    );
+
+    assert_eq!(rows, Ok(Vec::new()));
+    assert_eq!(*asked.borrow(), vec![vec!["ttys001".to_string()]]);
 }

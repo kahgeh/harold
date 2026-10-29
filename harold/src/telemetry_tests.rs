@@ -2376,6 +2376,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .chain(WEB_APP_CARDS.map(str::to_string))
         .chain(KNOWLEDGE_CARDS.map(str::to_string))
         .chain(TTS_CARDS.map(str::to_string))
+        .chain([INVENTORY_FULL_READS_CARD.to_string()])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2530,6 +2531,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days",
     "TTS failures per day, by machine, caller and reason",
 ];
+const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
