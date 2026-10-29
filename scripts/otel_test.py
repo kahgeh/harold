@@ -74,7 +74,12 @@ class OtelRun(ct.Run):
             self.env, 'new-session', '-d', '-s', ct.SESSION, '-c', str(self.chief_dir),
             '-x', '160', '-y', '50', '-P', '-F', '#{pane_id}', 'cat')
         self.pane = created.stdout.strip()
-        say = '{} send-message-to-away-device --src-id {} "{}"'.format(self.binary, self.pane, ANSWER)
+        # The stand-in reaches Harold through a link in its scratch folder, so no path of the
+        # worktree is in its files.
+        (self.scratch / 'bin').mkdir()
+        link = self.scratch / 'bin' / 'harold'
+        link.symlink_to(self.binary)
+        say = '{} send-message-to-away-device --src-id {} "{}"'.format(link, self.pane, ANSWER)
         (self.chief_dir / 'CLAUDE.md').write_text(
             'Two kinds of line need an answer, and the answer is always the same command.\n'
             '1. A message whose first line starts with 📱 is one reply from the phone, with all its lines.\n'
@@ -85,11 +90,20 @@ class OtelRun(ct.Run):
             'Answer any other line with the one word: ok.\n'.format(say))
         # No hooks: the user's own Stop hook reports to the installed Harold.
         (self.chief_dir / '.claude' / 'settings.json').write_text(
-            '{{"disableAllHooks": true, "promptSuggestionEnabled": false, "permissions": {{"allow": ["Bash({}:*)"]}}}}\n'.format(
-                '{} send-message-to-away-device'.format(self.binary)))
+            '{{"disableAllHooks": true, "promptSuggestionEnabled": false, '
+            '"permissions": {{"defaultMode": "dontAsk", "allow": ["Bash({}:*)"]}}}}\n'.format(
+                '{} send-message-to-away-device'.format(link)))
         self.run_stand_in()
         self.sampler = LoadSampler(self.env)
         self.sampler.start()
+
+    def run_stand_in(self):
+        """As Run.run_stand_in, but Claude Code has the shell tool only, in dontAsk mode: it
+        refuses each tool use that no rule allows."""
+        ct.tmux(self.env, 'set-option', '-w', '-t', self.pane, 'remain-on-exit', 'on')
+        self.stand_in_started = time.monotonic()
+        ct.tmux(self.env, 'respawn-pane', '-k', '-t', self.pane, os.environ.get('CALL_TEST_STAND_IN')
+                or 'claude --model haiku --permission-mode dontAsk --tools=Bash "Hello"')
 
     def chief_idle(self):
         text = self.pane_text()
@@ -115,7 +129,7 @@ class OtelRun(ct.Run):
 
 LIST_PANES_FORMAT = '#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}'
 SAMPLE_EVERY = 5
-REPORT_SAMPLES = 120
+REPORT_SAMPLES = 300
 REPORT_LOG = 300
 HAROLD_TROUBLE = ('agent monitor degraded', 'agent monitor recovered', 'event handler cycle failed')
 
