@@ -499,6 +499,34 @@ where
     I: AgentInventoryPort + 'static,
     S: VisibleScreenPort + 'static,
 {
+    let inventory_timeout = seed.acquisition_timeout;
+    spawn_agent_monitor_seeded_with_inventory_timeout_for_test(
+        store,
+        inventory,
+        screen,
+        providers,
+        seed,
+        inventory_timeout,
+        shutdown,
+    )
+}
+
+/// As `spawn_agent_monitor_seeded_for_test`, with an inventory deadline apart from the seed's
+/// screen deadline.
+#[cfg(test)]
+pub(crate) fn spawn_agent_monitor_seeded_with_inventory_timeout_for_test<I, S>(
+    store: Arc<HaroldStore>,
+    inventory: Arc<I>,
+    screen: Arc<S>,
+    providers: Vec<AgentProviderSettings>,
+    seed: AgentMonitorSeed,
+    inventory_timeout: Duration,
+    shutdown: watch::Receiver<()>,
+) -> (AgentMonitorHandle, tokio::task::JoinHandle<()>)
+where
+    I: AgentInventoryPort + 'static,
+    S: VisibleScreenPort + 'static,
+{
     spawn_runtime(
         RuntimeInputs {
             store,
@@ -508,7 +536,7 @@ where
             initial_snapshot: seed.snapshot,
             graces: GraceWindows::same(seed.hook_grace_ms),
             acquisition_timeout: seed.acquisition_timeout,
-            inventory_timeout: seed.acquisition_timeout,
+            inventory_timeout,
             intervals: None,
             inventory_interval: Duration::ZERO,
             activity_summary: None,

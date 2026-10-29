@@ -20,6 +20,7 @@ use super::runtime::{
     AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, ReadFailure, SCREEN_DEGRADE_AFTER,
     SCREEN_RETRY_TIMEOUT, coalesced_tick_channel_for_test, read_with_retry_for_test,
     spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
+    spawn_agent_monitor_seeded_with_inventory_timeout_for_test,
     spawn_agent_monitor_with_graces_for_test,
 };
 use super::screen::{
@@ -5522,7 +5523,7 @@ struct ScreenHealthFixture {
 }
 
 impl ScreenHealthFixture {
-    /// Tracks the panes `%8`, `%9`, ... with a 20 ms first deadline.
+    /// Tracks the panes `%8`, `%9`, ... with a 20 ms screen deadline and a 2 s inventory deadline.
     async fn new(screen: TimingScreen, pane_count: usize) -> Self {
         let directory = TestDirectory::new();
         let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
@@ -5539,7 +5540,7 @@ impl ScreenHealthFixture {
             .collect();
         let screen = Arc::new(screen);
         let (shutdown, shutdown_rx) = watch::channel(());
-        let (handle, _task) = spawn_agent_monitor_seeded_for_test(
+        let (handle, _task) = spawn_agent_monitor_seeded_with_inventory_timeout_for_test(
             Arc::clone(&store),
             Arc::new(FakeInventory::scans(vec![Ok(panes)])),
             Arc::clone(&screen),
@@ -5549,6 +5550,8 @@ impl ScreenHealthFixture {
                 hook_grace_ms: 2_000,
                 acquisition_timeout: SHORT_DEADLINE,
             },
+            // The fake answers at once: only a busy Mac makes its thread take longer than 20 ms.
+            Duration::from_secs(2),
             shutdown_rx,
         );
         handle.inventory_tick().await.unwrap();
@@ -5592,7 +5595,12 @@ async fn two_panes_timing_out_in_one_pass_leave_the_screen_healthy() {
 
     // One pane gets the pass's retry and the other times out.
     fixture.handle.screen_tick().await.unwrap();
+    // The tokio clock stands still while the slow reads finish, so the time between the passes
+    // comes from the test, not from the Mac. Both passes read on the running clock, because the
+    // 20 ms read deadline needs it: a paused clock jumps past that deadline at once.
+    tokio::time::pause();
     let_slow_reads_finish();
+    tokio::time::resume();
     fixture.handle.screen_tick().await.unwrap();
 
     let logs = logged(&captured);
