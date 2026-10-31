@@ -1656,6 +1656,24 @@ fn tool_refusal_line(status: &tonic::Status) -> String {
     }
 }
 
+/// For `send-message-to-away-device` and `speak` with no `--src-id`: adds the caller's pane id
+/// (`$TMUX_PANE` or `$REX_BLOCK`) as `--src-id`, when there is one.
+pub(crate) fn with_caller_pane(args: Vec<String>) -> Vec<String> {
+    with_caller_pane_from(args, caller_pane())
+}
+
+pub(crate) fn with_caller_pane_from(mut args: Vec<String>, pane: String) -> Vec<String> {
+    let sends = matches!(
+        args.first().map(String::as_str),
+        Some(AWAY_MESSAGE_COMMAND | SPEAK_COMMAND)
+    );
+    if sends && !pane.is_empty() && !args.iter().any(|arg| arg == "--src-id") {
+        args.insert(1, "--src-id".to_string());
+        args.insert(2, pane);
+    }
+    args
+}
+
 /// The caller's pane id: `$TMUX_PANE` in a tmux pane, `$REX_BLOCK` in a Rex pane, or an empty
 /// string outside both.
 pub(crate) fn caller_pane() -> String {
@@ -3070,6 +3088,34 @@ mod tests {
             "block:abc"
         );
         assert_eq!(caller_pane_from(env(&[])), "");
+    }
+
+    #[test]
+    fn the_caller_pane_becomes_the_source_id_when_there_is_none() {
+        let words = |list: &[&str]| {
+            list.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            with_caller_pane_from(words(&["speak", "hello"]), "block:abc".into()),
+            words(&["speak", "--src-id", "block:abc", "hello"])
+        );
+        assert_eq!(
+            with_caller_pane_from(
+                words(&["send-message-to-away-device", "--src-id", "%1", "hi"]),
+                "block:abc".into()
+            ),
+            words(&["send-message-to-away-device", "--src-id", "%1", "hi"])
+        );
+        assert_eq!(
+            with_caller_pane_from(words(&["speak", "hello"]), String::new()),
+            words(&["speak", "hello"])
+        );
+        assert_eq!(
+            with_caller_pane_from(words(&["accept", "turn-started"]), "%1".into()),
+            words(&["accept", "turn-started"])
+        );
     }
 
     #[test]

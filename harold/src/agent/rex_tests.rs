@@ -416,12 +416,10 @@ fn the_tail_read_calls_blob_read_with_the_id_until_eof() {
     assert!(api.blob.ends_with(&tail.text));
     assert!(last_lines(&tail, 3).ends_with("line 399"));
     assert_eq!(last_lines(&tail, 3).lines().count(), 3);
-    // The first line of a cut tail goes.
+    // The first line of a cut tail goes: the kept text starts after the tail's first break.
     let all = last_lines(&tail, 10_000);
-    assert!(all.starts_with("line "));
-    assert!(
-        !all.starts_with(tail.text.split('\n').next().unwrap()) || tail.text.starts_with("line ")
-    );
+    let first_break = tail.text.find('\n').unwrap();
+    assert!(tail.text[first_break + 1..].starts_with(&all[..all.find('\n').unwrap()]));
 }
 
 #[test]
@@ -505,10 +503,20 @@ fn an_absent_program_is_absent_and_a_slow_one_times_out() {
         Duration::from_secs(1),
     );
     assert_eq!(missing, Err(RexError::Absent));
-    let slow = run_program(Path::new("/bin/sleep"), &["5"], Duration::from_millis(50));
-    // `--autostart=false` makes sleep fail at once; a slow success is covered by the timeout
-    // branch only when the program starts. Either way the call fails and does not hang.
-    assert!(matches!(slow, Err(RexError::Timeout | RexError::Failed)));
+    // A shell script that ignores the `--autostart=false` flag and sleeps.
+    let dir = std::env::temp_dir().join(format!("rex-timeout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("slow-rex.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let started = Instant::now();
+    let slow = run_program(&script, &["ls"], Duration::from_millis(100));
+    assert_eq!(slow, Err(RexError::Timeout));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -532,4 +540,18 @@ fn typing_ports_use_the_session_of_the_block() {
     assert!(session_of(&api, "block:nope").is_err());
     assert!(block_is_gone(&api, "block:nope"));
     assert!(!block_is_gone(&api, "block:z"));
+}
+
+#[test]
+fn a_pane_id_of_the_other_form_is_told_apart_from_a_bad_one() {
+    use crate::agent::runtime::{pane_id_fits_multiplexer, pane_id_is_other_multiplexer};
+    // The test settings are not initialised or name tmux, so a tmux id fits.
+    assert!(pane_id_fits_multiplexer("%47"));
+    assert!(!pane_id_fits_multiplexer("block:abc"));
+    assert!(pane_id_is_other_multiplexer("block:abc"));
+    assert!(!pane_id_is_other_multiplexer("%47"));
+    // An empty or malformed id is not "the other multiplexer": it keeps its old handling.
+    for bad in ["", "47", "block:", "x"] {
+        assert!(!pane_id_is_other_multiplexer(bad), "{bad}");
+    }
 }

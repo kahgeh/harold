@@ -516,7 +516,9 @@ pub(crate) fn read_screen_text(
     let size = block_size(api, &session_id, block_id)?;
     let bytes = match keep {
         Keep::Visible => size.tail_bytes(),
-        Keep::Lines(lines) => (lines * size.cols * 2).clamp(size.tail_bytes(), 1024 * 1024),
+        Keep::Lines(lines) => (lines * size.cols * 2)
+            .max(size.tail_bytes())
+            .min(1024 * 1024),
     };
     let tail = tail_read(
         api,

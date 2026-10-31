@@ -245,7 +245,7 @@ impl Harold for HaroldService {
     ) -> Result<Response<TurnCompleteResponse>, Status> {
         let req = request.into_inner();
         // A hook report from a pane of the other multiplexer is dropped without an error.
-        if !agent::runtime::pane_id_fits_multiplexer(&req.pane_id) {
+        if agent::runtime::pane_id_is_other_multiplexer(&req.pane_id) {
             return Ok(Response::new(TurnCompleteResponse::default()));
         }
         let trace_id = uuid::Uuid::new_v4().to_string();
@@ -334,8 +334,8 @@ impl Harold for HaroldService {
             Some(value) => agent::domain::WorkSummaryUpdate::Set(value),
         };
 
-        if !agent::runtime::pane_id_fits_multiplexer(&req.pane_id) {
-            return Ok(Response::new(ReportAgentStateResponse::default()));
+        if agent::runtime::pane_id_is_other_multiplexer(&req.pane_id) {
+            return Ok(Response::new(ReportAgentStateResponse { accepted: true }));
         }
         self.monitor
             .report_lifecycle(req.pane_id, state, req.adapter_id, summary_update)
@@ -882,6 +882,7 @@ fn print_help() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = cli::with_caller_pane(args);
     let mode = match cli::Mode::parse(&args) {
         Ok(mode) => mode,
         Err(line)

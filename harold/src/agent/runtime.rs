@@ -1973,6 +1973,12 @@ pub(crate) fn valid_tmux_pane_id(value: &str) -> bool {
     })
 }
 
+/// Whether a pane id is well formed but has the form of the multiplexer Harold does not
+/// work with.
+pub(crate) fn pane_id_is_other_multiplexer(value: &str) -> bool {
+    valid_pane_id(value) && !pane_id_fits_multiplexer(value)
+}
+
 /// Whether a pane id has the form of the multiplexer Harold works with.
 pub(crate) fn pane_id_fits_multiplexer(value: &str) -> bool {
     match crate::settings::try_get_settings().map(|s| s.agent_monitor.multiplexer()) {
