@@ -574,6 +574,9 @@ impl AgentSettings {
         if monitor.screen_interval_ms == 0 {
             errors.push("agent_monitor.screen_interval_ms must be greater than zero".into());
         }
+        if Multiplexer::parse(&monitor.multiplexer).is_none() {
+            errors.push("agent_monitor.multiplexer must be \"tmux\" or \"rex\"".into());
+        }
 
         let mut ids = std::collections::HashSet::new();
         for provider in &self.0 {
@@ -648,6 +651,35 @@ pub(crate) struct AgentMonitorSettings {
     pub hook_grace_ms: u64,
     /// How long an adapter's report stands against the screen reading.
     pub report_grace_ms: u64,
+    /// The one multiplexer Harold works with: `"tmux"` (the default) or `"rex"`. Read at start.
+    pub multiplexer: String,
+    /// The path to the `rex` program, when it is not found by the usual search.
+    pub rex: Option<String>,
+}
+
+/// The multiplexer that holds the panes Harold works with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Multiplexer {
+    Tmux,
+    Rex,
+}
+
+impl Multiplexer {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "tmux" => Some(Self::Tmux),
+            "rex" => Some(Self::Rex),
+            _ => None,
+        }
+    }
+}
+
+impl AgentMonitorSettings {
+    /// The multiplexer the setting names. A bad value is a start error (`validate`), so it
+    /// counts as tmux here.
+    pub(crate) fn multiplexer(&self) -> Multiplexer {
+        Multiplexer::parse(&self.multiplexer).unwrap_or(Multiplexer::Tmux)
+    }
 }
 
 impl Default for AgentMonitorSettings {
@@ -658,6 +690,8 @@ impl Default for AgentMonitorSettings {
             screen_interval_ms: 500,
             hook_grace_ms: 2_000,
             report_grace_ms: 30_000,
+            multiplexer: "tmux".to_string(),
+            rex: None,
         }
     }
 }
@@ -1749,6 +1783,11 @@ fn removed_setting_messages_from(local: &Config, merged: &Config) -> Vec<String>
     messages
 }
 
+/// The settings if they are initialised, for code that must not panic without them.
+pub(crate) fn try_get_settings() -> Option<&'static Arc<Settings>> {
+    SETTINGS.get()
+}
+
 pub fn get_settings() -> &'static Arc<Settings> {
     SETTINGS.get().expect("settings not initialised")
 }
@@ -2478,6 +2517,40 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             opencode.summary_line_prefixes.is_empty(),
             "OpenCode's prompt and user-message rows share the same visible prefix"
         );
+    }
+
+    #[test]
+    fn multiplexer_is_tmux_or_rex_and_defaults_to_tmux() {
+        let none = parse_agent_config(&["agents = []"]);
+        assert_eq!(
+            none.agent_monitor.multiplexer(),
+            crate::settings::Multiplexer::Tmux
+        );
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        assert_eq!(
+            shipped.agent_monitor.multiplexer(),
+            crate::settings::Multiplexer::Tmux
+        );
+        for (value, expected) in [
+            ("tmux", crate::settings::Multiplexer::Tmux),
+            ("rex", crate::settings::Multiplexer::Rex),
+        ] {
+            let text = format!("agents = []\n[agent_monitor]\nmultiplexer = \"{value}\"");
+            let configured = parse_agent_config(&[text.as_str()]);
+            assert_eq!(configured.agent_monitor.multiplexer(), expected);
+            assert!(
+                AgentSettings::default()
+                    .validate(&configured.agent_monitor)
+                    .is_empty()
+            );
+        }
+        let bad = parse_agent_config(&["agents = []\n[agent_monitor]\nmultiplexer = \"screen\""]);
+        assert_eq!(
+            AgentSettings::default().validate(&bad.agent_monitor),
+            vec!["agent_monitor.multiplexer must be \"tmux\" or \"rex\"".to_string()]
+        );
+        let path = parse_agent_config(&["agents = []\n[agent_monitor]\nrex = \"/x/rex\""]);
+        assert_eq!(path.agent_monitor.rex.as_deref(), Some("/x/rex"));
     }
 
     #[test]

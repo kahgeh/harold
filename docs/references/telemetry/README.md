@@ -359,9 +359,13 @@ These agent monitor lines carry the fields below:
 | `agent monitor pane found` | `pane_id`, `provider_id` (the named provider), `program` (the file name of the matched program) |
 | `agent monitor read retried` | `component`, `pane_id` (for a screen read), `elapsed_ms` (from the first try's start to the retry's success) |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
-| `agent inventory scan slow` | `ps_ms` (the time of `ps`), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |
+| `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
+| `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
+| `agent inventory scan slow` | `ps_ms` (the time of `ps`; with Rex, the time of the start time reads), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it) or `rex_ms` (the time of the Rex listing, in place of `tmux_ms` when the multiplexer is Rex), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |
 | `agent pane resolve slow` | `wait_ms` (from the send to the moment the monitor takes the command), `elapsed_ms` (from the send to the answer), `outcome` (`ok`, `not_found` or `inventory_unavailable`). `warn`, only for a resolve over 1 s or one that is not `ok`. The `agent inventory scan slow` line just before it gives the resolve's `ps_ms` |
 | `agent inventory full read` | `reason` (`chain_broken` or `chain_joined`), `pane_id`. `warn`, one line per full read (`ps -ax`) of a scan. On `chain_joined`, `pane_id` is the pane that joined; on `chain_broken`, it is the first pane whose chain stayed broken |
+
+**Rex reads slow.** The card "Rex reads slow, by day" in the Pods group counts `agent inventory scan slow` lines with `rex_ms` and `agent screen read slow` lines for each day. It is a card, not an alert. A day with more than 20 needs a look. `scrollback_bytes` on the screen line shows whether a long scrollback caused the slow read.
 
 **A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
 
@@ -372,7 +376,7 @@ WHERE ServiceName = 'harold' AND Body = 'agent monitor pane found' AND Timestamp
 GROUP BY program, provider
 ```
 
-**The agent monitor loses sight of the panes.** `agent monitor degraded` (`warn`) and `agent monitor recovered` (`info`) carry `component` (`inventory` or `screen`) and `reason`. The reason is a bounded code, such as `timeout`, `busy`, `command_failed` or `malformed_output`. A recovered line has `reason` = `ok`. This query gives the count by day and reason. A day with more than 20 for one reason needs a look:
+**The agent monitor loses sight of the panes.** `agent monitor degraded` (`warn`) and `agent monitor recovered` (`info`) carry `component` (`inventory` or `screen`) and `reason`. The reason is a bounded code, such as `timeout`, `busy`, `command_failed`, `malformed_output`, `rex_failed`, `rex_timeout` or `rex_absent` (no `rex` program, or no Rex server runs). A recovered line has `reason` = `ok`. This query gives the count by day and reason. A day with more than 20 for one reason needs a look:
 
 ```
 SELECT toDate(Timestamp) AS day, LogAttributes['component'] AS component, LogAttributes['reason'] AS reason, count() AS n

@@ -158,7 +158,9 @@ function spawnGrpcurl(invocation, spawnProcess = spawn) {
 
 export function createHaroldPlugin(overrides = {}) {
   const env = overrides.env ?? process.env;
-  const paneId = env.TMUX_PANE?.trim() ?? "";
+  // `TMUX_PANE` in a tmux pane, `REX_BLOCK` in a Rex pane.
+  const paneId =
+    env.TMUX_PANE?.trim() || (env.REX_BLOCK?.trim() ?? "");
   const config = {
     address: env.HAROLD_ADDR?.trim() || DEFAULT_ADDRESS,
     protoPath:

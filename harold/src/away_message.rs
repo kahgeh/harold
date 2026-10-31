@@ -11,6 +11,21 @@ pub(crate) const INVALID_MESSAGE_LENGTH: &str = "invalid message length";
 pub(crate) const MESSAGING_PAUSED: &str = "messaging paused";
 pub(crate) const AGENT_NOT_FOUND: &str = "agent not found";
 
+/// The start of the refusal for a pane id of the multiplexer Harold does not work with.
+pub(crate) const WRONG_MULTIPLEXER_PREFIX: &str = "Harold works with ";
+
+/// The refusal for a pane id of the other multiplexer, such as
+/// `Harold works with rex panes, not tmux`.
+pub(crate) fn wrong_multiplexer_message() -> String {
+    let (works_with, other) = match crate::settings::try_get_settings()
+        .map(|settings| settings.agent_monitor.multiplexer())
+    {
+        Some(crate::settings::Multiplexer::Rex) => ("rex", "tmux"),
+        _ => ("tmux", "rex"),
+    };
+    format!("{WRONG_MULTIPLEXER_PREFIX}{works_with} panes, not {other}")
+}
+
 /// A character that ends a line or is a tab. The iMessage send deletes control characters
 /// (`sanitise_for_applescript`), which would join the words on either side of one, and it
 /// leaves U+2028 and U+2029 in place.

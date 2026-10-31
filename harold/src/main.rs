@@ -244,6 +244,10 @@ impl Harold for HaroldService {
         request: Request<TurnCompleteRequest>,
     ) -> Result<Response<TurnCompleteResponse>, Status> {
         let req = request.into_inner();
+        // A hook report from a pane of the other multiplexer is dropped without an error.
+        if !agent::runtime::pane_id_fits_multiplexer(&req.pane_id) {
+            return Ok(Response::new(TurnCompleteResponse::default()));
+        }
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
         let hook_reached = time::OffsetDateTime::now_utc();
@@ -330,6 +334,9 @@ impl Harold for HaroldService {
             Some(value) => agent::domain::WorkSummaryUpdate::Set(value),
         };
 
+        if !agent::runtime::pane_id_fits_multiplexer(&req.pane_id) {
+            return Ok(Response::new(ReportAgentStateResponse::default()));
+        }
         self.monitor
             .report_lifecycle(req.pane_id, state, req.adapter_id, summary_update)
             .await
@@ -368,6 +375,11 @@ impl Harold for HaroldService {
         let req = request.into_inner();
         if !agent::runtime::valid_pane_id(&req.src_id) {
             return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
+        }
+        if !agent::runtime::pane_id_fits_multiplexer(&req.src_id) {
+            return Err(Status::failed_precondition(
+                away_message::wrong_multiplexer_message(),
+            ));
         }
         let text = away_message::one_line(&req.text);
         if !away_message::is_sendable_length(&text) {
@@ -420,6 +432,11 @@ impl Harold for HaroldService {
         let req = request.into_inner();
         if !agent::runtime::valid_pane_id(&req.src_id) {
             return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
+        }
+        if !agent::runtime::pane_id_fits_multiplexer(&req.src_id) {
+            return Err(Status::failed_precondition(
+                away_message::wrong_multiplexer_message(),
+            ));
         }
         let text = away_message::one_line(&req.text);
         if !outbound::spoken_line::is_speakable_length(&text) {
@@ -622,10 +639,7 @@ fn non_empty(value: &str) -> Option<&str> {
 }
 
 fn pane_id_for_log(value: &str) -> &str {
-    let valid = value.len() <= 32
-        && value.strip_prefix('%').is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        });
+    let valid = value.len() <= 64 && agent::runtime::valid_pane_id(value);
     if valid { value } else { "<invalid-pane-id>" }
 }
 
@@ -762,11 +776,11 @@ fn print_help() {
     println!("                          Report a pane busy (turn-started, still-working) or idle");
     println!("                          (turn-completed, subagents-finished); 3s timeout");
     println!("  harold send-message-to-away-device --src-id ID TEXT");
-    println!("                          Send TEXT to the away device from tmux pane ID;");
+    println!("                          Send TEXT to the away device from tmux or Rex pane ID;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold speak --src-id ID TEXT");
     println!(
-        "                          Say TEXT from tmux pane ID at the desk, or send it as text;"
+        "                          Say TEXT from tmux or Rex pane ID at the desk, or send it as text;"
     );
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold app pair [--unlock]");
@@ -1131,11 +1145,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let log_trim = start_log_trim(launchd, &shutdown_rx);
 
-    let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
-        agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
-    );
-    let screen: Arc<dyn agent::screen::VisibleScreenPort> =
-        Arc::new(agent::screen::TmuxVisibleScreen::new());
+    agent::rex::log_multiplexer(cfg);
+    let inventory = agent::rex::inventory_for(cfg);
+    let screen = agent::rex::screen_for(cfg);
     let providers = cfg.agents.0.clone();
     let initial_agent_snapshot = restore_startup_state(&store).await?;
     let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());

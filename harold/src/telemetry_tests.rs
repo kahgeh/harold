@@ -2376,7 +2376,10 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .chain(WEB_APP_CARDS.map(str::to_string))
         .chain(KNOWLEDGE_CARDS.map(str::to_string))
         .chain(TTS_CARDS.map(str::to_string))
-        .chain([INVENTORY_FULL_READS_CARD.to_string()])
+        .chain([
+            INVENTORY_FULL_READS_CARD.to_string(),
+            REX_READS_SLOW_CARD.to_string(),
+        ])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2532,6 +2535,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
+const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
@@ -2667,7 +2671,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         // A log card reads `otel.otel_logs`, which the product filter does not reach.
         let filtered = containers[tile["containerId"].as_str().unwrap()]
             && name != SPOKEN_LINES_DROPPED_CARD
-            && name != INVENTORY_FULL_READS_CARD;
+            && name != INVENTORY_FULL_READS_CARD
+            && name != REX_READS_SLOW_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.

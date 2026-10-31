@@ -50,7 +50,8 @@ def clean_text(value: str, limit: int) -> str:
 def get_pane_info() -> tuple[str, str]:
     pane_id = os.environ.get("TMUX_PANE", "")
     if not pane_id:
-        return "", "unknown"
+        # A Rex pane: Harold makes the label from its own listing.
+        return os.environ.get("REX_BLOCK", ""), "unknown"
 
     try:
         result = subprocess.run(

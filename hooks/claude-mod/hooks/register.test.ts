@@ -45,6 +45,19 @@ test('a subagent turn.complete reports nothing', async ($, on) => {
   expect(calls).toEqual([])
 })
 
+test('a Rex block reports with REX_BLOCK as the pane', async ($, on) => {
+  const calls = bottom(on, { REX_BLOCK: 'block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7' }, async () => ({ exitCode: 0 }))
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  expect(calls.length).toBe(1)
+  expect(calls[0].argv.join(' ')).toContain('block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7')
+})
+
+test('a REX_BLOCK that is not a block id reports nothing', async ($, on) => {
+  const calls = bottom(on, { REX_BLOCK: 'block:' }, async () => ({ exitCode: 0 }))
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  expect(calls).toEqual([])
+})
+
 test('no TMUX_PANE reports nothing', async ($, on) => {
   const calls = bottom(on, {}, async () => ({ exitCode: 0 }))
   await $.turn.start({ text: 'hi', turnId: 't1' })

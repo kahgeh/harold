@@ -16,6 +16,20 @@ from . import harold_turn_complete
 
 
 class HaroldTurnCompleteTest(unittest.TestCase):
+    def test_a_rex_pane_reports_its_block_id_and_the_label_unknown(self) -> None:
+        with patch.dict(
+            os.environ, {"REX_BLOCK": "block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7"}, clear=True
+        ), patch.object(harold_turn_complete.subprocess, "run") as run:
+            self.assertEqual(
+                harold_turn_complete.get_pane_info(),
+                ("block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7", "unknown"),
+            )
+            run.assert_not_called()
+
+    def test_no_pane_at_all_reports_an_empty_id(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(harold_turn_complete.get_pane_info(), ("", "unknown"))
+
     def test_clean_text_removes_controls_collapses_whitespace_and_bounds_output(self) -> None:
         self.assertEqual(
             harold_turn_complete.clean_text("  refresh\x1b[31m\n\tevents  ", 14),

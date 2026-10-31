@@ -91,6 +91,35 @@ impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
     }
 }
 
+/// Reads a Rex block's screen with a tail read (see `agent::rex`).
+pub(super) struct RexPaneCapture {
+    pub(super) api: std::sync::Arc<dyn crate::agent::rex::RexApi>,
+}
+
+impl PaneCapturePort for RexPaneCapture {
+    fn capture(
+        &self,
+        pane_id: &str,
+        request: CaptureRequest,
+    ) -> Result<StyledPaneCapture, ScreenError> {
+        use crate::agent::rex::{self, Keep, RexError};
+        let keep = match request.scope {
+            CaptureScope::Visible => Keep::Visible,
+            CaptureScope::RecentHistory { lines } if (1..=10_000).contains(&lines) => {
+                Keep::Lines(usize::from(lines))
+            }
+            CaptureScope::RecentHistory { .. } => return Err(ScreenError::CaptureFailed),
+        };
+        match rex::read_screen_text(&*self.api, pane_id, request.preserve_styles, keep) {
+            Ok(text) if text.len() <= MAX_CAPTURE_BYTES => Ok(StyledPaneCapture { text, request }),
+            Ok(_) => Err(ScreenError::CaptureFailed),
+            Err(RexError::Absent) => Err(ScreenError::CaptureUnavailable),
+            Err(_) if rex::block_is_gone(&*self.api, pane_id) => Err(ScreenError::PaneDeparted),
+            Err(_) => Err(ScreenError::CaptureFailed),
+        }
+    }
+}
+
 /// Bound both time and memory without a reader thread that could outlive a timed-out child.
 pub(super) fn bounded_output(
     program: &str,

@@ -19,18 +19,22 @@ mod capture;
 mod claude;
 #[path = "screen_codex.rs"]
 mod codex;
-use capture::{CaptureRequest, CaptureScope, PaneCapturePort, StyledPaneCapture, TmuxPaneCapture};
+use capture::{
+    CaptureRequest, CaptureScope, PaneCapturePort, RexPaneCapture, StyledPaneCapture,
+    TmuxPaneCapture,
+};
 
 use super::domain::{AgentPaneObservation, ObservedAgentState, ScreenObservation};
 use super::summary::{normalize_visible_grid, normalize_work_summary};
 
 const CLASSIFIER_ID: &str = "tmux-visible-v1";
+const REX_CLASSIFIER_ID: &str = "rex-visible-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScreenError {
     CaptureUnavailable,
     CaptureFailed,
-    /// A read failed and tmux no longer lists the pane.
+    /// A read failed and the multiplexer no longer lists the pane.
     PaneDeparted,
 }
 
@@ -95,6 +99,11 @@ pub(crate) fn run_stoppable<T>(signal: StopSignal, operation: impl FnOnce() -> T
     let result = operation();
     CURRENT_STOP.with(|current| current.replace(previous));
     result
+}
+
+/// This thread's stop signal, for a worker thread that must stop with it.
+pub(crate) fn current_stop() -> Option<StopSignal> {
+    CURRENT_STOP.with(|current| current.borrow().clone())
 }
 
 pub(crate) fn stop_requested() -> bool {
@@ -179,26 +188,59 @@ impl<R> TmuxVisibleScreen<R> {
     }
 }
 
+fn observe_through(
+    capture: &impl PaneCapturePort,
+    classifier_id: &str,
+    now_ms: i64,
+    pane: &AgentPaneObservation,
+    provider: &AgentProviderSettings,
+) -> Result<ScreenObservation, ScreenError> {
+    let captured = capture.capture(
+        &pane.incarnation.pane_id,
+        CaptureRequest {
+            scope: CaptureScope::Visible,
+            preserve_styles: false,
+        },
+    )?;
+    Ok(ScreenObservation {
+        incarnation: pane.incarnation.clone(),
+        state: adapter(provider).classify_visible(&captured),
+        fallback_summary: None,
+        classifier_id: classifier_id.to_string(),
+        observed_at_ms: now_ms,
+    })
+}
+
+fn scan_prompts_through(
+    capture: &impl PaneCapturePort,
+    pane: &AgentPaneObservation,
+    provider: &AgentProviderSettings,
+) -> Result<PromptScan, ScreenError> {
+    let captured = capture.capture(
+        &pane.incarnation.pane_id,
+        CaptureRequest {
+            scope: CaptureScope::RecentHistory {
+                lines: provider.screen_history_lines,
+            },
+            preserve_styles: true,
+        },
+    )?;
+    Ok(adapter(provider).scan_prompts(&captured))
+}
+
 impl<R: CommandRunner> VisibleScreenPort for TmuxVisibleScreen<R> {
     fn observe(
         &self,
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
-        let captured = self.capture.capture(
-            &pane.incarnation.pane_id,
-            CaptureRequest {
-                scope: CaptureScope::Visible,
-                preserve_styles: false,
-            },
-        )?;
-        Ok(ScreenObservation {
-            incarnation: pane.incarnation.clone(),
-            state: adapter(provider).classify_visible(&captured),
-            fallback_summary: None,
-            classifier_id: CLASSIFIER_ID.to_string(),
-            observed_at_ms: (self.now_ms)(),
-        })
+        observe_through(
+            &self.capture,
+            CLASSIFIER_ID,
+            (self.now_ms)(),
+            pane,
+            provider,
+        )
     }
 
     fn scan_prompts(
@@ -206,16 +248,48 @@ impl<R: CommandRunner> VisibleScreenPort for TmuxVisibleScreen<R> {
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<PromptScan, ScreenError> {
-        let captured = self.capture.capture(
-            &pane.incarnation.pane_id,
-            CaptureRequest {
-                scope: CaptureScope::RecentHistory {
-                    lines: provider.screen_history_lines,
-                },
-                preserve_styles: true,
-            },
-        )?;
-        Ok(adapter(provider).scan_prompts(&captured))
+        scan_prompts_through(&self.capture, pane, provider)
+    }
+}
+
+/// The screen reader for Rex panes: a tail read of the block's output.
+pub(crate) struct RexVisibleScreen {
+    capture: RexPaneCapture,
+}
+
+impl RexVisibleScreen {
+    pub(crate) fn new() -> Self {
+        Self::with_api(super::rex::system())
+    }
+
+    pub(super) fn with_api(api: Arc<dyn super::rex::RexApi>) -> Self {
+        Self {
+            capture: RexPaneCapture { api },
+        }
+    }
+}
+
+impl VisibleScreenPort for RexVisibleScreen {
+    fn observe(
+        &self,
+        pane: &AgentPaneObservation,
+        provider: &AgentProviderSettings,
+    ) -> Result<ScreenObservation, ScreenError> {
+        observe_through(
+            &self.capture,
+            REX_CLASSIFIER_ID,
+            system_now_ms(),
+            pane,
+            provider,
+        )
+    }
+
+    fn scan_prompts(
+        &self,
+        pane: &AgentPaneObservation,
+        provider: &AgentProviderSettings,
+    ) -> Result<PromptScan, ScreenError> {
+        scan_prompts_through(&self.capture, pane, provider)
     }
 }
 

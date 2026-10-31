@@ -60,6 +60,12 @@ pub(crate) enum InventoryError {
     CommandFailed,
     MalformedOutput,
     MissingProcessStartTime,
+    /// There is no `rex` program, or no Rex server runs.
+    RexAbsent,
+    /// A Rex call took more than 3 seconds.
+    RexTimeout,
+    /// A Rex call failed.
+    RexFailed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,17 +422,25 @@ const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
 /// The program a `ps` command runs: the file name of its first word, or of its second when the
 /// first is an interpreter, so `node …/codex` is `codex`. Arguments never take part.
 pub(super) fn command_program(command: &str) -> &str {
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return "";
+    };
+    program_from_words(first, words.next())
+}
+
+/// The program that a first word and a second word name: the file name of the first, or of
+/// the second when the first is an interpreter. Tmux (through `ps`) and Rex (through
+/// `argv0` and `script`) share this rule.
+pub(super) fn program_from_words<'a>(first: &'a str, second: Option<&'a str>) -> &'a str {
     fn file_name(word: &str) -> &str {
         word.rsplit('/').next().unwrap_or(word)
     }
-    let mut words = command.split_whitespace();
-    let Some(first) = words.next().map(file_name) else {
-        return "";
-    };
+    let first = file_name(first);
     if !INTERPRETERS.contains(&first) {
         return first;
     }
-    words.next().map_or(first, file_name)
+    second.map_or(first, file_name)
 }
 
 fn command_matches_any(command: &str, fragments: &[String]) -> bool {
@@ -489,7 +503,7 @@ fn parse_field<T: std::str::FromStr>(field: &str) -> Result<T, InventoryError> {
     field.parse().map_err(|_| InventoryError::MalformedOutput)
 }
 
-fn parse_start_time(month: &str, day: &str, time: &str, year: &str) -> Option<i64> {
+pub(super) fn parse_start_time(month: &str, day: &str, time: &str, year: &str) -> Option<i64> {
     let month = match month {
         "Jan" => Month::January,
         "Feb" => Month::February,

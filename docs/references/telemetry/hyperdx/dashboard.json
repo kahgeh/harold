@@ -1011,6 +1011,22 @@
         "sourceId": "@TRACES_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(Timestamp) AS day, LogAttributes['reason'] AS reason, count() AS full_reads FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'agent inventory full read' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, reason ORDER BY day DESC, full_reads DESC"
       }
+    },
+    {
+      "id": "rex-reads-slow-by-day",
+      "name": "Rex reads slow, by day",
+      "x": 0,
+      "y": 6,
+      "w": 12,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS slow_reads FROM otel.otel_logs WHERE ServiceName = 'harold' AND ((Body = 'agent inventory scan slow' AND mapContains(LogAttributes, 'rex_ms')) OR Body = 'agent screen read slow') AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
     }
   ]
 }

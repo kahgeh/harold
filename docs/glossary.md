@@ -14,7 +14,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Mac package | The release file `harold-aarch64-apple-darwin.tar.gz`, built with `mac-defaults` | "bundle" for the file |
 | haroldctl | The command that starts, stops and checks the installed Harold service | — |
 | tmx-agent-dash, the dash | The terminal dashboard that lists agents and holds the chief's questions | "dashboard" for the dash (HyperDX has dashboards), "TUI" |
-| agent | A coding agent running in a tmux pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |
+| agent | A coding agent running in a pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |
 | echo test | The hidden web app page that measures how much of Harold's voice the phone's mic picks up while the phone plays it | "loopback test", "AEC test" |
 | paired device | A phone or browser that typed the pairing code and holds a device secret, listed by `harold app devices` | "trusted device", "registered" |
 | pairing code | The code you choose and keep as `HAROLD_PAIRING_CODE` in the pairing file; you type it into the pair screen. It is fixed and does not expire | "PIN", "password", "one-time code" |
@@ -22,10 +22,16 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | device secret | The random secret a paired device keeps as the cookie `harold_device`; Harold keeps only its fingerprint | "token", "API key" |
 | pairing lock | What stops pairing for good after 5 wrong tries in all, until the code changes or `harold app pair --unlock` | "ban", "rate limit" |
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
-| pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
+| multiplexer | The program that holds the panes an agent runs in: tmux or Rex. Harold works with one, the one `agent_monitor.multiplexer` names | "back end", "terminal" for it |
+| Rex | The Superlogical terminal multiplexer: a macOS app with a server. A Rex pane is a block, with an id such as `block:01a1…` | "Rex terminal" for the server |
+| `agent_monitor.multiplexer` | The setting that picks the multiplexer Harold works with, `"tmux"` (the default) or `"rex"`. Harold reads it at start | — |
+| pane, pane id | The tmux pane or the Rex block an agent runs in, and its id, such as `%47` or `block:01a1…` | "pane address", "target" |
+| pane label | The text the agent list shows and a routing tag matches: `<session>:<window>.<pane>` | "target" |
+| INSERT mode | Claude Code's Vim editor mode in which keys type text into the input box | — |
+| NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |
 | pane resolve | The look-up of one pane by its id (`resolve_pane` in the code), which runs its own scan after it waits for the monitor's current tick. Harold logs a slow one as `agent pane resolve slow` | "pane lookup" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
-| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
+| the chief, chief of pods | The first agent pane in the chief's session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
 | the chief's row | The chief's row in the dash's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
 | pod session | A pod-coordination or PnEM pane | — |
@@ -82,8 +88,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | agent monitor | The part of Harold that finds agents and works out their state | "monitor" alone |
-| inventory, process inventory | The agent monitor's regular scan of tmux panes and the agent processes in them | — |
-| tty read | The inventory's read of only the processes on the tmux panes' ttys (`ps -t`) | "partial scan", "fast scan" |
+| inventory, process inventory | The agent monitor's regular scan of the panes of Harold's multiplexer and the agent processes in them | — |
+| tty read | The inventory's read of only the processes on the tmux panes' ttys (`ps -t`). Only with tmux. With Rex, the agent comes from Rex's `process` reply | "partial scan", "fast scan" |
 | full read | The inventory's read of every process on the Mac (`ps -ax`), done only when a chain is broken | "full scan", because "scan" is the inventory's whole pass |
 | screen adapter | The per-provider reader of an agent's visible screen, such as `claude-v1` | — |
 | input box | The row where Claude Code shows the text the user types, between two rows of `─`. Harold types a line into it only when it is empty | "prompt box", "text box" |
@@ -96,7 +102,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | work summary | Short text saying what an agent is working on | "task description", "current work", "dashboard description", "summary" alone |
 | activity summary | A work summary that Claude Code writes from the agent's evidence, when `[activity_summary]` is on | "generated description" |
 | waiting agent | An agent that went from Busy to Idle while the user wasn't looking at it, marked `◆` | — |
-| focus tracking | The dash's check, once a second, of which pane the user's tmux client shows | — |
+| focus tracking | The dash's check, once a second, of which pane the user's tmux client or the Rex app shows | — |
 
 ## Talking to the user
 
@@ -113,8 +119,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | dropped | An agent message or spoken line Harold chose not to send. It names the channel list that held the pane back | — |
 | channel | One of the three ways Harold reaches the user, each with its own list in `[notify]`: `imessage`, `web_app` and `machine_audio_output` | "away channel" for it (the away channel is only iMessage), "route", "output" alone |
 | channel list | A channel's list in `[notify]` of the folders whose agents may use that channel | "allowlist", "whitelist", "only_from" |
-| the chief's tmux session | The tmux session the chief runs in: the one `notify.chief_session` names, or else the session of the longest-running agent in the chief's folder | "chief window" |
-| `notify.chief_session` | The `[notify] chief_session` entry that names the chief's tmux session exactly. It picks the session among the agents in the chief's folder, not which folder is the chief's | "chief session setting", "session prefix" |
+| the chief's session | The session the chief runs in, in Harold's multiplexer: the one `notify.chief_session` names, or else the session of the longest-running agent in the chief's folder | "chief window", "the chief's tmux session" for a Rex one |
+| `notify.chief_session` | The `[notify] chief_session` entry that names the chief's session exactly, a tmux session name or a Rex session label. It picks the session among the agents in the chief's folder, not which folder is the chief's | "chief session setting", "session prefix" |
 | the chief's folder | The folder `[notify] chief` names. The channel lists count every pane in it as the chief's, while only the chief's pane gets the chief's typing | "chief directory" |
 | `notify.chief` | The `[notify] chief` entry that names the chief's pane by its folder. It decides which pane is the chief, not what the chief may use | "chief folder setting", "away_messages_only_from" for it |
 | voice, voice mute | Harold's speech at the desk, and the switch that silences it (`Voice: mute`) | — |
@@ -275,7 +281,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | note | The dash's revise or reject text. The web app's "Notes" page and header link mean vault notes, never backlog notes | backlog note, vault note |
 | dash | tmx-agent-dash | HyperDX dashboard |
 | monitor | Never alone | agent monitor, HyperDX alert |
-| session | A tmux session, or a pod session | agent, for the agent itself |
+| session | A tmux session, a Rex session, or a pod session | agent, for the agent itself |
 | task | The work asked of an agent | background job, for Harold's own threads |
 | version | Never alone | question version, release version |
 | waiting | Never alone | waiting agent, waiting question |
@@ -286,6 +292,8 @@ Each of these words has one sense in Harold. Anything else is named another way:
 
 Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "coordinator", "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
 
+- `tmux_target` holds the pane label, for tmux and Rex. "Target" is a word the pane entry says not to use. It would become: `pane_label`. Where: `harold/src/agent/domain.rs`, `store.rs`, `store/migrations/001_initial.sql`, `harold-api/proto/harold.proto`, `inbound/tmux.rs`, `outbound/left_out.rs`, `agent/runtime.rs`, `voice_input/answerer.rs`, `tools/watch/facts.rs`, `main.rs` and their tests.
+- `tmux_ms` in `agent inventory scan slow` is the time of the tmux listing, and `rex_ms` is its Rex twin. The pair would read better as one `listing_ms` with a `multiplexer` field. Where: `harold/src/agent/inventory.rs`, `harold/src/telemetry.rs` (`ALLOWED_FIELDS`), `docs/references/telemetry/README.md`.
 - The word `dispatcher` (variables and `fake_dispatcher`) names the delivery handler. It would become: delivery handler. Where: `harold/src/main_tests.rs`: 11 uses, lines 1913–2215; `harold/src/projector.rs`: 58 uses, lines 33–945; `harold/src/projector_tests.rs`: 307 uses, lines 8–4109; `harold/src/telemetry_tests.rs`: 383.
 - The word `dashboard` for the dash or for activity summaries (the HyperDX dashboards in `harold/src/telemetry_tests.rs` and `harold/src/pod_stats_tests.rs` keep it). It would become: the dash, or activity summary. Where: `harold/config/local.template.toml`: 21; `harold/src/activity_summary.rs`: 15; `harold/src/agent/screen_tests.rs`: 105, 117; `harold/src/voice_input.rs`: 130; `hooks/opencode/harold-plugin.test.mjs`: 21, 129, 137; `scripts/install.py`: 347; `scripts/tests/test_install.py`: 516, 799, 932; `tmx-agent-dash/examples/dashboard_demo.rs`: 90; `tmx-agent-dash/src/api.rs`: 519, 529; `tmx-agent-dash/src/app.rs`: 168; `tmx-agent-dash/src/runtime.rs`: 63, 3397; `tmx-agent-dash/src/terminal.rs`: 284; `tmx-agent-dash/src/ui.rs`: 23 uses, lines 1633–2712.
 - `send_now` is the proto field, store column and migration `002_answer_send_now.sql` of the question tool. It is Harold's API and stays. The dash's `send` is the action row. The phrase "send now" appears in a comment and in dash test strings. It would become: send (comment and test strings only). Where: `harold-api/proto/tools/questions.proto`: 124; `harold-api/tests/questions_contract.rs`: 208, 261, 267, 271, 274, 278; `harold/src/tools/questions/batch.rs`: 6; `harold/src/tools/questions/batch_tests.rs`: 78, 85, 193, 198; `harold/src/tools/questions/migrations/002_answer_send_now.sql`: 1; `harold/src/tools/questions/service.rs`: 145, 151; `harold/src/tools/questions/service_tests.rs`: 51, 60, 69, 413, 425, 439; `harold/src/tools/questions/store.rs`: 13 uses, lines 22–767; `harold/src/tools/questions/store_tests.rs`: 72, 74, 141, 157, 570, 612, 622; `harold/src/tools/questions/test_support.rs`: 186, 192, 283, 288; `harold/src/tools_tests.rs`: 495; `tmx-agent-dash/src/api.rs`: 418, 1471, 1472, 1479, 1481; `tmx-agent-dash/src/app.rs`: 3299; `tmx-agent-dash/src/questions.rs`: 79, 618, 1083, 1094, 1180, 1224, 1246, 1483; `tmx-agent-dash/src/runtime.rs`: 2492, 3069, 3073; `tmx-agent-dash/src/ui.rs`: 4082, 4312, 4316.

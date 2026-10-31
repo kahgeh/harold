@@ -1,6 +1,7 @@
 pub(crate) mod domain;
 pub(crate) mod inventory;
 pub(crate) mod reducer;
+pub(crate) mod rex;
 pub(crate) mod runtime;
 pub(crate) mod screen;
 pub(crate) mod snapshot;

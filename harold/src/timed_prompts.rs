@@ -1342,6 +1342,9 @@ fn capture_args(pane_id: &str) -> [&str; 5] {
 
 /// Sends one key to the pane by its tmux name.
 fn press_key_in_tmux_pane(pane_id: &str, key: &str) -> Result<(), String> {
+    if pane_id.starts_with(crate::agent::rex::BLOCK_PREFIX) {
+        return crate::agent::rex::press_key(pane_id, key);
+    }
     let status = std::process::Command::new("tmux")
         .args(["send-keys", "-t", pane_id, key])
         .status()
@@ -1409,6 +1412,16 @@ impl Ports for TmuxPorts {
     }
 
     async fn read_screen(&self, pane_id: &str) -> Option<String> {
+        if pane_id.starts_with(crate::agent::rex::BLOCK_PREFIX) {
+            let pane_id = pane_id.to_string();
+            let read = tokio::task::spawn_blocking(move || {
+                crate::agent::rex::read_screen_styled(&pane_id)
+            });
+            return tokio::time::timeout(COMMAND_TIMEOUT, read)
+                .await
+                .ok()?
+                .ok()?;
+        }
         bounded_stdout("tmux", &capture_args(pane_id), COMMAND_TIMEOUT).await
     }
 

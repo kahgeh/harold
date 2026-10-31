@@ -4,7 +4,7 @@ What Harold is made of and how its parts talk, kept true by the pod that builds 
 
 ## Purpose
 
-Harold watches the coding agents in the user's tmux panes on each Mac, tells the user on the phone when one finishes, and routes the user's replies back to the right pane. It also hosts tools: the question tool and the backlog tool, which the chief of pods uses, and the watch tool, which any agent can use.
+Harold watches the coding agents in the user's tmux or Rex panes on each Mac, tells the user on the phone when one finishes, and routes the user's replies back to the right pane. It also hosts tools: the question tool and the backlog tool, which the chief of pods uses, and the watch tool, which any agent can use.
 
 ## Components
 
@@ -42,7 +42,7 @@ flowchart LR
 
   api["API contracts: harold-api"]
   phone["phone"]
-  panes["tmux panes"]
+  panes["tmux or Rex panes"]
 
   hooks --> monitor
   panes --> monitor
@@ -160,9 +160,25 @@ Each place Harold does not follow the organisation's `knowledge/standards.md`, w
 
 ## How it works
 
-Harold inventories configured agent processes in tmux, combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates.
+Harold inventories configured agent processes in the panes of its multiplexer (tmux or Rex, see [Two multiplexers](#two-multiplexers)), combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates.
 
 The public agent-state stream starts with a complete current snapshot, then sends later revisions. Raw pane captures remain inside the screen adapter; only classified state and a normalized work summary can cross the acquisition boundary. The [agent-monitor reference](../references/agent-monitor/README.md) and the [hook setup guide](../how-tos/setup-agent-monitor-hooks.md) give the detail.
+
+### Two multiplexers
+
+The setting `[agent_monitor] multiplexer` picks the one multiplexer Harold works with: `"tmux"` (the default) or `"rex"`. Harold reads it once, at start. To switch, change the setting and start Harold again ([ADR 0022](../adr/0022-harold-works-with-one-multiplexer-chosen-at-start-and-rex-has-its-own-implementation-of-each-port.md)).
+
+Each port has one implementation for each multiplexer:
+
+| Port | tmux | Rex |
+|---|---|---|
+| `AgentInventoryPort` | `TmuxAgentInventory`: `tmux list-panes -a`, then `ps -t` | `RexAgentInventory`: `rex ls`, `session.view`, and `process` for each block |
+| `PaneCapturePort`, `VisibleScreenPort` | `TmuxPaneCapture`, `TmuxVisibleScreen` (`tmux-visible-v1`): `tmux capture-pane` | `RexPaneCapture`, `RexVisibleScreen` (`rex-visible-v1`): a tail read with the block methods `format` and `blob_read` |
+| `Ports` typing steps | `tmux send-keys` | a paste event (`block.event`) and `rex send-key` |
+
+At start, Harold builds the inventory and the screen reader for the chosen multiplexer. A typing step acts by the form of the pane id it gets. The two forms are `%47` for a tmux pane and `block:<id>` for a Rex block. A pane id of the other form is refused. Both multiplexers show the pane label `<session>:<window>.<pane>`, and Harold stores it in `tmux_target`.
+
+Harold never starts a Rex server. A Rex call that fails makes the listing fail, and the snapshot keeps its panes. The code is in `harold/src/agent/rex.rs`.
 
 ### Follow one task
 
@@ -280,7 +296,7 @@ A turn-end update and an agent-state update serve different purposes. The dash n
 
 A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, or sends it through the away channel, iMessage. At the desk it leaves every update out. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
 
-For a phone reply, the channel listener records an `InboundMessageReceived` event. The delivery handler resolves a live agent pane using the message's routing tag or the configured routing fallbacks, checks that an agent is still present, and submits the message to that pane through tmux. A reply typed in the web app may carry a photo: its `InboundMessageReceived` payload then holds `photo`, a file name in `app-photos/`, and the line typed into the chief's pane ends with `📷` and that file's absolute path, which Claude Code reads ([ADR 0010](../adr/0010-photos-reach-the-chief-as-files.md)).
+For a phone reply, the channel listener records an `InboundMessageReceived` event. The delivery handler resolves a live agent pane using the message's routing tag or the configured routing fallbacks, checks that an agent is still present, and submits the message to that pane through its multiplexer. A reply typed in the web app may carry a photo: its `InboundMessageReceived` payload then holds `photo`, a file name in `app-photos/`, and the line typed into the chief's pane ends with `📷` and that file's absolute path, which Claude Code reads ([ADR 0010](../adr/0010-photos-reach-the-chief-as-files.md)).
 
 The channels are Cargo features of the build. The `imessage` feature builds in the iMessage channel and the `calls` feature builds in calls. The `mac-defaults` set holds both, and the `linux-defaults` set holds neither yet ([ADR 0019](../adr/0019-harold-is-built-from-per-part-features-for-the-mac-and-linux.md)). A build without `imessage` never sets up that channel and reaches the phone through the web app only.
 

@@ -6,7 +6,7 @@ A timed prompt is a text Harold types into an agent's pane at a set local time e
 
 A scheduled job outside Harold can send a text to a pane at 07:50, but it cannot see the pane. It cannot tell whether the agent is in the middle of a turn, or whether you have half a sentence typed in the input box. A text sent then is added to the end of your sentence and submitted with it.
 
-Harold already lists the tmux panes that run agents and knows for each whether its agent is busy or idle. A timed prompt uses that, and reads the pane's screen once more before typing.
+Harold already lists the panes (tmux panes, or Rex blocks when `[agent_monitor] multiplexer` is `"rex"`) that run agents and knows for each whether its agent is busy or idle. A timed prompt uses that, and reads the pane's screen once more before typing.
 
 ## Configuration
 
@@ -67,7 +67,7 @@ For each due prompt, in the order of the list, Harold checks these in order and 
 | 6 | A fresh read of the pane's screen finds the input box | `input_box_not_found` |
 | 7 | The input box is empty, and in Vim INSERT mode when Claude Code's editor is Vim | `input_box_holds_text`, `input_box_not_insert` |
 
-When all seven pass, Harold types `text` into the pane as literal keys and then sends Enter. Harold adds nothing before or after the text. Two of the [limits](#limits) say when tmux types less than the text.
+When all seven pass, Harold types `text` into the pane as literal keys and then sends Enter. In a Rex block, Harold types `text` with one paste event and sends Enter with `rex send-key`, and it reads the screen for check 6 with a tail read of the block's output. Harold adds nothing before or after the text. Two of the [limits](#limits) say when tmux types less than the text.
 
 Two more things make a prompt wait:
 

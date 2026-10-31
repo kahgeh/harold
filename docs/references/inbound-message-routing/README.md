@@ -1,6 +1,6 @@
 # Inbound Message Routing
 
-Inbound message routing routes messages from your phone (via iMessage) to the correct agent running in a tmux pane.
+Inbound message routing routes messages from your phone (via iMessage) to the correct agent running in a tmux pane or a Rex pane (the setting `[agent_monitor] multiplexer`).
 
 ## Problem
 
@@ -19,7 +19,7 @@ Each cursor is advanced only after a successful `append_inbound_message`, so a c
 
 A reply typed in Messages on the Mac is stored as two rows with the same text, one matched by each query, so the listener records a row only once when both arrive: a row is skipped if a row with identical text from the other query was recorded within the last 10 seconds and has not already been matched this way. A skipped row still advances its cursor but appends no event. Two rows with the same text from the same query are both recorded (the user sent it twice), and rows discarded while messaging is paused are not remembered. Two limits are known: if the two copies are stored more than 10 seconds apart, or Harold restarts between them, the reply is routed twice.
 
-**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message(text)` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message(text)` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`; the variant holds a Rex block id too, such as `block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7`). With `multiplexer = "rex"`, live pane discovery runs the Rex inventory in place of `tmux list-panes -a`, and the typing steps below paste the text into the block and press Enter with `rex send-key`.
 
 An `InboundMessageReceived` event carries the reply's `text`, as the user typed it, tag included. Routing decides the owner when it handles the event.
 

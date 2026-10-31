@@ -138,6 +138,25 @@ test("chat message reports BUSY with the actual prompt", async () => {
   });
 });
 
+test("a Rex block reports with REX_BLOCK as the pane", async () => {
+  const calls = [];
+  const plugin = await createHaroldPlugin({
+    env: { REX_BLOCK: "block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7" },
+    protoPath: "/tmp/harold.proto",
+    dispatch: (invocation) => calls.push(invocation),
+  })({});
+
+  await plugin.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "ses_1", status: { type: "busy" } },
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].input, /block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7/);
+});
+
 test("idle event omits workSummary and preserves a busy sibling session", async () => {
   const calls = [];
   const plugin = await createHaroldPlugin({

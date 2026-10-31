@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::agent::runtime::valid_pane_id;
 use crate::away_message::{
     AGENT_NOT_FOUND, INVALID_MESSAGE_LENGTH, INVALID_SOURCE_ID, MESSAGING_PAUSED,
+    WRONG_MULTIPLEXER_PREFIX,
 };
 use crate::harold::{
     AgentState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SpeakLineRequest,
@@ -206,6 +207,11 @@ fn refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String {
     match (code, message) {
         (tonic::Code::InvalidArgument, INVALID_SOURCE_ID) => SOURCE_ID_LINE.into(),
         (tonic::Code::InvalidArgument, INVALID_MESSAGE_LENGTH) => MESSAGE_LENGTH_LINE.into(),
+        (tonic::Code::FailedPrecondition, message)
+            if message.starts_with(WRONG_MULTIPLEXER_PREFIX) =>
+        {
+            format!("refused: {message}")
+        }
         (tonic::Code::FailedPrecondition, MESSAGING_PAUSED) => "messaging is paused".into(),
         (tonic::Code::FailedPrecondition, AGENT_NOT_FOUND) => {
             format!("no agent is running in pane {src_id}")
@@ -220,6 +226,11 @@ fn speak_refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String 
     match (code, message) {
         (tonic::Code::InvalidArgument, INVALID_SOURCE_ID) => SOURCE_ID_LINE.into(),
         (tonic::Code::InvalidArgument, INVALID_MESSAGE_LENGTH) => SPOKEN_LENGTH_LINE.into(),
+        (tonic::Code::FailedPrecondition, message)
+            if message.starts_with(WRONG_MULTIPLEXER_PREFIX) =>
+        {
+            format!("refused: {message}")
+        }
         (tonic::Code::FailedPrecondition, AGENT_NOT_FOUND) => {
             format!("no agent is running in pane {src_id}")
         }
@@ -1645,6 +1656,21 @@ fn tool_refusal_line(status: &tonic::Status) -> String {
     }
 }
 
+/// The caller's pane id: `$TMUX_PANE` in a tmux pane, `$REX_BLOCK` in a Rex pane, or an empty
+/// string outside both.
+pub(crate) fn caller_pane() -> String {
+    caller_pane_from(|name| std::env::var(name).ok())
+}
+
+pub(crate) fn caller_pane_from(var: impl Fn(&str) -> Option<String>) -> String {
+    ["TMUX_PANE", "REX_BLOCK"]
+        .into_iter()
+        .filter_map(var)
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+}
+
 /// Run a `harold tool` command against the daemon at `address`. `Ok` is the line
 /// to print; `Err` is the one line to print for a refusal. A backlog command sends the
 /// caller's `TMUX_PANE` and works out local midnight in the Mac's UTC offset.
@@ -1654,7 +1680,7 @@ pub(crate) async fn tool(
     stdin: impl std::io::Read,
 ) -> Result<String, String> {
     if let ToolCommand::Backlog(backlog) = command {
-        let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+        let pane = caller_pane();
         return backlog_within(
             address,
             backlog,
@@ -1921,7 +1947,9 @@ fn backlog_refusal_line(status: &tonic::Status, pane: &str, product: &str) -> St
         (tonic::Code::PermissionDenied, "not_chief") => {
             format!("refused: pane {pane} is not the chief's pane")
         }
-        (tonic::Code::PermissionDenied, "no_pane") => "refused: not run in a tmux pane".into(),
+        (tonic::Code::PermissionDenied, "no_pane") => {
+            "refused: not run in a tmux or Rex pane".into()
+        }
         (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve the backlog".into(),
         (_, "") => "the Harold daemon refused the call".into(),
         (_, message) => message.to_string(),
@@ -3020,6 +3048,43 @@ mod tests {
         ] {
             assert_eq!(parse(&args), Err(USAGE.to_string()), "{args:?}");
         }
+    }
+
+    #[test]
+    fn the_caller_pane_comes_from_tmux_pane_or_rex_block() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        assert_eq!(caller_pane_from(env(&[("TMUX_PANE", "%47")])), "%47");
+        assert_eq!(
+            caller_pane_from(env(&[("REX_BLOCK", "block:abc")])),
+            "block:abc"
+        );
+        assert_eq!(
+            caller_pane_from(env(&[("TMUX_PANE", ""), ("REX_BLOCK", "block:abc")])),
+            "block:abc"
+        );
+        assert_eq!(caller_pane_from(env(&[])), "");
+    }
+
+    #[test]
+    fn a_pane_id_of_the_other_multiplexer_is_a_refusal_line() {
+        let message = "Harold works with rex panes, not tmux";
+        assert_eq!(
+            refusal_line(tonic::Code::FailedPrecondition, message, "%47"),
+            format!("refused: {message}")
+        );
+        assert_eq!(
+            speak_refusal_line(tonic::Code::FailedPrecondition, message, "%47"),
+            format!("refused: {message}")
+        );
+        assert!(valid_pane_id("block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7"));
+        assert!(valid_pane_id("%47"));
     }
 
     #[test]
@@ -4148,7 +4213,7 @@ mod tests {
             ),
             (
                 Status::permission_denied("no_pane"),
-                "refused: not run in a tmux pane",
+                "refused: not run in a tmux or Rex pane",
             ),
             (
                 Status::new(Code::Unimplemented, ""),
@@ -4627,7 +4692,10 @@ mod tests {
             not_chief,
             Err("refused: pane %40 is not the chief's pane".into())
         );
-        assert_eq!(no_pane, Err("refused: not run in a tmux pane".into()));
+        assert_eq!(
+            no_pane,
+            Err("refused: not run in a tmux or Rex pane".into())
+        );
         assert_eq!(unknown, Err("unknown_product".into()));
         assert_eq!(dry, Err("unknown_product".into()));
     }

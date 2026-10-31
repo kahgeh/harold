@@ -1,6 +1,6 @@
 # Agent Monitor Reference
 
-The agent monitor discovers configured agent processes in tmux, records lifecycle and provider-screen observations, projects current pane state, and serves complete snapshots over gRPC.
+The agent monitor discovers configured agent processes in tmux panes or Rex blocks (the setting `[agent_monitor] multiplexer`), records lifecycle and provider-screen observations, projects current pane state, and serves complete snapshots over gRPC.
 
 ## Problem
 
@@ -49,7 +49,7 @@ Every pane-scoped agent event identifies the complete current agent incarnation:
 
 | Field | Meaning |
 | --- | --- |
-| `pane_id` | tmux pane ID, such as `%22` |
+| `pane_id` | The pane ID: a tmux pane, such as `%22`, or a Rex block, such as `block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7` |
 | `pane_pid` | Long-lived pane-root process ID |
 | `agent_pid` | Selected configured agent process ID |
 | `agent_started_at_ms` | OS-reported agent-process start time |
@@ -212,7 +212,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 
-`ReportAgentState.state` accepts only `AGENT_STATE_BUSY` and `AGENT_STATE_IDLE`. Pane IDs have the tmux `%` plus decimal-digits form. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
+`ReportAgentState.state` accepts only `AGENT_STATE_BUSY` and `AGENT_STATE_IDLE`. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID, and with `"tmux"` it refuses a `block:` pane ID. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
 
 ### `AgentStateSnapshot`
 
@@ -289,6 +289,8 @@ screen_history_lines = 2000
 | `agent_monitor.inventory_timeout_ms` | Positive integer; inventory scan/resolve deadline in milliseconds, default 3000; the next tick's scan retries a failed one with the same deadline |
 | `agent_monitor.screen_interval_ms` | Positive integer; scheduled visible-screen period, default 2000 |
 | `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's idle state wins over the screen for a pane with no lifecycle adapter |
+| `agent_monitor.multiplexer` | `"tmux"` (the default) or `"rex"`; the one multiplexer Harold works with. Harold reads it once, at start. Any other value stops Harold at start with `agent_monitor.multiplexer must be "tmux" or "rex"` |
+| `agent_monitor.rex` | Optional path to the `rex` program. When it is not set, Harold tries the running server's own copy (`~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`), then `rex` on the `PATH`, then `/Applications/Rex*.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex` |
 | `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Busy` report can be before the screen decides, and how long the screen must read `Busy` without a break to replace an `Idle` report |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
 | `agents[].display_name` | Non-empty display label |
@@ -302,6 +304,14 @@ screen_history_lines = 2000
 The defaults above are the ones in `harold/config/default.toml`, and that file decides them. Harold will not start without it, and it sets every `[agent_monitor]` key, so the fallback values built into `AgentMonitorSettings` in `harold/src/settings.rs` (1,000 ms inventory and 500 ms screen intervals) apply only to a key the file leaves out.
 
 Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 output (`tmux -u`), so output framing does not depend on the daemon’s locale. Rows must contain exactly seven fields; embedded tabs are rejected as malformed rather than guessing their meaning.
+
+### Rex
+
+With `multiplexer = "rex"`, each inventory tick runs `rex ls --json --autostart=false`, then `session.view` for each session, then `rex block call … process` for each terminal block (at most 8 at a time). The label is `<session label>:<window>.<pane>`, with both numbers counted from 1 in the order `session.view` lists them. Harold looks for the agent in the foreground program first, then in `ancestors` (nearest parent first), and stops at the block's first process (`child`). The program is the file name of `argv0`; when `argv0` is an interpreter, it is the file name of `script`. A new agent pid gets one `ps -o lstart= -p <pid>` read.
+
+A Rex screen read is a tail read: the block method `format` (with `max_bytes` = 1) gives the length of the output and an id, and `blob_read` with that id reads the last bytes (the screen's rows × columns × 4, at least 64 KiB) until `eof`. Harold drops the first line of a cut tail and keeps as many lines as the block has rows. The classifier id is `rex-visible-v1`. A read over 500 ms logs `agent screen read slow`.
+
+A Rex call that fails or takes more than 3 seconds fails the listing, and the snapshot keeps its panes. The `agent monitor degraded` line then has `reason` = `rex_failed`, `rex_timeout` or `rex_absent` (no `rex` program, or no Rex server runs). Typing uses a paste event (`block.event`) for the text and `rex send-key` for Enter and single keys.
 
 Process selection looks only at processes whose program matches a fragment, so `nvim CLAUDE.md` or a script under `~/.claude/` is not an agent, and a provider comes from the program alone. A pane with no agent program is never in the snapshot: `Unknown` is only an agent's state. Among matching processes, it prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
@@ -367,7 +377,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered work summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
-- Harold does not navigate tmux for the dash and does not implement the dash's filter.
+- Harold does not navigate tmux or Rex for the dash and does not implement the dash's filter.
 - The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and agents without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
 - The `TurnComplete` RPC is the turn-end update ingress. Empty prompts preserve work summaries and cannot explicitly clear them.

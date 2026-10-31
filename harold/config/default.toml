@@ -91,6 +91,10 @@ inventory_timeout_ms = 3000
 screen_interval_ms = 2000
 hook_grace_ms = 2000
 report_grace_ms = 30000
+# The one multiplexer Harold works with, read at start: "tmux" (the default) or "rex".
+# multiplexer = "tmux"
+# The path to the `rex` program, when Harold does not find it by itself.
+# rex = "/path/to/rex"
 
 [[agents]]
 id = "codex"

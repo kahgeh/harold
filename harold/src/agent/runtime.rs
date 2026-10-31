@@ -1948,6 +1948,9 @@ fn inventory_reason(error: InventoryError) -> &'static str {
         InventoryError::CommandFailed => "command_failed",
         InventoryError::MalformedOutput => "malformed_output",
         InventoryError::MissingProcessStartTime => "missing_start_time",
+        InventoryError::RexAbsent => "rex_absent",
+        InventoryError::RexTimeout => "rex_timeout",
+        InventoryError::RexFailed => "rex_failed",
     }
 }
 
@@ -1959,10 +1962,23 @@ fn screen_reason(error: ScreenError) -> &'static str {
     }
 }
 
+/// A tmux pane id (`%47`) or a Rex pane id (`block:` and the block's id).
 pub(crate) fn valid_pane_id(value: &str) -> bool {
+    valid_tmux_pane_id(value) || super::rex::valid_rex_pane_id(value)
+}
+
+pub(crate) fn valid_tmux_pane_id(value: &str) -> bool {
     value.strip_prefix('%').is_some_and(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+/// Whether a pane id has the form of the multiplexer Harold works with.
+pub(crate) fn pane_id_fits_multiplexer(value: &str) -> bool {
+    match crate::settings::try_get_settings().map(|s| s.agent_monitor.multiplexer()) {
+        Some(crate::settings::Multiplexer::Rex) => super::rex::valid_rex_pane_id(value),
+        _ => valid_tmux_pane_id(value),
+    }
 }
 
 #[allow(

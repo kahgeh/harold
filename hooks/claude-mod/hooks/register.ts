@@ -16,10 +16,22 @@ let checks: Timer | undefined
 // The one pending wait after a subagent's turn ended; each new subagent end replaces it.
 let settle: Timer | undefined
 
+// A Rex pane id is `block:` and the block's id.
+const isRexBlock = (value: string | undefined): value is string =>
+  value !== undefined && /^block:[0-9A-Za-z-]+$/.test(value)
+
+// The caller's pane: `TMUX_PANE` in a tmux pane, `REX_BLOCK` in a Rex pane.
+async function callerPane($: EngineInterface): Promise<string | undefined> {
+  const tmux = await $.env.get('TMUX_PANE')
+  if (isPaneId(tmux)) return tmux
+  const rex = await $.env.get('REX_BLOCK')
+  return isRexBlock(rex) ? rex : undefined
+}
+
 async function report($: EngineInterface, event: ReportEvent): Promise<boolean> {
   try {
-    const paneId = await $.env.get('TMUX_PANE')
-    if (!isPaneId(paneId)) return true
+    const paneId = await callerPane($)
+    if (paneId === undefined) return true
 
     const program = resolveProgram({ bin: await $.env.get('HAROLD_BIN'), root: $.plugin.root })
     const { exitCode } = await $.process.run(buildArgv({ program, event, paneId }), { timeoutMs: 4000 })

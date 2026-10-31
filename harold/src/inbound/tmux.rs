@@ -3,7 +3,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::agent::domain::AgentPaneObservation;
-use crate::agent::inventory::{AgentInventoryPort, TmuxAgentInventory};
+use crate::agent::rex;
 use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::get_settings;
 use crate::timed_prompts::{PaneLock, Writer, pane_lock};
@@ -15,7 +15,7 @@ const INBOUND_PANE_LABEL_MAX_SCALARS: usize = 256;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn scan_live_panes() -> Vec<super::directory::AgentAddress> {
-    let inventory = TmuxAgentInventory::new(get_settings().agents.clone());
+    let inventory = rex::inventory_for(get_settings());
     match inventory.scan() {
         Ok(observations) => observations
             .into_iter()
@@ -29,7 +29,7 @@ pub(crate) fn scan_live_panes() -> Vec<super::directory::AgentAddress> {
 }
 
 pub(crate) fn is_pane_alive(pane_id: &str) -> bool {
-    let inventory = TmuxAgentInventory::new(get_settings().agents.clone());
+    let inventory = rex::inventory_for(get_settings());
     match inventory.resolve(pane_id) {
         Ok(observation) => observation.is_some(),
         Err(error) => {
@@ -121,14 +121,22 @@ fn press_enter_with(program: &str, pane_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Types `text` into the pane as literal keys, without Enter. Writes no log line: the
+/// Types `text` into the pane (a tmux pane as literal keys, a Rex block as one paste), without
+/// Enter. Writes no log line: the
 /// caller decides whether the text may be logged.
 pub(crate) fn type_text_into_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
+    if pane_id.starts_with(rex::BLOCK_PREFIX) {
+        // One paste keeps a line break as a line break; only `press_enter` submits.
+        return rex::type_text(pane_id, &strip_control(text));
+    }
     type_text_with(TMUX, pane_id, text)
 }
 
 /// Sends Enter to the pane.
 pub(crate) fn press_enter_in_tmux_pane(pane_id: &str) -> Result<(), String> {
+    if pane_id.starts_with(rex::BLOCK_PREFIX) {
+        return rex::press_key(pane_id, "Enter");
+    }
     press_enter_with(TMUX, pane_id)
 }
 

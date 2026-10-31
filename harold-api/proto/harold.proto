@@ -102,6 +102,7 @@ message WatchAgentStatesRequest {}
 
 message AgentPaneState {
   string pane_id = 1;
+  // The pane label, <session>:<window>.<pane>, for tmux and Rex.
   string tmux_target = 2;
   string session_name = 3;
   uint32 window_index = 4;
@@ -151,7 +152,7 @@ message SetMessagingPausedResponse {
 }
 
 message SendMessageToAwayDeviceRequest {
-  // The tmux pane id of the sending agent, such as "%47".
+  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex).
   string src_id = 1;
   string text = 2;
 }
@@ -161,7 +162,7 @@ message SendMessageToAwayDeviceResponse {
 }
 
 message SpeakLineRequest {
-  // The tmux pane id of the sending agent, such as "%47".
+  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex).
   string src_id = 1;
   string text = 2;
 }

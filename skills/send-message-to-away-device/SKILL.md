@@ -5,7 +5,7 @@ description: Use when the user's instructions ask you to message them, text them
 
 # Send a message to the user's away device
 
-Harold is the service on this Mac that messages the user's phone. This skill gives you one command that sends text you write to that phone, tagged with the tmux pane you run in.
+Harold is the service on this Mac that messages the user's phone. This skill gives you one command that sends text you write to that phone, tagged with the tmux pane or Rex pane you run in.
 
 ## When to send
 
@@ -14,10 +14,10 @@ Send a message only when the user's instructions call for it: they asked you to 
 ## The command
 
 ```
-{{HAROLD_BIN}} send-message-to-away-device --src-id "$TMUX_PANE" 'Pod 3 is blocked on a merge conflict in store.rs'
+{{HAROLD_BIN}} send-message-to-away-device --src-id "${TMUX_PANE:-$REX_BLOCK}" 'Pod 3 is blocked on a merge conflict in store.rs'
 ```
 
-- `--src-id "$TMUX_PANE"` names your pane. Pass it exactly as written. It is empty outside tmux, and the command then fails.
+- `--src-id "${TMUX_PANE:-$REX_BLOCK}"` names your pane. Pass it exactly as written. `$TMUX_PANE` is set in a tmux pane, and `$REX_BLOCK` is set in a Rex pane. Both are empty outside a multiplexer, and the command then fails.
 - The phone shows `🤖 [<machine>/<session>:<window>.<pane>] <your text>`.
 - Exit status 0 means Harold has stored the message for sending. It does not mean the phone has it.
 
