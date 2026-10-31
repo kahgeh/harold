@@ -18,7 +18,7 @@ use crate::app::{
     Snapshot, SnapshotError,
 };
 use crate::cli::Options;
-use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
+use crate::navigation::{NavigationError, PaneNavigator, REX_BLOCK_PREFIX, TmuxNavigator};
 use crate::notes::{DEBOUNCE, NoteLine, NotesAction, NotesEvent, SharedBackend};
 use crate::questions::{Outgoing, PickView, Queue, SendResult};
 use crate::terminal::{TerminalError, TerminalGuard};
@@ -834,15 +834,31 @@ trait FocusProbe: Send + 'static {
     fn read(&mut self) -> FocusReading;
 }
 
+/// Set when the snapshot's agents have `block:` ids (Rex), cleared when they have `%` ids (tmux).
+static AGENTS_ARE_IN_REX: AtomicBool = AtomicBool::new(false);
+
+/// Reads the one multiplexer the agents run in. The other one may run too, so the order
+/// of the two is not used to choose.
+fn read_focus(
+    agents_are_in_rex: bool,
+    tmux: impl FnOnce() -> Option<String>,
+    rex: impl FnOnce() -> Option<String>,
+) -> FocusReading {
+    let pane = if agents_are_in_rex { rex() } else { tmux() };
+    pane.map_or(FocusReading::Unavailable, FocusReading::Active)
+}
+
 struct TmuxFocusProbe;
 
 impl FocusProbe for TmuxFocusProbe {
     fn read(&mut self) -> FocusReading {
         // Built per read: TmuxNavigator's ports are not Send, and construction is free.
-        match TmuxNavigator::new().focused_pane() {
-            Ok(Some(pane_id)) => FocusReading::Active(pane_id),
-            Ok(None) | Err(_) => FocusReading::Unavailable,
-        }
+        let navigator = TmuxNavigator::new();
+        read_focus(
+            AGENTS_ARE_IN_REX.load(Ordering::Acquire),
+            || navigator.focused_pane().ok().flatten(),
+            || navigator.rex_focused_block().ok().flatten(),
+        )
     }
 }
 
@@ -1359,6 +1375,12 @@ impl RuntimeCore {
     }
 
     fn accept_snapshot(&mut self, snapshot: Snapshot, received_at_ms: i64) -> StreamControl {
+        if let Some(row) = snapshot.rows.first() {
+            AGENTS_ARE_IN_REX.store(
+                row.incarnation.pane_id.starts_with(REX_BLOCK_PREFIX),
+                Ordering::Release,
+            );
+        }
         let result = if self.first_snapshot_pending {
             self.app.apply_first_snapshot(snapshot).map(|()| true)
         } else {
@@ -1443,6 +1465,24 @@ impl RuntimeCore {
             Effect::OpenLink(link) => Control::OpenLink(link),
             Effect::Notes(action) => {
                 self.start_notes(action);
+                Control::Continue
+            }
+            Effect::Navigate { pane_id } if pane_id.starts_with(REX_BLOCK_PREFIX) => {
+                // A Rex block: the agent's session name comes from its row. No tmux client is needed.
+                let session = self
+                    .app
+                    .snapshot
+                    .rows
+                    .iter()
+                    .find(|row| row.incarnation.pane_id == pane_id)
+                    .map(|row| row.session_name.clone())
+                    .unwrap_or_default();
+                match navigator.focus_rex_block(&session, &pane_id) {
+                    Ok(()) => self.app.clear_runtime_status(),
+                    Err(error) => self.app.set_runtime_status(RuntimeStatus::NavigationFailed(
+                        sanitize_display(&error.to_string(), ERROR_LIMIT),
+                    )),
+                }
                 Control::Continue
             }
             Effect::Navigate { pane_id } => {
@@ -1714,6 +1754,77 @@ mod tests {
             Some(RuntimeStatus::NavigationFailed(_))
         ));
         assert_eq!(failed.app.snapshot.rows.len(), 1);
+    }
+
+    #[test]
+    fn focus_is_read_from_the_multiplexer_of_the_agents_ids() {
+        let tmux = || Some("%1".to_owned());
+        let rex = || Some("block:a".to_owned());
+
+        assert_eq!(
+            super::read_focus(true, tmux, rex),
+            FocusReading::Active("block:a".into())
+        );
+        assert_eq!(
+            super::read_focus(false, tmux, rex),
+            FocusReading::Active("%1".into())
+        );
+        assert_eq!(
+            super::read_focus(true, tmux, || None),
+            FocusReading::Unavailable
+        );
+    }
+
+    struct RexNavigator {
+        calls: Rc<RefCell<Vec<(String, String)>>>,
+        fail: bool,
+    }
+
+    impl PaneNavigator for RexNavigator {
+        fn jump_to(&self, _: &str, _: &str) -> Result<(), NavigationError> {
+            panic!("a Rex block must not switch a tmux client");
+        }
+
+        fn focus_rex_block(&self, session: &str, block: &str) -> Result<(), NavigationError> {
+            self.calls.borrow_mut().push((session.into(), block.into()));
+            if self.fail {
+                return Err(NavigationError::RexNotFound);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn enter_on_a_rex_block_focuses_it_by_session_name_without_a_tmux_client() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let navigator = RexNavigator {
+            calls: calls.clone(),
+            fail: false,
+        };
+        let mut rex_snapshot = snapshot(1, MonitorHealthState::Healthy);
+        rex_snapshot.rows[0].incarnation.pane_id = "block:abc".into();
+        rex_snapshot.rows[0].session_name = "rexsup-dash".into();
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(rex_snapshot, 1);
+
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::Continue
+        );
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[("rexsup-dash".into(), "block:abc".into())]
+        );
+        assert_eq!(core.app.runtime_status(), None);
+
+        let failing = RexNavigator { calls, fail: true };
+        core.handle_key(KeyCode::Enter, &failing);
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::NavigationFailed(_))
+        ));
     }
 
     #[test]

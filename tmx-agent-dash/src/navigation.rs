@@ -3,9 +3,17 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const ERROR_DETAIL_MAX_SCALARS: usize = 512;
+
+/// The copy of `rex` that the running Rex server keeps, under the user's home folder.
+const REX_SERVER_COPY: &str = "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex";
+/// The copy of `rex` inside a Rex app bundle in `/Applications`.
+const REX_BUNDLE_COPY: &str = "Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+/// A Rex pane id starts with this. A tmux pane id starts with `%`.
+pub const REX_BLOCK_PREFIX: &str = "block:";
 
 struct CommandOutput {
     success: bool,
@@ -32,6 +40,28 @@ impl CommandRunner for ProcessCommandRunner {
 
 trait ProcessContext {
     fn var_os(&self, name: &OsStr) -> Option<OsString>;
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
+    /// The Rex app bundles in `/Applications`.
+    fn rex_app_bundles(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir("/Applications") else {
+            return Vec::new();
+        };
+        let mut bundles: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with("Rex") && name.ends_with(".app"))
+            })
+            .collect();
+        bundles.sort();
+        bundles
+    }
 }
 
 struct ProcessEnvironment;
@@ -54,6 +84,10 @@ pub enum NavigationError {
     EditorUnavailable,
     /// Only the absolute path of a file is opened in the editor.
     NotAFilePath,
+    /// The pane is a Rex block, and no `rex` program was found.
+    RexNotFound,
+    /// The Rex block id or session name is empty or holds a control character.
+    BadRexTarget,
     CommandIo {
         operation: &'static str,
         detail: String,
@@ -73,6 +107,8 @@ impl fmt::Display for NavigationError {
             Self::LinksUnavailable => formatter.write_str("links cannot be opened here"),
             Self::EditorUnavailable => formatter.write_str("an editor cannot be opened here"),
             Self::NotAFilePath => formatter.write_str("only a file's absolute path can be opened"),
+            Self::RexNotFound => formatter.write_str("the rex program was not found"),
+            Self::BadRexTarget => formatter.write_str("the Rex session or block is not valid"),
             Self::CommandIo { operation, detail } => {
                 write!(formatter, "could not {operation}: {detail}")
             }
@@ -87,6 +123,11 @@ impl std::error::Error for NavigationError {}
 
 pub trait PaneNavigator {
     fn jump_to(&self, client: &str, pane_id: &str) -> Result<(), NavigationError>;
+
+    /// Shows a Rex block in the Rex app.
+    fn focus_rex_block(&self, _session: &str, _block: &str) -> Result<(), NavigationError> {
+        Err(NavigationError::RexNotFound)
+    }
 
     /// Opens a question's link in the user's browser.
     fn open_link(&self, _link: &str) -> Result<(), NavigationError> {
@@ -168,6 +209,65 @@ impl TmuxNavigator {
         Ok(best.map(|(_, _, pane)| pane))
     }
 
+    /// Finds `rex`: the server's own copy, then `PATH`, then an app bundle.
+    fn find_rex(&self) -> Option<PathBuf> {
+        let from_home = self
+            .context
+            .var_os("HOME".as_ref())
+            .map(|home| PathBuf::from(home).join(REX_SERVER_COPY));
+        let from_path: Vec<PathBuf> = self
+            .context
+            .var_os("PATH".as_ref())
+            .map(|path| env::split_paths(&path).map(|dir| dir.join("rex")).collect())
+            .unwrap_or_default();
+        let from_bundles = self
+            .context
+            .rex_app_bundles()
+            .into_iter()
+            .map(|bundle| bundle.join(REX_BUNDLE_COPY));
+        from_home
+            .into_iter()
+            .chain(from_path)
+            .chain(from_bundles)
+            .find(|candidate| candidate.is_absolute() && self.context.is_file(candidate))
+    }
+
+    /// Runs `rex` with its first argument, then `--autostart=false` (the dash never
+    /// starts a Rex server), then the rest.
+    fn run_rex(
+        &self,
+        operation: &'static str,
+        args: &[&str],
+    ) -> Result<CommandOutput, NavigationError> {
+        let rex = self.find_rex().ok_or(NavigationError::RexNotFound)?;
+        let mut full = vec![args[0], "--autostart=false", "--timeout=3s"];
+        full.extend_from_slice(&args[1..]);
+        self.run_command(&rex.to_string_lossy(), operation, &full)
+    }
+
+    /// The Rex block the user sees: the focused block of the active window of the one session
+    /// the Rex app shows. Rex does not say which session the app has in front, so with
+    /// more than one session this is `None` and the dash does not guess.
+    pub fn rex_focused_block(&self) -> Result<Option<String>, NavigationError> {
+        if self.find_rex().is_none() {
+            return Ok(None);
+        }
+        let clients = self.run_rex("read Rex clients", &["client", "ls", "--json"])?;
+        let clients = String::from_utf8_lossy(&clients.stdout);
+        let sessions = rex_app_session_ids(&clients);
+        let [session] = sessions.as_slice() else {
+            return Ok(None);
+        };
+        let request = format!("{{\"session_id\":\"{session}\"}}");
+        let view = self.run_rex(
+            "read Rex session",
+            &["api", "call", "session.view", &request],
+        )?;
+        let view = String::from_utf8_lossy(&view.stdout);
+        Ok(rex_focused_block_of(&view)
+            .map(|block| sanitize_display(&block, ERROR_DETAIL_MAX_SCALARS)))
+    }
+
     fn has_invoking_tmux_context(&self) -> bool {
         ["TMUX", "TMUX_PANE"]
             .into_iter()
@@ -237,6 +337,28 @@ impl PaneNavigator for TmuxNavigator {
         Ok(())
     }
 
+    /// Runs `rex focus` for the block, then `rex do session.select` so the Rex app shows the
+    /// session. The block id and the session name are separate arguments.
+    fn focus_rex_block(&self, session: &str, block: &str) -> Result<(), NavigationError> {
+        let clean = |text: &str| !text.trim().is_empty() && !text.chars().any(char::is_control);
+        if !clean(session) || !clean(block) || !block.starts_with(REX_BLOCK_PREFIX) {
+            return Err(NavigationError::BadRexTarget);
+        }
+        let session_flag = format!("--session={session}");
+        self.run_rex("focus Rex block", &["focus", &session_flag, block])?;
+        let sessions = self.run_rex("list Rex sessions", &["ls", "--json"])?;
+        let sessions = String::from_utf8_lossy(&sessions.stdout);
+        let Some(session_id) = rex_session_id(&sessions, session) else {
+            return Err(NavigationError::CommandFailed {
+                operation: "show Rex session",
+                detail: "no Rex session has this name".into(),
+            });
+        };
+        let argument = format!("session_id={session_id}");
+        self.run_rex("show Rex session", &["do", "session.select", &argument])?;
+        Ok(())
+    }
+
     /// Runs `open <link>`. The scheme check means the link can never be read as a flag
     /// or name a local file or app.
     fn open_link(&self, link: &str) -> Result<(), NavigationError> {
@@ -279,6 +401,75 @@ impl PaneNavigator for TmuxNavigator {
         )?;
         Ok(())
     }
+}
+
+/// The string value of the first `"key"` at or after `from`: its text and the offset after it.
+fn json_string(text: &str, key: &str, from: usize) -> Option<(String, usize)> {
+    let needle = format!("\"{key}\"");
+    let at = from + text.get(from..)?.find(&needle)? + needle.len();
+    let rest = text.get(at..)?.trim_start().strip_prefix(':')?.trim_start();
+    let start = text.len() - rest.len();
+    let body = rest.strip_prefix('"')?;
+    let mut value = String::new();
+    let mut chars = body.char_indices();
+    while let Some((offset, character)) = chars.next() {
+        match character {
+            '"' => return Some((value, start + 1 + offset + 1)),
+            '\\' => match chars.next()?.1 {
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).map(|(_, digit)| digit).collect();
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    value.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                }
+                other => value.push(other),
+            },
+            other => value.push(other),
+        }
+    }
+    None
+}
+
+/// The id of the session with this name in `rex ls --json`.
+fn rex_session_id(listing: &str, name: &str) -> Option<String> {
+    let mut at = 0;
+    while let Some((id, after)) = json_string(listing, "session_id", at) {
+        let end = json_string(listing, "session_id", after).map_or(listing.len(), |(_, n)| n);
+        let label = json_string(listing.get(..end)?, "label", after);
+        if label.is_some_and(|(label, _)| label == name) {
+            return Some(id);
+        }
+        at = after;
+    }
+    None
+}
+
+/// The sessions that the Rex app shows: `session_ids` of the `app` client in `rex client ls --json`.
+fn rex_app_session_ids(clients: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for client in clients.split("\"client_id\"").skip(1) {
+        let is_app = json_string(client, "kind", 0).is_some_and(|(kind, _)| kind == "app");
+        let Some(list) = client.find("\"session_ids\"").filter(|_| is_app) else {
+            continue;
+        };
+        let body = client.get(list..).unwrap_or_default();
+        let body = body.split_once('[').map_or("", |(_, rest)| rest);
+        let body = body.split(']').next().unwrap_or_default();
+        ids.extend(body.split('"').skip(1).step_by(2).map(str::to_owned));
+    }
+    ids
+}
+
+/// The focused block of the active window in a `session.view` result.
+fn rex_focused_block_of(view: &str) -> Option<String> {
+    let (active, _) = json_string(view, "active_window_id", 0)?;
+    let mut at = 0;
+    while let Some((window, after)) = json_string(view, "window_id", at) {
+        if window == active {
+            return json_string(view, "focused_block_id", after).map(|(block, _)| block);
+        }
+        at = after;
+    }
+    None
 }
 
 fn command_failure_detail(program: &str, stderr: &[u8]) -> String {
@@ -742,5 +933,277 @@ mod tests {
             FakeContext::valid(),
         );
         assert!(navigator.focused_pane().is_err());
+    }
+
+    // ---- Rex ----
+
+    use std::path::{Path, PathBuf};
+
+    const REX_SERVER: &str = "/Users/u/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex";
+    const REX_BUNDLE: &str =
+        "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+
+    struct RexContext {
+        path: Option<&'static str>,
+        files: Vec<&'static str>,
+    }
+
+    impl ProcessContext for RexContext {
+        fn var_os(&self, name: &OsStr) -> Option<OsString> {
+            match name.to_str() {
+                Some("HOME") => Some("/Users/u".into()),
+                Some("PATH") => self.path.map(Into::into),
+                _ => None,
+            }
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.iter().any(|file| Path::new(file) == path)
+        }
+
+        fn rex_app_bundles(&self) -> Vec<PathBuf> {
+            vec!["/Applications/Rex Beta.app".into()]
+        }
+    }
+
+    fn rex_navigator(files: Vec<&'static str>, outputs: Vec<&str>) -> (TmuxNavigator, FakeRunner) {
+        let runner = FakeRunner::with_outputs(
+            outputs
+                .into_iter()
+                .map(|stdout| {
+                    Ok(CommandOutput {
+                        success: true,
+                        stdout: stdout.as_bytes().to_vec(),
+                        stderr: Vec::new(),
+                    })
+                })
+                .collect(),
+        );
+        let observed = runner.clone();
+        let context = RexContext {
+            path: Some("/opt/bin:/usr/bin"),
+            files,
+        };
+        (TmuxNavigator::with_ports(runner, context), observed)
+    }
+
+    const SESSIONS: &str = r#"{
+  "sessions": [
+    {
+      "session_id": "session:aaa",
+      "label": "arid-moor"
+    },
+    {
+      "session_id": "session:bbb",
+      "label": "rexsup-dash-28440"
+    }
+  ]
+}"#;
+
+    const CLIENTS: &str = r#"{
+  "clients": [
+    {
+      "client_id": "client:cli",
+      "info": { "kind": "cli", "name": "rex" },
+      "connection_state": "connected"
+    },
+    {
+      "client_id": "client:app",
+      "info": {
+        "kind": "app",
+        "name": "Rex Beta"
+      },
+      "connection_state": "connected",
+      "session_ids": [
+        "session:aaa",
+        "session:bbb"
+      ]
+    },
+    {
+      "client_id": "client:other",
+      "info": { "kind": "cli", "name": "rex" },
+      "session_ids": ["session:zzz"]
+    }
+  ]
+}"#;
+
+    const CLIENTS_ONE_SESSION: &str = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"},"session_ids":["session:aaa"]}]}"#;
+
+    const VIEW_OF_AAA: &str = r#"{"revision":1,"session_id":"session:aaa","label":"arid-moor","active_window_id":"window:2","windows":[{"window_id":"window:1","label":"One","focused_block_id":"block:one","layers":[]},{"window_id":"window:2","label":"Two","focused_block_id":"block:two","layers":[{"layer_id":"layer:x","blocks":[{"block_id":"block:two"}]}]}]}"#;
+
+    fn args(call: &RecordedCall) -> Vec<&str> {
+        call.1.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn rex_is_found_in_the_server_copy_then_the_path_then_the_app_bundle() {
+        let all = vec![REX_SERVER, "/opt/bin/rex", REX_BUNDLE];
+        let (navigator, _) = rex_navigator(all.clone(), vec![]);
+        assert_eq!(navigator.find_rex(), Some(PathBuf::from(REX_SERVER)));
+
+        let (navigator, _) = rex_navigator(all[1..].to_vec(), vec![]);
+        assert_eq!(navigator.find_rex(), Some(PathBuf::from("/opt/bin/rex")));
+
+        let (navigator, _) = rex_navigator(all[2..].to_vec(), vec![]);
+        assert_eq!(navigator.find_rex(), Some(PathBuf::from(REX_BUNDLE)));
+
+        let (navigator, _) = rex_navigator(vec![], vec![]);
+        assert_eq!(navigator.find_rex(), None);
+    }
+
+    #[test]
+    fn enter_on_a_rex_block_focuses_it_then_selects_its_session_in_the_app() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec!["", SESSIONS, ""]);
+
+        navigator
+            .focus_rex_block("rexsup-dash-28440", "block:abc")
+            .unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|call| call.0 == REX_SERVER));
+        assert_eq!(
+            args(&calls[0]),
+            [
+                "focus",
+                "--autostart=false",
+                "--timeout=3s",
+                "--session=rexsup-dash-28440",
+                "block:abc"
+            ]
+        );
+        assert_eq!(
+            args(&calls[1]),
+            ["ls", "--autostart=false", "--timeout=3s", "--json"]
+        );
+        assert_eq!(
+            args(&calls[2]),
+            [
+                "do",
+                "--autostart=false",
+                "--timeout=3s",
+                "session.select",
+                "session_id=session:bbb"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rex_block_in_an_unknown_session_is_not_selected() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec!["", SESSIONS]);
+
+        let error = navigator.focus_rex_block("gone", "block:abc").unwrap_err();
+
+        assert!(matches!(error, NavigationError::CommandFailed { .. }));
+        assert_eq!(runner.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_bad_rex_target_or_a_missing_rex_runs_nothing() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![]);
+        for (session, block) in [
+            ("", "block:a"),
+            ("s", ""),
+            ("s", "%4"),
+            ("s", "block:a\n"),
+            ("s\x1b", "block:a"),
+        ] {
+            assert_eq!(
+                navigator.focus_rex_block(session, block),
+                Err(NavigationError::BadRexTarget),
+                "{session:?} {block:?}"
+            );
+        }
+        assert!(runner.calls().is_empty());
+
+        let (navigator, runner) = rex_navigator(vec![], vec![]);
+        assert_eq!(
+            navigator.focus_rex_block("s", "block:a"),
+            Err(NavigationError::RexNotFound)
+        );
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_failed_rex_command_is_an_error_with_its_text() {
+        let runner = FakeRunner::failed("no such block");
+        let observed = runner.clone();
+        let context = RexContext {
+            path: None,
+            files: vec![REX_SERVER],
+        };
+        let navigator = TmuxNavigator::with_ports(runner, context);
+
+        let error = navigator.focus_rex_block("s", "block:a").unwrap_err();
+
+        assert!(error.to_string().contains("no such block"), "{error}");
+        assert_eq!(observed.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_rex_focus_is_the_focused_block_of_the_active_window_of_the_shown_session() {
+        let (navigator, runner) =
+            rex_navigator(vec![REX_SERVER], vec![CLIENTS_ONE_SESSION, VIEW_OF_AAA]);
+
+        assert_eq!(
+            navigator.rex_focused_block().unwrap(),
+            Some("block:two".into())
+        );
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            args(&calls[0]),
+            [
+                "client",
+                "--autostart=false",
+                "--timeout=3s",
+                "ls",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            args(&calls[1]),
+            [
+                "api",
+                "--autostart=false",
+                "--timeout=3s",
+                "call",
+                "session.view",
+                r#"{"session_id":"session:aaa"}"#
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rex_focus_is_unknown_with_several_sessions_or_no_rex() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![CLIENTS]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+        assert_eq!(runner.calls().len(), 1);
+
+        let (navigator, runner) = rex_navigator(vec![], vec![]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+        assert!(runner.calls().is_empty());
+
+        let (navigator, _) = rex_navigator(vec![REX_SERVER], vec![r#"{"clients":[]}"#]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+    }
+
+    #[test]
+    fn only_the_app_clients_sessions_count_as_shown() {
+        assert_eq!(
+            super::rex_app_session_ids(CLIENTS),
+            vec!["session:aaa".to_owned(), "session:bbb".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_session_name_with_an_escaped_character_is_matched() {
+        let listing = r#"{"sessions":[{"session_id":"session:x","label":"r\u0026d \"q\""}]}"#;
+
+        assert_eq!(
+            super::rex_session_id(listing, "r&d \"q\""),
+            Some("session:x".into())
+        );
     }
 }

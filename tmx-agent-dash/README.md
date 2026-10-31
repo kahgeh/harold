@@ -73,7 +73,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `l` / → | Nothing | Open the todo (on another todo's row, open that todo) | Nothing | Nothing | Nothing | Types `l` |
 | `h` / ← | Nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Types `h` |
 | Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Tick the step, or untick it | Types a space |
-| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the todo | Nothing | `send` sends the answer at once; `relegate to idea…`, `revise…` or `reject…` opens a note; `done` tells the chief you are done; `ignore` tells it you will not | Nothing | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
+| Enter | Switch the invoking tmux client to the pane under the cursor; for a Rex agent (`block:` id), `rex focus` the block and `rex do session.select` its session, with no tmux client needed | Open or close the todo | Nothing | `send` sends the answer at once; `relegate to idea…`, `revise…` or `reject…` opens a note; `done` tells the chief you are done; `ignore` tells it you will not | Nothing | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
 | Esc | Clear an accepted filter, or nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
 | `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting todo (wraps) | Same | Same | Same | Types |
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
@@ -312,6 +312,15 @@ hides that agent, the filter is cleared.
   Idle when the dash starts do not wait, and a second dash keeps its own list.
 
 ### Focus tracking
+
+For Rex agents (`block:` ids) the dash does not run `tmux`. Once a second it reads
+`rex client ls --json` and `session.view` and counts the focused block of the
+active window as seen. Rex does not say which session the app has in front, so
+when the app has more than one session the dash has no reading and shows
+`(focus tracking off)`. The dash finds `rex` in the running server's copy, then on
+`PATH`, then in `/Applications/Rex*.app`.
+
+For tmux agents (`%` ids):
 
 Once a second the dash runs `tmux list-clients` and decides which pane you can
 see. Suspended clients are ignored; a focused client is preferred, otherwise the
