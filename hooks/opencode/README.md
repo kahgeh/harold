@@ -14,7 +14,7 @@ Harold without changing the user's global OpenCode configuration.
 - The generic `event` hook maps `session.status` (`busy`, `retry`, `idle`) and
   the legacy `session.idle` event to lifecycle observations. Idle reports do
   not contain `workSummary`, so they preserve the last task description.
-- `TMUX_PANE` identifies the pane. If it or a session ID is unavailable, the
+- `TMUX_PANE` (tmux) or `REX_BLOCK` (Rex) identifies the pane. If it or a session ID is unavailable, the
   adapter does nothing.
 - Harold resolves `provider_id=opencode` from its configured tmux inventory.
   `ReportAgentStateRequest` deliberately has no provider field that an

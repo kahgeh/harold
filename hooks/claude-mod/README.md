@@ -13,7 +13,7 @@ working while its main session's turn is running, or while one of its subagents 
 | 3 seconds after a subagent's turn ends (`turn.complete` with an `agentId`), or when a 10-second check runs | No main turn is running, and no subagent is working | `subagents-finished` | Idle |
 
 Every run has the form `harold accept <event> --pane <id> --adapter claude.lifecycle`. The pane
-is the `TMUX_PANE` environment variable. Unless it is `%` plus digits, the mod sends nothing.
+is the `TMUX_PANE` environment variable in a tmux pane, or the `REX_BLOCK` environment variable in a Rex pane. Unless it is `%` plus digits (`TMUX_PANE`) or `block:` plus the block's id (`REX_BLOCK`), the mod sends nothing.
 
 ## Subagents
 
@@ -50,7 +50,7 @@ person.
 ## Known gap
 
 Claude Code passes the settings `env` block to child processes, so a `claude -p` run from a
-Bash tool inside a pane loads this mod and inherits that pane's `TMUX_PANE`. When the nested
+Bash tool inside a pane loads this mod and inherits that pane's `TMUX_PANE` or `REX_BLOCK`. When the nested
 run ends, it reports the parent pane idle while the parent may still be busy. The parent's next
 `still-working`, at most 10 seconds later, corrects it.
 
