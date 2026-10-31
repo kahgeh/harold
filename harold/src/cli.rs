@@ -1656,10 +1656,12 @@ fn tool_refusal_line(status: &tonic::Status) -> String {
     }
 }
 
-/// For `send-message-to-away-device` and `speak` with no `--src-id`: adds the caller's pane id
-/// (`$TMUX_PANE` or `$REX_BLOCK`) as `--src-id`, when there is one.
+/// For `send-message-to-away-device` and `speak` with no `--src-id`: adds the caller's Rex
+/// block (`$REX_BLOCK`) as `--src-id`, when there is one. A tmux pane still needs `--src-id`,
+/// as before.
 pub(crate) fn with_caller_pane(args: Vec<String>) -> Vec<String> {
-    with_caller_pane_from(args, caller_pane())
+    let rex_block = std::env::var("REX_BLOCK").unwrap_or_default();
+    with_caller_pane_from(args, rex_block.trim().to_string())
 }
 
 pub(crate) fn with_caller_pane_from(mut args: Vec<String>, pane: String) -> Vec<String> {

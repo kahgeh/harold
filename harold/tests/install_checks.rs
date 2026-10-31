@@ -42,6 +42,8 @@ impl Fixture {
         }
         let child = command
             .args(args)
+            // The caller's own pane must not fill in a missing `--src-id`.
+            .env_remove("REX_BLOCK")
             .env("HAROLD_CONFIG_DIR", &self.0)
             .env("HAROLD_ENV", "local")
             .env("HAROLD__STORE__PATH", self.0.join("unopened-store"))
