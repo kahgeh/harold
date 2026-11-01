@@ -799,3 +799,279 @@ fn the_tmux_check_after_a_failed_capture_is_counted_under_list() {
     let timeout = FakeRunner::output(false, "").then_error(io::ErrorKind::TimedOut);
     assert!(screen_rise("list", "timeout", timeout, "%7") >= 1);
 }
+
+// -- the Rex observer: the program status record first --------------------------------
+
+mod rex_observer {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::agent::domain::ScreenObservation;
+    use crate::agent::rex::{
+        CurrentSteps, Lookup, Program, RexApi, RexBlockSlot, RexError, RexProcess, RexSession,
+        RexStatus,
+    };
+    use crate::agent::screen::{PROGRAM_STATUS_CLASSIFIER_ID, RexVisibleScreen};
+
+    /// A fake Rex that counts every block call.
+    #[derive(Default)]
+    struct CountingRex {
+        blocks: Vec<String>,
+        /// The `program_status` reply for each block. A block with none fails.
+        statuses: HashMap<String, Value>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl CountingRex {
+        fn count(&self, method: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| *call == method)
+                .count()
+        }
+
+        fn screen_reads(&self) -> usize {
+            self.count("size") + self.count("format") + self.count("blob_read")
+        }
+    }
+
+    impl RexApi for CountingRex {
+        fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
+            Ok(vec![RexSession {
+                id: "session:s3".to_string(),
+                label: "three".to_string(),
+            }])
+        }
+        fn session_view(&self, _: &str) -> Result<Vec<Vec<String>>, RexError> {
+            Ok(vec![self.blocks.clone()])
+        }
+        fn process(&self, _: &str, _: &str) -> Result<RexProcess, RexError> {
+            Err(RexError::Failed)
+        }
+        fn start_time_ms(&self, _: u32) -> Option<i64> {
+            None
+        }
+        fn block_call(
+            &self,
+            _: &str,
+            block: &str,
+            method: &str,
+            args: &Value,
+        ) -> Result<Value, RexError> {
+            self.calls.lock().unwrap().push(method.to_string());
+            match method {
+                "program_status" => self.statuses.get(block).cloned().ok_or(RexError::Failed),
+                "size" => Ok(json!({"rows": 24, "columns": 80})),
+                "format" => Ok(json!({"id": 7, "total": 5})),
+                "blob_read" => {
+                    assert_eq!(args["id"], 7);
+                    Ok(json!({"id": 7, "data": "Ready", "total": 5, "eof": true}))
+                }
+                _ => Err(RexError::Failed),
+            }
+        }
+        fn paste(&self, _: &str, _: &str, _: &str) -> Result<(), RexError> {
+            Ok(())
+        }
+        fn send_key(&self, _: &str, _: &str, _: &str) -> Result<(), RexError> {
+            Ok(())
+        }
+    }
+
+    fn reply(state: &str, pid: u32) -> Value {
+        json!({"records": [{"state": state, "owner": {"pid": pid}, "msg": "a step"}]})
+    }
+
+    fn api_with(block: &str, status: Option<Value>) -> Arc<CountingRex> {
+        let mut api = CountingRex {
+            blocks: vec![block.to_string()],
+            ..CountingRex::default()
+        };
+        if let Some(status) = status {
+            api.statuses.insert(block.to_string(), status);
+        }
+        Arc::new(api)
+    }
+
+    /// A status object with no stream: every observation asks Rex once.
+    fn no_stream_screen(api: &Arc<CountingRex>) -> RexVisibleScreen {
+        let program: Program = Arc::new(|| Err(RexError::Absent));
+        let status = RexStatus::new(api.clone(), program, CurrentSteps::default());
+        RexVisibleScreen::with_status(api.clone(), Arc::new(status))
+    }
+
+    fn observe(screen: &RexVisibleScreen, block: &str) -> ScreenObservation {
+        screen.observe(&pane(block), &provider()).unwrap()
+    }
+
+    /// A fake `rex` script that prints fixed lines and then waits.
+    struct FakeEvents {
+        dir: PathBuf,
+    }
+
+    impl FakeEvents {
+        fn new(name: &str, lines: &[String]) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("harold-rex-observer-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut script = String::from("#!/bin/sh\ncat <<'END_OF_EVENTS'\n");
+            for line in lines {
+                script.push_str(line);
+                script.push('\n');
+            }
+            script.push_str("END_OF_EVENTS\nexec sleep 30\n");
+            let path = dir.join("rex");
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { dir }
+        }
+
+        fn program(&self) -> Program {
+            let path = self.dir.join("rex");
+            Arc::new(move || Ok(path.clone()))
+        }
+    }
+
+    impl Drop for FakeEvents {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A screen whose block has a running stream. The caller keeps the fake and the status.
+    fn streaming_screen(
+        api: &Arc<CountingRex>,
+        script: &FakeEvents,
+        block: &str,
+    ) -> (RexVisibleScreen, Arc<RexStatus>) {
+        let status = Arc::new(RexStatus::new(
+            api.clone(),
+            script.program(),
+            CurrentSteps::default(),
+        ));
+        status.sync(&[RexBlockSlot {
+            session_id: "session:s3".to_string(),
+            session_label: "three".to_string(),
+            window: 1,
+            pane: 1,
+            block_id: block.to_string(),
+        }]);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while status.lookup(block) == Lookup::NoStream {
+            assert!(Instant::now() < deadline, "the stream did not start");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let screen = RexVisibleScreen::with_status(api.clone(), status.clone());
+        (screen, status)
+    }
+
+    #[test]
+    fn a_record_of_the_agents_pid_makes_no_screen_read() {
+        let block = "block:obs-record";
+        let api = api_with(block, Some(reply("working", 20)));
+        let script = FakeEvents::new("record", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        let calls_before = api.count("program_status");
+        let observation = observe(&screen, block);
+        assert_eq!(observation.state, Some(ObservedAgentState::Working));
+        assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+        assert_eq!(api.screen_reads(), 0);
+        assert_eq!(api.count("program_status"), calls_before);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_done_record_of_another_pid_reads_the_screen() {
+        let block = "block:obs-other-pid";
+        let api = api_with(block, Some(reply("done", 99)));
+        let script = FakeEvents::new("otherpid", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert_eq!(observation.state, Some(ObservedAgentState::Idle));
+        assert!(api.screen_reads() > 0);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_block_with_no_record_reads_the_screen() {
+        let block = "block:obs-no-record";
+        let api = api_with(block, Some(json!({"records": []})));
+        let script = FakeEvents::new("norecord", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert!(api.screen_reads() > 0);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_block_without_a_stream_calls_program_status_once() {
+        let block = "block:obs-no-stream";
+        let api = api_with(block, Some(reply("blocked", 20)));
+        let screen = no_stream_screen(&api);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+        assert_eq!(api.count("program_status"), 1);
+        assert_eq!(api.screen_reads(), 0);
+    }
+
+    #[test]
+    fn a_no_stream_record_of_another_pid_reads_the_screen() {
+        let block = "block:obs-no-stream-other";
+        let api = api_with(block, Some(reply("done", 99)));
+        let screen = no_stream_screen(&api);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert_eq!(api.count("program_status"), 1);
+        assert!(api.screen_reads() > 0);
+    }
+
+    #[test]
+    fn a_failed_program_status_call_reads_the_screen() {
+        let block = "block:obs-failed-call";
+        let api = api_with(block, None);
+        let screen = no_stream_screen(&api);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert_eq!(observation.state, Some(ObservedAgentState::Idle));
+        assert_eq!(api.count("program_status"), 1);
+        assert!(api.screen_reads() > 0);
+    }
+
+    #[test]
+    fn a_program_status_observation_has_no_fallback_summary() {
+        let block = "block:obs-no-summary";
+        let api = api_with(block, Some(reply("working", 20)));
+        let screen = no_stream_screen(&api);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+        assert_eq!(observation.fallback_summary, None);
+        assert_eq!(observation.incarnation, pane(block).incarnation);
+    }
+
+    #[test]
+    fn each_state_word_maps_to_an_observed_state() {
+        let cases = [
+            ("working", ObservedAgentState::Working),
+            ("blocked", ObservedAgentState::Working),
+            ("done", ObservedAgentState::Idle),
+            ("idle", ObservedAgentState::Idle),
+            ("error", ObservedAgentState::Idle),
+        ];
+        for (word, expected) in cases {
+            let block = format!("block:obs-word-{word}");
+            let api = api_with(&block, Some(reply(word, 20)));
+            let screen = no_stream_screen(&api);
+            let observation = observe(&screen, &block);
+            assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+            assert_eq!(observation.state, Some(expected), "state word {word}");
+        }
+    }
+}

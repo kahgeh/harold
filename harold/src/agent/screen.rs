@@ -252,20 +252,66 @@ impl<R: CommandRunner> VisibleScreenPort for TmuxVisibleScreen<R> {
     }
 }
 
-/// The screen reader for Rex panes: a tail read of the block's output.
+/// The classifier id of an observation that comes from the program status record.
+pub(crate) const PROGRAM_STATUS_CLASSIFIER_ID: &str = "program_status";
+
+/// The observer for Rex panes. It reads the program status record of the block first. It
+/// reads the block's output only when no usable record of the agent exists.
 pub(crate) struct RexVisibleScreen {
     capture: RexPaneCapture,
+    status: Arc<super::rex::RexStatus>,
 }
 
 impl RexVisibleScreen {
     pub(crate) fn new() -> Self {
-        Self::with_api(super::rex::system())
+        let api = super::rex::system();
+        let rex = Arc::clone(&api);
+        let status = super::rex::RexStatus::new(
+            api.clone(),
+            Arc::new(move || rex.program()),
+            super::rex::CurrentSteps::default(),
+        );
+        Self::with_status(api, Arc::new(status))
     }
 
-    pub(super) fn with_api(api: Arc<dyn super::rex::RexApi>) -> Self {
+    pub(crate) fn with_status(
+        api: Arc<dyn super::rex::RexApi>,
+        status: Arc<super::rex::RexStatus>,
+    ) -> Self {
         Self {
             capture: RexPaneCapture { api },
+            status,
         }
+    }
+
+    /// The observation from the block's record, when a record of this agent exists.
+    fn record_observation(&self, pane: &AgentPaneObservation) -> Option<ScreenObservation> {
+        use super::rex::Lookup;
+        let block_id = &pane.incarnation.pane_id;
+        let record = match self.status.lookup(block_id) {
+            Lookup::Stream(record) => record,
+            Lookup::NoStream => self.record_by_call(block_id),
+        }?;
+        // A record of another pid belongs to an agent that is gone.
+        (record.pid == pane.incarnation.agent_pid).then(|| ScreenObservation {
+            incarnation: pane.incarnation.clone(),
+            state: Some(record.state.observed()),
+            fallback_summary: None,
+            classifier_id: PROGRAM_STATUS_CLASSIFIER_ID.to_string(),
+            observed_at_ms: system_now_ms(),
+        })
+    }
+
+    /// One `program_status` call. Any failure gives no record.
+    fn record_by_call(&self, block_id: &str) -> Option<super::rex::StatusRecord> {
+        let api = &*self.capture.api;
+        let session = super::rex::session_of(api, block_id).ok()?;
+        let reply = api
+            .block_call(&session, block_id, "program_status", &serde_json::json!({}))
+            .ok()?;
+        super::rex::parse_program_status(&reply.to_string())
+            .ok()
+            .flatten()
     }
 }
 
@@ -275,6 +321,9 @@ impl VisibleScreenPort for RexVisibleScreen {
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
+        if let Some(observation) = self.record_observation(pane) {
+            return Ok(observation);
+        }
         observe_through(
             &self.capture,
             REX_CLASSIFIER_ID,
