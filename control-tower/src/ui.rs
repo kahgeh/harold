@@ -359,21 +359,65 @@ where
     spans
 }
 
-fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let summary = Line::from(summary_spans(
-        app.state_counts(),
-        app.snapshot.server_time_ms,
-        &chrono::Local,
+fn summary_line<Tz>(
+    counts: StateCounts,
+    server_time_ms: i64,
+    tz: &Tz,
+    inner_width: u16,
+) -> Line<'static>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let full = Line::from(summary_spans(counts, server_time_ms, tz));
+    if full.width() <= usize::from(inner_width) {
+        return full;
+    }
+    Line::from(short_summary_spans(counts, server_time_ms, tz))
+}
+
+/// The strip for a narrow screen: each state as its first letter and its count.
+fn short_summary_spans<Tz>(counts: StateCounts, server_time_ms: i64, tz: &Tz) -> Vec<Span<'static>>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let bold = |state: AgentState| state_style(state).add_modifier(Modifier::BOLD);
+    let unknown_style = Style::default().fg(MUTED).add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    for (letter, count, style, always) in [
+        ('W', counts.working, bold(AgentState::Working), true),
+        ('B', counts.blocked, bold(AgentState::Blocked), false),
+        ('D', counts.done, bold(AgentState::Done), false),
+        ('I', counts.idle, bold(AgentState::Idle), true),
+        ('E', counts.error, bold(AgentState::Error), false),
+        ('U', counts.unknown, unknown_style, false),
+    ] {
+        if always || count > 0 {
+            spans.push(Span::styled(format!(" {letter} {count} "), style));
+        }
+    }
+    spans.push(Span::styled(
+        format!(" {}", clock_text(server_time_ms, tz)),
+        Style::default().fg(MUTED),
     ));
+    spans
+}
+
+fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let borders = if area.height <= 2 {
         Borders::LEFT | Borders::RIGHT
     } else {
         Borders::ALL
     };
-    frame.render_widget(
-        Paragraph::new(summary).block(board_block().borders(borders)),
-        area,
+    let block = board_block().borders(borders);
+    let summary = summary_line(
+        app.state_counts(),
+        app.snapshot.server_time_ms,
+        &chrono::Local,
+        block.inner(area).width,
     );
+    frame.render_widget(Paragraph::new(summary).block(block), area);
 }
 
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2420,9 +2464,72 @@ mod tests {
             assert!(wide.contains(word), "missing {word:?}");
         }
         let narrow = rendered(&app, 60, 18, 100_000);
-        for word in ["WORKING 01", "BLOCKED 01", "DONE 01"] {
+        for word in ["W 1", "B 1", "D 1", "I 1", "E 1"] {
             assert!(narrow.contains(word), "missing {word:?} at 60 columns");
         }
+        assert!(!narrow.contains("SERVER TIME"));
+    }
+
+    fn strip_line(
+        counts: crate::app::StateCounts,
+        ms: i64,
+        width: u16,
+    ) -> ratatui::text::Line<'static> {
+        super::summary_line(counts, ms, &plus_eleven(), width.saturating_sub(2))
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn the_short_strip_holds_every_count_and_the_clock_at_60_and_80_columns() {
+        for width in [60, 80] {
+            let line = strip_line(counts(1, 1, 1, 1, 1, 1), SAMPLE_MS, width);
+            assert_eq!(
+                line_text(&line),
+                " W 1  B 1  D 1  I 1  E 1  U 1  21:47:03",
+                "at {width} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_full_strip_shows_server_time_at_120_columns() {
+        let line = strip_line(counts(1, 1, 1, 1, 1, 1), SAMPLE_MS, 120);
+        let text = line_text(&line);
+        assert!(text.contains("SERVER TIME 21:47:03"), "{text}");
+        assert!(text.contains("UNKNOWN 1"), "{text}");
+    }
+
+    #[test]
+    fn the_strip_is_never_wider_than_the_inner_width() {
+        for width in [60, 80, 100, 120] {
+            let line = strip_line(counts(1, 1, 1, 1, 1, 1), SAMPLE_MS, width);
+            assert!(line.width() <= usize::from(width - 2), "at {width}");
+        }
+    }
+
+    #[test]
+    fn the_short_strip_fits_unknown_above_9_and_the_no_clock_text_at_60_columns() {
+        let line = strip_line(counts(12, 12, 12, 12, 12, 12), SAMPLE_MS, 60);
+        assert!(line.width() <= 58);
+        assert_eq!(
+            line_text(&line),
+            " W 12  B 12  D 12  I 12  E 12  U 12  21:47:03"
+        );
+        let line = strip_line(counts(1, 1, 1, 1, 1, 12), 0, 60);
+        assert!(line.width() <= 58);
+        assert!(line_text(&line).ends_with("U 12  --:--:--"));
+    }
+
+    #[test]
+    fn the_short_strip_hides_blocked_done_error_and_unknown_at_zero() {
+        let line = strip_line(counts(3, 0, 0, 5, 0, 0), SAMPLE_MS, 20);
+        assert_eq!(line_text(&line), " W 3  I 5  21:47:03");
     }
 
     #[test]

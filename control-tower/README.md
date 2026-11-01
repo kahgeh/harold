@@ -317,7 +317,7 @@ Each row has Harold's latest classified agent state:
 - `ERROR` means the agent stopped on an error.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
-The summary strip under the masthead shows the `WORKING` and `IDLE` counts, `BLOCKED`, `DONE` and `ERROR` counts only when above 0, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock (at 60 columns, a strip with all five states above 0 clips `ERROR`, `UNKNOWN` and the clock) in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
+The summary strip under the masthead shows the `WORKING` and `IDLE` counts, `BLOCKED`, `DONE` and `ERROR` counts only when above 0, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot). When the full strip does not fit the screen width, the strip uses a short form: each state as its first letter in the state's colour, then the count, then the clock, such as `W 1  B 1  D 1  I 1  E 1  U 1  21:47:03`.
 
 Transport and agent monitor health describe different system-level conditions:
 
