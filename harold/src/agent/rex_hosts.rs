@@ -173,7 +173,9 @@ impl RexHostInventory {
             Err(RexError::Failed) => MultiplexerOutcome::Failed,
             Err(RexError::Malformed) => MultiplexerOutcome::Malformed,
         };
-        record_call("rex", &self.label, operation, outcome, started.elapsed());
+        // A call with no server flag goes to this Mac: its host is the empty value.
+        let host = if with_server { self.label.as_str() } else { "" };
+        record_call("rex", host, operation, outcome, started.elapsed());
         result
     }
 

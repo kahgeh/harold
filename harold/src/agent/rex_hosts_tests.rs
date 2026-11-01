@@ -443,3 +443,28 @@ fn the_local_host_id_comes_from_whoami_with_no_server_flag() {
     std::fs::remove_file(fake.dir.join("whoami.json")).unwrap();
     assert_eq!(inventory.local_host_id(), None);
 }
+
+#[test]
+fn the_local_whoami_call_records_an_empty_host() {
+    let fake = Fake::new("whoami-metric");
+    let count = |host: &str| {
+        crate::telemetry::test_support::counter_value(
+            "harold.multiplexer.calls",
+            &[
+                ("multiplexer", "rex"),
+                ("host", host),
+                ("operation", "other"),
+                ("outcome", "ok"),
+            ],
+        )
+        .unwrap_or(0)
+    };
+    let local_before = count("");
+    let inventory = fake.inventory("whoami-metric-host", None, clock(0));
+    assert_eq!(inventory.local_host_id().as_deref(), Some("host-1"));
+    // Other tests also record local calls, so the empty host only has to rise.
+    assert!(count("") > local_before);
+    assert_eq!(count("whoami-metric-host"), 0);
+    let _ = inventory.scan();
+    assert_eq!(count("whoami-metric-host"), 1);
+}
