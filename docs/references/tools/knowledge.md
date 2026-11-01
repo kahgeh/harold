@@ -2,7 +2,7 @@
 
 The knowledge tool is Harold's index of the **vault** by meaning. The vault is the organisation's folder of Markdown notes, such as `personal-chief/vault/knowledge`. A **vault note** is one Markdown file in it. The tool reads every vault note, splits a long one into passages, turns each passage into an embedding with a small model on the Mac, and keeps them in a tursodb database that buckwal makes durable in a bucket. A search turns the words into an embedding and returns the vault notes whose passages are closest.
 
-It is a [tool](README.md): a module of the daemon with its own storage and gRPC service, `harold.tools.knowledge.v1.KnowledgeService` (`harold-api/proto/tools/knowledge.proto`). It trusts local callers (ADR 0002). The chief uses it through `harold tool knowledge`, the web app's Notes page ([away-app reference](../away-app/README.md#notes)) and the dash's `s` key ([dash README](../../../tmx-agent-dash/README.md)) call the same service.
+It is a [tool](README.md): a module of the daemon with its own storage and gRPC service, `harold.tools.knowledge.v1.KnowledgeService` (`harold-api/proto/tools/knowledge.proto`). It trusts local callers (ADR 0002). The chief uses it through `harold tool knowledge`, the web app's Notes page ([away-app reference](../away-app/README.md#notes)) and the control-tower's `s` key ([control-tower README](../../../control-tower/README.md)) call the same service.
 
 The vault stays the source. Harold only reads it, and the index can always be rebuilt from it.
 
@@ -13,7 +13,7 @@ flowchart LR
   subgraph Callers["Callers"]
     CLI["The chief: harold tool knowledge"]
     WEB["Web app: Notes page"]
-    DASH["Dash: the s search"]
+    DASH["Control-tower: the s search"]
   end
   subgraph Tool["Harold: the knowledge tool"]
     PASS["Watcher and passes: start-up, hourly, and 2 s after a save"]
@@ -59,7 +59,7 @@ Boxes are parts and cylinders are stores. Each dark group is where the parts run
 
 | Call | Caller | Reads |
 |---|---|---|
-| `search`, `related`, `links`, `show`, `recent` | the chief, the Notes page, the dash's `s` (`search`, `recent` and `show`) | the knowledge index, through buckwal's local copy |
+| `search`, `related`, `links`, `show`, `recent` | the chief, the Notes page, the control-tower's `s` (`search`, `recent` and `show`) | the knowledge index, through buckwal's local copy |
 | `status`, `rebuild` | the chief | the knowledge index (`rebuild` reads the vault again) |
 | `relate`, `unrelate`, `relations`, `graph status` | the chief | the graph writer, then TypeDB |
 | `graph rebuild`, `graph void` | the chief | the schema log and the data log, then TypeDB. A rebuild never reads the vault |
@@ -94,7 +94,7 @@ The graph has its own commands, [below](#the-graphs-commands).
 | `recent` | The vault notes changed most recently, newest first, in the same lines with `-` for the score |
 | `related NOTE` | The vault notes closest to the vault note's own passages, the note itself left out. A line ends its kind with `(linked)` when the vault note already links to it |
 | `links NOTE` | The suggested links: related vault notes scoring 0.60 or more that the vault note does not link to yet, at most 5 |
-| `show NOTE` | The vault note's name, title, kind, description and links, then its text as stored, without the front matter. At the service the `VaultNote` message also carries `file`, the file's absolute path, which the dash opens in `$EDITOR` |
+| `show NOTE` | The vault note's name, title, kind, description and links, then its text as stored, without the front matter. At the service the `VaultNote` message also carries `file`, the file's absolute path, which the control-tower opens in `$EDITOR` |
 | `status` | The vault notes and passages held, the last good pass, the changed files not yet indexed, the runtime and model, the worker (`idle`, `loading`, `ready` or `unavailable`) and the last failure |
 | `rebuild` | Clears the index and builds it again from the vault, then prints the counts |
 
@@ -358,4 +358,4 @@ No field holds a vault note's path or text. The [telemetry reference](../telemet
 | The vault folder is missing or unreadable | `knowledge index failed` with `vault_unreadable`; searches answer from the last index and `status` says so |
 | The worker cannot load | Searches answer `Unavailable`; the web app says "Search is resting: the model didn't load." |
 | A link to a vault note that does not exist | Shown as plain text, not a link |
-| `[knowledge]` is not set | No knowledge tool, no Notes link in the web app, and the dash's `s` does nothing (it asks Harold once when the stream opens, and `Unimplemented` means off) |
+| `[knowledge]` is not set | No knowledge tool, no Notes link in the web app, and the control-tower's `s` does nothing (it asks Harold once when the stream opens, and `Unimplemented` means off) |

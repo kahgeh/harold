@@ -32,8 +32,8 @@ flowchart LR
     cli["CLI"]
   end
 
-  subgraph dashg["tmx-agent-dash"]
-    dash["the dash"]
+  subgraph dashg["the control-tower"]
+    dash["the control-tower"]
   end
 
   subgraph scriptsg["Scripts"]
@@ -79,7 +79,7 @@ flowchart LR
 | channels and channel listener | Send to the phone by iMessage, and record the user's replies in the event stream | `harold/src/channels/` |
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
-| tool host, question tool, backlog tool, watch tool, knowledge tool | Hosts tools with their own storage and gRPC services (ADR 0001). The dash and the web app are clients of the question tool. The knowledge tool indexes the vault by meaning with a local embedding model run by the embedding worker, in a tursodb database that buckwal keeps durable in a bucket, and answers the chief (`harold tool knowledge`), the web app's Notes page and the dash's `s` search. When `[knowledge.graph]` is on, it also keeps the **knowledge graph** in TypeDB, a separate store from the index: one graph writer checks, logs and applies every change, and two OpenData logs (a schema log and a data log) let Harold rebuild the graph from nothing. See the [knowledge reference](../references/tools/knowledge.md#the-knowledge-graph). See the diagram in the [knowledge reference](../references/tools/knowledge.md#how-the-parts-fit). | `harold/src/tools.rs`, `harold/src/tools/`, `harold/src/embed_worker.py` |
+| tool host, question tool, backlog tool, watch tool, knowledge tool | Hosts tools with their own storage and gRPC services (ADR 0001). The control-tower and the web app are clients of the question tool. The knowledge tool indexes the vault by meaning with a local embedding model run by the embedding worker, in a tursodb database that buckwal keeps durable in a bucket, and answers the chief (`harold tool knowledge`), the web app's Notes page and the control-tower's `s` search. When `[knowledge.graph]` is on, it also keeps the **knowledge graph** in TypeDB, a separate store from the index: one graph writer checks, logs and applies every change, and two OpenData logs (a schema log and a data log) let Harold rebuild the graph from nothing. See the [knowledge reference](../references/tools/knowledge.md#the-knowledge-graph). See the diagram in the [knowledge reference](../references/tools/knowledge.md#how-the-parts-fit). | `harold/src/tools.rs`, `harold/src/tools/`, `harold/src/embed_worker.py` |
 | calls, call answerer, voice worker and speech model | Voice calls with the chief, the call answerer (the small model that answers each turn and hands real work to the chief), the process that turns speech into text (it loads Whisper only), and the check of the Whisper model: Harold downloads it at start-up if it is missing, pinned to a commit and checked file by file ([ADR 0011](../adr/0011-harold-downloads-missing-speech-models-at-start-up.md)). A call also waits for the default TTS model | `harold/src/voice_input.rs`, `harold/src/voice_input/` (`answerer.rs`, `hand_over.rs`, `models.rs`), `harold/src/voice_worker.py`, `harold/src/voice_download.py` |
 | TTS server and TTS workers | One TTS server on each machine, `harold.tts.v1.TtsService`, that turns text into audio for the desk voice, for calls and for `harold tool tts`. A TTS worker keeps one model loaded: the MLX worker on macOS, the ONNX worker on Linux (the NVIDIA GPU, with the CPU as the fallback). Kokoro is the default model. Other models come through the API and download only when they are on the approved model list ([ADR 0020](../adr/0020-each-machine-runs-one-tts-server-built-for-its-platform-and-downloads-only-approved-models.md), [TTS server reference](../references/tts/README.md)) | `harold/src/tts/`, `harold/src/tts_worker_mlx.py`, `harold/src/tts_worker_onnx.py`, `harold-api/proto/tts.proto` |
 | web app | The phone's web app: the thread, push, calls, the todos, which it shows and answers through the question tool's service, and the spec pages, which it renders from each product's spec files and offers to share one at a time. A second, loopback-only listener, the specs listener, serves the same pages to the browser on the Mac. Its page records page loads, requests and script errors as spans (`telemetry.js` and one vendored OpenTelemetry bundle) and posts them to Harold's `POST /telemetry/traces`, which keeps only the fields it allows and forwards them to the collector | `harold/src/web_app/` (`specs.rs` for the spec pages), `harold/static/web_app/`, `harold/templates/web_app/` |
@@ -90,8 +90,8 @@ flowchart LR
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did | `hooks/` |
-| tmx-agent-dash | The dash: agent rows, todo rows, voice and messaging switches, and the notes search (`s`) over the knowledge tool | `tmx-agent-dash/` |
-| API contracts | The protobuf definitions shared by Harold, the dash and the tools | `harold-api/` |
+| control-tower | The control-tower: agent rows, todo rows, voice and messaging switches, and the notes search (`s`) over the knowledge tool | `control-tower/` |
+| API contracts | The protobuf definitions shared by Harold, the control-tower and the tools | `harold-api/` |
 
 ## Interfaces
 
@@ -182,12 +182,12 @@ Harold never starts a Rex server. A Rex call that fails makes the listing fail, 
 
 ### Follow one task
 
-Suppose an agent is idle and you submit “Fix the login error.” With lifecycle hooks configured, the update reaches the dash like this:
+Suppose an agent is idle and you submit “Fix the login error.” With lifecycle hooks configured, the update reaches the control-tower like this:
 
 1. The agent's start hook tells Harold that work has begun and supplies the task text. A **hook** is a small script a provider runs to report an agent action.
 2. Harold checks which agent process is running in that pane and records the observation in the event stream.
 3. Harold reads the recorded observation and updates its stored view of that agent to `Busy`, with the submitted instruction available as its work summary.
-4. After saving that view, Harold publishes it to the dash. The dash can now show `Busy` and “Fix the login error.”
+4. After saving that view, Harold publishes it to the control-tower. The control-tower can now show `Busy` and “Fix the login error.”
 
 When the agent finishes, a completion hook can report its reply. Harold updates the agent to `Idle` and separately considers whether to tell you. Finishing a turn does not by itself prove the requested fix succeeded.
 
@@ -195,7 +195,7 @@ This flow has two useful records: **what Harold observed**, and **what Harold cu
 
 ### The main parts
 
-The following diagram shows how observations become the dash's state and how messages lead to delivery work. These are responsibilities inside Harold; they are not separate services.
+The following diagram shows how observations become the control-tower's state and how messages lead to delivery work. These are responsibilities inside Harold; they are not separate services.
 
 ```mermaid
 flowchart TD
@@ -205,7 +205,7 @@ flowchart TD
     C --> E["Projector: apply recorded events"]
     E --> F["State database: current agent view"]
     E --> G["Outbox: pending delivery work"]
-    F --> H["Snapshot publisher: send saved state to the dash"]
+    F --> H["Snapshot publisher: send saved state to the control-tower"]
     G --> I["Delivery handler: send turn-end updates or route replies"]
 ```
 
@@ -217,19 +217,19 @@ The **projector** reads that history and updates the state database. For agent o
 
 The **outbox** is a persistent list of delivery work, such as sending a turn-end update or routing a phone reply. The projector stages that work in the same database transaction as its state updates and checkpoint. Actual delivery happens afterward, so a retryable channel failure can remain pending without undoing the recorded event.
 
-The **snapshot publisher** sends the saved agent view to clients through the `WatchAgentStates` gRPC stream. A snapshot is the complete current view. The dash receives one when it connects, followed by updated snapshots, so it can reconnect without reconstructing every change it missed.
+The **snapshot publisher** sends the saved agent view to clients through the `WatchAgentStates` gRPC stream. A snapshot is the complete current view. The control-tower receives one when it connects, followed by updated snapshots, so it can reconnect without reconstructing every change it missed.
 
 See the [agent monitor reference](../references/agent-monitor/README.md#projection-and-storage) for the storage and API contracts.
 
 ### The question tool's todos
 
-The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The dash stores each tick of instructions' step with `TickStep`, in the `ticks` column, so the ticks survive a dash restart. The dash stores each pick with `SavePicks` in the `picks` column of the `questions` table, so picks survive a dash restart and carry to the next question version for unchanged decisions, and the chief reads them with `ShowQuestion`. The `done` and `ignore` action rows store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001, except for one thing: the tool reads only the spec files the chief names, and only inside a registered product's specs folder, to mark a changed spec ([ADR 0015](../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). See the [questions reference](../references/tools/questions.md).
+The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The control-tower stores each tick of instructions' step with `TickStep`, in the `ticks` column, so the ticks survive a control-tower restart. The control-tower stores each pick with `SavePicks` in the `picks` column of the `questions` table, so picks survive a dash restart and carry to the next question version for unchanged decisions, and the chief reads them with `ShowQuestion`. The `done` and `ignore` action rows store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001, except for one thing: the tool reads only the spec files the chief names, and only inside a registered product's specs folder, to mark a changed spec ([ADR 0015](../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). See the [questions reference](../references/tools/questions.md).
 
 ### The spec pages and the specs listener
 
 Harold shows each product's specs as pages, so a spec stays on the user's machines unless the user shares it. `web_app/specs.rs` reads the pod registry through the `Products` port, as the question tool does, and renders the files `<repo>/.superpowers/pod/specs/<id>.md` with `pulldown-cmark`. Raw HTML shows as text, and Mermaid draws the diagrams in the page, from one vendored bundle. The web app serves the pages at `/specs` and `/specs/{product}/{id}`, behind the login, pairing and same-origin checks. The **Share** button posts `/specs/{product}/{id}/share`, and Harold puts one fixed reply in the thread for the chief, which has the PnEM publish that spec as a private artifact.
 
-A second listener, `[web_app] specs_listen` (`127.0.0.1:4331`), serves the same two page routes and three static files to the browser on the Mac. It is open only with `[telemetry] pod_registry`. It has no login check and answers only `GET`, so any local process can read the specs, as it can read the files, and none can make the chief publish one. `tailscale serve` does not forward to it. The question tool gives each todo its `spec_page`, and the listing gives `local_specs_url`, so the web app card and the dash `o` open the spec page. See [ADR 0017](../adr/0017-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md) and the [web app reference](../references/away-app/README.md#specs).
+A second listener, `[web_app] specs_listen` (`127.0.0.1:4331`), serves the same two page routes and three static files to the browser on the Mac. It is open only with `[telemetry] pod_registry`. It has no login check and answers only `GET`, so any local process can read the specs, as it can read the files, and none can make the chief publish one. `tailscale serve` does not forward to it. The question tool gives each todo its `spec_page`, and the listing gives `local_specs_url`, so the web app card and the control-tower `o` open the spec page. See [ADR 0017](../adr/0017-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md) and the [web app reference](../references/away-app/README.md#specs).
 
 Every post and delete from a web app page goes through Datastar. A script sets its signals with Datastar's `mergePatch` and starts the request with Datastar's `post` action; a template uses `@post`. The same-origin check accepts a post or a delete only with `Datastar-Request: true`. It accepts `application/octet-stream` only on `POST /call/audio`, and `application/json` only on `POST /telemetry/traces`. These two are the approved exceptions, and only the user approves another. Every moved post sets `retry: 'never'`, `retryMaxCount: 0` and `openWhenHidden: true`, and an asset test fails on a `fetch` post that is not the call audio. See [ADR 0018](../adr/0018-every-web-app-post-goes-through-datastar-and-only-the-user-approves-an-exception.md).
 
@@ -292,7 +292,7 @@ Raw terminal captures stay inside capture and parsing. Only eligible, sanitized,
 
 ### Turn-end updates and phone replies
 
-A turn-end update and an agent-state update serve different purposes. The dash needs an updated view even when you are already looking at the agent and no turn-end update is needed.
+A turn-end update and an agent-state update serve different purposes. The control-tower needs an updated view even when you are already looking at the agent and no turn-end update is needed.
 
 A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, or sends it through the away channel, iMessage. At the desk it leaves every update out. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
 
@@ -306,10 +306,10 @@ Ordinary agent observations and activity summaries do not create delivery work. 
 
 Harold reads its settings from `default.toml`, then lays `local.toml` over it, and export to the local collector is on by default.
 
-On a fresh installation, Harold creates its state database with the complete current schema. Before accepting client traffic, it catches the stored view up to the event stream. It then loads the complete saved snapshot and starts publishing. The dash cannot connect halfway through that recovery and receive a partially rebuilt view.
+On a fresh installation, Harold creates its state database with the complete current schema. Before accepting client traffic, it catches the stored view up to the event stream. It then loads the complete saved snapshot and starts publishing. The control-tower cannot connect halfway through that recovery and receive a partially rebuilt view.
 
 Persistent observations, projected state, and accepted activity summaries survive restart. Temporary work, such as pending activity summary requests and scrollback fingerprints, does not. History capture establishes a fresh baseline when the agent monitor resumes.
 
-During shutdown, Harold signals its background jobs to stop, closes the dash's streams, and lets in-flight requests drain. The agent monitor has a bounded stop period. Already committed events and state remain available on the next start.
+During shutdown, Harold signals its background jobs to stop, closes the control-tower's streams, and lets in-flight requests drain. The agent monitor has a bounded stop period. Already committed events and state remain available on the next start.
 
 See the [startup and shutdown sequence](../references/agent-monitor/README.md#startup-reconnect-and-shutdown) for the precise recovery behavior. To connect agents to Harold, follow [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).

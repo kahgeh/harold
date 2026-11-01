@@ -71,7 +71,7 @@ sequenceDiagram
     participant Projector as Application projector
     participant StateDB as harold-state.db
     participant Hub as Snapshot publisher
-    participant Dash as Dash consumer
+    participant Tower as Control-tower consumer
 
     par scheduled inventory
         Inventory->>Runtime: complete pane and process observations
@@ -88,7 +88,7 @@ sequenceDiagram
     Projector->>StateDB: advance checkpoint and commit
     Projector->>StateDB: load complete committed snapshot
     Projector->>Hub: publish greater event-stream revision
-    Hub-->>Dash: complete AgentStateSnapshot
+    Hub-->>Tower: complete AgentStateSnapshot
 ```
 
 ### Startup, reconnect, and shutdown
@@ -178,7 +178,7 @@ Lifecycle and completion input use only the matching provider's idle fragments w
 
 Placeholder rules apply when observations arrive. Changing the configuration does not retroactively change stored work summaries.
 
-The public API exposes one optional effective work summary. When it is absent, the dash—not Harold—owns the exact display copy `No work summary reported`.
+The public API exposes one optional effective work summary. When it is absent, the control-tower—not Harold—owns the exact display copy `No work summary reported`.
 
 ## Projection and storage
 
@@ -377,7 +377,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered work summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
-- Harold does not navigate tmux or Rex for the dash and does not implement the dash's filter.
+- Harold does not navigate tmux or Rex for the control-tower and does not implement the control-tower's filter.
 - The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and agents without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
 - The `TurnComplete` RPC is the turn-end update ingress. Empty prompts preserve work summaries and cannot explicitly clear them.

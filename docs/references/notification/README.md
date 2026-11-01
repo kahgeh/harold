@@ -80,11 +80,11 @@ Config keys (`[tts]`):
 
 ### Muting voice
 
-`SetTtsMuted(muted)` turns the spoken output at the desk off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
+`SetTtsMuted(muted)` turns the spoken output at the desk off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `the control-tower` shows `VOICE ON` / `VOICE MUTED`.
 
 - Mute gates only the spoken output at the desk: `harold speak` lines and the Mac's call. A turn-end update is left out at the desk whether the voice is muted or not. Turn-end updates to the away channel (iMessage) are unaffected; they have their own switch, described below.
 - A `TurnCompleted` delivered in the same projection batch as a mute change observes the post-batch value.
-- Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-dash client within the projection window may drop the second. The dash always sends from confirmed state and is unaffected.
+- Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-control-tower client within the projection window may drop the second. The control-tower always sends from confirmed state and is unaffected.
 
 ### Pausing messaging
 
@@ -206,7 +206,7 @@ The agent that sent a dropped message is not told. Its command prints nothing an
 
 ### What leaving an update out means
 
-Harold sends nothing to the phone for that turn: no summary and no trailing question. The event is marked handled and is not retried. The pane does not become the one an untagged reply goes to. The turn is recorded in the 30-second duplicate check, so a repeat of the same `TurnCompleted` is left out as well. The `TurnCompleted` event is still stored, so the dash and the pane's work summary update as usual.
+Harold sends nothing to the phone for that turn: no summary and no trailing question. The event is marked handled and is not retried. The pane does not become the one an untagged reply goes to. The turn is recorded in the 30-second duplicate check, so a repeat of the same `TurnCompleted` is left out as well. The `TurnCompleted` event is still stored, so the control-tower and the pane's work summary update as usual.
 
 ## Updates Harold does not speak at the desk
 

@@ -1,6 +1,6 @@
 # Question Tool
 
-The question tool is Harold's first [tool](README.md). The chief of pods puts todos in, of two kinds: questions and instructions. The user answers questions and follows instructions from the dash. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user sends every answer with `send` in the dash.
+The question tool is Harold's first [tool](README.md). The chief of pods puts todos in, of two kinds: questions and instructions. The user answers questions and follows instructions from the control-tower. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user sends every answer with `send` in the control-tower.
 
 The service is `harold.tools.questions.v1.QuestionService`. It trusts local callers: there is no token. The proto is `harold-api/proto/tools/questions.proto`.
 
@@ -61,7 +61,7 @@ Instructions are a todo of the other kind: numbered steps the user does by hand.
 `id`, `product`, `title` and `steps` are required. `intro`, `link`, `spec` and `sha` are optional. The rules:
 
 - A put holds `decisions` or `steps`, never both. A put with neither is refused as `invalid decisions`; one with both, as `invalid steps`.
-- `id` follows the same rule as for a question. `product` and `title` are not blank. `title` is what the dash shows in the instructions' row.
+- `id` follows the same rule as for a question. `product` and `title` are not blank. `title` is what the control-tower shows in the instructions' row.
 - There are 1 to 20 steps (more than 20 is `invalid steps`). Each step has a `text`, which is not blank, and an optional `detail`.
 - Every text field, `text` and `detail` included, is under 2,000 characters. `link`, when present, starts with `https://` or `http://`.
 - A question with a `title` is refused as `invalid title`.
@@ -75,16 +75,16 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | RPC | Who | What it does |
 | --- | --- | --- |
 | `PutQuestion` | chief | Adds a question or instructions. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting question keeps its place; any other goes last. Returns `id` and `version`. |
-| `DismissQuestion` | chief | Withdraws a waiting question or instructions, with a `reason` the dash shows. |
+| `DismissQuestion` | chief | Withdraws a waiting question or instructions, with a `reason` the control-tower shows. |
 | `ReorderQuestions` | chief | Puts the listed ids, of questions and instructions, that are waiting first, in that order. Other ids are ignored, so a race with a dismissal is harmless. |
-| `ListQuestions` | dash, web app | Returns the waiting todos, the count `waiting`, `dismissed`: the id and reason of every question dismissed in the last hour, `checked_at_ms`: when the chief last called `MarkChecked` (0 before the first), and for each todo its `spec_state`. |
-| `AnswerQuestion` | dash, web app | Answers a question at the question version the caller saw, or relegates it to an idea (`RELEGATE`). |
-| `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
-| `SavePicks` | dash, web app | Replaces the saved picks of a waiting question (see [Saved picks](#saved-picks)). |
+| `ListQuestions` | control-tower, web app | Returns the waiting todos, the count `waiting`, `dismissed`: the id and reason of every question dismissed in the last hour, `checked_at_ms`: when the chief last called `MarkChecked` (0 before the first), and for each todo its `spec_state`. |
+| `AnswerQuestion` | control-tower, web app | Answers a question at the question version the caller saw, or relegates it to an idea (`RELEGATE`). |
+| `TickStep` | control-tower | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
+| `SavePicks` | control-tower, web app | Replaces the saved picks of a waiting question (see [Saved picks](#saved-picks)). |
 | `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason, saved picks and `spec_state`. An id that was never stored is `NotFound` `unknown_question`. It never returns `spec_file`. |
 | `MarkChecked` | chief | Records that the chief has just checked every todo against its spec. Returns `checked_at_ms`. |
 
-`ListQuestions` also returns each todo's `spec_page` and, for the whole listing, `local_specs_url`. `spec_page` is the path `/specs/<product>/<id>` of the todo's [spec page](../away-app/README.md#specs). It is set when the todo's `spec_file` is a file `<id>.md` directly in a registered product's specs folder, once symlinks are resolved, and `<id>` is lowercase letters, digits and `-`. It is empty otherwise. `local_specs_url`, such as `http://127.0.0.1:4331`, is the address of the specs listener, and is empty when the listener is not open. The web app card links to `spec_page` on the web app, and the dash `o` opens `local_specs_url` followed by `spec_page`, else the `link`.
+`ListQuestions` also returns each todo's `spec_page` and, for the whole listing, `local_specs_url`. `spec_page` is the path `/specs/<product>/<id>` of the todo's [spec page](../away-app/README.md#specs). It is set when the todo's `spec_file` is a file `<id>.md` directly in a registered product's specs folder, once symlinks are resolved, and `<id>` is lowercase letters, digits and `-`. It is empty otherwise. `local_specs_url`, such as `http://127.0.0.1:4331`, is the address of the specs listener, and is empty when the listener is not open. The web app card links to `spec_page` on the web app, and the control-tower `o` opens `local_specs_url` followed by `spec_page`, else the `link`.
 
 The `waiting` count in `ListQuestions` is the number of questions listed. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question, and `picks`: the saved picks of a question, empty for instructions.
 
@@ -110,17 +110,17 @@ The question tool also tests the checked line's rule once a minute: more than 2 
 
 ### Ticking
 
-`TickStep` takes `id`, `version`, `step` (counted from 1) and `ticked` (true to tick, false to untick). The ticks are stored with the instructions, in the `ticks` column, so a dash restart, a reconnect or a second dash shows the same ticks. Ticking sends nothing to the chief. When the chief puts the same id again, a step keeps its tick if its text is unchanged.
+`TickStep` takes `id`, `version`, `step` (counted from 1) and `ticked` (true to tick, false to untick). The ticks are stored with the instructions, in the `ticks` column, so a control-tower restart, a reconnect or a second control-tower shows the same ticks. Ticking sends nothing to the chief. When the chief puts the same id again, a step keeps its tick if its text is unchanged.
 
 ### Saved picks
 
-`SavePicks` takes `id`, `version` and `picks`, and replaces the question's saved picks. The picks follow the `REVISE` rule below: any picks made so far, in order, with valid keys and `text` for a free pick; an empty list clears them. It is refused as `version_changed`, `not_waiting` (the question is answered, dismissed or unknown) or `invalid picks`, as `AnswerQuestion` is. It changes nothing but the picks: not `updated_at_ms`, the state or the answer, and it does not wake the answers sender. `AnswerQuestion` also writes its picks, so the column always holds the latest. The picks live in the `picks` column, so a dash restart, a reconnect or a second dash shows them, and they stay readable with `ShowQuestion` after the question is answered, sent or dismissed.
+`SavePicks` takes `id`, `version` and `picks`, and replaces the question's saved picks. The picks follow the `REVISE` rule below: any picks made so far, in order, with valid keys and `text` for a free pick; an empty list clears them. It is refused as `version_changed`, `not_waiting` (the question is answered, dismissed or unknown) or `invalid picks`, as `AnswerQuestion` is. It changes nothing but the picks: not `updated_at_ms`, the state or the answer, and it does not wake the answers sender. `AnswerQuestion` also writes its picks, so the column always holds the latest. The picks live in the `picks` column, so a control-tower restart, a reconnect or a second control-tower shows them, and they stay readable with `ShowQuestion` after the question is answered, sent or dismissed.
 
 When the chief puts the same id again, in any state, a decision takes the saved pick of an old decision whose `ask` and every option field (`key`, `label`, `impact`, `suggested`, `free`) are the same, each old decision used once, in order. The pick's `decision` is renumbered to the new place; other picks are dropped.
 
 ### Answers
 
-`AnswerQuestion` takes `id`, `version`, a `kind`, `picks`, a `note` and `send_now`. `send_now` is a flag, false by default: when true, the answer goes to the chief at once (the dash's `send` sets it; see [The answers line](#the-answers-line)). Callers that omit it get false, so they behave as before. A pick has a `decision` (counting from 0), an option `key`, and `text` for a free option.
+`AnswerQuestion` takes `id`, `version`, a `kind`, `picks`, a `note` and `send_now`. `send_now` is a flag, false by default: when true, the answer goes to the chief at once (the control-tower's `send` sets it; see [The answers line](#the-answers-line)). Callers that omit it get false, so they behave as before. A pick has a `decision` (counting from 0), an option `key`, and `text` for a free option.
 
 | Kind | Picks | Note |
 | --- | --- | --- |
@@ -132,9 +132,9 @@ When the chief puts the same id again, in any state, a decision takes the saved 
 | `DONE` | None. | None. For instructions only. |
 | `IGNORE` | None. | None. For instructions only. |
 
-`DONE` tells the chief the user is done with the instructions; `IGNORE` tells the chief the user will not do them. The dash sends both with `send_now` set. `DONE` and `IGNORE` are refused for a question, and `ANSWER`, `FREE_TEXT`, `REVISE`, `REJECT` and `RELEGATE` for instructions, as `invalid kind`. `DONE` and `IGNORE` with picks or a note are refused as `invalid picks` or `invalid note`. `UNSPECIFIED` is refused. A free option does not end the walk through the decisions: its typed text becomes that decision's pick, and the dash goes on to the next decision. The answer is `FREE_TEXT` when any pick is free.
+`DONE` tells the chief the user is done with the instructions; `IGNORE` tells the chief the user will not do them. The control-tower sends both with `send_now` set. `DONE` and `IGNORE` are refused for a question, and `ANSWER`, `FREE_TEXT`, `REVISE`, `REJECT` and `RELEGATE` for instructions, as `invalid kind`. `DONE` and `IGNORE` with picks or a note are refused as `invalid picks` or `invalid note`. `UNSPECIFIED` is refused. A free option does not end the walk through the decisions: its typed text becomes that decision's pick, and the control-tower goes on to the next decision. The answer is `FREE_TEXT` when any pick is free.
 
-`RELEGATE` takes the question out of the todos for good: the question is stored as `answered`, then `sent` with its line, as every answer is. The chief keeps it as an idea note (see [The answers line](#the-answers-line)). The dash and the web app both send it, with `send_now` set.
+`RELEGATE` takes the question out of the todos for good: the question is stored as `answered`, then `sent` with its line, as every answer is. The chief keeps it as an idea note (see [The answers line](#the-answers-line)). The control-tower and the web app both send it, with `send_now` set.
 
 The note is sent only with `REVISE`, `REJECT` and `RELEGATE`. For `ANSWER` and `FREE_TEXT` it is not sent; the typed text of a free pick travels as that pick.
 
@@ -143,7 +143,7 @@ The note is sent only with `REVISE`, `REJECT` and `RELEGATE`. For `ANSWER` and `
 | Status | Message | When |
 | --- | --- | --- |
 | `InvalidArgument` | `invalid <field>` | A rule is broken. The field is named, such as `invalid link`, `invalid decisions.1.options.2.key`, `invalid picks`, `invalid note`, `invalid kind`, `invalid steps` or `invalid step`. Nothing is stored. |
-| `FailedPrecondition` | `version_changed` | The question or instructions were put again since the dash read them. |
+| `FailedPrecondition` | `version_changed` | The question or instructions were put again since the control-tower read them. |
 | `FailedPrecondition` | `not_waiting` | The question or instructions are dismissed, already answered, or unknown. |
 | `FailedPrecondition` | `spec_changed` | `AnswerQuestion` or `SavePicks` names a todo whose spec changed after it was asked. Checked after `version_changed` is ruled out, so an answer at an old version is `version_changed`. |
 | `InvalidArgument` | `invalid step` | `TickStep` names a step number below 1 or above the number of steps, which includes any step of a question. `TickStep` checks `not_waiting` and `version_changed` first. |
@@ -166,7 +166,7 @@ harold tool questions checked                    # checked at 14:05
 
 `put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec> picks <picked>/<decisions>`, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. ` (changed spec)` ends the line of a todo with a changed spec. `checked` prints `checked at HH:MM`, the Mac's local time. `show` prints a head line `<id> v<version> <product> <spec> <state>`, then one line per decision: `  <n> <ask>: <key> <label>`, `  <n> <ask>: <key> "<text>"` for a free pick, or `  <n> <ask>: no pick`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
 
-The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#todos).
+The user answers in the control-tower, not through the CLI. See the [control-tower README](../../../control-tower/README.md#todos).
 
 ## States
 

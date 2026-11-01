@@ -1,6 +1,6 @@
 # Voice input: calls with the chief
 
-A call lets you talk to the chief of pods at the Mac instead of typing. You press one key in tmx-agent-dash. Harold listens through the microphone, turns what you say into text, types the text into the chief's pane, and plays the chief's spoken answer. Harold then listens again, until you end the call.
+A call lets you talk to the chief of pods at the Mac instead of typing. You press one key in the control-tower. Harold listens through the microphone, turns what you say into text, types the text into the chief's pane, and plays the chief's spoken answer. Harold then listens again, until you end the call.
 
 The chief is the first agent pane of the chief's tmux session among the agents running in a folder `[notify] chief` matches. Other agents in that folder do not hide it.
 
@@ -22,14 +22,14 @@ The reason: Messages stores a recorded message as an attachment, which reaches H
 
 ### Starting and ending
 
-In tmx-agent-dash, put the cursor on the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the dash, so the button follows the chief if it restarts in another pane.
+In the control-tower, put the cursor on the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the control-tower, so the button follows the chief if it restarts in another pane.
 
 | Key | On the chief's row | On any other row |
 |---|---|---|
 | `c` | Starts a call when none is on and Harold's voice is not muted. Ends the call during one. | Nothing |
 | `t` | Talk now, while the chief speaks ([Talk now](#talk-now)). | Nothing |
 
-The command palette (opened with `/`) also lists `Call: start` when a call can start and `Call: end` during a call, from any row. Typing `call` in the palette finds them. Talk now has no palette entry. The dash captures no mouse events, so the buttons are pressed only with their keys. The footer lists `c call` and `t talk now`.
+The command palette (opened with `/`) also lists `Call: start` when a call can start and `Call: end` during a call, from any row. Typing `call` in the palette finds them. Talk now has no palette entry. The control-tower captures no mouse events, so the buttons are pressed only with their keys. The footer lists `c call` and `t talk now`.
 
 When a call starts, Harold:
 
@@ -39,7 +39,7 @@ When a call starts, Harold:
 4. starts `ffmpeg` with avfoundation on the default microphone, reading 16 kHz mono samples;
 5. starts the voice worker, or takes the one already loaded, and waits first for the speech model and the default TTS model to be on the Mac ([The voice worker](#the-voice-worker), [Speech models](#speech-models)). It also starts the TTS worker, which keeps Kokoro loaded, so the first line of the call does not wait for the load ([TTS server](../tts/README.md)).
 
-Every call starts *connecting*, like a phone call, whatever the worker's state. Harold plays the ringback, "ring-ring": a 400 Hz and 450 Hz pair for 0.4 s, 0.2 s of quiet, the pair again for 0.4 s, then 2.0 s of quiet, 3.0 s a cycle. At least one whole cycle plays, and the ring never stops part-way. At the end of a cycle Harold checks whether the call is ready: the voice worker is ready, and the call answerer's warm-up (below) has finished or passed its 5 s limit. If not, another whole cycle plays. If so, Harold plays the pick-up, two quick soft notes rising from 660 Hz to 880 Hz in 0.15 s, and when it ends the call is listening. So the tap-to-listening time is at least 3.15 s. The phone's screen shows `Connecting…` until then; the dash's button shows `listening`, since the `Call` RPC has no value for it.
+Every call starts *connecting*, like a phone call, whatever the worker's state. Harold plays the ringback, "ring-ring": a 400 Hz and 450 Hz pair for 0.4 s, 0.2 s of quiet, the pair again for 0.4 s, then 2.0 s of quiet, 3.0 s a cycle. At least one whole cycle plays, and the ring never stops part-way. At the end of a cycle Harold checks whether the call is ready: the voice worker is ready, and the call answerer's warm-up (below) has finished or passed its 5 s limit. If not, another whole cycle plays. If so, Harold plays the pick-up, two quick soft notes rising from 660 Hz to 880 Hz in 0.15 s, and when it ends the call is listening. So the tap-to-listening time is at least 3.15 s. The phone's screen shows `Connecting…` until then; the control-tower's button shows `listening`, since the `Call` RPC has no value for it.
 
 The ringing is sound like any other: the microphone's pieces are dropped while it plays (reason `playing`), so you are not heard before the pick-up, and no turn can start. The ringing is when the call starts what it needs. The voice worker starts if no worker is loaded or loading (it loads in about 3 s from memory and 6 to 8.5 s cold, so a call whose page loaded it rings once, and a cold one rings two or three cycles). With the call answerer on, Harold reads the call facts (todos, queue, pods) once, as for a turn, and keeps them for the call's first turn if that turn comes within 30 s; and it runs `<claude cli> --version` once, which makes no model call and costs nothing, so the CLI's files are in memory for the first answer. The warm-up has a 5 s limit; past it, the call picks up anyway. The span `harold.call_ring` records the cycles, whether the worker was `ready` or `loaded_now`, and the warm-up's `warm_ms` ([the telemetry reference](../telemetry/README.md)).
 
@@ -83,7 +83,7 @@ The call ends in one of these ways. Each is the `reason` of the `call ended` log
 | `idle` | For 10 minutes no turn was cut and no sound played. Harold says `Bye.` and ends the call ([Where this differs from the original design](#where-this-differs-from-the-original-design)). |
 | `voice_muted` | Harold's voice was muted during the call ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). |
 
-When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, deletes the call's folder, and clears the transcript the dash shows. A turn still waiting for a busy chief is not dropped: it keeps its retry after the call ends ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)).
+When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, deletes the call's folder, and clears the transcript the control-tower shows. A turn still waiting for a busy chief is not dropped: it keeps its retry after the call ends ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)).
 
 The 10-minute clock starts again on every turn cut and every sound played, the tick included. When it runs out while something is going on (you are speaking, a sound plays or waits, a turn waits for a busy chief, or Harold is transcribing or waiting for the chief), the clock starts again instead.
 
@@ -109,7 +109,7 @@ When Harold has said `The chief is busy. I'll pass it on when it's free.`, the t
 
 The button sits at the right edge of the chief's work cell, so a call never changes the list's column widths. During a call the cell's text is the last thing typed, `🎙 <transcript>`, or else what became of the last turn (`nothing heard`, `chief busy`, `failed`).
 
-The dash asks Harold for the call's state once when its stream opens, every 500 ms while a call is on, and every 5 seconds otherwise, so the button finds the chief's pane before any call. A poll that fails hides the button and shows no status line, so a dash talking to an older Harold without calls shows nothing. Only a failed `c` or `t` press shows a status.
+The control-tower asks Harold for the call's state once when its stream opens, every 500 ms while a call is on, and every 5 seconds otherwise, so the button finds the chief's pane before any call. A poll that fails hides the button and shows no status line, so a control-tower talking to an older Harold without calls shows nothing. Only a failed `c` or `t` press shows a status.
 
 | State | Button | Colour |
 |---|---|---|
@@ -120,7 +120,7 @@ The dash asks Harold for the call's state once when its stream opens, every 500 
 | `[voice_input]` absent | `[c] 📞 call: not set up` | muted; `c` does nothing |
 | Harold's voice is muted | `[c] 📞 call: voice muted` | muted; `c` does nothing until you unmute |
 
-The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from the clock, so the dash's redraw rate (every 100 ms) does not change.
+The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from the clock, so the control-tower's redraw rate (every 100 ms) does not change.
 
 **Narrow terminals.** The button uses the full text whenever it fits in the work cell, and otherwise shortens in this order:
 
@@ -129,7 +129,7 @@ The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from 
 
 While the chief speaks, `[t] talk now` is kept ahead of the state words. The pair shrinks as `[c] 📞 ▂▄▆▄▂ chief speaking · end call [t] talk now`, then `[c] 📞 ▂▄▆▄▂ end call [t] talk now`, then `[c] 📞 end call [t] talk now`, then `[c] 📞 end call [t] talk`, then `[c] 📞 end call` alone. The last step hides the talk-now button, and `t` still works.
 
-The other states shorten like this: off is always `[c] 📞 call`; not set up and voice muted shorten to `[c] 📞 not set up` and `[c] 📞 voice muted`. The narrowest text is used when none fits. The dash's tests cover `end call` at every width.
+The other states shorten like this: off is always `[c] 📞 call`; not set up and voice muted shorten to `[c] 📞 not set up` and `[c] 📞 voice muted`. The narrowest text is used when none fits. The control-tower's tests cover `end call` at every width.
 
 ### Talk now
 
@@ -188,7 +188,7 @@ The microphone capture has no echo cancellation, so this muting is the guard. Wi
 Add a `[voice_input]` section to `local.toml`. The template (`harold/config/local.template.toml`) carries it commented out:
 
 ```toml
-# Calls with the chief at the desk (tmx-agent-dash: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
+# Calls with the chief at the desk (control-tower: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
 # [voice_input]
 # command = "/Users/you/Dev/xn/mlx-audio/.venv/bin/python"
 # args = ["-m", "mlx_audio.stt.generate", "--model", "mlx-community/whisper-large-v3-turbo"]
@@ -326,7 +326,7 @@ env -i PATH=/usr/bin:/bin HOME=$(mktemp -d) HF_HUB_CACHE=$(mktemp -d) \
 - **On the Mac.** Audio and transcripts stay on the Mac. The models and commands are local. The one thing the voice sends out is the speech-model download, which carries no call content ([Speech models](#speech-models)).
 - **Audio.** Each turn's audio lives only until its transcript returns, and is deleted even on failure. Samples between turns are kept only in memory. The voice worker keeps no audio or text after answering. The audio of the lines it made for a call is deleted after it plays, and the call's folder is deleted when the call ends. The phone's early worker runs from its own folder (`worker/` beside the call folders), which stays while it is kept. If Harold is killed during a call, its folder stays in `$TMPDIR/harold-voice-input/` until Harold next starts: at start-up Harold removes every `call-*` folder left there, and nothing else in that folder.
 - **Phrases kept.** The phrase folder holds only Harold's own fixed phrases, never your words.
-- **Transcripts.** Harold does not store the transcript as an event, and never writes it to `harold.log`. It is shown in tmx-agent-dash while the call lasts, through the `Call` answer's `last_transcript`, and cleared when the call ends.
+- **Transcripts.** Harold does not store the transcript as an event, and never writes it to `harold.log`. It is shown in the control-tower while the call lasts, through the `Call` answer's `last_transcript`, and cleared when the call ends.
 - **Telemetry.** harold-telemetry never exports text. The typed line becomes a turn's prompt like any typed prompt.
 - **A call turn's trace.** One trace per turn, from the start of speech to the answer's first sound, with spans for the speech, Whisper, Kokoro and the playback: see [the call turn's span table](../telemetry/README.md#turns).
 - **The chief's session.** The prompt typed into the chief's pane is in the chief's own session. That is how the chief hears it.
@@ -377,7 +377,7 @@ The first turn of a call used to wait for the worker to load, 6 to 8.5 s after t
 
 ## The `Call` RPC
 
-tmx-agent-dash controls the call over one RPC in `harold-api/proto/harold.proto`: `Call(CallRequest { action }) returns (CallResponse { state, chief_pane_id, last_transcript, last_result })`.
+The control-tower controls the call over one RPC in `harold-api/proto/harold.proto`: `Call(CallRequest { action }) returns (CallResponse { state, chief_pane_id, last_transcript, last_result })`.
 
 | Field | Values |
 |---|---|
@@ -385,7 +385,7 @@ tmx-agent-dash controls the call over one RPC in `harold-api/proto/harold.proto`
 | `state` | `OFF`, `LISTENING`, `TRANSCRIBING`, `WAITING`, `SPEAKING`, `NOT_SET_UP`; a connecting call reads as `LISTENING` (the contract has no value for it) |
 | `last_result` | `TYPED`, `NOTHING_HEARD`, `NO_CHIEF`, `CHIEF_BUSY`, `FAILED`, `VOICE_MUTED`; unspecified before any turn has ended in the call |
 
-The dash shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It waits up to 8 seconds for the answer to `START`, `STOP` or `TALK_NOW`, longer than the 5 seconds Harold may take to close the voice worker when a call ends, and up to 2 seconds for a `STATUS` poll, which Harold answers at once. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the dash does not know counts as not set up.
+The control-tower shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It waits up to 8 seconds for the answer to `START`, `STOP` or `TALK_NOW`, longer than the 5 seconds Harold may take to close the voice worker when a call ends, and up to 2 seconds for a `STATUS` poll, which Harold answers at once. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the control-tower does not know counts as not set up.
 
 ## The shared core and the web app
 
@@ -434,7 +434,7 @@ The web app's call (its stage 1b) runs on this core. [The web app reference](../
 
 **The phone's own voice.** What Harold says only through `[tts]` at the desk, `The voice stopped. One moment.` and `The voice failed. Call ended.`, and any sound the phone never fetched, goes to the phone as a line, not a sound. The app says it with the phone's `speechSynthesis`, and reports it said. The core waits for that report, or for 2 seconds plus 80 milliseconds for each character, whichever comes first. Harold's voice mute silences the Mac's speakers, not the phone, so it does not end or refuse a phone's call. Until the call opens (its worker has started), the sink and the phone's own voice offer nothing and return at once: a call that ends before it opens answers `POST /call` with 200 and the signal `_callWhy`, which holds the line that the phone shows, so `There's no chief running.` and a voice failure at the start are shown, not heard.
 
-**`say_in_open_call`.** `harold speak` and other agents' turn-end updates reach an open call through `say_in_open_call`. It asks the desk's call only; the phone's call is reached through `say_in_phone_call`, under the `web_app` list, so a line held off that list is never heard in it, and no turn-end update goes into the phone's call. With the screen unlocked and only the phone's call open, such a line is spoken with the `[tts]` command on the Mac. Before the screen lock decides where the chief's spoken line goes, the projector asks only the phone's call (`say_in_phone_call`). With no phone call open, the line goes by the lock's rules, as at the desk: with the screen unlocked it is said through `say_in_open_call`, into the desk's call if one is open; with the screen locked it goes to the phone, as [The display and the lock screen](#the-display-and-the-lock-screen) describes. A line the chief says in the phone's call plays on the phone and is added to the thread as text, with no push and no iMessage. Starting a call on the phone ends a call open at the desk first. Nothing stops the dash from starting a desk call while the phone's call is open.
+**`say_in_open_call`.** `harold speak` and other agents' turn-end updates reach an open call through `say_in_open_call`. It asks the desk's call only; the phone's call is reached through `say_in_phone_call`, under the `web_app` list, so a line held off that list is never heard in it, and no turn-end update goes into the phone's call. With the screen unlocked and only the phone's call open, such a line is spoken with the `[tts]` command on the Mac. Before the screen lock decides where the chief's spoken line goes, the projector asks only the phone's call (`say_in_phone_call`). With no phone call open, the line goes by the lock's rules, as at the desk: with the screen unlocked it is said through `say_in_open_call`, into the desk's call if one is open; with the screen locked it goes to the phone, as [The display and the lock screen](#the-display-and-the-lock-screen) describes. A line the chief says in the phone's call plays on the phone and is added to the thread as text, with no push and no iMessage. Starting a call on the phone ends a call open at the desk first. Nothing stops the control-tower from starting a desk call while the phone's call is open.
 
 **A newer screen.** A `POST /call` while the phone's call is open takes it over: the call and its worker go on, the call gets a new id, and its pieces are stamped from that request's arrival. The older screen's pieces are refused, and those it posted that still wait are not read. The call forgets the turn being spoken (`CallControl::forget_turn`, which resets the speech detector and keeps the background level), and the source forgets it again just before the newer screen's first piece, so whatever the older screen was saying is dropped, not typed.
 

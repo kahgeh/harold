@@ -66,7 +66,7 @@ Calls use the server. The voice worker loads Whisper only. When a call rings, Ha
 | Model is for the other worker | `FailedPrecondition` `unsupported_worker` |
 | A weight file that can run code | `FailedPrecondition` `unsafe_format` |
 | Remove the default model | `FailedPrecondition` `default_model` |
-| `Speak` while the voice is muted in the dash | `FailedPrecondition` `voice_muted` |
+| `Speak` while the voice is muted in the control-tower | `FailedPrecondition` `voice_muted` |
 
 ## The CLI
 

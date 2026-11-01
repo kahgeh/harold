@@ -1,6 +1,6 @@
-# Tmux Agent Dash
+# control-tower
 
-`tmx-agent-dash` is a keyboard-driven terminal view of the agent-pane projection
+`control-tower` is a keyboard-driven terminal view of the agent-pane projection
 published by Harold. It shows transport and agent monitor health separately, keeps the
 last committed rows visible through degraded or stale periods, and can switch
 the invoking tmux client to the pane under the cursor.
@@ -12,7 +12,7 @@ the invoking tmux client to the pane under the cursor.
 - Harold with the `WatchAgentStates` gRPC service available
 - The containing Harold workspace, with the shared API crate at `../harold-api`
 
-Viewing works outside tmux, but pane navigation is disabled. Start the dash
+Viewing works outside tmux, but pane navigation is disabled. Start the control-tower
 inside the tmux client that should move when you press `Enter`. When several
 clients are attached to that session, tmux moves the most recently active one.
 
@@ -22,20 +22,19 @@ From the containing Harold workspace root, build every release binary:
 make build
 ```
 
-Install the same workspace revision, including the signed on-demand dash
-command at `~/bin/tmx-agent-dash`:
+Install the same workspace revision. This installs the signed control-tower program at `~/bin/harold/control-tower`:
 
 ```sh
 make deploy
 ```
 
-For standalone dash development from this package directory, use Cargo:
+For standalone control-tower development from this package directory, use Cargo:
 
 ```sh
 cargo build --release
 ```
 
-The resulting development executable is `../target/release/tmx-agent-dash`.
+The resulting development executable is `../target/release/control-tower`.
 
 ## Run
 
@@ -125,10 +124,10 @@ Before the first snapshot the masthead shows `○ VOICE —`.
 iMessage traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
-every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown
-while messaging is running. The masthead title always shows the dash's own release version (`source` for a
+every connected control-tower shows `■ MSG PAUSED` after the voice state; nothing is shown
+while messaging is running. The masthead title always shows the control-tower's own release version (`source` for a
 source build), whatever Harold reports and even before the first snapshot or after a
-disconnect. A dash left running through an install shows its old version until it is
+disconnect. A control-tower left running through an install shows its old version until it is
 restarted. As the line gets tight `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
 goes, then `REV`, then the version, so transport, voice and the paused marker stay
 visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
@@ -137,22 +136,22 @@ for what the switch does.
 
 ## Notes search
 
-`s` opens the vault notes over the agent list, while the dash is connected to Harold. Vault notes are the organisation's Markdown notes, which Harold's [knowledge tool](../docs/references/tools/knowledge.md) indexes by meaning; they are not backlog notes. The dash reads them through the tool's gRPC service on Harold's own address. It needs `[knowledge] vault` set in Harold: the dash asks once when its stream opens, and when Harold does not serve the tool `s` does nothing.
+`s` opens the vault notes over the agent list, while the control-tower is connected to Harold. Vault notes are the organisation's Markdown notes, which Harold's [knowledge tool](../docs/references/tools/knowledge.md) indexes by meaning; they are not backlog notes. The control-tower reads them through the tool's gRPC service on Harold's own address. It needs `[knowledge] vault` set in Harold: the control-tower asks once when its stream opens, and when Harold does not serve the tool `s` does nothing.
 
 - The box shows the 10 vault notes changed most recently, newest first, each with its kind and title.
 - **Typing searches.** Any printable key starts a search, and the list becomes the closest 10 vault notes after you pause for 300 ms. A query under 2 characters shows the recent list again. The first search after a pause waits for the model to load, and the box reads `Looking…`; if the model could not load it reads `Search is resting: the model didn't load.`
 - `j` / `k` (and ↓ / ↑) move the cursor, `gg` / `G` go to the first and last row, while the keys are for moving. To search for a word that begins with `j`, `k` or `g`, press `/` first: then every key types, and only the arrows move.
-- **Enter** opens the vault note's file in `$EDITOR` (`vi` when it is unset), in a new tmux window named `note`. The dash stays where it is.
+- **Enter** opens the vault note's file in `$EDITOR` (`vi` when it is unset), in a new tmux window named `note`. The control-tower stays where it is.
 - **Esc** clears the query, then leaves the list and goes back to the agents. Ctrl+Q, Ctrl+C and Ctrl+L act as everywhere. `q` types a `q` here and does not quit.
 - There is no note pane and no related list. When the connection to Harold ends, the list closes.
 
 ## Now line
 
-When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on it and it takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
+When the chief of pods has a Now item in its queue, the control-tower shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The control-tower reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on it and it takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
 ## Todos
 
-When the chief of pods has something for you, a todo, it appears as rows of the agent list, right under the chief's row. A todo is one of two kinds: a question to answer (id `Q1`) or instructions to follow by hand (id `I1`), and every header and row names its kind. The dash reads the todos from Harold's question tool every 2 seconds, and before each key that lands on a todo row. No row shows while no todo waits. A new todo never moves the cursor. See the [question tool reference](../docs/references/tools/questions.md) for how todos get in and what Harold does with the answers.
+When the chief of pods has something for you, a todo, it appears as rows of the agent list, right under the chief's row. A todo is one of two kinds: a question to answer (id `Q1`) or instructions to follow by hand (id `I1`), and every header and row names its kind. The control-tower reads the todos from Harold's question tool every 2 seconds, and before each key that lands on a todo row. No row shows while no todo waits. A new todo never moves the cursor. See the [question tool reference](../docs/references/tools/questions.md) for how todos get in and what Harold does with the answers.
 
 ### Closed and open
 
@@ -166,7 +165,7 @@ Closed todos take one row, counting questions and instructions together. With an
   ● BUSY   harold-main               Building dash-one-version
 ```
 
-Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
+Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second control-tower shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
 
 ```text
     ▾ I1 · instructions · 1 of 2 todos · 2 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac
@@ -222,14 +221,14 @@ Each decision opens with its suggested option picked (`●`); an option you have
 
 An option's impact shows on the line below its label, dim; an option with no impact has no second line. A free option such as `z  Something else` takes text of your own: `Space` on it opens a text field, holding any text typed there before. Type, then press `Enter` to keep the text and pick the option (blank text is not accepted), or `Esc` to discard it and leave the field. The option's row then shows the text after its label, cut to fit. Text stops at 1,999 characters, since Harold refuses 2,000.
 
-To answer, move to `send` and press `Enter`. The dash re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting todo shows in its place, open, with the cursor on its header; with none left, the todo rows go and the cursor moves to the chief's row.
+To answer, move to `send` and press `Enter`. The control-tower re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting todo shows in its place, open, with the cursor on its header; with none left, the todo rows go and the cursor moves to the chief's row.
 
 The other action rows:
 
 - **relegate to idea…** opens a note for anything to add to the idea. `Enter` on it sends a relegate answer at once, with the picks made so far, and the note may be empty. The question leaves your todos for good, and the chief keeps it as an idea note.
 - **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note sends it as a revise or reject answer, with the picks made so far and at once like `send`; a blank note is not sent. `Esc` discards the note.
 
-`n` and `N` move to the next or previous waiting question, wrapping over the listed order. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a dash restart, a reconnect or a second dash shows the same saved picks. A question that opens at a question version the dash holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a control-tower restart, a reconnect or a second control-tower shows the same saved picks. A question that opens at a question version the control-tower holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
 
 ### When the chief's row is hidden or scrolled off
 
@@ -308,21 +307,21 @@ hides that agent, the filter is cleared.
   when you press `Enter` on it. With focus tracking on, `Enter` does not clear
   it directly: it stops once the jump makes its pane active, on the next poll.
   With tracking off, `Enter` clears it.
-- Waiting state is per dash and kept in memory only. Agents that are already
-  Idle when the dash starts do not wait, and a second dash keeps its own list.
+- Waiting state is per control-tower and kept in memory only. Agents that are already
+  Idle when the control-tower starts do not wait, and a second control-tower keeps its own list.
 
 ### Focus tracking
 
-For Rex agents (`block:` ids) the dash does not run `tmux`. Once a second it reads
+For Rex agents (`block:` ids) the control-tower does not run `tmux`. Once a second it reads
 `rex client ls --json` and `session.view` and counts the focused block of the
 active window as seen. Rex does not say which session the app has in front, so
-when the app has more than one session the dash has no reading and shows
-`(focus tracking off)`. The dash finds `rex` in the running server's copy, then on
+when the app has more than one session the control-tower has no reading and shows
+`(focus tracking off)`. The control-tower finds `rex` in the running server's copy, then on
 `PATH`, then in `/Applications/Rex*.app`.
 
 For tmux agents (`%` ids):
 
-Once a second the dash runs `tmux list-clients` and decides which pane you can
+Once a second the control-tower runs `tmux list-clients` and decides which pane you can
 see. Suspended clients are ignored; a focused client is preferred, otherwise the
 most recently active client is used, and that client's active pane counts as
 seen. Focus is sampled once a second, so leaving a pane less than about a second
@@ -337,29 +336,29 @@ An absent or empty work summary is displayed exactly as:
 No work summary reported
 ```
 
-The dash consumes only Harold's classified pane state and bounded work
+The control-tower consumes only Harold's classified pane state and bounded work
 summary. Raw pane screen content and evidence provenance do not reach or appear
-in the dash.
+in the control-tower.
 
 ## Troubleshooting
 
 ### Harold is unavailable
 
-The dash keeps retrying with a capped backoff and shows the selected
+The control-tower keeps retrying with a capped backoff and shows the selected
 endpoint plus a sanitized error. Press Ctrl+L to retry immediately; the message reads `Press Ctrl+L to retry now`. Before the
 first snapshot, no rows are shown; after a disconnect, the last accepted rows
 remain visible as stale.
 
 ### Navigation is unavailable
 
-The dash requires non-empty `TMUX` and `TMUX_PANE` values from its invoking
+The control-tower requires non-empty `TMUX` and `TMUX_PANE` values from its invoking
 process before it discovers a client. Run it from the tmux client you intend to
-navigate. An outside-tmux dash remains usable for viewing and searching but
+navigate. An outside-tmux control-tower remains usable for viewing and searching but
 will show `NAVIGATION UNAVAILABLE`.
 
 ### Pane switching fails
 
-If the pane under the cursor disappears or tmux rejects the switch, the dash keeps
+If the pane under the cursor disappears or tmux rejects the switch, the control-tower keeps
 running, preserves its rows and cursor, and shows a sanitized
 `NAVIGATION FAILED` status. Move the cursor to another live row or wait for the next Harold
 snapshot.
