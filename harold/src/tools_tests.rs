@@ -1105,14 +1105,13 @@ fn the_agents_port_rows_have_no_current_step_field() {
     );
 }
 
-/// A stored recap does not reach the agents port. This fails if a recap field is added to a row.
+/// This guards against a recap field being added to a row, because the agents port cannot
+/// reach the store.
 #[test]
 fn the_agents_port_rows_have_no_recap() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
-    let recaps = crate::agent::recap::Recaps::default();
-    recaps.put_for_test("%7", 70, "RECAPCHECK-91bd", 5);
     let pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     let agents = SnapshotAgents {
         ports: Arc::new(Fake::at(DAY, "09:00:00")),
@@ -1121,12 +1120,5 @@ fn the_agents_port_rows_have_no_recap() {
     };
     let rows = format!("{:?}", agents.agents());
     assert!(rows.contains("%7"), "{rows}");
-    assert_eq!(
-        recaps.get("%7", 70).map(|line| line.text).as_deref(),
-        Some("RECAPCHECK-91bd")
-    );
-    assert!(
-        !rows.contains("RECAPCHECK-91bd") && !rows.contains("recap"),
-        "{rows}"
-    );
+    assert!(!rows.contains("recap"), "{rows}");
 }

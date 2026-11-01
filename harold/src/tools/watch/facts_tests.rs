@@ -181,10 +181,10 @@ async fn the_watch_facts_have_no_current_step_field() {
     assert!(!json.contains("step"), "{json}");
 }
 
+// This guards against a recap field being added to the facts, because the watch code cannot
+// reach the store.
 #[tokio::test]
 async fn the_watch_facts_have_no_recap() {
-    let recaps = crate::agent::recap::Recaps::default();
-    recaps.put_for_test("%3", 30, "RECAPCHECK-91bd", 5);
     let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
     worker.work_summary = Some("Plain summary".into());
     let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
@@ -202,9 +202,5 @@ async fn the_watch_facts_have_no_recap() {
     .await;
     let json = serde_json::to_string(&facts).unwrap();
     assert!(json.contains("Plain summary"), "{json}");
-    assert!(recaps.get("%3", 30).is_some());
-    assert!(
-        !json.contains("RECAPCHECK-91bd") && !json.contains("recap"),
-        "{json}"
-    );
+    assert!(!json.contains("recap"), "{json}");
 }

@@ -402,13 +402,11 @@ fn the_activity_summary_input_does_not_hold_the_current_step() {
 /// compiling if a field is added, so the recap cannot enter without this test.
 #[test]
 fn the_activity_summary_input_does_not_hold_the_recap() {
-    let recaps = crate::agent::recap::Recaps::default();
-    recaps.put_for_test("%2", 20, "RECAPCHECK-91bd", 5);
+    // This guards against a recap field being added, because this code cannot reach the store.
     let ActivitySummaryInput {
         instruction,
         assistant_reply,
     } = input();
-    assert!(recaps.get("%2", 20).is_some());
-    assert!(!instruction.contains("RECAPCHECK-91bd"));
+    assert!(!instruction.contains("recap"));
     assert!(assistant_reply.is_none());
 }

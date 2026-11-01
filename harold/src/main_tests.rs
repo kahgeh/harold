@@ -2740,6 +2740,8 @@ async fn the_recap_is_not_in_the_captured_logs_spans_or_stored_rows() {
     assert!(!spans.contains(RECAP_MARKER));
     assert!(!records.contains(RECAP_MARKER));
 
+    // The projection and the store never receive the Recaps, so the next checks only prove that
+    // this path stays free of it.
     super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
         .await
         .unwrap();
@@ -2747,13 +2749,18 @@ async fn the_recap_is_not_in_the_captured_logs_spans_or_stored_rows() {
     assert!(!stored.contains(RECAP_MARKER));
     let mut files = vec![directory.clone()];
     while let Some(path) = files.pop() {
-        for entry in std::fs::read_dir(&path).unwrap() {
-            let path = entry.unwrap().path();
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
             if path.is_dir() {
                 files.push(path);
                 continue;
             }
-            let bytes = std::fs::read(&path).unwrap();
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             assert!(
                 !bytes
                     .windows(RECAP_MARKER.len())

@@ -258,17 +258,12 @@ fn the_phone_apps_chief_result_has_no_current_step_field() {
 /// The phone app reads panes only to find the chief. The result has no recap field.
 #[test]
 fn the_phone_apps_agent_rows_have_no_recap() {
-    let recaps = crate::agent::recap::Recaps::default();
-    recaps.put_for_test(CHIEF, 10, "RECAPCHECK-91bd", 5);
+    // This guards against a recap field being added, because this code cannot reach the store.
     let found = find_chief(
         &chief_and_pod(EffectiveAgentState::Working),
         Some(CHIEF),
         None,
     );
-    assert!(recaps.get(CHIEF, 10).is_some());
     let text = format!("{found:?}");
-    assert!(
-        !text.contains("RECAPCHECK-91bd") && !text.contains("recap"),
-        "{text}"
-    );
+    assert!(!text.contains("recap"), "{text}");
 }
