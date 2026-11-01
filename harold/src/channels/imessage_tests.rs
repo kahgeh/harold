@@ -177,7 +177,6 @@ fn a_long_text_keeps_its_question_past_character_280_as_its_own_message() {
 
 #[cfg(unix)]
 fn fake_cli(name: &str, script: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!("harold-{name}-{}", std::process::id()));
     crate::test_support::fake_program::write_fake_program(
         &path,

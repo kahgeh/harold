@@ -933,7 +933,6 @@ mod tests {
     }
 
     fn script(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("fake.sh");
         crate::test_support::fake_program::write_fake_program(
             &path,

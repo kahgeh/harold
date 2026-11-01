@@ -9,7 +9,6 @@ use crate::pod_stats::{SlotCounts, SpecFacts, SpecState};
 use crate::telemetry::test_support;
 use harold_api::tools::questions::v1::{Decision, DecisionOption, Pick, Question, Step};
 use std::collections::VecDeque;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------

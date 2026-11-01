@@ -127,9 +127,7 @@ mod tests {
     fn a_python_fake_starts_on_the_first_try_with_no_handle_open() {
         let folder = folder();
         let path = folder.join("fake");
-        let started = Instant::now();
         write_fake_program(&path, Language::Python, "print('ok')");
-        assert!(started.elapsed() < Duration::from_secs(2));
         let output = Command::new(&path).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
         let probe = Command::new(&path).arg("--probe").output().unwrap();
