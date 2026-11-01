@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
+use crate::agent::domain::ObservedAgentState;
 use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::*;
@@ -816,4 +817,173 @@ fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() 
     let inventory = RexAgentInventory::new(Arc::new(failing), settings());
     assert!(inventory.scan().is_err());
     assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
+}
+
+// Fixture layout of `rex block call … program_status` (captured from a live Rex block,
+// pids and ids changed).
+fn status_text(root: &str) -> String {
+    format!(
+        r#"{{"records":[{root},{{"id":"ad20e9f103fa84d1a","state":"working","app":"x","title":"t","updated_at":"2026-11-01T21:59:39+11:00","owner":{{"pid":7,"name":"2.1.316"}}}}]}}"#
+    )
+}
+
+fn root_record(state: &str, pid: u32, msg: Option<&str>) -> String {
+    let msg = msg.map_or_else(String::new, |m| format!(r#","msg":{}"#, json!(m)));
+    format!(
+        r#"{{"state":"{state}","app":"x","effective_app":"x","updated_at":"2026-11-01T21:59:40+11:00","owner":{{"pid":{pid},"name":"2.1.316"}}{msg}}}"#
+    )
+}
+
+#[test]
+fn the_root_record_gives_state_pid_and_cleaned_msg() {
+    let long = format!("step\n\u{7}{}", "a".repeat(2048));
+    let record = parse_program_status(&status_text(&root_record("working", 13934, Some(&long))))
+        .expect("parses")
+        .expect("has a root");
+    assert_eq!(record.state, RecordState::Working);
+    assert_eq!(record.pid, 13934);
+    let msg = record.msg.expect("has a step");
+    assert!(msg.chars().count() <= 160);
+    assert!(msg.starts_with("step "));
+    assert!(!msg.contains('\n') && !msg.contains('\u{7}'));
+}
+
+#[test]
+fn a_child_record_is_not_the_root() {
+    let text = r#"{"records":[{"id":"x","state":"working","owner":{"pid":5}}]}"#;
+    assert_eq!(parse_program_status(text), Ok(None));
+    assert_eq!(parse_program_status(r#"{"records":[]}"#), Ok(None));
+    assert_eq!(parse_program_status("not json"), Err(RexError::Malformed));
+}
+
+#[test]
+fn a_record_with_an_unknown_state_word_is_unusable() {
+    let text = status_text(&root_record("sleeping", 5, Some("x")));
+    assert_eq!(parse_program_status(&text), Ok(None));
+    let no_pid = r#"{"records":[{"state":"working","msg":"x"}]}"#;
+    assert_eq!(parse_program_status(no_pid), Ok(None));
+}
+
+#[test]
+fn done_idle_and_error_records_give_no_step() {
+    for word in ["done", "idle", "error"] {
+        let text = status_text(&root_record(word, 5, Some("a step")));
+        let record = parse_program_status(&text).unwrap().unwrap();
+        assert_eq!(record.msg, None, "{word}");
+        assert_eq!(record.state.observed(), ObservedAgentState::Idle, "{word}");
+    }
+    let text = status_text(&root_record("working", 5, None));
+    assert_eq!(parse_program_status(&text).unwrap().unwrap().msg, None);
+}
+
+#[test]
+fn blocked_maps_to_working_and_gives_its_step() {
+    let text = status_text(&root_record("blocked", 5, Some("Allow Bash?")));
+    let record = parse_program_status(&text).unwrap().unwrap();
+    assert_eq!(record.state, RecordState::Blocked);
+    assert_eq!(record.state.observed(), ObservedAgentState::Working);
+    assert_eq!(record.msg.as_deref(), Some("Allow Bash?"));
+}
+
+// No status event arrived while the shapes were captured (20 s on a live session: only
+// `client_connected` and `client_disconnected` events). The layout below is assumed: a
+// `session_event` envelope whose `event` holds `type` and `payload` with `block_id` and,
+// for a change, the `record`.
+fn event_line(kind: &str, payload: &Value) -> String {
+    json!({
+        "type": "session_event",
+        "payload": {
+            "session_id": "session:s1",
+            "event": {"type": kind, "payload": payload},
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn event_lines_parse_and_bad_lines_are_skipped() {
+    let root: Value = serde_json::from_str(&root_record("working", 5, Some("go"))).unwrap();
+    let changed = event_line(
+        "program_status_changed",
+        &json!({"block_id": "block:b1", "record": root}),
+    );
+    assert_eq!(
+        parse_event_line(&changed),
+        Some(StatusEvent::Changed {
+            block_id: "block:b1".to_string(),
+            record: Some(StatusRecord {
+                state: RecordState::Working,
+                pid: 5,
+                msg: Some("go".to_string()),
+            }),
+        })
+    );
+    let mut child = root.clone();
+    child["id"] = json!("abc");
+    let child_line = event_line(
+        "program_status_changed",
+        &json!({"block_id": "block:b1", "record": child}),
+    );
+    assert_eq!(parse_event_line(&child_line), None);
+    let removed = event_line(
+        "program_status_removed",
+        &json!({"block_id": "block:b1", "record": {"state": "done"}}),
+    );
+    assert_eq!(
+        parse_event_line(&removed),
+        Some(StatusEvent::Removed {
+            block_id: "block:b1".to_string()
+        })
+    );
+    let removed_child = event_line(
+        "program_status_removed",
+        &json!({"block_id": "block:b1", "record": {"id": "abc"}}),
+    );
+    assert_eq!(parse_event_line(&removed_child), None);
+    let closed = event_line("block_closed", &json!({"block_id": "block:b1"}));
+    assert_eq!(
+        parse_event_line(&closed),
+        Some(StatusEvent::BlockClosed {
+            block_id: "block:b1".to_string()
+        })
+    );
+    assert_eq!(parse_event_line("not json"), None);
+    assert_eq!(parse_event_line(""), None);
+    assert_eq!(
+        parse_event_line(&event_line("client_connected", &json!({}))),
+        None
+    );
+    let unusable = event_line(
+        "program_status_changed",
+        &json!({"block_id": "block:b1", "record": {"state": "later", "owner": {"pid": 1}}}),
+    );
+    assert_eq!(
+        parse_event_line(&unusable),
+        Some(StatusEvent::Changed {
+            block_id: "block:b1".to_string(),
+            record: None
+        })
+    );
+}
+
+#[test]
+fn current_steps_notify_only_on_a_change() {
+    let steps = CurrentSteps::default();
+    let rx = steps.subscribe();
+    assert_eq!(*rx.borrow(), 0);
+    steps.set("block:a", 5, Some("one".to_string()));
+    assert_eq!(*rx.borrow(), 1);
+    steps.set("block:a", 5, Some("one".to_string()));
+    assert_eq!(*rx.borrow(), 1);
+    assert_eq!(steps.get("block:a", 5).as_deref(), Some("one"));
+    assert_eq!(steps.get("block:a", 6), None);
+    steps.set("block:a", 5, Some("two".to_string()));
+    assert_eq!(*rx.borrow(), 2);
+    steps.set("block:b", 5, None);
+    assert_eq!(*rx.borrow(), 2);
+    steps.clear_block("block:a");
+    assert_eq!(*rx.borrow(), 3);
+    steps.clear_block("block:a");
+    assert_eq!(*rx.borrow(), 3);
+    assert_eq!(steps.get("block:a", 5), None);
 }

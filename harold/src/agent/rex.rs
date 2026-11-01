@@ -1173,6 +1173,16 @@ pub(crate) fn system() -> Arc<SystemRex> {
     }))
 }
 
+#[path = "rex_status.rs"]
+mod status;
+#[allow(
+    unused_imports,
+    reason = "the observer and the streams use these in later tasks"
+)]
+pub(crate) use status::{
+    CurrentSteps, RecordState, StatusEvent, StatusRecord, parse_event_line, parse_program_status,
+};
+
 #[cfg(test)]
 #[path = "rex_tests.rs"]
 mod tests;
