@@ -10,6 +10,15 @@ use super::*;
 
 // -- fakes ---------------------------------------------------------------------------
 
+/// How long `Script::feed` waits for the program to open the fifo.
+const FEED_WAIT: Duration = Duration::from_secs(5);
+/// `O_NONBLOCK` and `ENXIO` as the two systems that Harold builds on give them.
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x4;
+const ENXIO: i32 = 6;
+
 /// The first `program_status` call for `block` waits until the gate opens. Later calls
 /// answer `later` at once.
 struct Gate {
@@ -195,20 +204,57 @@ impl Script {
 
     /// Sends one event line to a program from `fifo`. The write end stays open for the next
     /// line, so `cat` does not see the end of its input.
+    ///
+    /// The fifo opens with `O_NONBLOCK`, so a program that never opens its end makes the test
+    /// fail after `FEED_WAIT`, and not hang for ever.
     fn feed(&self, line: &str) {
         use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         static WRITERS: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
         let path = self.dir.join("events");
+        let deadline = Instant::now() + FEED_WAIT;
         let mut writers = lock(&WRITERS);
         if !writers.iter().any(|(owner, _)| *owner == path) {
-            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            let file = loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(O_NONBLOCK)
+                    .open(&path)
+                {
+                    Ok(file) => break file,
+                    // `ENXIO`: nothing has the fifo open for reading yet.
+                    Err(error) if error.raw_os_error() == Some(ENXIO) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the program did not open the fifo within {FEED_WAIT:?}"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("the fifo did not open: {error}"),
+                }
+            };
             writers.push((path.clone(), file));
         }
         let (_, file) = writers
             .iter_mut()
             .find(|(owner, _)| *owner == path)
             .unwrap();
-        writeln!(file, "{line}").unwrap();
+        let mut bytes = format!("{line}\n").into_bytes();
+        while !bytes.is_empty() {
+            match file.write(&bytes) {
+                Ok(written) => {
+                    bytes.drain(..written);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the fifo stays full for {FEED_WAIT:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("the fifo did not take the line: {error}"),
+            }
+        }
     }
 
     fn program(&self) -> Program {
@@ -708,4 +754,19 @@ fn a_call_that_works_while_the_block_closes_keeps_the_block_gone() {
     pending.finish("block:a");
     pending.note_worked("block:a");
     assert!(!lock(&pending.state).gone.contains("block:a"));
+}
+
+#[test]
+#[should_panic(expected = "did not open the fifo")]
+fn feed_fails_fast_when_the_program_never_opens_the_fifo() {
+    // The program ends at once and never opens its end of the fifo.
+    let script = Script::new("nofifo", false);
+    assert!(
+        Command::new("mkfifo")
+            .arg(script.dir.join("events"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    script.feed("never read");
 }

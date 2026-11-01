@@ -948,6 +948,7 @@ fn fake_of_3_sessions_and_14_blocks() -> FakeRex {
 
 #[test]
 fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() {
+    let _directory = directory_test_lock();
     crate::telemetry::take_noted_listings();
     let inventory = RexAgentInventory::new(
         Arc::new(fake_of_3_sessions_and_14_blocks()),
@@ -2089,6 +2090,7 @@ fn fake_of_two_sessions(listed: usize) -> FakeRex {
 
 #[test]
 fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
+    let _directory = directory_test_lock();
     let program = FakeProgram::new("scan-starts", &[], true);
     let (status, _) = status_with(fake_of_two_sessions(2), &program, now_clock());
     let status = Arc::new(status);
@@ -2112,6 +2114,7 @@ fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
 
 #[test]
 fn a_scan_after_a_stream_ended_and_the_gap_passed_changes_the_generation() {
+    let _directory = directory_test_lock();
     let (logs, _guard) = capture_logs();
     let program = FakeProgram::new("scan-restarts", &[], false);
     let base = Instant::now();
@@ -2150,6 +2153,7 @@ fn a_sync_after_stop_all_starts_no_stream() {
 
 #[test]
 fn a_session_that_leaves_the_listing_has_its_stream_stopped() {
+    let _directory = directory_test_lock();
     let program = FakeProgram::new("scan-leaves", &[], true);
     let (status, _) = status_with(fake_of_two_sessions(2), &program, now_clock());
     let status = Arc::new(status);
@@ -2196,6 +2200,7 @@ fn a_rex_setting_gives_the_inventory_the_status() {
 
 #[test]
 fn find_session_refuses_a_host_pane_id_without_listing() {
+    let _directory = directory_test_lock();
     struct CountingRex(AtomicUsize, FakeRex);
     impl RexApi for CountingRex {
         fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
