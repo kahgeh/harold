@@ -1551,7 +1551,9 @@ fn block_closed_removes_the_block_with_no_call() {
         status.lookup("block:a") == Lookup::Stream(None)
     });
     assert_eq!(steps.get("block:a", 5), None);
-    assert_eq!(api.status_calls("block:a"), 1);
+    // The call thread skips a block that is closed already. So the one call happens only when
+    // it starts before the reader handles the close, and the count is 0 or 1.
+    assert!(api.status_calls("block:a") <= 1);
 }
 
 #[test]
