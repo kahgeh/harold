@@ -8,8 +8,7 @@
 //! only from the offset kept in `restart-reminder.json`.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +20,7 @@ use tracing::{info, warn};
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::settings::RestartReminderSettings;
 use crate::timed_prompts::{AgentPane, LineOutcome, Ports, Writer, type_line_once};
+use crate::transcript::{Tail, read_new_lines};
 
 /// The state file in Harold's data folder.
 const STATE_FILE: &str = "restart-reminder.json";
@@ -341,8 +341,7 @@ fn reminder_line(started: OffsetDateTime, compactions: u32) -> String {
 /// A transcript that has shrunk or moved is read again from its start. A last line with
 /// no newline yet is left for the next read.
 fn read_new(session: &mut Session, path: &str, session_id: &str) -> std::io::Result<()> {
-    let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
+    let length = std::fs::metadata(path)?.len();
     if session.transcript_path != path || length < session.offset {
         *session = Session {
             transcript_path: path.to_string(),
@@ -351,26 +350,20 @@ fn read_new(session: &mut Session, path: &str, session_id: &str) -> std::io::Res
             ..Session::default()
         };
     }
-    file.seek(SeekFrom::Start(session.offset))?;
-    let mut reader = BufReader::new(file);
-    let mut buffer = Vec::new();
-    loop {
-        buffer.clear();
-        let read = reader.read_until(b'\n', &mut buffer)?;
-        if read == 0 || buffer.last() != Some(&b'\n') {
-            break;
-        }
-        session.offset += read as u64;
+    let mut tail = Tail {
+        offset: session.offset,
+    };
+    let result = read_new_lines(Path::new(path), &mut tail, None, |buffer| {
         // A line that is not JSON is skipped.
-        let Ok(line) = serde_json::from_slice::<Line>(&buffer) else {
-            continue;
+        let Ok(line) = serde_json::from_slice::<Line>(buffer) else {
+            return;
         };
         if line
             .session_id
             .as_deref()
             .is_some_and(|id| id != session_id)
         {
-            continue;
+            return;
         }
         if session.started.is_none() {
             session.started = line.timestamp.filter(|stamp| parse_time(stamp).is_some());
@@ -380,8 +373,9 @@ fn read_new(session: &mut Session, path: &str, session_id: &str) -> std::io::Res
         if line.is_compact_summary == Some(true) {
             session.compactions += 1;
         }
-    }
-    Ok(())
+    });
+    session.offset = tail.offset;
+    result.map(|_| ())
 }
 
 #[cfg(test)]

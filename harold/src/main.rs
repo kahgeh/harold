@@ -18,6 +18,7 @@ mod store;
 mod telemetry;
 mod timed_prompts;
 mod tools;
+mod transcript;
 mod tts;
 mod util;
 #[cfg(feature = "calls")]
