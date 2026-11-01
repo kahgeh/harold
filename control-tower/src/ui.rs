@@ -1377,8 +1377,6 @@ fn call_buttons(
     spans
 }
 
-/// `prefix` + name truncated with an ellipsis so the pane-address suffix that
-/// tells colliding agents apart always stays visible.
 /// What leads the WHERE text of an agent on another Rex host: the host mark and a space.
 /// It is empty for an agent on this Mac.
 fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker) -> String {
@@ -1388,6 +1386,8 @@ fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker) -> String {
     format!("{} ", host_mark(&agent.host_icon, marker, &agent.host))
 }
 
+/// `prefix` + name truncated with an ellipsis so the pane-address suffix that
+/// tells colliding agents apart always stays visible.
 fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> String {
     let suffix_width = Line::raw(suffix).width();
     let head = format!("{prefix}{name}");

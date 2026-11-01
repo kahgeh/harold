@@ -23,21 +23,6 @@ pub fn is_tmux_pane_id(id: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-/// Whether `id` is `block:<id>`, a Rex block on this Mac.
-pub fn is_local_rex_pane_id(id: &str) -> bool {
-    id.strip_prefix(REX_BLOCK_PREFIX).is_some_and(|rest| {
-        !rest.is_empty()
-            && rest
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    })
-}
-
-/// Whether `id` is a local form: `%<n>` or `block:<id>`. A host pane id is not.
-pub fn is_local_pane_id(id: &str) -> bool {
-    is_tmux_pane_id(id) || is_local_rex_pane_id(id)
-}
-
 struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
@@ -515,7 +500,7 @@ fn sanitize_detail(detail: &str) -> String {
 mod tests {
     use super::{
         CommandOutput, CommandRunner, NavigationError, PaneNavigator, ProcessContext,
-        TmuxNavigator, is_local_pane_id,
+        TmuxNavigator, is_tmux_pane_id,
     };
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, ConnectionState, SearchState, Snapshot,
@@ -823,8 +808,9 @@ mod tests {
     }
 
     /// Pane ids from other Rex hosts, and malformed ids, as the daemon's route tests list them.
-    const NOT_LOCAL_IDS: [&str; 10] = [
+    const NOT_LOCAL_IDS: [&str; 11] = [
         "rex:omarchy/block:abc",
+        "rex:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/block:a",
         "rex:a_b/block:x",
         "rex:/block:a",
         "rex:h/",
@@ -855,12 +841,12 @@ mod tests {
     }
 
     #[test]
-    fn the_local_id_check_takes_only_the_local_forms() {
+    fn the_tmux_id_check_takes_only_a_percent_and_digits() {
         for id in NOT_LOCAL_IDS {
-            assert!(!is_local_pane_id(id), "{id:?}");
+            assert!(!is_tmux_pane_id(id), "{id:?}");
         }
-        for id in ["%0", "%27", "block:abc"] {
-            assert!(is_local_pane_id(id), "{id:?}");
+        for id in ["%0", "%27"] {
+            assert!(is_tmux_pane_id(id), "{id:?}");
         }
     }
 
