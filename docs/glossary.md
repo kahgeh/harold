@@ -259,6 +259,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | checkpoint | The projector's saved position in the event stream | "cursor" for the saved position |
 | state database | The Turso database `harold-state.db` that holds the current agent view, the outbox and the checkpoint | "SQLite" for it |
 | outbox | The stored list of delivery work, such as a turn-end update to send or a phone reply to route | "queue" for it |
+| try | One time the delivery handler works on an outbox row. The code keeps `attempt_count` | "attempt" in text, "retry" for a single try |
+| give up | The delivery handler marks an outbox row as failed for good, after its 10th failed try, or after `LONGEST_INVENTORY_WAIT` while the inventory fails | "drop", "abandon" |
 | delivery handler | The part of Harold that reads the outbox, checks the `[notify]` settings and whether the user is at the desk, then leaves out or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
 | channel listener | The part of Harold that receives replies from the away channel and records each in the event stream | "poller", "watcher" for it |
 | snapshot | The complete current view of every agent, as the control-tower receives it | — |
