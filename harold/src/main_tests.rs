@@ -422,6 +422,9 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
             Some(oversized.as_str()),
             WorkSummaryUpdate::Set("🦀".repeat(160)),
         ),
+        (AgentState::Blocked, None, WorkSummaryUpdate::Unchanged),
+        (AgentState::Done, None, WorkSummaryUpdate::Unchanged),
+        (AgentState::Error, None, WorkSummaryUpdate::Unchanged),
     ];
 
     for (state, work_summary, _) in &cases {
@@ -462,6 +465,9 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
             match state {
                 AgentState::Working => Some(ObservedAgentState::Working),
                 AgentState::Idle => Some(ObservedAgentState::Idle),
+                AgentState::Blocked => Some(ObservedAgentState::Blocked),
+                AgentState::Done => Some(ObservedAgentState::Done),
+                AgentState::Error => Some(ObservedAgentState::Error),
                 _ => unreachable!("test table contains only actionable states"),
             }
         );
@@ -1054,6 +1060,28 @@ fn snapshot_mapping_carries_the_harold_version() {
     );
     // Tests build without HAROLD_RELEASE_VERSION.
     assert_eq!(HAROLD_VERSION, "source");
+}
+
+#[test]
+fn snapshot_mapping_gives_each_effective_state_its_own_number() {
+    for (effective, expected) in [
+        (EffectiveAgentState::Unknown, 3),
+        (EffectiveAgentState::Working, 1),
+        (EffectiveAgentState::Blocked, 4),
+        (EffectiveAgentState::Done, 5),
+        (EffectiveAgentState::Idle, 2),
+        (EffectiveAgentState::Error, 6),
+    ] {
+        let mut snapshot = populated_snapshot(3, None);
+        snapshot.panes[0].effective_state = effective;
+        let mapped = map_agent_snapshot(
+            snapshot,
+            &CurrentSteps::default(),
+            &Recaps::default(),
+            &HostAgents::default(),
+        );
+        assert_eq!(mapped.panes[0].state, expected, "{effective:?}");
+    }
 }
 
 #[test]
@@ -3076,10 +3104,10 @@ fn a_host_agent_row_has_the_agent_pid_as_its_pane_pid() {
 fn a_host_agent_row_maps_each_state_as_a_pane_does() {
     for (observed, expected) in [
         (ObservedAgentState::Working, AgentState::Working),
-        (ObservedAgentState::Blocked, AgentState::Working),
-        (ObservedAgentState::Done, AgentState::Idle),
+        (ObservedAgentState::Blocked, AgentState::Blocked),
+        (ObservedAgentState::Done, AgentState::Done),
         (ObservedAgentState::Idle, AgentState::Idle),
-        (ObservedAgentState::Error, AgentState::Idle),
+        (ObservedAgentState::Error, AgentState::Error),
     ] {
         let mut row = fixed_host_agent_row();
         row.agent = host_agent(observed);

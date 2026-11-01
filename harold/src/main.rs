@@ -752,15 +752,18 @@ fn map_agent_snapshot(
     }
 }
 
-/// The API state of an effective state. Task 5 gives Blocked, Done and Error their own API
-/// values. Until then Blocked reads as Working, and Done and Error read as Idle.
+/// The API state of an effective state: each of the six states has its own number.
 fn proto_agent_state(state: agent::domain::EffectiveAgentState) -> i32 {
     use agent::domain::EffectiveAgentState as Effective;
     match state {
-        Effective::Working | Effective::Blocked => AgentState::Working.into(),
-        Effective::Done | Effective::Idle | Effective::Error => AgentState::Idle.into(),
-        Effective::Unknown => AgentState::Unknown.into(),
+        Effective::Working => AgentState::Working,
+        Effective::Blocked => AgentState::Blocked,
+        Effective::Done => AgentState::Done,
+        Effective::Idle => AgentState::Idle,
+        Effective::Error => AgentState::Error,
+        Effective::Unknown => AgentState::Unknown,
     }
+    .into()
 }
 
 /// One agent on a Rex host as a pane of the stream. Its working directory is empty, so the

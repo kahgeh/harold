@@ -575,7 +575,7 @@ fn accept_args(event: &'static str) -> Vec<&'static str> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accept_sends_one_exact_report_and_exits_zero_when_accepted() {
-    for (event, state) in [("turn-started", 1), ("turn-completed", 2)] {
+    for (event, state) in [("turn-started", 1), ("turn-completed", 5)] {
         let (port, requests, _guard) = serve_recording(ReportKind::Accepted).await;
         let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
         let output = fixture.run(&accept_args(event));

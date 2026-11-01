@@ -610,5 +610,33 @@ fn agent_state_has_working_idle_unknown_on_numbers_1_2_3() {
         AgentState::from_str_name("AGENT_STATE_WORKING"),
         Some(AgentState::Working)
     );
-    assert_eq!(AgentState::from_str_name("AGENT_STATE_BUSY"), None);
+}
+
+#[test]
+fn agent_state_numbers_are_stable() {
+    assert_eq!(
+        [
+            AgentState::Unspecified,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Unknown,
+            AgentState::Blocked,
+            AgentState::Done,
+            AgentState::Error,
+        ]
+        .map(i32::from),
+        [0, 1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        AgentState::from_str_name("AGENT_STATE_BLOCKED"),
+        Some(AgentState::Blocked)
+    );
+    assert_eq!(
+        AgentState::from_str_name("AGENT_STATE_DONE"),
+        Some(AgentState::Done)
+    );
+    assert_eq!(
+        AgentState::from_str_name("AGENT_STATE_ERROR"),
+        Some(AgentState::Error)
+    );
 }
