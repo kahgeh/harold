@@ -667,6 +667,10 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         }
         rows.push(header);
         heights.push(1 + u16::from(margin));
+        let pad = app.host_marker != HostMarker::Text
+            && agents
+                .iter()
+                .any(|agent| !host_mark(&agent.host_icon, app.host_marker, &agent.host).is_empty());
         for agent in agents {
             // The cursor is on the chief's row only when it is not on a question row.
             let selected = app.selected.as_ref() == Some(&agent.incarnation);
@@ -695,7 +699,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 Cell::from(format!(
                     "  {}",
                     fit_with_suffix(
-                        &host_prefix(agent, app.host_marker),
+                        &host_prefix(agent, app.host_marker, pad),
                         app.label_parts(agent),
                         usize::from(where_width) - 2
                     )
@@ -1445,13 +1449,19 @@ fn call_buttons(
     spans
 }
 
-/// What leads the WHERE text of an agent on another Rex host: the host mark and a space.
-/// It is empty for an agent on this Mac.
-fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker) -> String {
-    if !agent.is_on_host() {
-        return String::new();
+/// What leads the WHERE text of an agent: its host mark and a space.
+///
+/// A row without a mark gets 3 blank cells when `pad` is true, so the session names line up.
+/// The text form never pads.
+fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker, pad: bool) -> String {
+    let mark = host_mark(&agent.host_icon, marker, &agent.host);
+    if !mark.is_empty() {
+        return format!("{mark} ");
     }
-    format!("{} ", host_mark(&agent.host_icon, marker, &agent.host))
+    if pad && marker != HostMarker::Text {
+        return "   ".to_owned();
+    }
+    String::new()
 }
 
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
@@ -3747,9 +3757,10 @@ mod tests {
     fn a_long_recap_never_hides_the_detail_panel() {
         let recap = "Goal: ship the recap to the control tower. ".repeat(8);
         assert!(recap.chars().count() > 300);
-        // These are the smallest sizes where the whole panel shows, step lines included, with
-        // the cap of 4 lines. With no cap the panel hides at both sizes: it needs 40 rows at
-        // 140 columns and 43 rows at 120 columns, even with the step lines left out.
+        // The whole panel, step lines included, shows with the cap of 4 lines from 33 rows at
+        // 140 columns and at 120 columns. With no cap it shows from 37 rows at 140 columns and
+        // from 39 rows at 120 columns. The sizes below are 39 and 40 rows, so the panel also
+        // shows with no cap there. The cap shows in the `…` check, not in the panel check.
         for (width, height) in [(140, 39), (120, 40)] {
             let mut app = recap_app(Some(recap.trim()), Some("Running the tests"));
             app.snapshot.rows[0].work_summary = Some("w".repeat(160));
@@ -3985,12 +3996,12 @@ mod tests {
     fn host_rows_keep_the_where_column_width_in_all_three_modes() {
         let long = "/w/a-very-long-session-name-for-a-worker";
         for (marker, mark) in [
-            (HostMarker::Glyph, "\u{f233}  "),
-            (HostMarker::Emoji, "\u{1F4BB} "),
+            (HostMarker::Glyph, "\u{f179}  "),
+            (HostMarker::Emoji, "\u{1F34E} "),
             (HostMarker::Text, "omarchy \u{b7} "),
         ] {
             for (width, height) in [(60, 20), (80, 24), (120, 30)] {
-                let app = host_app(marker, "server.rack", long, None);
+                let app = host_app(marker, "mac", long, None);
                 let rows = buffer_rows(&rendered_buffer(&app, width, height, 100_000));
                 let local = text_row_with(&rows, "main");
                 let summary_at = cell_column(local, "SUMMARYX");
@@ -4018,7 +4029,11 @@ mod tests {
     fn golden_host_app(marker: HostMarker) -> App {
         let snapshot = crate::api::golden::snapshot_with_host_and_local("block:abc")
             .expect("the stream mapping accepts the snapshot");
-        let mut app = live_app(snapshot.rows, None);
+        let mut rows = snapshot.rows;
+        for row in rows.iter_mut().filter(|row| row.is_on_host()) {
+            row.host_icon = "arch".into();
+        }
+        let mut app = live_app(rows, None);
         app.host_marker = marker;
         app
     }
@@ -4026,8 +4041,8 @@ mod tests {
     #[test]
     fn the_golden_host_row_shows_the_session_name_in_where_in_all_modes_and_widths() {
         for (marker, mark) in [
-            (HostMarker::Glyph, "\u{f233}  "),
-            (HostMarker::Emoji, "\u{1F4BB} "),
+            (HostMarker::Glyph, "\u{f303}  "),
+            (HostMarker::Emoji, "\u{1F427} "),
             (HostMarker::Text, "omarchy \u{b7} "),
         ] {
             for (width, height) in [(60, 20), (80, 24), (120, 30)] {
@@ -4100,7 +4115,6 @@ mod tests {
             ("arch", '\u{f303}', "\u{1F427}"),
             ("linux", '\u{f31a}', "\u{1F427}"),
             ("mac", '\u{f179}', "\u{1F34E}"),
-            ("unicorn", '\u{1F4BB}', "\u{1F4BB}"),
         ] {
             let rows = buffer_rows(&rendered_buffer(
                 &host_app(HostMarker::Glyph, icon, "/w/harold", None),
@@ -4108,11 +4122,7 @@ mod tests {
                 24,
                 100_000,
             ));
-            let glyph_shown = if icon == "unicorn" {
-                "\u{1F4BB} harold".to_owned()
-            } else {
-                format!("{glyph}  harold")
-            };
+            let glyph_shown = format!("{glyph}  harold");
             assert!(
                 rows.iter().any(|row| row.contains(&glyph_shown)),
                 "{icon}: {rows:#?}"
@@ -4129,6 +4139,104 @@ mod tests {
                 "{icon}: {rows:#?}"
             );
         }
+    }
+
+    /// A local row with the icon `local_icon` and a row on `omarchy` with `remote_icon`.
+    fn marked_app(marker: HostMarker, local_icon: &str, remote_icon: &str) -> App {
+        let mut app = host_app(marker, remote_icon, "/w/harold", None);
+        for row in &mut app.snapshot.rows {
+            if !row.is_on_host() {
+                row.host_icon = local_icon.into();
+            }
+        }
+        app
+    }
+
+    /// The local row and the host row of `marked_app`, as text.
+    fn local_and_host_rows(app: &App, width: u16, height: u16) -> (String, String) {
+        let rows = buffer_rows(&rendered_buffer(app, width, height, 100_000));
+        let local = text_row_with(&rows, "main").to_owned();
+        let host = rows
+            .iter()
+            .find(|row| row.contains("SUMMARYX") && !row.contains("main"))
+            .unwrap_or_else(|| panic!("no host row: {rows:#?}"))
+            .clone();
+        (local, host)
+    }
+
+    #[test]
+    fn a_row_without_a_mark_pads_to_the_session_column_of_a_row_with_one() {
+        for marker in [HostMarker::Glyph, HostMarker::Emoji] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let app = marked_app(marker, "mac", "");
+                let (local, host) = local_and_host_rows(&app, width, height);
+                assert_eq!(
+                    cell_column(&host, "harold"),
+                    cell_column(&local, "main"),
+                    "{marker:?} {width}: {local:?} {host:?}"
+                );
+                assert_eq!(
+                    cell_column(&host, "SUMMARYX"),
+                    cell_column(&local, "SUMMARYX"),
+                    "{marker:?} {width}"
+                );
+                let mark = if marker == HostMarker::Glyph {
+                    "\u{f179}"
+                } else {
+                    "\u{1F34E}"
+                };
+                assert!(local.contains(mark), "{marker:?} {width}: {local:?}");
+                assert!(!host.contains(mark), "{marker:?} {width}: {host:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_row_is_padded_when_no_row_has_a_mark() {
+        for marker in [HostMarker::Glyph, HostMarker::Emoji] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let marked = marked_app(marker, "mac", "");
+                let (marked_local, _) = local_and_host_rows(&marked, width, height);
+                let bare = marked_app(marker, "", "");
+                let (local, host) = local_and_host_rows(&bare, width, height);
+                assert_eq!(
+                    cell_column(&host, "harold"),
+                    cell_column(&local, "main"),
+                    "{marker:?} {width}"
+                );
+                assert_eq!(
+                    cell_column(&local, "main") + 3,
+                    cell_column(&marked_local, "main"),
+                    "{marker:?} {width}: {local:?} {marked_local:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rex_host_icon_name_shows_no_mark_beside_a_marked_local_row() {
+        for (marker, apple) in [
+            (HostMarker::Glyph, "\u{f179}"),
+            (HostMarker::Emoji, "\u{1F34E}"),
+        ] {
+            let app = marked_app(marker, "mac", "server.rack");
+            let (local, host) = local_and_host_rows(&app, 100, 24);
+            assert!(local.contains(apple), "{marker:?}: {local:?}");
+            for gone in [apple, "\u{f233}", "\u{1F4BB}"] {
+                assert!(!host.contains(gone), "{marker:?}: {host:?}");
+            }
+            assert_eq!(cell_column(&host, "harold"), cell_column(&local, "main"));
+        }
+    }
+
+    #[test]
+    fn text_mode_never_pads_and_an_own_machine_row_shows_nothing() {
+        let app = marked_app(HostMarker::Text, "mac", "mac");
+        let (local, host) = local_and_host_rows(&app, 100, 24);
+        assert!(host.contains("omarchy \u{b7} harold"), "{host:?}");
+        assert!(!local.contains('\u{b7}'), "{local:?}");
+        assert!(!local.contains('\u{f179}'), "{local:?}");
+        assert_eq!(cell_column(&local, "main"), cell_column(&host, "omarchy"));
     }
 
     #[test]
