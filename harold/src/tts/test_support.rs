@@ -415,7 +415,7 @@ impl Scratch {
         }
     }
 
-    /// The names of the model file and of the two voice files in a snapshot of this build: the MLX
+    /// The names of the model file and of the two other files in a snapshot of this build: the MLX
     /// worker loads `model.safetensors` and a `voices` folder, and the ONNX worker loads one
     /// `.onnx` file and one `voices*` file.
     fn snapshot_files() -> (&'static str, [&'static str; 2]) {
