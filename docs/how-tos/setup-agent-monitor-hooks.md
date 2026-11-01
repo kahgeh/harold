@@ -140,8 +140,8 @@ Claude Code's `Stop` hook tells Harold when a turn ends, but nothing tells it wh
 |---|---|---|
 | `turn-started` | A main-session turn starts | working |
 | `still-working` | Every 10 seconds while the pane works, and when a main turn ends with a subagent working | working |
-| `turn-completed` | A main-session turn ends with no subagent working | idle |
-| `subagents-finished` | The last working subagent ends while no main turn is running | idle |
+| `turn-completed` | A main-session turn ends with no subagent working | done |
+| `subagents-finished` | The last working subagent ends while no main turn is running | done |
 
 A pane works while its main turn runs or while a subagent is `pending`, `running` or `waiting`, so a pane with a background subagent shows as working after Claude's own turn has ended. `accept` makes one `ReportAgentState` RPC to the running daemon and sends no work summary, so the work summary Harold holds is kept. The mod only watches; it never changes a prompt, a reply or a tool call.
 
