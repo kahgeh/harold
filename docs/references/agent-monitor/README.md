@@ -418,6 +418,7 @@ A retry that works logs one info line, `agent monitor read retried`, with `compo
 |---|---|
 | `agent monitor read retried` | `component` (`inventory` or `screen`), `pane_id` (for a screen read), `elapsed_ms` |
 | `agent monitor degraded` | `component`, `reason`, and for the screen `pane_id` and `elapsed_ms` |
+| `agent status stream` (info) | `session.id`; `event` (`started`, `ended` or `call_failed`); `reason`, on `ended` (`exit`, `read_error` or `rex_absent`) and on `call_failed` (`timeout`, `failed`, `malformed` or `rex_absent`); `records`, the number of records the stream holds (0 on `started`, the number dropped on `ended`, the number kept on `call_failed`). `started` has no `reason`. `call_failed` is logged once for each block until a call works. The line never holds a record's `msg`. |
 
 A worker that does not stop causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
 
