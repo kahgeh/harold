@@ -2784,8 +2784,8 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn marks_accept_a_rex_label_and_the_machine_name() {
         let errors = host_errors(&format!(
-            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"omarchy\"]\n\
-             [agent_monitor.rex_host_marks]\nomarchy = \"arch\"\nPasM4MBP = \"mac\""
+            "machine_name = \"Laptop-Mac\"\n{REX}rex_hosts = [\"omarchy\"]\n\
+             [agent_monitor.rex_host_marks]\nomarchy = \"arch\"\nLaptop-Mac = \"mac\""
         ));
         assert!(errors.is_empty(), "{errors:?}");
     }
@@ -2793,7 +2793,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn a_machine_name_key_loads_with_no_rex_hosts() {
         let errors = host_errors(
-            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\nPasM4MBP = \"mac\"",
+            "machine_name = \"Laptop-Mac\"\n[agent_monitor.rex_host_marks]\nLaptop-Mac = \"mac\"",
         );
         assert!(errors.is_empty(), "{errors:?}");
     }
@@ -2801,11 +2801,11 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn the_machine_name_key_ignores_case() {
         let overrides =
-            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\npasm4mbp = \"mac\"";
+            "machine_name = \"Laptop-Mac\"\n[agent_monitor.rex_host_marks]\nlaptop-mac = \"mac\"";
         assert!(host_errors(overrides).is_empty());
         let settings = crate::settings::settings_with(overrides);
         assert_eq!(
-            settings.agent_monitor.mark_for_machine("PasM4MBP"),
+            settings.agent_monitor.mark_for_machine("Laptop-Mac"),
             Some("mac")
         );
         assert_eq!(settings.agent_monitor.mark_for_machine("other"), None);
@@ -2814,7 +2814,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn a_key_naming_no_host_is_refused() {
         let errors = host_errors(
-            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\nother = \"arch\"",
+            "machine_name = \"Laptop-Mac\"\n[agent_monitor.rex_host_marks]\nother = \"arch\"",
         );
         assert_eq!(
             errors,
@@ -2825,18 +2825,20 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn a_label_equal_to_the_machine_name_is_refused() {
         let errors = host_errors(&format!(
-            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"pasm4mbp\"]"
+            "machine_name = \"Laptop-Mac\"\n{REX}rex_hosts = [\"laptop-mac\"]"
         ));
         assert_eq!(
             errors,
-            vec!["agent_monitor.rex_hosts names this machine's machine_name: pasm4mbp".to_string()]
+            vec![
+                "agent_monitor.rex_hosts names this machine's machine_name: laptop-mac".to_string()
+            ]
         );
     }
 
     #[test]
     fn a_bad_mark_value_is_refused_as_today() {
         let errors = host_errors(&format!(
-            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"omarchy\"]\n\
+            "machine_name = \"Laptop-Mac\"\n{REX}rex_hosts = [\"omarchy\"]\n\
              [agent_monitor.rex_host_marks]\nomarchy = \"windows\""
         ));
         assert_eq!(
