@@ -373,6 +373,8 @@ These agent monitor lines carry the fields below:
 | `agent monitor pane found` | `pane_id`, `provider_id` (the named provider), `program` (the file name of the matched program) |
 | `agent monitor read retried` | `component`, `pane_id` (for a screen read), `elapsed_ms` (from the first try's start to the retry's success) |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
+| `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
+| `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
 | `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
 | `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
 | `agent inventory scan slow` | `ps_ms` (the time of `ps`; with Rex, the time of the start time reads), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it) or `rex_ms` (the time of the Rex listing, in place of `tmux_ms` when the multiplexer is Rex), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |

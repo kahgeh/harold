@@ -85,6 +85,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "rex_ms",
     "multiplexer",
     "host",
+    "writer",
     "rex_version",
     "scrollback_bytes",
     "provider_id",

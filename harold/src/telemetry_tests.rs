@@ -150,6 +150,24 @@ fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
 }
 
 #[test]
+fn a_pane_write_refused_record_keeps_its_writer_field() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::warn!(pane_id = %pane, writer = "rex_paste", reason = "on_rex_host", "pane write refused");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["pane_id", "writer", "reason"]);
+}
+
+#[test]
 fn the_pod_file_and_stage_fields_leave_a_log_record() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
