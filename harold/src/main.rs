@@ -280,6 +280,11 @@ impl Harold for HaroldService {
         if agent::runtime::pane_id_is_other_multiplexer(&req.pane_id) {
             return Ok(Response::new(TurnCompleteResponse::default()));
         }
+        // A report from a pane that has no local form is dropped before any store or log write.
+        if let Err(refusal) = agent::pane_route::route_pane(&req.pane_id) {
+            agent::pane_route::refuse_write(&req.pane_id, "turn_complete", refusal);
+            return Ok(Response::new(TurnCompleteResponse::default()));
+        }
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
         let hook_reached = time::OffsetDateTime::now_utc();
@@ -410,6 +415,17 @@ impl Harold for HaroldService {
         request: Request<SendMessageToAwayDeviceRequest>,
     ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
         let req = request.into_inner();
+        if let Err(refusal @ agent::pane_route::PaneRefusal::OnRexHost) =
+            agent::pane_route::route_pane(&req.src_id)
+        {
+            return Err(Status::failed_precondition(
+                agent::pane_route::refuse_write(
+                    &req.src_id,
+                    "send_message_to_away_device",
+                    refusal,
+                ),
+            ));
+        }
         if !agent::runtime::valid_pane_id(&req.src_id) {
             return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
         }
@@ -467,6 +483,13 @@ impl Harold for HaroldService {
         request: Request<SpeakLineRequest>,
     ) -> Result<Response<SpeakLineResponse>, Status> {
         let req = request.into_inner();
+        if let Err(refusal @ agent::pane_route::PaneRefusal::OnRexHost) =
+            agent::pane_route::route_pane(&req.src_id)
+        {
+            return Err(Status::failed_precondition(
+                agent::pane_route::refuse_write(&req.src_id, "speak_line", refusal),
+            ));
+        }
         if !agent::runtime::valid_pane_id(&req.src_id) {
             return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
         }

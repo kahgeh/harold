@@ -1719,6 +1719,82 @@ async fn spoken_line_is_accepted_while_messaging_is_paused() {
     task.abort();
 }
 
+#[tokio::test]
+async fn turn_complete_with_a_host_pane_id_stores_nothing() {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = WarnLogs::default();
+    let writer = logs.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    );
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    // The refusal log is once for each pane id, so each id here is new to the process.
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let host_id = format!("rex:omarchy/block:{unique}");
+    let session_id = format!("main:0.{}", unique.len());
+
+    for pane_id in [host_id.as_str(), session_id.as_str()] {
+        let response = service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane_id.into(),
+                assistant_message: "report text".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.accepted, "{pane_id}");
+    }
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "a refused report stores nothing");
+    assert_eq!(logs.count("pane write refused"), 2);
+    assert_eq!(logs.count("writer=\"turn_complete\""), 2);
+    assert_eq!(logs.count("turn complete received"), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn away_message_and_spoken_line_refuse_a_host_src_id_as_on_rex_host() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+    let host_id = "rex:omarchy/block:abc";
+
+    let away = service
+        .send_message_to_away_device(away_request(host_id, "sensitive text"))
+        .await
+        .unwrap_err();
+    let spoken = service
+        .speak_line(speak_request(host_id, "hi"))
+        .await
+        .unwrap_err();
+
+    for error in [away, spoken] {
+        assert_ne!(error.message(), "invalid source id");
+        assert!(
+            error.message().contains("on_rex_host"),
+            "{}",
+            error.message()
+        );
+    }
+    let (messages, total) = away_messages(&store).await;
+    assert!(messages.is_empty());
+    assert_eq!(total, 0, "a refusal stores no event");
+    task.abort();
+}
+
 // ---------------------------------------------------------------------------
 // One trace per turn
 // ---------------------------------------------------------------------------
@@ -2076,13 +2152,15 @@ mod one_trace_per_turn {
     async fn the_turn_exports_the_pane_id_as_harold_log_shows_it() {
         test_support::install();
         let session = format!("session-{}", uuid::Uuid::new_v4());
+        // An id with no local form is dropped before the trace, so the id here is a local one.
+        let pane_id = format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18));
         let directory = TestDirectory::new();
         let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
         let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
 
         service
             .turn_complete(Request::new(TurnCompleteRequest {
-                pane_id: format!("not-a-pane-{}", uuid::Uuid::new_v4()),
+                pane_id: pane_id.clone(),
                 session_id: session.clone(),
                 ..Default::default()
             }))
@@ -2099,14 +2177,14 @@ mod one_trace_per_turn {
         assert_eq!(turns.len(), 1);
         assert_eq!(
             span_attr(&turns[0], "pane_id").as_deref(),
-            Some("<invalid-pane-id>")
+            Some(pane_id.as_str())
         );
         assert_eq!(
             test_support::counter_value(
                 "harold.turns",
                 &[
                     ("session.id", session.as_str()),
-                    ("pane_id", "<invalid-pane-id>")
+                    ("pane_id", pane_id.as_str())
                 ],
             ),
             Some(1)
