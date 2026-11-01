@@ -365,7 +365,7 @@ intend to move. Outside tmux, it stays usable for viewing and searching, and the
 shows `NAVIGATION UNAVAILABLE`.
 
 For Rex agents, Enter runs `rex focus` and `rex do session.select`. These need the `rex`
-program and its server, not tmux. The header shows no navigation warning.
+program and its server, not tmux. The header shows no `NAVIGATION UNAVAILABLE`.
 
 ### Pane switching fails
 

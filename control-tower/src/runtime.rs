@@ -134,7 +134,9 @@ async fn run_async(
     endpoint_display: String,
 ) -> Result<(), AppError> {
     let mut core = RuntimeCore::new_with_endpoint(client, &endpoint_display);
-    core.apply_startup_navigation_issue(navigation_issue);
+    if let Some(status) = navigation_issue {
+        core.set_navigation_issue(status);
+    }
     let mut input = InputPump::start();
     run_loop(
         source,
@@ -1369,25 +1371,13 @@ impl RuntimeCore {
         }
     }
 
-    /// Stores the issue found at startup. `NavigationUnavailable` is stored but not shown:
-    /// the multiplexer is not known before the first snapshot, and Rex agents need no tmux
-    /// client. `accept_snapshot` shows it once the rows are tmux panes.
-    fn apply_startup_navigation_issue(&mut self, status: Option<RuntimeStatus>) {
-        match status {
-            Some(RuntimeStatus::NavigationUnavailable) => {
-                self.navigation_issue = Some(RuntimeStatus::NavigationUnavailable);
-            }
-            Some(status) => self.set_navigation_issue(status),
-            None => {}
-        }
-    }
-
-    /// The stored navigation issue, unless it does not apply: Enter on a Rex block needs no
-    /// tmux client, so `NavigationUnavailable` is hidden while the agents are Rex blocks.
+    /// The stored navigation issue, unless it does not apply. `NavigationUnavailable` shows
+    /// only while the agents are known to be tmux panes: Enter on a Rex block needs no tmux
+    /// client, and before a non-empty snapshot the multiplexer is not known.
     fn visible_navigation_issue(&self) -> Option<RuntimeStatus> {
         self.navigation_issue.clone().filter(|status| {
-            !(matches!(status, RuntimeStatus::NavigationUnavailable)
-                && self.agents_in_rex == Some(true))
+            !matches!(status, RuntimeStatus::NavigationUnavailable)
+                || self.agents_in_rex == Some(false)
         })
     }
 
@@ -3994,7 +3984,7 @@ mod tests {
     fn startup_navigation_issue_is_hidden_until_the_multiplexer_is_known() {
         let mut core = RuntimeCore::new(None);
         core.begin_stream();
-        core.apply_startup_navigation_issue(Some(RuntimeStatus::NavigationUnavailable));
+        core.set_navigation_issue(RuntimeStatus::NavigationUnavailable);
         assert_eq!(core.app.runtime_status(), None);
 
         core.accept_snapshot(snapshot_with_pane_id("%1"), 1);
@@ -4007,10 +3997,34 @@ mod tests {
     #[test]
     fn startup_navigation_failure_is_shown_at_once() {
         let mut core = RuntimeCore::new(None);
-        core.apply_startup_navigation_issue(Some(RuntimeStatus::NavigationFailed("x".into())));
+        core.set_navigation_issue(RuntimeStatus::NavigationFailed("x".into()));
         assert_eq!(
             core.app.runtime_status(),
             Some(&RuntimeStatus::NavigationFailed("x".into()))
+        );
+    }
+
+    #[test]
+    fn an_empty_first_snapshot_shows_no_navigation_warning() {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        let mut empty = snapshot(1, MonitorHealthState::Healthy);
+        empty.rows.clear();
+        core.accept_snapshot(empty, 1);
+        assert_eq!(core.agents_in_rex, None);
+        assert_ne!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_cleared_request_error_before_any_snapshot_shows_no_navigation_warning() {
+        let mut core = RuntimeCore::new(None);
+        core.messaging_result(Ok(()));
+        assert_ne!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
         );
     }
 
