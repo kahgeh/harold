@@ -8,7 +8,7 @@ use crate::timed_prompts::{AgentPane, agents_view};
 /// The chief, as the latest snapshot sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChiefPane {
-    /// The chief's pane is found. `busy` is true only while its state is busy, so an
+    /// The chief's pane is found. `busy` is true only while its state is working, so an
     /// unknown state reads as not busy.
     One { pane_id: String, busy: bool },
     /// No folder is set, or no agent runs in it.

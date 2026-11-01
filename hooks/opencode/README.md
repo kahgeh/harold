@@ -11,7 +11,7 @@ Harold without changing the user's global OpenCode configuration.
   UI-placeholder parts are skipped. The selected text has controls and excess
   whitespace removed and is capped at 160 Unicode scalar values. The adapter
   does not invent fallback copy such as `Ask OpenCode to do anything`.
-- The generic `event` hook maps `session.status` (`busy`, `retry`, `idle`) and
+- The generic `event` hook maps `session.status` (`busy`, `retry`, `idle`; OpenCode's own words) and
   the legacy `session.idle` event to lifecycle observations. Idle reports do
   not contain `workSummary`, so they preserve the last task description.
 - `TMUX_PANE` (tmux) or `REX_BLOCK` (Rex) identifies the pane. If it or a session ID is unavailable, the
@@ -70,8 +70,8 @@ opencode .
 Run those commands inside pane `%35`, so OpenCode and its plugin inherit
 `TMUX_PANE=%35`. Submit a distinctive real prompt. The expected sequence is:
 
-1. `chat.message` reports BUSY with that normalized prompt as `workSummary`.
-2. `session.status` may repeat BUSY; the adapter suppresses the duplicate.
+1. `chat.message` reports WORKING with that normalized prompt as `workSummary`.
+2. `session.status` may repeat WORKING; the adapter suppresses the duplicate.
 3. `session.status: idle` or `session.idle` reports IDLE with `workSummary`
    absent, leaving the displayed summary unchanged.
 

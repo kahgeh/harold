@@ -414,7 +414,7 @@ pub(crate) struct AppState {
     /// The app's name and icon.
     pub identity: Arc<WebAppIdentity>,
     /// The agent panes as the latest snapshot sees them: where the chief is and whether it
-    /// is busy.
+    /// is working.
     pub snapshots: watch::Receiver<AgentSnapshot>,
     /// `[notify] chief`, the folder the chief runs in.
     pub chief_folder: Option<Arc<str>>,

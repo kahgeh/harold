@@ -58,14 +58,14 @@ test("lifecycleUpdate maps status and legacy idle events", () => {
       type: "session.status",
       properties: { sessionID: "one", status: { type: "busy" } },
     }),
-    { sessionID: "one", state: "AGENT_STATE_BUSY" },
+    { sessionID: "one", state: "AGENT_STATE_WORKING" },
   );
   assert.deepEqual(
     lifecycleUpdate({
       type: "session.status",
       properties: { sessionID: "one", status: { type: "retry" } },
     }),
-    { sessionID: "one", state: "AGENT_STATE_BUSY" },
+    { sessionID: "one", state: "AGENT_STATE_WORKING" },
   );
   assert.deepEqual(
     lifecycleUpdate({
@@ -89,7 +89,7 @@ test("grpcurl invocation uses safe argv and sends JSON through stdin", () => {
   const invocation = buildGrpcurlInvocation(
     {
       paneId: "%35",
-      state: "AGENT_STATE_BUSY",
+      state: "AGENT_STATE_WORKING",
       adapterId: "opencode.lifecycle",
       workSummary: "inspect 'quotes' and $(touch /tmp/not-run)",
     },
@@ -107,13 +107,13 @@ test("grpcurl invocation uses safe argv and sends JSON through stdin", () => {
   assert.equal(invocation.args.join(" ").includes("inspect 'quotes'"), false);
   assert.equal(invocation.input, JSON.stringify({
     paneId: "%35",
-    state: "AGENT_STATE_BUSY",
+    state: "AGENT_STATE_WORKING",
     adapterId: "opencode.lifecycle",
     workSummary: "inspect 'quotes' and $(touch /tmp/not-run)",
   }));
 });
 
-test("chat message reports BUSY with the actual prompt", async () => {
+test("chat message reports WORKING with the actual prompt", async () => {
   const calls = [];
   const plugin = await createHaroldPlugin({
     env: {
@@ -132,7 +132,7 @@ test("chat message reports BUSY with the actual prompt", async () => {
   assert.equal(calls.length, 1);
   assert.deepEqual(JSON.parse(calls[0].input), {
     paneId: "%35",
-    state: "AGENT_STATE_BUSY",
+    state: "AGENT_STATE_WORKING",
     adapterId: "opencode.lifecycle",
     workSummary: "Find why the dashboard summary is stale",
   });
@@ -184,13 +184,13 @@ test("idle event omits workSummary and preserves a busy sibling session", async 
     event: { type: "session.idle", properties: { sessionID: "two" } },
   });
 
-  assert.equal(calls.length, 2, "duplicate BUSY and premature IDLE are suppressed");
+  assert.equal(calls.length, 2, "duplicate WORKING and premature IDLE are suppressed");
   const idle = JSON.parse(calls[1].input);
   assert.equal(idle.state, "AGENT_STATE_IDLE");
   assert.equal(Object.hasOwn(idle, "workSummary"), false);
 });
 
-test("a placeholder submission reports BUSY without replacing the summary", async () => {
+test("a placeholder submission reports WORKING without replacing the summary", async () => {
   const calls = [];
   const plugin = await createHaroldPlugin({
     env: { TMUX_PANE: "%35" },
@@ -204,7 +204,7 @@ test("a placeholder submission reports BUSY without replacing the summary", asyn
   );
 
   const busy = JSON.parse(calls[0].input);
-  assert.equal(busy.state, "AGENT_STATE_BUSY");
+  assert.equal(busy.state, "AGENT_STATE_WORKING");
   assert.equal(Object.hasOwn(busy, "workSummary"), false);
 });
 

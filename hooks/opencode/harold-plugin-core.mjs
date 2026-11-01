@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ADDRESS = "localhost:50060";
 const ADAPTER_ID = "opencode.lifecycle";
-const BUSY = "AGENT_STATE_BUSY";
+const WORKING = "AGENT_STATE_WORKING";
 const IDLE = "AGENT_STATE_IDLE";
 const MAX_SUMMARY_SCALARS = 160;
 const REPOSITORY_PROTO = fileURLToPath(
@@ -100,7 +100,7 @@ export function lifecycleUpdate(event) {
 
   const status = event.properties?.status?.type;
   if (status === "busy" || status === "retry") {
-    return { sessionID, state: BUSY };
+    return { sessionID, state: WORKING };
   }
   if (status === "idle") {
     return { sessionID, state: IDLE };
@@ -199,7 +199,7 @@ export function createHaroldPlugin(overrides = {}) {
 
         const summary = normalizePrompt(output?.parts);
         busySessions.add(sessionID);
-        if (summary || lastState !== BUSY) report(BUSY, summary);
+        if (summary || lastState !== WORKING) report(WORKING, summary);
       },
 
       event: async ({ event } = {}) => {
@@ -208,9 +208,9 @@ export function createHaroldPlugin(overrides = {}) {
         const update = lifecycleUpdate(event);
         if (!update) return;
 
-        if (update.state === BUSY) {
+        if (update.state === WORKING) {
           busySessions.add(update.sessionID);
-          if (lastState !== BUSY) report(BUSY);
+          if (lastState !== WORKING) report(WORKING);
           return;
         }
 

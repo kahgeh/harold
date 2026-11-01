@@ -448,7 +448,7 @@ async fn the_prompt_holds_the_agents_the_pods_the_todos_the_queue_this_call_and_
     let prompt = prompt_json(&runner);
     let facts = &prompt["facts"];
     assert_eq!(facts["agents"][0]["agent"], "chief-of-pods");
-    assert_eq!(facts["agents"][0]["state"], "busy");
+    assert_eq!(facts["agents"][0]["state"], "working");
     assert_eq!(facts["agents"][0]["for_seconds"], 90);
     assert_eq!(facts["agents"][0]["work"].as_str().unwrap().len(), 200);
     assert_eq!(facts["agents"][1]["agent"], "harold");

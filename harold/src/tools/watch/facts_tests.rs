@@ -76,7 +76,7 @@ async fn the_facts_hold_every_field_the_spec_names() {
     assert_eq!(first.work_summary.as_ref().unwrap().chars().count(), 200);
     assert_eq!(first.input_box, Some("not_found"));
     let second = &facts.agents[1];
-    assert_eq!((second.state, second.seconds_in_state), ("busy", 0));
+    assert_eq!((second.state, second.seconds_in_state), ("working", 0));
     assert_eq!(second.input_box, None, "only a Claude Code pane has one");
     assert_eq!(facts.pods.len(), 1);
     let pod = &facts.pods[0];
@@ -104,6 +104,40 @@ async fn the_facts_hold_every_field_the_spec_names() {
     assert_eq!(json["watch"]["previous_outcome"], "quiet");
     assert!(json["now"].as_str().unwrap().starts_with("2027-"));
     assert!(json["agents"][1].get("input_box").is_none());
+}
+
+#[tokio::test]
+async fn watch_facts_write_working_for_a_working_agent() {
+    let now_ms = 1_800_000_000_000;
+    let fake = FakeAgents::with(vec![agent(
+        "%4",
+        "/work/other",
+        EffectiveAgentState::Working,
+    )]);
+    let pods_fake = FakePods::default();
+    pods_fake
+        .0
+        .lock()
+        .unwrap()
+        .slots
+        .insert("harold".into(), SlotCounts { busy: 1, free: 2 });
+    let agents: Arc<dyn Agents> = fake;
+    let pods: Arc<dyn Pods> = Arc::new(pods_fake);
+    let chief: Arc<dyn ChiefPane> = FakeChief::at(Some("%1"));
+    let facts = gather(
+        &sources(&agents, &pods, &chief),
+        now_ms,
+        WatchEntry {
+            run: 1,
+            runs_left: 1,
+            previous_outcome: None,
+        },
+    )
+    .await;
+    assert_eq!(facts.agents[0].state, "working");
+    let json = serde_json::to_value(&facts).unwrap();
+    assert_eq!(json["agents"][0]["state"], "working");
+    assert_eq!(json["pods"][0]["slots"]["busy"], 1, "slot counts keep busy");
 }
 
 #[tokio::test]

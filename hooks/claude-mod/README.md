@@ -6,10 +6,10 @@ working while its main session's turn is running, or while one of its subagents 
 
 | When | Condition | Runs `harold accept` with | Harold sets |
 |---|---|---|---|
-| A main-session turn starts (`turn.start`, no `agentId`) | Always | `turn-started` | Busy |
-| Every 10 seconds | The pane is working | `still-working` | Busy |
+| A main-session turn starts (`turn.start`, no `agentId`) | Always | `turn-started` | Working |
+| Every 10 seconds | The pane is working | `still-working` | Working |
 | A main-session turn ends (`turn.complete`, no `agentId`) | No subagent is working | `turn-completed` | Idle |
-| A main-session turn ends | A subagent is working | `still-working` | Busy |
+| A main-session turn ends | A subagent is working | `still-working` | Working |
 | 3 seconds after a subagent's turn ends (`turn.complete` with an `agentId`), or when a 10-second check runs | No main turn is running, and no subagent is working | `subagents-finished` | Idle |
 
 Every run has the form `harold accept <event> --pane <id> --adapter claude.lifecycle`. The pane
@@ -19,15 +19,15 @@ is the `TMUX_PANE` environment variable in a tmux pane, or the `REX_BLOCK` envir
 
 The mod reads the subagents' states with `$.agent.list()` when a main turn ends, when a
 subagent's turn ends, and at each 10-second check. If the call fails, the mod counts no subagent
-as working, so a failing call cannot keep a pane busy.
+as working, so a failing call cannot keep a pane working.
 
 The 10-second check runs from the start of a main turn until the mod reports the pane idle, on
-one timer. The repeat tells Harold the mod is still there: Harold lets a busy report stand
+one timer. The repeat tells Harold the mod is still there: Harold lets a working report stand
 against its screen reading for `agent_monitor.report_grace_ms` (30 seconds), so the mod has to
 miss three reports in a row before the screen reading takes over. The check also notices a
 subagent that ended without an event reaching the mod. A subagent's turn that ends after the
 pane was reported idle sends nothing. The mod keeps one 3-second wait: each subagent end restarts it, and a 10-second check that runs
-inside it still reports busy but never idle. The wait lets a
+inside it still reports working but never idle. The wait lets a
 main-session turn that Claude Code starts at once for that subagent's result begin first, so the
 pane is not reported idle in between.
 
@@ -51,7 +51,7 @@ person.
 
 Claude Code passes the settings `env` block to child processes, so a `claude -p` run from a
 Bash tool inside a pane loads this mod and inherits that pane's `TMUX_PANE` or `REX_BLOCK`. When the nested
-run ends, it reports the parent pane idle while the parent may still be busy. The parent's next
+run ends, it reports the parent pane idle while the parent may still be working. The parent's next
 `still-working`, at most 10 seconds later, corrects it.
 
 ## Loading it
@@ -65,7 +65,7 @@ claude --plugin-dir hooks/claude-mod
 
 Mods are early access: a Claude Code release can stop this one loading. Harold then reads
 the screen: at once for a session that never had the mod, and after
-`agent_monitor.report_grace_ms` (30 seconds) for a pane whose mod stopped while it was busy.
+`agent_monitor.report_grace_ms` (30 seconds) for a pane whose mod stopped while it was working.
 
 ## Tests
 

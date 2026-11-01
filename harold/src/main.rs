@@ -773,7 +773,9 @@ fn print_help() {
     println!("  harold --check-config   Validate config and print address/store JSON; no writes");
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
     println!("  harold accept EVENT --pane ID --adapter NAME");
-    println!("                          Report a pane busy (turn-started, still-working) or idle");
+    println!(
+        "                          Report a pane working (turn-started, still-working) or idle"
+    );
     println!("                          (turn-completed, subagents-finished); 3s timeout");
     println!("  harold start-control-tower [--endpoint URI]");
     println!("                          Start the control-tower in this terminal");

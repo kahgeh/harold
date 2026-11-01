@@ -59,7 +59,7 @@ async function hasWorkingSubagent($: EngineInterface): Promise<boolean> {
   try {
     return hasWorking(await $.agent.list())
   } catch {
-    // A failing list counts as no subagent working, so a pane cannot stay busy on an error.
+    // A failing list counts as no subagent working, so a pane cannot stay working on an error.
     return false
   }
 }
@@ -83,7 +83,7 @@ function cancelSettle(): void {
 }
 
 // Called when a main turn or a subagent's turn has ended, and at a check with no main turn
-// running. Reports busy while a subagent works; otherwise reports idleEvent and stops the checks.
+// running. Reports working while a subagent works; otherwise reports idleEvent and stops the checks.
 async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promise<boolean> {
   const isSubagentWorking = await hasWorkingSubagent($)
   if (isMainTurnRunning) return true
@@ -103,7 +103,7 @@ async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promi
 
 // Reports a subagent's end once nothing has woken the main session for SETTLE_MS. Each end
 // restarts the one wait, and a check does not report idle while it is pending (it still
-// reports busy).
+// reports working).
 function settleAfterSubagentEnd($: EngineInterface): void {
   cancelSettle()
   settle = $.clock.after(SETTLE_MS, () => {

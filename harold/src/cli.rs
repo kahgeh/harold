@@ -3156,7 +3156,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_maps_each_event_to_busy_or_idle() {
+    fn accept_maps_each_event_to_working_or_idle() {
         assert_eq!(AcceptEvent::TurnStarted.state(), AgentState::Working);
         assert_eq!(AcceptEvent::StillWorking.state(), AgentState::Working);
         assert_eq!(AcceptEvent::TurnCompleted.state(), AgentState::Idle);

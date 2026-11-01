@@ -266,7 +266,7 @@ fn facts_json(
             json!({
                 "agent": folder_name(&fact.folder),
                 "state": match fact.state {
-                    crate::agent::domain::EffectiveAgentState::Working => "busy",
+                    crate::agent::domain::EffectiveAgentState::Working => "working",
                     crate::agent::domain::EffectiveAgentState::Idle => "idle",
                     crate::agent::domain::EffectiveAgentState::Unknown => "unknown",
                 },
