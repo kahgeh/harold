@@ -34,6 +34,7 @@ pub(crate) enum Mode {
     Speak(AwayMessageArgs),
     Tool(ToolCommand),
     App(AppCommand),
+    StartControlTower(StartControlTowerArgs),
 }
 
 /// A `harold app` command: the web app's pairing and its paired devices.
@@ -63,6 +64,77 @@ fn parse_app(args: &[&str]) -> Result<AppCommand, String> {
         }),
         _ => Err(APP_USAGE_LINE.into()),
     }
+}
+
+pub(crate) const START_CONTROL_TOWER_COMMAND: &str = "start-control-tower";
+const START_CONTROL_TOWER_USAGE: &str =
+    "invalid argument: usage is harold start-control-tower [--endpoint URI]";
+/// The program that `harold start-control-tower` starts. It sits beside `harold`.
+const CONTROL_TOWER_PROGRAM: &str = "control-tower";
+
+/// The arguments of `harold start-control-tower`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartControlTowerArgs {
+    pub(crate) endpoint: Option<String>,
+}
+
+fn parse_start_control_tower(args: &[&str]) -> Result<StartControlTowerArgs, String> {
+    match args {
+        [] => Ok(StartControlTowerArgs { endpoint: None }),
+        ["--endpoint", endpoint] => Ok(StartControlTowerArgs {
+            endpoint: Some((*endpoint).into()),
+        }),
+        _ => Err(START_CONTROL_TOWER_USAGE.into()),
+    }
+}
+
+/// The command that starts the control-tower in `folder`. It never reads `PATH`.
+fn control_tower_command(
+    folder: &std::path::Path,
+    settings: &Settings,
+    args: &StartControlTowerArgs,
+) -> Result<std::process::Command, String> {
+    let program = folder.join(CONTROL_TOWER_PROGRAM);
+    if !program.exists() {
+        return Err(format!(
+            "harold: no control-tower at {}. Install Harold again.",
+            program.display()
+        ));
+    }
+    let endpoint = match &args.endpoint {
+        Some(endpoint) => endpoint.clone(),
+        None => format!(
+            "http://{}",
+            settings
+                .grpc
+                .addr()
+                .map_err(|_| "invalid configuration".to_string())?
+        ),
+    };
+    let mut command = std::process::Command::new(program);
+    command.args(["--endpoint", &endpoint]);
+    Ok(command)
+}
+
+/// Replace this process with the control-tower beside the running `harold`.
+/// It returns only the line to print, because a good `exec` does not return.
+pub(crate) fn start_control_tower(
+    settings: &Settings,
+    args: &StartControlTowerArgs,
+) -> Result<std::convert::Infallible, String> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| format!("harold: cannot find the running program: {error}"))?;
+    let folder = exe
+        .parent()
+        .ok_or_else(|| "harold: cannot find the running program's folder".to_string())?;
+    let mut command = control_tower_command(folder, settings, args)?;
+    let error = command.exec();
+    Err(format!(
+        "harold: cannot start the control-tower at {}: {error}",
+        folder.join(CONTROL_TOWER_PROGRAM).display()
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1292,6 +1364,9 @@ impl Mode {
             }
             [TOOL_COMMAND, rest @ ..] => parse_tool(rest).map(Self::Tool),
             [APP_COMMAND, rest @ ..] => parse_app(rest).map(Self::App),
+            [START_CONTROL_TOWER_COMMAND, rest @ ..] => {
+                parse_start_control_tower(rest).map(Self::StartControlTower)
+            }
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
                 Ok(Self::Diagnostics { delay_seconds: 10 })
@@ -2582,6 +2657,124 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn start_control_tower_parses_with_and_without_an_endpoint() {
+        assert_eq!(
+            parse(&["start-control-tower"]),
+            Ok(Mode::StartControlTower(StartControlTowerArgs {
+                endpoint: None
+            }))
+        );
+        assert_eq!(
+            parse(&["start-control-tower", "--endpoint", "http://127.0.0.1:1"]),
+            Ok(Mode::StartControlTower(StartControlTowerArgs {
+                endpoint: Some("http://127.0.0.1:1".into())
+            }))
+        );
+    }
+
+    #[test]
+    fn start_control_tower_refuses_a_missing_value_a_repeat_and_an_unknown_argument() {
+        for rest in [
+            vec!["--endpoint"],
+            vec!["--endpoint", "a", "--endpoint", "b"],
+            vec!["--bogus"],
+            vec!["extra"],
+        ] {
+            let mut args = vec!["start-control-tower"];
+            args.extend(rest);
+            assert_eq!(parse(&args), Err(START_CONTROL_TOWER_USAGE.to_string()));
+        }
+    }
+
+    fn tower_folder(with_program: bool) -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!("harold-tower-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&folder).unwrap();
+        if with_program {
+            std::fs::write(folder.join("control-tower"), "").unwrap();
+        }
+        folder
+    }
+
+    fn command_args(command: &std::process::Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn control_tower_command_uses_the_settings_address() {
+        let folder = tower_folder(true);
+        let command = control_tower_command(
+            &folder,
+            &settings_for("127.0.0.1:50060"),
+            &StartControlTowerArgs { endpoint: None },
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), folder.join("control-tower"));
+        assert_eq!(
+            command_args(&command),
+            ["--endpoint", "http://127.0.0.1:50060"]
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn control_tower_command_lets_a_given_endpoint_win() {
+        let folder = tower_folder(true);
+        let command = control_tower_command(
+            &folder,
+            &settings_for("127.0.0.1:50060"),
+            &StartControlTowerArgs {
+                endpoint: Some("http://127.0.0.1:9".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(command_args(&command), ["--endpoint", "http://127.0.0.1:9"]);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn control_tower_command_names_the_path_when_the_file_is_missing() {
+        let folder = tower_folder(false);
+        let error = control_tower_command(
+            &folder,
+            &settings_for("127.0.0.1:50060"),
+            &StartControlTowerArgs { endpoint: None },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "harold: no control-tower at {}. Install Harold again.",
+                folder.join("control-tower").display()
+            )
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn control_tower_command_never_reads_path() {
+        let empty = tower_folder(false);
+        let other = tower_folder(true);
+        let error = control_tower_command(
+            &empty,
+            &settings_for("127.0.0.1:50060"),
+            &StartControlTowerArgs { endpoint: None },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "harold: no control-tower at {}. Install Harold again.",
+                empty.join("control-tower").display()
+            )
+        );
+        std::fs::remove_dir_all(&empty).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
     }
 
     #[test]

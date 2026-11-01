@@ -895,6 +895,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         | cli::SPEAK_COMMAND
                         | cli::TOOL_COMMAND
                         | cli::APP_COMMAND
+                        | cli::START_CONTROL_TOWER_COMMAND
                 )
             ) =>
         {
@@ -1008,6 +1009,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::Speak(_)
             | cli::Mode::Tool(_)
             | cli::Mode::App(_)
+            | cli::Mode::StartControlTower(_)
     );
     let launchd = started_by_launchd(&mode);
     // Before `load`, which would deserialise (or reject) the settings this names.
@@ -1059,6 +1061,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
                 exit_with_line(&line);
             }
             return Ok(());
+        }
+        cli::Mode::StartControlTower(ref args) => {
+            // `exec` replaces this process, so only a failure comes back.
+            let line = match cli::start_control_tower(&settings, args) {
+                Ok(never) => match never {},
+                Err(line) => line,
+            };
+            exit_with_line(&line);
         }
         cli::Mode::App(ref command) => {
             let address = settings.grpc.addr()?.to_string();

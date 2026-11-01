@@ -34,7 +34,11 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_harold"));
+        self.run_program(std::path::Path::new(env!("CARGO_BIN_EXE_harold")), args)
+    }
+
+    fn run_program(&self, program: &std::path::Path, args: &[&str]) -> Output {
+        let mut command = Command::new(program);
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("HAROLD") {
                 command.env_remove(name);
@@ -1150,4 +1154,184 @@ fn a_bad_engine_or_idle_time_is_refused_by_the_install_check() {
         let output = Fixture::new(&format!("{VALID}\n[tts]\n{overlay}\n")).run(&["--check-config"]);
         assert!(!output.status.success(), "{overlay}");
     }
+}
+
+/// A fresh folder that holds a copy of the `harold` program, and the path of that copy.
+fn folder_with_harold() -> (PathBuf, PathBuf) {
+    let folder = std::env::temp_dir().join(format!("harold-bundle-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&folder).unwrap();
+    // A temp folder can sit behind a link; the program resolves its own path.
+    let folder = folder.canonicalize().unwrap();
+    let harold = folder.join("harold");
+    std::fs::copy(env!("CARGO_BIN_EXE_harold"), &harold).unwrap();
+    (folder, harold)
+}
+
+/// Write a `control-tower` shell script in `folder`.
+fn write_control_tower(folder: &std::path::Path, body: &str, executable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = folder.join("control-tower");
+    std::fs::write(&path, body).unwrap();
+    let mode = if executable { 0o755 } else { 0o644 };
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+const PRINT_ARGUMENTS: &str = "#!/bin/sh\nfor argument in \"$@\"; do echo \"$argument\"; done\n";
+
+/// The caller's `PATH` with `first` put in front; the settings still need the rest of it.
+fn path_with_first(first: &std::path::Path) -> std::ffi::OsString {
+    let mut paths = vec![first.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
+
+fn grpc_endpoint(fixture: &Fixture) -> String {
+    let output = fixture.run(&["--check-config"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    format!("http://{}", value["grpc_addr"].as_str().unwrap())
+}
+
+#[test]
+fn start_control_tower_runs_the_program_beside_harold_with_the_settings_endpoint() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, PRINT_ARGUMENTS, true);
+    let output = fixture.run_program(&harold, &["start-control-tower"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("--endpoint\n{}\n", grpc_endpoint(&fixture))
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_prefers_the_endpoint_the_user_gives() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, PRINT_ARGUMENTS, true);
+    let output = fixture.run_program(
+        &harold,
+        &["start-control-tower", "--endpoint", "http://127.0.0.1:9"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "--endpoint\nhttp://127.0.0.1:9\n"
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_exits_with_the_program_exit_code() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, "#!/bin/sh\nexit 7\n", true);
+    let output = fixture.run_program(&harold, &["start-control-tower"]);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_prints_one_line_when_the_program_is_missing() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    // A working program on PATH must not be used.
+    let elsewhere = std::env::temp_dir().join(format!("harold-path-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&elsewhere).unwrap();
+    write_control_tower(&elsewhere, PRINT_ARGUMENTS, true);
+    let mut command = Command::new(&harold);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("HAROLD") {
+            command.env_remove(name);
+        }
+    }
+    let child = command
+        .arg("start-control-tower")
+        .env("PATH", path_with_first(&elsewhere))
+        .env("HAROLD_CONFIG_DIR", &fixture.0)
+        .env("HAROLD_ENV", "local")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = wait_for_exit(child);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "harold: no control-tower at {}. Install Harold again.\n",
+            folder.join("control-tower").display()
+        )
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+    std::fs::remove_dir_all(&elsewhere).unwrap();
+}
+
+#[test]
+fn start_control_tower_prints_one_line_when_the_file_cannot_run() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, PRINT_ARGUMENTS, false);
+    let output = fixture.run_program(&harold, &["start-control-tower"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("harold: cannot start the control-tower at "),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1);
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_with_a_directory_named_control_tower_prints_the_cannot_start_line() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    std::fs::create_dir(folder.join("control-tower")).unwrap();
+    let output = fixture.run_program(&harold, &["start-control-tower"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("harold: cannot start the control-tower at "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_with_broken_settings_prints_invalid_configuration() {
+    let fixture = Fixture::new(INVALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, PRINT_ARGUMENTS, true);
+    for args in [
+        vec!["start-control-tower"],
+        vec!["start-control-tower", "--endpoint", "http://127.0.0.1:9"],
+    ] {
+        let output = fixture.run_program(&harold, &args);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("invalid configuration"),
+            "{output:?}"
+        );
+    }
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn start_control_tower_refuses_bad_arguments() {
+    let output = Fixture::new(VALID).run(&["start-control-tower", "--endpoint"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "invalid argument: usage is harold start-control-tower [--endpoint URI]\n"
+    );
 }
