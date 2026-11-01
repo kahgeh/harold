@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -280,36 +280,67 @@ pub(crate) enum Lookup {
 pub(crate) type Program = Arc<dyn Fn() -> Result<PathBuf, RexError> + Send + Sync>;
 pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
-/// A record with the session that holds its block.
-type Records = Mutex<HashMap<String, (String, StatusRecord)>>;
+/// A record with the generation of the stream that wrote it.
+type Records = Mutex<HashMap<String, (u64, StatusRecord)>>;
 
 struct Shared {
     api: Arc<dyn RexApi>,
     steps: CurrentSteps,
     records: Records,
+    /// The source of stream generations. A stream tags every write with its generation, so
+    /// a stale reader cannot change what a newer stream of the same session wrote.
+    next_generation: AtomicU64,
     /// The log subscriber of the thread that made the `RexStatus`. Reader threads use it.
     dispatch: Dispatch,
 }
 
 impl Shared {
-    /// Drops the records and steps of the session. The result is the number of records.
-    fn drop_session(&self, session_id: &str) -> usize {
-        let blocks: Vec<String> = {
-            let mut records = lock(&self.records);
-            let blocks: Vec<String> = records
-                .iter()
-                .filter(|(_, (session, _))| *session == session_id)
-                .map(|(block, _)| block.clone())
-                .collect();
-            for block in &blocks {
-                records.remove(block);
-            }
-            blocks
-        };
+    /// Drops the records and steps that stream `generation` wrote. The result is the
+    /// number of records.
+    fn drop_stream(&self, generation: u64) -> usize {
+        let mut records = lock(&self.records);
+        let blocks: Vec<String> = records
+            .iter()
+            .filter(|(_, (owner, _))| *owner == generation)
+            .map(|(block, _)| block.clone())
+            .collect();
         for block in &blocks {
+            records.remove(block);
             self.steps.clear_block(block);
         }
         blocks.len()
+    }
+
+    /// Stores a record for stream `generation`, unless the stream was asked to stop. The
+    /// check and the write happen under the records lock, which `drop_stream` also takes.
+    fn store(&self, generation: u64, stop: &AtomicBool, block_id: &str, record: StatusRecord) {
+        let mut records = lock(&self.records);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let step = match record.state {
+            RecordState::Working | RecordState::Blocked => record.msg.clone(),
+            RecordState::Done | RecordState::Idle | RecordState::Error => None,
+        };
+        self.steps.set(block_id, record.pid, step);
+        records.insert(block_id.to_string(), (generation, record));
+    }
+
+    /// Removes the record of the block, unless a newer stream wrote it or the stream was
+    /// asked to stop.
+    fn remove(&self, generation: u64, stop: &AtomicBool, block_id: &str) {
+        let mut records = lock(&self.records);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        if records
+            .get(block_id)
+            .is_some_and(|(owner, _)| *owner != generation)
+        {
+            return;
+        }
+        records.remove(block_id);
+        self.steps.clear_block(block_id);
     }
 }
 
@@ -324,6 +355,7 @@ struct Flags {
 }
 
 struct Stream {
+    generation: u64,
     started: Instant,
     flags: Arc<Flags>,
     child: Arc<Mutex<Option<Child>>>,
@@ -336,6 +368,7 @@ impl Stream {
         let flags = Flags::default();
         flags.ended.store(true, Ordering::Release);
         Self {
+            generation: 0,
             started,
             flags: Arc::new(flags),
             child: Arc::new(Mutex::new(None)),
@@ -408,6 +441,7 @@ impl RexStatus {
                 api,
                 steps,
                 records: Mutex::new(HashMap::new()),
+                next_generation: AtomicU64::new(1),
                 dispatch: dispatcher::get_default(Dispatch::clone),
             }),
             program,
@@ -446,8 +480,9 @@ impl RexStatus {
         for id in gone {
             if let Some(stream) = registry.streams.remove(&id) {
                 // The reader reaps its own child. `sync` does not wait for it.
+                let generation = stream.generation;
                 drop(stream.stop());
-                self.shared.drop_session(&id);
+                self.shared.drop_stream(generation);
             }
         }
         for (id, blocks) in sessions {
@@ -505,7 +540,9 @@ impl RexStatus {
         log_stream(dispatch, session_id, "started", None, 0);
         let flags = Arc::new(Flags::default());
         let child = Arc::new(Mutex::new(Some(child)));
+        let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
         let reader = Reader {
+            generation,
             shared: Arc::clone(&self.shared),
             session_id: session_id.to_string(),
             flags: Arc::clone(&flags),
@@ -524,6 +561,7 @@ impl RexStatus {
             }
         }
         Stream {
+            generation,
             started: now,
             flags,
             child,
@@ -616,6 +654,7 @@ fn read_event_line(
 
 /// The reader thread of one stream.
 struct Reader {
+    generation: u64,
     shared: Arc<Shared>,
     session_id: String,
     flags: Arc<Flags>,
@@ -654,7 +693,7 @@ impl Reader {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let dropped = self.shared.drop_session(&self.session_id);
+        let dropped = self.shared.drop_stream(self.generation);
         log_stream(
             &self.shared.dispatch,
             &self.session_id,
@@ -697,16 +736,12 @@ impl Reader {
     }
 
     fn store(&self, block_id: &str, record: StatusRecord) {
-        let step = match record.state {
-            RecordState::Working | RecordState::Blocked => record.msg.clone(),
-            RecordState::Done | RecordState::Idle | RecordState::Error => None,
-        };
-        self.shared.steps.set(block_id, record.pid, step);
-        lock(&self.shared.records).insert(block_id.to_string(), (self.session_id.clone(), record));
+        self.shared
+            .store(self.generation, &self.flags.stop, block_id, record);
     }
 
     fn remove(&self, block_id: &str) {
-        lock(&self.shared.records).remove(block_id);
-        self.shared.steps.clear_block(block_id);
+        self.shared
+            .remove(self.generation, &self.flags.stop, block_id);
     }
 }

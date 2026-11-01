@@ -235,6 +235,50 @@ struct FakeRex {
     views: HashMap<String, Vec<Vec<String>>>,
     /// The reply of `program_status` for each block.
     statuses: HashMap<String, Value>,
+    /// Holds the first `program_status` call until the test opens the gate.
+    gate: Option<Arc<Gate>>,
+}
+
+/// The first `program_status` call waits and answers `first`. Later calls answer `later`.
+struct Gate {
+    calls: std::sync::atomic::AtomicUsize,
+    open: Mutex<bool>,
+    changed: std::sync::Condvar,
+    first: Value,
+    later: Value,
+}
+
+impl Gate {
+    fn new(first: Value, later: Value) -> Arc<Self> {
+        Arc::new(Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            open: Mutex::new(false),
+            changed: std::sync::Condvar::new(),
+            first,
+            later,
+        })
+    }
+
+    fn call(&self) -> Value {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n > 0 {
+            return self.later.clone();
+        }
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.changed.wait(open).unwrap();
+        }
+        self.first.clone()
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl RexApi for FakeRex {
@@ -271,6 +315,7 @@ impl RexApi for FakeRex {
             .unwrap()
             .push((method.to_string(), args.clone()));
         match method {
+            "program_status" if self.gate.is_some() => Ok(self.gate.as_ref().unwrap().call()),
             "program_status" => self.statuses.get(block).cloned().ok_or(RexError::Failed),
             "size" => Ok(json!({"rows": 24, "columns": 80})),
             "format" => Ok(json!({"id": 7, "total": self.blob.len()})),
@@ -1430,4 +1475,63 @@ fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
         .with_max_level(tracing::Level::INFO)
         .finish();
     (logs, tracing::subscriber::set_default(subscriber))
+}
+
+fn ended_lines(logs: &Logs) -> usize {
+    logs.with("agent status stream")
+        .iter()
+        .filter(|line| line.contains("event=\"ended\""))
+        .count()
+}
+
+#[test]
+fn a_stopped_reader_never_touches_a_newer_stream_of_the_same_session() {
+    let (logs, _guard) = capture_logs();
+    let program = FakeProgram::new("stale", &[], true);
+    let gate = Gate::new(reply("working", 1, "stale"), reply("working", 2, "fresh"));
+    let api = FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        ..FakeRex::default()
+    };
+    let (status, steps) = status_with(api, &program, now_clock());
+    let slots = [slot_in("session:1", "block:a")];
+    status.sync(&slots);
+    wait_until("the old reader is in its call", || gate.calls() == 1);
+    // The session leaves and returns while the old call is held.
+    status.sync(&[]);
+    status.sync(&slots);
+    wait_until("the new stream reads the fresh record", || {
+        status.lookup("block:a")
+            == Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
+    });
+    gate.release();
+    wait_until("the old reader ends", || ended_lines(&logs) == 1);
+    assert_eq!(
+        status.lookup("block:a"),
+        Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
+    );
+    assert_eq!(steps.get("block:a", 2).as_deref(), Some("fresh"));
+    assert_eq!(steps.get("block:a", 1), None);
+}
+
+#[test]
+fn a_stopped_reader_reads_no_queued_line_and_makes_no_call() {
+    let (logs, _guard) = capture_logs();
+    // The queued line has no owner pid, so a read of it would call `program_status`.
+    let program = FakeProgram::new("queued", &[LIVE_CHANGED.to_string()], true);
+    let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
+    let gate = Gate::new(reply("working", 1, "stale"), reply("working", 2, "later"));
+    let api = FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        ..FakeRex::default()
+    };
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[slot_in("session:1", block)]);
+    wait_until("the reader is in its first call", || gate.calls() == 1);
+    status.sync(&[]);
+    gate.release();
+    wait_until("the reader ends", || ended_lines(&logs) == 1);
+    assert_eq!(gate.calls(), 1);
+    assert_eq!(status.lookup(block), Lookup::NoStream);
+    assert_eq!(steps.get(block, 1), None);
 }
