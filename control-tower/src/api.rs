@@ -703,16 +703,11 @@ fn map_monitor_health(health: AgentMonitorHealth) -> MonitorHealth {
 fn map_agent_state(state: i32) -> AgentState {
     match ProtoAgentState::try_from(state) {
         Ok(ProtoAgentState::Working) => AgentState::Working,
+        Ok(ProtoAgentState::Blocked) => AgentState::Blocked,
+        Ok(ProtoAgentState::Done) => AgentState::Done,
         Ok(ProtoAgentState::Idle) => AgentState::Idle,
-        // Task 6 maps blocked, done and error. Until then they read as unknown.
-        Ok(
-            ProtoAgentState::Unspecified
-            | ProtoAgentState::Unknown
-            | ProtoAgentState::Blocked
-            | ProtoAgentState::Done
-            | ProtoAgentState::Error,
-        )
-        | Err(_) => AgentState::Unknown,
+        Ok(ProtoAgentState::Error) => AgentState::Error,
+        Ok(ProtoAgentState::Unspecified | ProtoAgentState::Unknown) | Err(_) => AgentState::Unknown,
     }
 }
 
@@ -793,6 +788,20 @@ mod tests {
     fn proto_number_1_reads_as_working() {
         assert_eq!(super::map_agent_state(1), AgentState::Working);
         assert_eq!(AgentState::Working.label(), "WORKING");
+    }
+
+    #[test]
+    fn proto_numbers_1_to_6_map_to_the_six_states_and_others_to_unknown() {
+        assert_eq!(super::map_agent_state(1), AgentState::Working);
+        assert_eq!(super::map_agent_state(2), AgentState::Idle);
+        assert_eq!(super::map_agent_state(3), AgentState::Unknown);
+        assert_eq!(super::map_agent_state(4), AgentState::Blocked);
+        assert_eq!(super::map_agent_state(5), AgentState::Done);
+        assert_eq!(super::map_agent_state(6), AgentState::Error);
+        assert_eq!(super::map_agent_state(0), AgentState::Unknown);
+        assert_eq!(super::map_agent_state(7), AgentState::Unknown);
+        assert_eq!(super::map_agent_state(-1), AgentState::Unknown);
+        assert_eq!(super::map_agent_state(4).label(), "BLOCKED");
     }
 
     #[test]

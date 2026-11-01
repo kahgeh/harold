@@ -10,7 +10,7 @@ use ratatui::widgets::{
 };
 
 use crate::api::HAROLD_VERSION_LIMIT;
-use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
+use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, StateCounts, VoiceState};
 use crate::questions::{
     ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
 };
@@ -313,25 +313,39 @@ where
     }
 }
 
-fn summary_spans<Tz>(
-    (working, idle, unknown): (usize, usize, usize),
-    server_time_ms: i64,
-    tz: &Tz,
-) -> Vec<Span<'static>>
+fn summary_spans<Tz>(counts: StateCounts, server_time_ms: i64, tz: &Tz) -> Vec<Span<'static>>
 where
     Tz: chrono::TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    let mut spans = vec![
-        Span::styled(
-            format!(" WORKING {working:02} "),
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("    IDLE {idle:02} "),
-            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let bold = |state: AgentState| state_style(state).add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::styled(
+        format!(" WORKING {:02} ", counts.working),
+        bold(AgentState::Working),
+    )];
+    // The new states show only above 0, so the strip keeps its old look.
+    for (state, count) in [
+        (AgentState::Blocked, counts.blocked),
+        (AgentState::Done, counts.done),
+    ] {
+        if count > 0 {
+            spans.push(Span::styled(
+                format!("    {} {count:02} ", state.label()),
+                bold(state),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        format!("    IDLE {:02} ", counts.idle),
+        bold(AgentState::Idle),
+    ));
+    if counts.error > 0 {
+        spans.push(Span::styled(
+            format!("    ERROR {:02} ", counts.error),
+            bold(AgentState::Error),
+        ));
+    }
+    let unknown = counts.unknown;
     if unknown > 0 {
         spans.push(Span::styled(
             format!("    UNKNOWN {unknown} "),
@@ -1935,8 +1949,10 @@ fn fit(text: &str, width: usize) -> Cow<'_, str> {
 
 fn state_glyph(state: AgentState) -> &'static str {
     match state {
-        AgentState::Working => "●",
-        AgentState::Idle => "●",
+        AgentState::Working | AgentState::Idle => "●",
+        AgentState::Blocked => "◐",
+        AgentState::Done => "✓",
+        AgentState::Error => "✕",
         AgentState::Unknown => "○",
     }
 }
@@ -1944,7 +1960,10 @@ fn state_glyph(state: AgentState) -> &'static str {
 fn state_style(state: AgentState) -> Style {
     let color = match state {
         AgentState::Working => AMBER,
+        AgentState::Blocked => Color::Yellow,
+        AgentState::Done => INK,
         AgentState::Idle => GREEN,
+        AgentState::Error => CORAL,
         AgentState::Unknown => MUTED,
     };
     Style::default().fg(color)
@@ -2096,6 +2115,9 @@ mod tests {
             (AgentState::Idle, "● IDLE", Color::Rgb(125, 200, 139)),
             (AgentState::Working, "● WORKING", Color::Rgb(224, 174, 85)),
             (AgentState::Unknown, "○ UNKNOWN", Color::Rgb(143, 138, 127)),
+            (AgentState::Blocked, "◐ BLOCKED", Color::Yellow),
+            (AgentState::Done, "✓ DONE", Color::Rgb(237, 231, 216)),
+            (AgentState::Error, "✕ ERROR", Color::Rgb(224, 114, 98)),
         ] {
             let selected = incarnation("%17", 91700, 91844, "codex");
             let app = live_app(
@@ -2279,7 +2301,25 @@ mod tests {
     // 2026-10-20 10:47:03 UTC
     const SAMPLE_MS: i64 = 1_792_493_223_000;
 
-    fn strip_text(counts: (usize, usize, usize), ms: i64) -> String {
+    fn counts(
+        working: usize,
+        blocked: usize,
+        done: usize,
+        idle: usize,
+        error: usize,
+        unknown: usize,
+    ) -> crate::app::StateCounts {
+        crate::app::StateCounts {
+            working,
+            blocked,
+            done,
+            idle,
+            error,
+            unknown,
+        }
+    }
+
+    fn strip_text(counts: crate::app::StateCounts, ms: i64) -> String {
         super::summary_spans(counts, ms, &plus_eleven())
             .iter()
             .map(|span| span.content.as_ref())
@@ -2313,7 +2353,7 @@ mod tests {
     #[test]
     fn summary_hides_unknown_at_zero() {
         assert_eq!(
-            strip_text((3, 5, 0), SAMPLE_MS),
+            strip_text(counts(3, 0, 0, 5, 0, 0), SAMPLE_MS),
             " WORKING 03     IDLE 05     SERVER TIME 21:47:03"
         );
     }
@@ -2321,9 +2361,68 @@ mod tests {
     #[test]
     fn summary_shows_unpadded_unknown() {
         assert_eq!(
-            strip_text((3, 4, 2), SAMPLE_MS),
+            strip_text(counts(3, 0, 0, 4, 0, 2), SAMPLE_MS),
             " WORKING 03     IDLE 04     UNKNOWN 2     SERVER TIME 21:47:03"
         );
+    }
+
+    #[test]
+    fn summary_shows_blocked_done_and_error_only_above_zero() {
+        assert_eq!(
+            strip_text(counts(1, 2, 3, 4, 5, 0), SAMPLE_MS),
+            " WORKING 01     BLOCKED 02     DONE 03     IDLE 04     ERROR 05     SERVER TIME 21:47:03"
+        );
+        assert_eq!(
+            strip_text(counts(0, 0, 1, 0, 0, 0), SAMPLE_MS),
+            " WORKING 00     DONE 01     IDLE 00     SERVER TIME 21:47:03"
+        );
+    }
+
+    #[test]
+    fn summary_strip_styles_follow_the_row_styles() {
+        let spans = super::summary_spans(counts(1, 1, 1, 1, 1, 0), SAMPLE_MS, &plus_eleven());
+        let colour_of = |word: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.contains(word))
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(colour_of("BLOCKED"), Some(Color::Yellow));
+        assert_eq!(colour_of("DONE"), Some(super::INK));
+        assert_eq!(colour_of("ERROR"), Some(super::CORAL));
+    }
+
+    #[test]
+    fn the_summary_strip_with_all_states_fits_the_wide_and_the_narrow_screen() {
+        let mut app = live_app(Vec::new(), None);
+        app.snapshot.rows = [
+            AgentState::Working,
+            AgentState::Blocked,
+            AgentState::Done,
+            AgentState::Idle,
+            AgentState::Error,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+            row(
+                incarnation(&format!("%{index}"), 100 + index as u32, 200, "codex"),
+                state,
+                "Codex",
+                "agents:1.1",
+                "x",
+                90_000,
+            )
+        })
+        .collect();
+        let wide = rendered(&app, 100, 30, 100_000);
+        for word in ["WORKING 01", "BLOCKED 01", "DONE 01", "IDLE 01", "ERROR 01"] {
+            assert!(wide.contains(word), "missing {word:?}");
+        }
+        let narrow = rendered(&app, 60, 18, 100_000);
+        for word in ["WORKING 01", "BLOCKED 01", "DONE 01"] {
+            assert!(narrow.contains(word), "missing {word:?} at 60 columns");
+        }
     }
 
     #[test]
@@ -3742,7 +3841,10 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "harold");
         assert_eq!(groups[0].1.len(), 2);
-        assert_eq!(app.state_counts(), (2, 0, 0));
+        assert_eq!(
+            (app.state_counts().working, app.state_counts().idle),
+            (2, 0)
+        );
     }
 
     #[test]

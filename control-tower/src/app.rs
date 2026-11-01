@@ -36,7 +36,10 @@ pub struct AgentIncarnation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     Working,
+    Blocked,
+    Done,
     Idle,
+    Error,
     Unknown,
 }
 
@@ -44,10 +47,34 @@ impl AgentState {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Working => "WORKING",
+            Self::Blocked => "BLOCKED",
+            Self::Done => "DONE",
             Self::Idle => "IDLE",
+            Self::Error => "ERROR",
             Self::Unknown => "UNKNOWN",
         }
     }
+
+    /// Working or blocked: the agent is in a turn.
+    pub const fn is_working(self) -> bool {
+        matches!(self, Self::Working | Self::Blocked)
+    }
+
+    /// Done, idle or error: the agent is not in a turn.
+    pub const fn is_at_rest(self) -> bool {
+        matches!(self, Self::Done | Self::Idle | Self::Error)
+    }
+}
+
+/// How many agents are in each state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StateCounts {
+    pub working: usize,
+    pub blocked: usize,
+    pub done: usize,
+    pub idle: usize,
+    pub error: usize,
+    pub unknown: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,17 +505,19 @@ impl App {
             .iter()
             .filter(|waiting| {
                 rows.iter()
-                    .any(|row| &row.incarnation == *waiting && row.state != AgentState::Working)
+                    .any(|row| &row.incarnation == *waiting && !row.state.is_working())
             })
             .cloned()
             .collect();
         for row in rows {
-            if row.state != AgentState::Idle || waiting.contains(&row.incarnation) {
+            if !row.state.is_at_rest() || waiting.contains(&row.incarnation) {
                 continue;
             }
-            let was_working = self.snapshot.rows.iter().any(|prior| {
-                prior.incarnation == row.incarnation && prior.state == AgentState::Working
-            });
+            let was_working = self
+                .snapshot
+                .rows
+                .iter()
+                .any(|prior| prior.incarnation == row.incarnation && prior.state.is_working());
             let in_view = self.active_pane.as_deref() == Some(row.incarnation.pane_id.as_str());
             if was_working && !in_view {
                 waiting.push(row.incarnation.clone());
@@ -944,15 +973,20 @@ impl App {
             .find(|row| &row.incarnation == selected)
     }
 
-    pub fn state_counts(&self) -> (usize, usize, usize) {
-        self.snapshot
-            .rows
-            .iter()
-            .fold((0, 0, 0), |(working, idle, unknown), row| match row.state {
-                AgentState::Working => (working + 1, idle, unknown),
-                AgentState::Idle => (working, idle + 1, unknown),
-                AgentState::Unknown => (working, idle, unknown + 1),
-            })
+    pub fn state_counts(&self) -> StateCounts {
+        let mut counts = StateCounts::default();
+        for row in &self.snapshot.rows {
+            let count = match row.state {
+                AgentState::Working => &mut counts.working,
+                AgentState::Blocked => &mut counts.blocked,
+                AgentState::Done => &mut counts.done,
+                AgentState::Idle => &mut counts.idle,
+                AgentState::Error => &mut counts.error,
+                AgentState::Unknown => &mut counts.unknown,
+            };
+            *count += 1;
+        }
+        counts
     }
 
     /// Whether Harold has confirmed that away-channel messaging is paused.
@@ -1423,7 +1457,7 @@ mod tests {
 
     use super::*;
     use crate::questions::{AnswerKind, Mode};
-    use AgentState::{Idle, Unknown, Working};
+    use AgentState::{Blocked, Done, Error, Idle, Unknown, Working};
 
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
@@ -2822,6 +2856,76 @@ mod tests {
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%2", "%1"]);
         assert!(app.is_waiting(&app.snapshot.rows[0].incarnation));
+    }
+
+    #[test]
+    fn working_or_blocked_to_done_idle_or_error_joins_and_unknown_does_not() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Blocked, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Done, Error, Unknown], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        app.apply_later_snapshot(fleet([Done, Error, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+    }
+
+    #[test]
+    fn a_blocked_or_unseen_row_that_comes_at_rest_without_prior_work_does_not_join() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Done, Idle, Error], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Blocked, Idle, Error], 2))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+        app.apply_later_snapshot(fleet([Blocked, Working, Blocked], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_row_that_goes_blocked_leaves() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Done, Working, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1"]);
+        app.apply_later_snapshot(fleet([Blocked, Working, Working], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn state_counts_has_one_count_for_each_state() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(snapshot(
+            1,
+            0,
+            vec![
+                placed("%1", Working, "a", "/a", 0),
+                placed("%2", Blocked, "a", "/b", 0),
+                placed("%3", Blocked, "a", "/c", 0),
+                placed("%4", Done, "a", "/d", 0),
+                placed("%5", Idle, "a", "/e", 0),
+                placed("%6", Error, "a", "/f", 0),
+                placed("%7", Unknown, "a", "/g", 0),
+            ],
+        ))
+        .unwrap();
+        let counts = app.state_counts();
+        assert_eq!(
+            (
+                counts.working,
+                counts.blocked,
+                counts.done,
+                counts.idle,
+                counts.error,
+                counts.unknown
+            ),
+            (1, 2, 1, 1, 1, 1)
+        );
     }
 
     #[test]

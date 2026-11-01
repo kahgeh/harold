@@ -311,10 +311,13 @@ While keys are ignored or held, the quit keys still quit and Ctrl+L still retrie
 Each row has Harold's latest classified agent state:
 
 - `WORKING` means Harold currently classifies the agent as working.
+- `BLOCKED` means the agent waits for the user to answer it. It shows in the same colour as the todo markers.
+- `DONE` means the agent finished its turn.
 - `IDLE` means Harold currently classifies the agent as idle.
+- `ERROR` means the agent stopped on an error.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
-The summary strip under the masthead shows the `WORKING` and `IDLE` counts, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
+The summary strip under the masthead shows the `WORKING` and `IDLE` counts, `BLOCKED`, `DONE` and `ERROR` counts only when above 0, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
 
 Transport and agent monitor health describe different system-level conditions:
 
@@ -349,9 +352,9 @@ Rows of waiting agents are marked with `◆`. `n` and `N` move the cursor to the
 next or previous waiting agent, oldest first, and wrap around. If a search filter
 hides that agent, the filter is cleared.
 
-- An agent starts waiting when it goes from Working to Idle while its pane is not the
-  pane you are looking at.
-- It stops when you visit its pane, when it goes Working again, when it exits, or
+- An agent starts waiting when it goes from Working or Blocked to Done, Idle or Error
+  while its pane is not the pane you are looking at. A change to Unknown does not start it.
+- It stops when you visit its pane, when it goes Working or Blocked again, when it exits, or
   when you press `Enter` on it. With focus tracking on, `Enter` does not clear
   it directly: it stops once the jump makes its pane active, on the next poll.
   With tracking off, `Enter` clears it.
