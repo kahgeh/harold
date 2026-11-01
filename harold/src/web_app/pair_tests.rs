@@ -606,18 +606,19 @@ async fn a_changed_code_works_at_once_and_no_log_page_or_status_holds_a_code() {
     let page = server.get("/").send().await.unwrap().text().await.unwrap();
     let status = format!("{:?}", server.pairing.status());
     let devices = format!("{:?}", server.pairing.devices());
-    let all = format!("{}{page}{status}{devices}", logs.text());
+    let lock = std::fs::read_to_string(folder.lock_file()).unwrap();
+    let all = format!("{}{page}{status}{devices}{lock}", logs.text());
     for code in [CODE, OTHER_CODE, "Different-Code"] {
         assert!(!all.contains(code), "{code}");
     }
-    for part in ["Test-Code", "7731", "Another9"] {
+    for part in ["Test-Code", "Another9"] {
         assert!(!all.contains(part), "{part}");
     }
-    assert!(
-        !std::fs::read_to_string(folder.lock_file())
-            .unwrap()
-            .contains("7731")
-    );
+    // The digits of a code are searched only where the text holds no random hex or time. The
+    // device list and the lock file hold SHA-256 hex and milliseconds, and four digits can
+    // appear there by chance.
+    let readable = format!("{}{page}{status}", logs.text());
+    assert!(!readable.contains("7731"), "7731");
 }
 
 #[tokio::test(flavor = "current_thread")]
