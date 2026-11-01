@@ -674,6 +674,10 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
         work_summary: pane
             .work_summary
             .map(|summary| sanitize_display(&summary, SUMMARY_LIMIT)),
+        current_step: pane
+            .current_step
+            .map(|step| sanitize_display(&step, SUMMARY_LIMIT))
+            .filter(|step| !step.is_empty()),
         state: map_agent_state(pane.state),
         last_transition_at_ms: pane.last_transition_at_ms,
     })
@@ -961,6 +965,40 @@ mod tests {
                 .unwrap()
                 .chars()
                 .all(|c| c == '界')
+        );
+    }
+
+    #[test]
+    fn api_maps_current_step() {
+        let map = |step: Option<String>| {
+            map_snapshot(AgentStateSnapshot {
+                harold_version: String::new(),
+                tts_muted: false,
+                messaging_paused: false,
+                through_event_version: 1,
+                server_time_ms: 2,
+                monitor_health: Vec::new(),
+                panes: vec![AgentPaneState {
+                    current_step: step,
+                    ..proto_pane("%1")
+                }],
+            })
+            .expect("snapshot")
+            .rows
+            .remove(0)
+            .current_step
+        };
+
+        assert_eq!(map(None), None);
+        assert_eq!(
+            map(Some("Running tests".into())).as_deref(),
+            Some("Running tests")
+        );
+        let long = map(Some("x".repeat(200))).unwrap();
+        assert_eq!(long.chars().count(), 160);
+        assert_eq!(
+            map(Some("a\x1b[31mb\nc\0d".into())).as_deref(),
+            Some("abcd")
         );
     }
 

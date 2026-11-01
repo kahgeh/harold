@@ -60,6 +60,7 @@ pub struct AgentRow {
     pub pane_index: u32,
     pub working_directory: String,
     pub work_summary: Option<String>,
+    pub current_step: Option<String>,
     pub state: AgentState,
     pub last_transition_at_ms: i64,
 }
@@ -286,7 +287,7 @@ pub struct App {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchableRow {
-    fields: [String; 4],
+    fields: [String; 5],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1295,6 +1296,7 @@ impl From<&AgentRow> for SearchableRow {
             fields: [
                 normalize_search(&row.provider_display_name),
                 normalize_search(row.work_summary.as_deref().unwrap_or_default()),
+                normalize_search(row.current_step.as_deref().unwrap_or_default()),
                 normalize_search(&row.tmux_target),
                 normalize_search(&row.working_directory),
             ],
@@ -1785,6 +1787,7 @@ mod tests {
             pane_index: 7,
             working_directory: "/Users/example/Project-Zeta".into(),
             work_summary: Some("Map Harold snapshots".into()),
+            current_step: None,
             state: AgentState::Working,
             last_transition_at_ms: 1,
         };
@@ -1815,6 +1818,29 @@ mod tests {
                 "query {query:?} should match"
             );
         }
+    }
+
+    #[test]
+    fn the_filter_matches_the_current_step() {
+        let mut stepped = row(
+            incarnation("%1", 1, 2, 0, "codex"),
+            AgentState::Working,
+            "one",
+            0,
+            0,
+        );
+        stepped.work_summary = Some("nothing here".into());
+        stepped.current_step = Some("Compiling the HAYSTACK".into());
+        let other = row(
+            incarnation("%2", 3, 4, 0, "codex"),
+            AgentState::Idle,
+            "two",
+            0,
+            0,
+        );
+
+        assert!(SearchableRow::from(&stepped).matches("haystack"));
+        assert!(!SearchableRow::from(&other).matches("haystack"));
     }
 
     #[test]
@@ -2143,6 +2169,7 @@ mod tests {
             provider_display_name: incarnation.provider_id.clone(),
             working_directory: format!("/work/{session_name}"),
             work_summary: Some(format!("work in {session_name}")),
+            current_step: None,
             incarnation,
             state,
             last_transition_at_ms: 10,

@@ -117,7 +117,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   key types into it, so the footer lists only `Enter` (`send` for a note, `keep` for a
   text field), `Esc` discard, `^L` and `^Q`.
 
-Search is a local, case-insensitive filter over provider, work summary, `session:window.pane`
+Search is a local, case-insensitive filter over provider, work summary, current step, `session:window.pane`
 name, and working directory. It never sends a search request to Harold and it
 does not pause incoming snapshots. The search line reports visible and total
 row counts while a filter is active. Press `f` to start editing the search query.
@@ -337,6 +337,12 @@ before its agent finishes can keep that agent from waiting. The top border of th
 agent list shows `(focus tracking off)` when the query fails, when no client is
 eligible, and for the first second after start; while it is off, an agent stops
 waiting only on `Enter` or when it goes Working.
+
+The detail panel (the `SELECTED SIGNAL` box) shows the lines `STATE`, `TARGET`, `PANE ID`,
+`DIRECTORY` and `AGE`. Then it shows `CURRENT STEP`, only when the agent reports a step, and
+`WORK SUMMARY`. `CURRENT STEP` is above `WORK SUMMARY`. The step is the line the agent
+reports in its Rex status. Harold cuts it to 160 characters and removes control characters, as
+it does for the work summary. The agent row in the list does not show the step.
 
 An absent or empty work summary is displayed exactly as:
 

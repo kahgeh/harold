@@ -152,6 +152,7 @@ fn row(
         pane_index: 0,
         working_directory: working_directory.into(),
         work_summary: Some(work_summary.into()),
+        current_step: None,
         state,
         last_transition_at_ms,
     }

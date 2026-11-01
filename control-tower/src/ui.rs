@@ -1416,7 +1416,7 @@ fn detail_paragraph<'a>(lines: Vec<Line<'a>>) -> Paragraph<'a> {
 }
 
 fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a>> {
-    vec![
+    let mut lines = vec![
         Line::styled(
             format!(
                 "{} {}  {}",
@@ -1433,15 +1433,28 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
         fact("DIRECTORY", &agent.working_directory),
         fact("AGE", age(now_ms, agent.last_transition_at_ms)),
         Line::raw(""),
-        Line::styled(
-            "CURRENT WORK",
+    ];
+    if let Some(step) = agent
+        .current_step
+        .as_deref()
+        .filter(|step| !step.is_empty())
+    {
+        lines.push(Line::styled(
+            "CURRENT STEP",
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            display_work_summary(agent.work_summary.as_deref()),
-            Style::default().fg(INK),
-        ),
-    ]
+        ));
+        lines.push(Line::styled(step, Style::default().fg(INK)));
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::styled(
+        "WORK SUMMARY",
+        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::styled(
+        display_work_summary(agent.work_summary.as_deref()),
+        Style::default().fg(INK),
+    ));
+    lines
 }
 
 /// The key where a narrow footer goes on to a second line: the list's `c`, or a
@@ -1963,7 +1976,6 @@ mod tests {
             "WORK SUMMARY",
             "f event",
             "2 OF 3",
-            "CURRENT WORK",
             "Build event snapshot dashboard",
             "Claude",
             "inventory:tmux_unavailable",
@@ -2119,7 +2131,6 @@ mod tests {
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
         }
-        assert!(!content.contains("CURRENT WORK"));
         assert!(!content.contains("SELECTED SIGNAL"));
     }
 
@@ -2153,7 +2164,6 @@ mod tests {
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
         }
-        assert!(!content.contains("CURRENT WORK"));
     }
 
     fn plus_eleven() -> chrono::FixedOffset {
@@ -2589,7 +2599,6 @@ mod tests {
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("Build responsive dashboard"));
         assert!(!content.contains("SELECTED SIGNAL"));
-        assert!(!content.contains("CURRENT WORK"));
         assert!(!content.contains("/Users/you/code/Codex"));
     }
 
@@ -2780,7 +2789,6 @@ mod tests {
 
         assert!(content.contains(&summary));
         assert!(!content.contains("SELECTED SIGNAL"));
-        assert!(!content.contains("CURRENT WORK"));
         assert!(!content.contains(&directory));
     }
 
@@ -2791,7 +2799,8 @@ mod tests {
         let content = rendered(&app, 140, 44, 100_000);
 
         assert!(content.contains("SELECTED SIGNAL"));
-        assert!(content.contains("CURRENT WORK"));
+        // One in the list header, one in the detail panel.
+        assert_eq!(content.matches("WORK SUMMARY").count(), 2);
         assert!(content.contains("/Users/you/code/control-tower"));
         assert!(content.contains("current-feature"));
         assert!(content.contains("Complete the responsive renderer"));
@@ -2817,7 +2826,6 @@ mod tests {
         let content = rendered(&app, 140, 29, 100_000);
 
         assert!(!content.contains("SELECTED SIGNAL"));
-        assert!(!content.contains("CURRENT WORK"));
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("▶ ● WORKING"));
         assert!(content.contains("cx"));
@@ -3080,6 +3088,48 @@ mod tests {
         }
     }
 
+    fn step_app(step: Option<&str>) -> App {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let mut agent = row(
+            selected.clone(),
+            AgentState::Working,
+            "Codex",
+            "control-tower:2.17",
+            "Build the panel",
+            90_000,
+        );
+        agent.current_step = step.map(str::to_string);
+        live_app(vec![agent], Some(selected))
+    }
+
+    #[test]
+    fn the_detail_panel_shows_current_step_above_the_work_summary() {
+        let content = rendered(&step_app(Some("Running the tests")), 140, 44, 100_000);
+
+        let step_label = content.find("CURRENT STEP").expect("step label");
+        let step_text = content.find("Running the tests").expect("step text");
+        let summary_label = content.rfind("WORK SUMMARY").expect("summary label");
+        assert!(step_label < step_text);
+        assert!(step_text < summary_label);
+    }
+
+    #[test]
+    fn the_work_summary_label_is_work_summary() {
+        let content = rendered(&step_app(None), 140, 44, 100_000);
+
+        assert!(content.contains("SELECTED SIGNAL"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 2);
+        assert!(!content.contains("CURRENT WORK"));
+    }
+
+    #[test]
+    fn a_row_without_current_step_shows_as_today() {
+        let content = rendered(&step_app(None), 140, 44, 100_000);
+
+        assert!(!content.contains("CURRENT STEP"));
+        assert!(content.contains("Build the panel"));
+    }
+
     fn row(
         incarnation: AgentIncarnation,
         state: AgentState,
@@ -3097,6 +3147,7 @@ mod tests {
             pane_index: 0,
             working_directory: format!("/Users/you/code/{provider_display_name}"),
             work_summary: Some(work_summary.into()),
+            current_step: None,
             state,
             last_transition_at_ms,
         }

@@ -853,6 +853,7 @@ mod tests {
                     pane_index: 0,
                     working_directory: "/tmp/project".into(),
                     work_summary: Some("Task 5".into()),
+                    current_step: None,
                     state: AgentState::Working,
                     last_transition_at_ms: 1,
                 }],
