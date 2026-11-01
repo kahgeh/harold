@@ -4,7 +4,7 @@
 use super::fetch::{Env, Host, snapshot_dir};
 use super::hub::{Fetcher, RemoteFile};
 use super::models::*;
-use super::release_download::{FILES, ReleaseDownloader};
+use super::release_download::{self, FILES, ReleaseDownloader};
 use super::worker::*;
 use crate::settings::KOKORO_REVISION;
 use crate::tools::BoxFuture;
@@ -17,6 +17,31 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
+
+/// The id of Kokoro in this build: the MLX model on macOS, the release's repository on Linux.
+pub(crate) fn kokoro_model() -> &'static str {
+    match WorkerKind::THIS_BUILD {
+        WorkerKind::Mlx => KOKORO_MLX,
+        WorkerKind::Onnx => release_download::MODEL_ID,
+    }
+}
+
+/// The revision of Kokoro in this build: the pinned commit on macOS, the release tag on Linux.
+pub(crate) fn kokoro_commit() -> &'static str {
+    match WorkerKind::THIS_BUILD {
+        WorkerKind::Mlx => KOKORO_REVISION,
+        WorkerKind::Onnx => release_download::RELEASE_TAG,
+    }
+}
+
+/// Makes the registry hold the voices of model `id` that the worker of this build reports. The MLX
+/// registry reads them from the snapshot, so it does nothing there. The ONNX worker reports them
+/// when it has loaded the model.
+pub(crate) fn worker_reports_voices(registry: &Registry, id: &str) {
+    if WorkerKind::THIS_BUILD == WorkerKind::Onnx {
+        registry.note_voices(id, &["af_heart".to_string(), "am_adam".to_string()]);
+    }
+}
 
 pub(crate) fn mlx(model: &str) -> Load {
     Load::Mlx {
@@ -396,50 +421,61 @@ impl Scratch {
         Registry::new(self.deps(), self.kokoro())
     }
 
-    /// Kokoro as a Hugging Face model on this build's worker.
+    /// Kokoro as this build has it: the Hugging Face MLX model on macOS, and on Linux the row
+    /// `kokoro_row` gives, the ONNX files of a GitHub release.
     pub(crate) fn kokoro(&self) -> Row {
-        Row {
-            id: KOKORO_MLX.to_string(),
-            source: Source::HuggingFace,
-            revision: KOKORO_REVISION.to_string(),
-            worker: WorkerKind::THIS_BUILD,
-            phase: Phase::Checking,
-            size: 100,
-            // The MLX registry reads the voices from the snapshot. The ONNX worker reports
-            // them after it loads, so an ONNX row starts with the names the worker would report.
-            voices: match WorkerKind::THIS_BUILD {
-                WorkerKind::Mlx => Vec::new(),
-                WorkerKind::Onnx => vec!["af_heart".to_string(), "am_adam".to_string()],
-            },
-            asked: false,
-        }
-    }
-
-    /// The names of the model file and of the two other files in a snapshot of this build: the MLX
-    /// worker loads `model.safetensors` and a `voices` folder, and the ONNX worker loads one
-    /// `.onnx` file and one `voices*` file.
-    fn snapshot_files() -> (&'static str, [&'static str; 2]) {
         match WorkerKind::THIS_BUILD {
-            WorkerKind::Mlx => (
-                "model.safetensors",
-                ["voices/af_heart.safetensors", "voices/am_adam.safetensors"],
-            ),
-            WorkerKind::Onnx => ("model.onnx", ["voices.bin", "extra.json"]),
+            WorkerKind::Mlx => Row {
+                id: KOKORO_MLX.to_string(),
+                source: Source::HuggingFace,
+                revision: KOKORO_REVISION.to_string(),
+                worker: WorkerKind::THIS_BUILD,
+                phase: Phase::Checking,
+                size: 100,
+                voices: Vec::new(),
+                asked: false,
+            },
+            WorkerKind::Onnx => kokoro_row(&crate::settings::TtsSettings::default()),
         }
     }
 
-    /// A snapshot of `model` with a file of `size` bytes, and a record that lists it.
+    /// The files of a model that is ready, and a record that lists them. A model at the release
+    /// tag on Linux is two files in a folder of its own, as `ensure_release` finds them. Any
+    /// other model is a Hugging Face snapshot of `model.safetensors` and two voices.
     pub(crate) fn cached(&self, model: &str, revision: &str, size: usize) {
-        self.snapshot(model, revision, size);
-        let (model_file, voice_files) = Self::snapshot_files();
+        if WorkerKind::THIS_BUILD == WorkerKind::Onnx && revision == release_download::RELEASE_TAG {
+            let folder = self.folder().join(model.replace('/', "--"));
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(release_download::MODEL_FILE), vec![0u8; size]).unwrap();
+            std::fs::write(folder.join(release_download::VOICES_FILE), b"v").unwrap();
+            let record = json!({
+                "model": model,
+                "commit": revision,
+                "files": [
+                    {"path": release_download::MODEL_FILE, "size": size},
+                    {"path": release_download::VOICES_FILE, "size": 1},
+                ],
+            });
+            std::fs::write(
+                self.folder().join(record_name(model, revision)),
+                record.to_string(),
+            )
+            .unwrap();
+            return;
+        }
+        let snapshot = snapshot_dir(&self.cache(), model, revision);
+        std::fs::create_dir_all(snapshot.join("voices")).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), vec![0u8; size]).unwrap();
+        std::fs::write(snapshot.join("voices/af_heart.safetensors"), b"v").unwrap();
+        std::fs::write(snapshot.join("voices/am_adam.safetensors"), b"v").unwrap();
         std::fs::create_dir_all(self.folder()).unwrap();
         let record = json!({
             "model": model,
             "commit": revision,
             "files": [
-                {"path": model_file, "size": size},
-                {"path": voice_files[0], "size": 1},
-                {"path": voice_files[1], "size": 1},
+                {"path": "model.safetensors", "size": size},
+                {"path": "voices/af_heart.safetensors", "size": 1},
+                {"path": "voices/am_adam.safetensors", "size": 1},
             ],
         });
         std::fs::write(
@@ -447,23 +483,6 @@ impl Scratch {
             record.to_string(),
         )
         .unwrap();
-    }
-
-    /// The files of a snapshot of `model`, with no record: what a finished download leaves.
-    pub(crate) fn snapshot(&self, model: &str, revision: &str, size: usize) {
-        let snapshot = snapshot_dir(&self.cache(), model, revision);
-        let (model_file, voice_files) = Self::snapshot_files();
-        // The ONNX worker takes exactly one `voices*` entry, so only the MLX snapshot has a
-        // `voices` folder.
-        std::fs::create_dir_all(match WorkerKind::THIS_BUILD {
-            WorkerKind::Mlx => snapshot.join("voices"),
-            WorkerKind::Onnx => snapshot.clone(),
-        })
-        .unwrap();
-        std::fs::write(snapshot.join(model_file), vec![0u8; size]).unwrap();
-        for voice in voice_files {
-            std::fs::write(snapshot.join(voice), b"v").unwrap();
-        }
     }
 
     pub(crate) fn safe_files(&self) {
@@ -517,13 +536,14 @@ pub(crate) async fn fixture() -> Fixture {
     );
     let mut kokoro = scratch.kokoro();
     kokoro.id = model.clone();
-    scratch.cached(&model, crate::settings::KOKORO_REVISION, 100);
+    scratch.cached(&model, kokoro_commit(), 100);
     let registry = Registry::new(scratch.deps(), kokoro);
     registry.start_up();
     until(&registry, |registry| {
         registry.default_status() == DefaultStatus::Ready
     })
     .await;
+    worker_reports_voices(&registry, &model);
     let script = Arc::new(Script::default());
     let supervisor = Supervisor::new(
         Arc::new(FakeLauncher(Arc::clone(&script))),

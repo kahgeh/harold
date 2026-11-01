@@ -256,9 +256,15 @@ async fn list_models_shows_each_model_with_its_state_and_the_default() {
     assert!(kokoro.is_default);
     assert_eq!(kokoro.default_voice, "af_heart");
     assert_eq!(kokoro.worker, WorkerKind_this());
-    assert_eq!(kokoro.source, "huggingface");
-    assert_eq!(kokoro.revision, crate::settings::KOKORO_REVISION);
-    assert_eq!(kokoro.size_bytes, 102);
+    // The fixture's files: macOS has a model file and two voices, Linux a model file and a
+    // voices file.
+    let (source, size) = match worker::WorkerKind::THIS_BUILD {
+        worker::WorkerKind::Mlx => ("huggingface", 102),
+        worker::WorkerKind::Onnx => ("github_release", 101),
+    };
+    assert_eq!(kokoro.source, source);
+    assert_eq!(kokoro.revision, kokoro_commit());
+    assert_eq!(kokoro.size_bytes, size);
 }
 
 #[allow(non_snake_case)]

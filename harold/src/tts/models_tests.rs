@@ -7,6 +7,7 @@ use crate::settings::KOKORO_REVISION;
 use crate::tts::test_support::*;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
+#[cfg(target_os = "macos")]
 use tokio::time::timeout;
 
 const REVISION: &str = "b71e4d38b236d968966a2002c4c895dbd12b1c3c";
@@ -29,12 +30,13 @@ fn kokoro_failed(registry: &Registry) -> bool {
     matches!(registry.default_status(), DefaultStatus::Failed { .. })
 }
 
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[tokio::test(flavor = "current_thread")]
 async fn kokoro_with_a_record_that_holds_is_ready_and_nothing_is_asked_of_the_hub() {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     let registry = scratch.registry();
 
     registry.start_up();
@@ -45,18 +47,27 @@ async fn kokoro_with_a_record_that_holds_is_ready_and_nothing_is_asked_of_the_hu
     assert_eq!(listed.len(), 1);
     assert!(listed[0].is_default);
     assert_eq!(listed[0].default_voice, "af_heart");
-    assert_eq!(listed[0].voices, ["af_heart", "am_adam"]);
+    // The MLX registry reads the voices from the snapshot. The ONNX worker reports them once it
+    // has loaded, so a registry that no worker has loaded lists none.
+    if WorkerKind::THIS_BUILD == WorkerKind::Mlx {
+        assert_eq!(listed[0].voices, ["af_heart", "am_adam"]);
+    } else {
+        assert!(listed[0].voices.is_empty());
+    }
     assert_eq!(listed[0].state, InfoState::Ready);
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn kokoro_cached_without_a_record_is_checked_and_downloads_nothing() {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     std::fs::remove_file(
         scratch
             .folder()
-            .join(record_name(KOKORO_MLX, KOKORO_REVISION)),
+            .join(record_name(kokoro_model(), kokoro_commit())),
     )
     .unwrap();
     scratch.hub.checks.lock().unwrap().push(Ok(300));
@@ -65,18 +76,21 @@ async fn kokoro_cached_without_a_record_is_checked_and_downloads_nothing() {
     registry.start_up();
 
     until(&registry, kokoro_ready).await;
-    assert_eq!(scratch.hub.calls(), [format!("check {KOKORO_MLX}")]);
+    assert_eq!(scratch.hub.calls(), [format!("check {}", kokoro_model())]);
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn kokoros_record_from_the_speech_models_still_holds_after_the_upgrade_and_needs_no_network()
 {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     // The record is where the speech models kept it, not where the TTS server looks.
     let speech_models = scratch.root.join("speech-models");
     std::fs::create_dir_all(&speech_models).unwrap();
-    let name = record_name(KOKORO_MLX, KOKORO_REVISION);
+    let name = record_name(kokoro_model(), kokoro_commit());
     std::fs::rename(scratch.folder().join(&name), speech_models.join(&name)).unwrap();
     let registry = scratch.registry();
 
@@ -87,6 +101,9 @@ async fn kokoros_record_from_the_speech_models_still_holds_after_the_upgrade_and
     assert!(scratch.folder().join(&name).exists());
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_ready() {
     let logs = CapturedLogs::start();
@@ -100,17 +117,23 @@ async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_r
     assert_eq!(
         scratch.hub.calls(),
         [
-            format!("check {KOKORO_MLX}"),
-            format!("download {KOKORO_MLX}")
+            format!("check {}", kokoro_model()),
+            format!("download {}", kokoro_model())
         ]
     );
     let text = logs.text();
     assert!(text.contains("tts model download started"), "{text}");
     assert!(text.contains("tts model downloaded"), "{text}");
-    assert!(text.contains(&format!("model={KOKORO_MLX}")), "{text}");
+    assert!(
+        text.contains(&format!("model={}", kokoro_model())),
+        "{text}"
+    );
     assert!(text.contains("bytes=100"), "{text}");
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
     let scratch = Scratch::new();
@@ -128,19 +151,20 @@ async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
     assert_eq!(
         registry.default_status(),
         DefaultStatus::Downloading {
-            model: KOKORO_MLX.into(),
+            model: kokoro_model().into(),
             bytes: 10,
             total: 100
         }
     );
 
-    // The fake download writes nothing, and the ONNX worker needs its files in the snapshot.
-    scratch.snapshot(KOKORO_MLX, KOKORO_REVISION, 100);
     gate.notify_one();
     until(&registry, kokoro_ready).await;
     assert!(registry.resolve("", "").is_ok());
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_file_that_fails_its_check_is_not_listed_ready_and_logs_check_failed() {
     let logs = CapturedLogs::start();
@@ -156,7 +180,7 @@ async fn a_file_that_fails_its_check_is_not_listed_ready_and_logs_check_failed()
     registry.start_up();
 
     until(&registry, kokoro_failed).await;
-    assert_eq!(state_of(&registry, KOKORO_MLX), InfoState::Failed);
+    assert_eq!(state_of(&registry, kokoro_model()), InfoState::Failed);
     assert_eq!(registry.list()[0].reason, "check_failed");
     assert_eq!(
         registry.resolve("", ""),
@@ -186,6 +210,9 @@ async fn a_full_disk_fails_the_download_before_it_starts() {
     );
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
     let logs = CapturedLogs::start();
@@ -220,6 +247,9 @@ async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
     );
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_call_tries_a_failed_download_again_unless_the_disk_was_full_or_it_is_not_allowed() {
     let scratch = Scratch::new();
@@ -445,7 +475,7 @@ async fn a_hub_that_cannot_be_asked_refuses_with_its_reason() {
 async fn models_asked_for_before_come_back_after_a_restart() {
     let scratch = Scratch::new();
     scratch.safe_files();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     scratch.approve(REPO, REVISION, WorkerKind::THIS_BUILD.as_str());
     let first = scratch.registry();
     first
@@ -490,7 +520,7 @@ async fn models_asked_for_before_come_back_after_a_restart() {
 async fn kokoro_and_the_default_cannot_be_removed_and_another_model_can() {
     let scratch = Scratch::new();
     scratch.safe_files();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     scratch.approve(REPO, REVISION, WorkerKind::THIS_BUILD.as_str());
     let registry = scratch.registry();
     registry.start_up();
@@ -505,7 +535,7 @@ async fn kokoro_and_the_default_cannot_be_removed_and_another_model_can() {
     .await;
 
     assert_eq!(
-        registry.remove_model(KOKORO_MLX),
+        registry.remove_model(kokoro_model()),
         Err(RemoveRefusal::DefaultModel)
     );
     assert_eq!(
@@ -517,7 +547,10 @@ async fn kokoro_and_the_default_cannot_be_removed_and_another_model_can() {
         registry.remove_model(REPO),
         Err(RemoveRefusal::DefaultModel)
     );
-    registry.set_default(KOKORO_MLX, "af_heart").await.unwrap();
+    registry
+        .set_default(kokoro_model(), "af_heart")
+        .await
+        .unwrap();
 
     assert_eq!(registry.remove_model(REPO), Ok(()));
     assert!(registry.list().iter().all(|model| model.id != REPO));
@@ -530,7 +563,7 @@ async fn kokoro_and_the_default_cannot_be_removed_and_another_model_can() {
 async fn the_default_survives_a_restart() {
     let scratch = Scratch::new();
     scratch.safe_files();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     scratch.approve(REPO, REVISION, WorkerKind::THIS_BUILD.as_str());
     let registry = scratch.registry();
     registry
@@ -549,7 +582,7 @@ async fn the_default_survives_a_restart() {
         (REPO.to_string(), "voice_one".to_string())
     );
     let after = scratch.registry();
-    assert_eq!(after.default_pair().0, KOKORO_MLX);
+    assert_eq!(after.default_pair().0, kokoro_model());
     after.load_default().await;
     assert_eq!(
         after.default_pair(),
@@ -573,16 +606,17 @@ async fn a_stored_default_for_a_model_that_is_gone_is_ignored() {
 
     registry.load_default().await;
 
-    assert_eq!(registry.default_pair().0, KOKORO_MLX);
+    assert_eq!(registry.default_pair().0, kokoro_model());
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn set_default_refuses_an_unknown_model_voice_or_unapproved_model() {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     let registry = scratch.registry();
     registry.start_up();
     until(&registry, kokoro_ready).await;
+    worker_reports_voices(&registry, kokoro_model());
     registry
         .add_model("huggingface", REPO, REVISION)
         .await
@@ -593,35 +627,39 @@ async fn set_default_refuses_an_unknown_model_voice_or_unapproved_model() {
         Err(SetDefaultRefusal::UnknownModel)
     );
     assert_eq!(
-        registry.set_default(KOKORO_MLX, "nobody").await,
+        registry.set_default(kokoro_model(), "nobody").await,
         Err(SetDefaultRefusal::UnknownVoice)
     );
     assert_eq!(
-        registry.set_default(KOKORO_MLX, "").await,
+        registry.set_default(kokoro_model(), "").await,
         Err(SetDefaultRefusal::UnknownVoice)
     );
     assert_eq!(
         registry.set_default(REPO, "v").await,
         Err(SetDefaultRefusal::NotReady)
     );
-    assert_eq!(registry.set_default(KOKORO_MLX, "am_adam").await, Ok(()));
+    assert_eq!(
+        registry.set_default(kokoro_model(), "am_adam").await,
+        Ok(())
+    );
     assert_eq!(
         scratch.default_row.0.lock().unwrap().clone(),
-        Some((KOKORO_MLX.to_string(), "am_adam".to_string()))
+        Some((kokoro_model().to_string(), "am_adam".to_string()))
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_request_resolves_to_the_model_voice_and_worker_files() {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     let registry = scratch.registry();
     registry.start_up();
     until(&registry, kokoro_ready).await;
+    worker_reports_voices(&registry, kokoro_model());
 
     let resolved = registry.resolve("", "").unwrap();
 
-    assert_eq!(resolved.id, KOKORO_MLX);
+    assert_eq!(resolved.id, kokoro_model());
     assert_eq!(resolved.voice, "af_heart");
     assert_eq!(
         resolved.load.kind(),
@@ -630,7 +668,7 @@ async fn a_request_resolves_to_the_model_voice_and_worker_files() {
         resolved.load
     );
     assert_eq!(
-        registry.resolve(KOKORO_MLX, "am_adam").unwrap().voice,
+        registry.resolve(kokoro_model(), "am_adam").unwrap().voice,
         "am_adam"
     );
     assert_eq!(
@@ -638,11 +676,14 @@ async fn a_request_resolves_to_the_model_voice_and_worker_files() {
         Err(ResolveError::UnknownModel)
     );
     assert_eq!(
-        registry.resolve(KOKORO_MLX, "nobody"),
+        registry.resolve(kokoro_model(), "nobody"),
         Err(ResolveError::UnknownVoice)
     );
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn two_downloads_never_run_at_once() {
     let scratch = Scratch::new();
@@ -684,6 +725,9 @@ async fn two_downloads_never_run_at_once() {
     assert_eq!(scratch.hub.most_running.load(Ordering::SeqCst), 1);
 }
 
+// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
+// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_download_waits_while_another_holds_the_machines_download_slot() {
     let scratch = Scratch::new();
@@ -713,7 +757,7 @@ fn kokoro_for_this_build_is_pinned_and_a_refused_revision_is_not_managed() {
     match WorkerKind::THIS_BUILD {
         WorkerKind::Mlx => {
             assert_eq!(row.id, "mlx-community/Kokoro-82M-bf16");
-            assert_eq!(row.revision, KOKORO_REVISION);
+            assert_eq!(row.revision, kokoro_commit());
             assert_eq!(row.source, Source::HuggingFace);
             assert_eq!(row.size, 389_410_807);
             let bad = TtsSettings {
@@ -902,7 +946,7 @@ async fn voices_a_worker_reported_are_listed() {
     let scratch = Scratch::new();
     let registry = scratch.registry();
 
-    registry.note_voices(KOKORO_MLX, &["a".to_string(), "b".to_string()]);
+    registry.note_voices(kokoro_model(), &["a".to_string(), "b".to_string()]);
 
     assert_eq!(registry.list()[0].voices, ["a", "b"]);
 }
@@ -929,7 +973,7 @@ fn the_hand_command_downloads_the_pinned_commit_without_a_token() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_request_that_waited_for_approval_is_format_checked_after_a_restart() {
     let scratch = Scratch::new();
-    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    scratch.cached(kokoro_model(), kokoro_commit(), 100);
     let first = scratch.registry();
     assert_eq!(
         first.add_model("huggingface", REPO, REVISION).await,
