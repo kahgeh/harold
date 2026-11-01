@@ -31,7 +31,7 @@ pub(crate) const BLOCK_PREFIX: &str = "block:";
 /// A Rex call that takes longer than this fails.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// The most `process` calls that run side by side.
-const PROCESS_WIDTH: usize = 8;
+pub(crate) const PROCESS_WIDTH: usize = 8;
 /// A scan that takes longer than this logs how long each part took.
 const SLOW_SCAN: Duration = Duration::from_secs(1);
 /// A screen read that takes longer than this logs its time.

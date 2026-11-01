@@ -19,8 +19,9 @@ use super::rex::{
     BLOCK_PREFIX, RexBlockSlot, RexError, find_agent, parse_json, parse_process,
     parse_session_view, parse_sessions, run_program, slots_of,
 };
+use super::rex::{PROCESS_WIDTH, parallel_map};
 use super::rex::{StatusRecord, parse_program_status};
-use super::screen::stop_requested;
+use super::screen::{current_stop, stop_requested};
 use crate::settings::AgentSettings;
 use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_call};
 
@@ -242,15 +243,17 @@ impl RexHostInventory {
     fn slots(&self) -> Result<Vec<RexBlockSlot>, RexError> {
         let sessions =
             parse_sessions(&self.call(MultiplexerOperation::List, true, &["ls", "--json"])?)?;
-        let mut slots = Vec::new();
-        for session in &sessions {
+        let views = parallel_map(&sessions, PROCESS_WIDTH, current_stop(), |session| {
             let args = json!({"session_id": session.id}).to_string();
-            let view = self.call(
+            self.call(
                 MultiplexerOperation::Layout,
                 true,
                 &["api", "call", "session.view", &args],
-            )?;
-            slots.extend(slots_of(session, &parse_session_view(&view)?));
+            )
+        });
+        let mut slots = Vec::new();
+        for (session, view) in sessions.iter().zip(views) {
+            slots.extend(slots_of(session, &parse_session_view(&view?)?));
         }
         Ok(slots)
     }
@@ -276,9 +279,8 @@ impl RexHostInventory {
     fn scan_agents(&self) -> Result<Vec<RexHostAgent>, RexError> {
         let slots = self.slots()?;
         let now = (self.clock)();
-        let mut found = Vec::new();
-        for slot in &slots {
-            let text = self.call(
+        let texts = parallel_map(&slots, PROCESS_WIDTH, current_stop(), |slot| {
+            self.call(
                 MultiplexerOperation::Process,
                 true,
                 &[
@@ -290,18 +292,28 @@ impl RexHostInventory {
                     &slot.block_id,
                     "process",
                 ],
-            )?;
-            let process = parse_process(&text)?;
-            let Some((agent, program)) = find_agent(&process, &self.settings) else {
-                continue;
-            };
-            // A failed status call gives this agent no record, so its state is unknown.
-            // The other agents keep theirs.
-            let record = self
-                .record(slot)
+            )
+        });
+        let processes = texts
+            .into_iter()
+            .map(|text| parse_process(&text?))
+            .collect::<Result<Vec<_>, RexError>>()?;
+        let mut hits = Vec::new();
+        for (slot, process) in slots.iter().zip(&processes) {
+            if let Some((agent, program)) = find_agent(process, &self.settings) {
+                hits.push((slot, agent, program));
+            }
+        }
+        // A failed status call gives this agent no record, so its state is unknown.
+        // The other agents keep theirs.
+        let records = parallel_map(&hits, PROCESS_WIDTH, current_stop(), |(slot, agent, _)| {
+            self.record(slot)
                 .ok()
                 .flatten()
-                .filter(|record| record.pid == agent.pid);
+                .filter(|record| record.pid == agent.pid)
+        });
+        let mut found = Vec::new();
+        for ((slot, agent, program), record) in hits.into_iter().zip(records) {
             let (provider_id, provider_display_name) =
                 match resolve_provider(&self.settings, &program) {
                     ProviderResolution::Matched {

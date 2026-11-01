@@ -33,7 +33,9 @@ impl Fake {
         let dir = std::env::temp_dir().join(format!("rex-hosts-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = format!(
-            "D='{}'\necho \"$*\" >> \"$D/calls.log\"\ncase \"$*\" in\n\
+            "D='{}'\necho \"$*\" >> \"$D/calls.log\"\n\
+             if [ -f \"$D/delay\" ]; then case \"$*\" in *whoami*) ;; *) sleep \"$(cat \"$D/delay\")\";; esac; fi\n\
+             case \"$*\" in\n\
              *whoami*) cat \"$D/whoami.json\";;\n\
              *\" ls --json\"*) cat \"$D/ls.json\";;\n\
              *session.view*) cat \"$D/view.json\";;\n\
@@ -41,6 +43,7 @@ impl Fake {
              *\"-b block:b1 process\"*) cat \"$D/process-b1.json\";;\n\
              *\"-b block:b2 process\"*) cat \"$D/process-b2.json\";;\n\
              *\"-b block:b1 program_status\"*) cat \"$D/status-b1.json\";;\n\
+             *\" process\"*) cat \"$D/process-b2.json\";;\n\
              *) exit 1;;\nesac\n",
             dir.display()
         );
@@ -92,6 +95,11 @@ impl Fake {
                 r#"{{"records":[{{"state":"{state}","msg":"{msg}","owner":{{"pid":{pid}}}}}]}}"#
             ),
         );
+    }
+
+    /// Makes each call, except `whoami`, last this many seconds.
+    fn call_takes(&self, seconds: &str) {
+        self.put("delay", seconds);
     }
 
     fn remove_hosts(&self) {
@@ -377,6 +385,37 @@ fn a_failed_status_call_gives_that_agent_unknown_and_keeps_the_others() {
     assert_eq!(second.host_pane_id, "rex:omarchy/block:b2");
     assert_eq!(second.state, HostAgentState::Unknown);
     assert_eq!(second.current_step, None);
+}
+
+#[test]
+fn a_host_with_2_sessions_and_8_blocks_takes_its_slowest_call_per_step() {
+    let fake = Fake::new("pool");
+    fake.put(
+        "ls.json",
+        r#"{"sessions":[{"session_id":"s1","label":"one"},{"session_id":"s2","label":"two"}]}"#,
+    );
+    let block = |id: &str| {
+        format!(r#"{{"block_id":"block:{id}","creator_name":"com.superlogical.terminal"}}"#)
+    };
+    let blocks = ["b1", "b2", "b3", "b4"].map(block).join(",");
+    fake.put(
+        "view.json",
+        &format!(r#"{{"windows":[{{"layers":[{{"blocks":[{blocks}]}}]}}]}}"#),
+    );
+    fake.call_takes("0.15");
+    let inventory = fake.inventory("omarchy", None, clock(1));
+    let started = std::time::Instant::now();
+    let scan = inventory.scan();
+    let elapsed = started.elapsed();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents.len(), 2);
+    assert_eq!(scan.agents[0].session_name, "one");
+    assert_eq!(scan.agents[1].session_name, "two");
+    // In series the 13 calls take 1.95 s. By step they take about 0.6 s.
+    assert!(
+        elapsed < std::time::Duration::from_millis(1200),
+        "{elapsed:?}"
+    );
 }
 
 #[test]
