@@ -26,6 +26,8 @@ use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_call};
 const HOST_TIMEOUT: Duration = Duration::from_secs(2);
 /// The same limit as the text that `rex --timeout` takes.
 const HOST_TIMEOUT_ARG: &str = "2s";
+/// The shortest time between two `whoami` calls to a host that does not answer them.
+const WHOAMI_RETRY_MS: i64 = 30_000;
 /// The shortest time between two icon reads.
 const ICON_INTERVAL_MS: i64 = 60_000;
 
@@ -86,6 +88,8 @@ pub(crate) struct RexHostInventory {
     program: HostProgram,
     seen: Mutex<HashMap<String, Seen>>,
     host_id: Mutex<Option<String>>,
+    /// The time before which a failed `whoami` is not tried again.
+    whoami_retry_at_ms: Mutex<Option<i64>>,
     icon: Mutex<IconState>,
 }
 
@@ -122,6 +126,7 @@ impl RexHostInventory {
             program,
             seen: Mutex::new(HashMap::new()),
             host_id: Mutex::new(None),
+            whoami_retry_at_ms: Mutex::new(None),
             icon: Mutex::new(IconState::default()),
         }
     }
@@ -160,7 +165,8 @@ impl RexHostInventory {
         result
     }
 
-    /// The `host_id` of the host's server. It is read until one read works.
+    /// The `host_id` of the host's server. It is read until one read works. After a failed
+    /// read, the next try waits 30 seconds: an older Rex has no `whoami --json`.
     fn read_host_id(&self) -> Option<String> {
         if let Some(id) = self
             .host_id
@@ -170,17 +176,45 @@ impl RexHostInventory {
         {
             return Some(id);
         }
+        let now = (self.clock)();
+        let mut retry_at = self
+            .whoami_retry_at_ms
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        let id = self.whoami(true);
+        match &id {
+            Some(id) => {
+                *self.host_id.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.clone());
+            }
+            None => *retry_at = Some(now.saturating_add(WHOAMI_RETRY_MS)),
+        }
+        id
+    }
+
+    /// The `host_id` of the Rex server on this Mac, from `rex whoami --json` with no
+    /// server. It is a read: it changes nothing.
+    pub(crate) fn local_host_id(&self) -> Option<String> {
+        self.whoami(false)
+    }
+
+    /// One `rex whoami --json` call, on the host's server or on this Mac's.
+    fn whoami(&self, with_server: bool) -> Option<String> {
         let text = self
-            .call(MultiplexerOperation::Other, true, &["whoami", "--json"])
+            .call(
+                MultiplexerOperation::Other,
+                with_server,
+                &["whoami", "--json"],
+            )
             .ok()?;
-        let id = parse_json(&text)
+        parse_json(&text)
             .ok()?
             .get("host_id")?
             .as_str()
-            .filter(|id| !id.is_empty())?
-            .to_string();
-        *self.host_id.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.clone());
-        Some(id)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
     }
 
     fn slots(&self) -> Result<Vec<RexBlockSlot>, RexError> {

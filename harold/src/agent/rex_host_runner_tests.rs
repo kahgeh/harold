@@ -53,6 +53,9 @@ struct FakeHost {
     label: String,
     host_id: Option<String>,
     listed: Option<bool>,
+    /// The `host_id` of the Rex server on this Mac. `None` makes that read fail.
+    local_id: Option<String>,
+    local_calls: AtomicUsize,
     script: Mutex<VecDeque<Step>>,
     last: Mutex<Option<Step>>,
     calls: AtomicUsize,
@@ -67,6 +70,8 @@ impl FakeHost {
             label: label.into(),
             host_id: Some(format!("id-{label}")),
             listed: Some(true),
+            local_id: None,
+            local_calls: AtomicUsize::new(0),
             script: Mutex::new(steps.into()),
             last: Mutex::new(None),
             calls: AtomicUsize::new(0),
@@ -80,6 +85,18 @@ impl FakeHost {
         let mut host = Arc::into_inner(Self::new(label, steps)).unwrap();
         host.host_id = Some(host_id.into());
         host.listed = listed;
+        Arc::new(host)
+    }
+
+    fn on_this_mac(label: &str, host_id: &str, local_id: Option<&str>) -> Arc<Self> {
+        let mut host = Arc::into_inner(Self::with(
+            label,
+            host_id,
+            Some(true),
+            vec![Step::Good(vec![agent(label, "b1", 200, 5, WORKING)])],
+        ))
+        .unwrap();
+        host.local_id = local_id.map(str::to_string);
         Arc::new(host)
     }
 
@@ -140,6 +157,11 @@ impl HostSource for FakeHost {
 
     fn listed(&self) -> Option<bool> {
         self.listed
+    }
+
+    fn local_host_id(&self) -> Option<String> {
+        self.local_calls.fetch_add(1, Ordering::SeqCst);
+        self.local_id.clone()
     }
 }
 
@@ -482,4 +504,52 @@ async fn shutdown_stops_a_host_read_in_progress() {
     tokio::time::timeout(SCAN_BUDGET, host.stopped.notified())
         .await
         .expect("shutdown stops the read before its call limit");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_label_for_this_mac_is_left_out_with_one_warning() {
+    let logs = CapturedLogs::start();
+    let mine = FakeHost::on_this_mac("loopback", "mac-id", Some("mac-id"));
+    let other = FakeHost::on_this_mac("omarchy", "other-id", Some("mac-id"));
+    let (agents, _shutdown) = spawn(&[Arc::clone(&mine), Arc::clone(&other)]);
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    let rows = agents.snapshot();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].agent.host, "omarchy");
+    // The left-out label is not read again, and the local id is read once for both.
+    assert_eq!(mine.calls(), 1);
+    assert_eq!(
+        mine.local_calls.load(Ordering::SeqCst) + other.local_calls.load(Ordering::SeqCst),
+        1
+    );
+    let lines: Vec<_> = host_lines(&logs)
+        .into_iter()
+        .filter(|line| line.contains("local_host"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].trim_start().starts_with("WARN"), "{lines:?}");
+    assert!(lines[0].contains("host=loopback"), "{lines:?}");
+    assert!(lines[0].contains(r#"state="left_out""#), "{lines:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_local_read_leaves_out_nothing_and_logs_nothing() {
+    let logs = CapturedLogs::start();
+    let first = FakeHost::on_this_mac("omarchy", "id-a", None);
+    let second = FakeHost::on_this_mac("nas", "id-b", None);
+    let (agents, _shutdown) = spawn(&[Arc::clone(&first), Arc::clone(&second)]);
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    assert_eq!(agents.snapshot().len(), 2);
+    assert!(first.calls() >= 5);
+    assert_eq!(
+        first.local_calls.load(Ordering::SeqCst) + second.local_calls.load(Ordering::SeqCst),
+        1
+    );
+    assert!(
+        host_lines(&logs)
+            .iter()
+            .all(|line| !line.contains("left_out")),
+        "{:?}",
+        host_lines(&logs)
+    );
 }

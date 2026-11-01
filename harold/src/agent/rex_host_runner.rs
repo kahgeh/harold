@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::domain::ObservedAgentState;
 use super::rex::RexError;
@@ -36,6 +36,8 @@ pub(crate) trait HostSource: Send + Sync {
     fn icon(&self) -> String;
     /// Whether Rex knows the label. `None` when Harold cannot tell.
     fn listed(&self) -> Option<bool>;
+    /// The `host_id` of the Rex server on this Mac. `None` when the read fails. It blocks.
+    fn local_host_id(&self) -> Option<String>;
 }
 
 impl HostSource for RexHostInventory {
@@ -53,6 +55,10 @@ impl HostSource for RexHostInventory {
 
     fn listed(&self) -> Option<bool> {
         self.listed()
+    }
+
+    fn local_host_id(&self) -> Option<String> {
+        self.local_host_id()
     }
 }
 
@@ -103,7 +109,24 @@ pub(crate) enum HostReport {
 enum Logged {
     Reachable,
     Unreachable(Unreached),
-    LeftOut,
+    /// Left out, with the reason that the log shows.
+    LeftOut(&'static str),
+}
+
+/// The reason to leave out a label whose server has the `host_id` of an earlier label.
+const DUPLICATE_HOST: &str = "duplicate_host";
+/// The reason to leave out a label whose server is the Rex server on this Mac.
+const LOCAL_HOST: &str = "local_host";
+
+/// What Harold knows about the `host_id` of the Rex server on this Mac.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum LocalId {
+    #[default]
+    Unread,
+    /// A host task reads it now.
+    Reading,
+    /// The read is over. `None` when it failed: it is not tried again.
+    Read(Option<String>),
 }
 
 #[derive(Default)]
@@ -122,6 +145,7 @@ struct Host {
 struct Inner {
     labels: Vec<String>,
     hosts: Mutex<HashMap<String, Host>>,
+    local: Mutex<LocalId>,
     version: watch::Sender<u64>,
 }
 
@@ -130,6 +154,7 @@ impl Default for Inner {
         Self {
             labels: Vec::new(),
             hosts: Mutex::new(HashMap::new()),
+            local: Mutex::new(LocalId::default()),
             version: watch::channel(0).0,
         }
     }
@@ -167,6 +192,34 @@ impl HostAgents {
             .hosts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn local_lock(&self) -> std::sync::MutexGuard<'_, LocalId> {
+        self.inner
+            .local
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the caller must read the local `host_id`. True for the first caller only.
+    fn begin_local_read(&self) -> bool {
+        let mut local = self.local_lock();
+        if *local != LocalId::Unread {
+            return false;
+        }
+        *local = LocalId::Reading;
+        true
+    }
+
+    fn finish_local_read(&self, id: Option<String>) {
+        *self.local_lock() = LocalId::Read(id);
+    }
+
+    fn local_id(&self) -> Option<String> {
+        match &*self.local_lock() {
+            LocalId::Read(id) => id.clone(),
+            _ => None,
+        }
     }
 
     fn is_left_out(&self, label: &str) -> bool {
@@ -222,7 +275,7 @@ impl HostAgents {
                     log_change(label, host, Logged::Unreachable(reason));
                 }
             }
-            leave_out_duplicates(&self.inner.labels, &mut hosts);
+            leave_out_duplicates(&self.inner.labels, &mut hosts, self.local_id().as_deref());
             rows(&self.inner.labels, &hosts) != before
         };
         if changed {
@@ -299,8 +352,9 @@ fn rows(labels: &[String], hosts: &HashMap<String, Host>) -> Vec<HostAgentRow> {
         .collect()
 }
 
-/// Leaves out a later label whose `host_id` an earlier label in `rex_hosts` has too.
-fn leave_out_duplicates(labels: &[String], hosts: &mut HashMap<String, Host>) {
+/// Leaves out a label whose server is the Rex server on this Mac, and a later label whose
+/// `host_id` an earlier label in `rex_hosts` has too.
+fn leave_out_duplicates(labels: &[String], hosts: &mut HashMap<String, Host>, local: Option<&str>) {
     let mut seen_ids = HashSet::new();
     for label in labels {
         let Some(host) = hosts.get_mut(label) else {
@@ -309,12 +363,16 @@ fn leave_out_duplicates(labels: &[String], hosts: &mut HashMap<String, Host>) {
         let Some(host_id) = host.host_id.clone() else {
             continue;
         };
-        if seen_ids.insert(host_id) {
+        let reason = if local == Some(host_id.as_str()) {
+            LOCAL_HOST
+        } else if seen_ids.insert(host_id) {
             continue;
-        }
+        } else {
+            DUPLICATE_HOST
+        };
         if !host.left_out {
             host.left_out = true;
-            log_change(label, host, Logged::LeftOut);
+            log_change(label, host, Logged::LeftOut(reason));
         }
     }
 }
@@ -333,10 +391,17 @@ fn log_change(label: &str, host: &mut Host, next: Logged) {
             reason = reason.reason(),
             "agent monitor host"
         ),
-        Logged::LeftOut => info!(
+        // A label that leads to this Mac is a mistake in the settings: it is a warning.
+        Logged::LeftOut(LOCAL_HOST) => warn!(
             host = %label,
             state = "left_out",
-            reason = "duplicate_host",
+            reason = LOCAL_HOST,
+            "agent monitor host"
+        ),
+        Logged::LeftOut(reason) => info!(
+            host = %label,
+            state = "left_out",
+            reason,
             "agent monitor host"
         ),
     }
@@ -435,6 +500,25 @@ async fn run_host(
                 }
             },
         };
+        let seen_host_id = match &report {
+            HostReport::Reached { host_id, .. } | HostReport::Unreached { host_id, .. } => {
+                host_id.is_some()
+            }
+        };
+        // The first good read of any host also reads the local `host_id`, once.
+        if seen_host_id && agents.begin_local_read() {
+            let reader = Arc::clone(&source);
+            let signal = stop.0.clone();
+            let read = tokio::task::spawn_blocking(move || {
+                run_stoppable(signal, || reader.local_host_id())
+            });
+            let id = tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                result = read => result.ok().flatten(),
+            };
+            agents.finish_local_read(id);
+        }
         failures = match report {
             HostReport::Reached { .. } => 0,
             HostReport::Unreached { .. } => failures.saturating_add(1),

@@ -5991,6 +5991,10 @@ impl super::rex_host_runner::HostSource for StuckHost {
     fn listed(&self) -> Option<bool> {
         None
     }
+
+    fn local_host_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Lets the stuck read go when the test ends, so the runtime can stop.

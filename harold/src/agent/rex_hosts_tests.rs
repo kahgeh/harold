@@ -366,3 +366,53 @@ fn the_host_list_tells_whether_rex_knows_the_label() {
     fake.remove_hosts();
     assert_eq!(fake.inventory("omarchy", None, clock(0)).listed(), None);
 }
+
+fn whoami_calls(fake: &Fake) -> usize {
+    fake.calls()
+        .iter()
+        .filter(|call| call.contains("whoami"))
+        .count()
+}
+
+#[test]
+fn a_failed_whoami_is_tried_again_only_after_30_seconds() {
+    let fake = Fake::new("whoami-retry");
+    std::fs::remove_file(fake.dir.join("whoami.json")).unwrap();
+    let time = clock(1_000_000);
+    let inventory = fake.inventory("omarchy", None, Arc::clone(&time));
+    // The listing works, so each scan runs: the scans are 1 second apart for 95 seconds.
+    for _ in 0..95 {
+        let scan = inventory.scan();
+        assert_eq!(scan.outcome, Ok(()));
+        assert_eq!(scan.host_id, None);
+        time.fetch_add(1_000, Ordering::SeqCst);
+    }
+    // Tries at 0, 30, 60 and 90 seconds.
+    assert_eq!(whoami_calls(&fake), 4);
+}
+
+#[test]
+fn a_good_whoami_is_kept_and_not_called_again() {
+    let fake = Fake::new("whoami-kept");
+    let time = clock(0);
+    let inventory = fake.inventory("omarchy", None, Arc::clone(&time));
+    for _ in 0..3 {
+        assert_eq!(inventory.scan().host_id.as_deref(), Some("host-1"));
+        time.fetch_add(60_000, Ordering::SeqCst);
+    }
+    assert_eq!(whoami_calls(&fake), 1);
+}
+
+#[test]
+fn the_local_host_id_comes_from_whoami_with_no_server_flag() {
+    let fake = Fake::new("whoami-local");
+    fake.put("whoami.json", r#"{"host_id":"mac-id"}"#);
+    let inventory = fake.inventory("omarchy", None, clock(0));
+    assert_eq!(inventory.local_host_id().as_deref(), Some("mac-id"));
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(!calls[0].contains("-S"), "{calls:?}");
+    assert!(calls[0].contains("whoami --json"), "{calls:?}");
+    std::fs::remove_file(fake.dir.join("whoami.json")).unwrap();
+    assert_eq!(inventory.local_host_id(), None);
+}

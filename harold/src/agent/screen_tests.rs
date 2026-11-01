@@ -238,13 +238,13 @@ impl CommandRunner for FakeRunner {
 }
 
 #[test]
-fn capture_uses_only_the_current_grid_with_literal_pane_argument() {
+fn capture_uses_only_the_current_grid_with_the_pane_id_as_one_argument() {
     let runner = FakeRunner::output(true, "Ready\n› Review tests");
     let calls = Arc::clone(&runner.calls);
     let screen = TmuxVisibleScreen::with_runner(runner, || 99);
-    let hostile_pane_id = "%7";
+    let pane_id = "%7";
 
-    let observation = screen.observe(&pane(hostile_pane_id), &provider()).unwrap();
+    let observation = screen.observe(&pane(pane_id), &provider()).unwrap();
 
     assert_eq!(observation.observed_at_ms, 99);
     assert_eq!(observation.state, Some(ObservedAgentState::Idle));
@@ -259,7 +259,7 @@ fn capture_uses_only_the_current_grid_with_literal_pane_argument() {
                 "-S".to_string(),
                 "0".to_string(),
                 "-t".to_string(),
-                hostile_pane_id.to_string(),
+                pane_id.to_string(),
             ],
         )]
     );
@@ -338,7 +338,7 @@ fn failed_pane_check_is_capture_failed() {
 
 #[test]
 fn capture_of_an_invalid_pane_id_is_refused_before_any_tmux_call() {
-    let runner = FakeRunner::output(false, "").then_output(true, "");
+    let runner = FakeRunner::output(true, "");
     let calls = Arc::clone(&runner.calls);
     let screen = TmuxVisibleScreen::with_runner(runner, || 99);
 
@@ -346,7 +346,7 @@ fn capture_of_an_invalid_pane_id_is_refused_before_any_tmux_call() {
         screen.observe(&pane("%7; x"), &provider()),
         Err(ScreenError::CaptureFailed)
     );
-    assert_eq!(calls.lock().unwrap().len(), 0);
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[test]

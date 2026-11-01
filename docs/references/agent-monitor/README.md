@@ -376,7 +376,7 @@ The route runs before any lock, log line, `tmux` call or `rex` call. `rex::find_
 
 ### When a host is offline
 
-The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. One read of a host has a limit of 10 seconds. After 3 failed reads, Harold tries that host only every 30 seconds. While a host is offline, its agents stay in the control-tower with the state `unknown`. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one.
+The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. One read of a host has a limit of 10 seconds. After 3 failed reads, Harold tries that host only every 30 seconds. While a host is offline, its agents stay in the control-tower with the state `unknown`. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one. Harold also reads the `host_id` of this Mac's own Rex server once, with `rex whoami --json`. A label that has this `host_id` is left out and logs a warning. If that read fails, Harold leaves out no label for this reason. Harold calls `whoami --json` on a host again only 30 seconds after a failed call, so an older Rex without it gets few calls.
 
 ### Grouping
 
@@ -482,7 +482,7 @@ A retry that works logs one info line, `agent monitor read retried`, with `compo
 | `agent recap read failed` (info) | `pane_id`, `provider_id`, `reason` (`not_found`, `permission` or `io`); logged once for each path and reason |
 | `agent recap read slow` (warn) | `pane_id`, `elapsed_ms`, `bytes`; logged when a transcript read takes over 200 ms |
 | `agent monitor degraded` | `component`, `reason`, and for the screen `pane_id` and `elapsed_ms` |
-| `agent monitor host` (info) | `host`, the label; `state` (`reachable`, `unreachable` or `left_out`); `reason`, on `unreachable` (`timeout`, `failed` or `unknown_host`) and on `left_out` (`duplicate_host`). It is logged once for each change. |
+| `agent monitor host` (info; warn for `local_host`) | `host`, the label; `state` (`reachable`, `unreachable` or `left_out`); `reason`, on `unreachable` (`timeout`, `failed` or `unknown_host`) and on `left_out` (`duplicate_host` or `local_host`). `duplicate_host` means an earlier label leads to the same server. `local_host` means the label leads to the Rex server on this Mac, so its agents would show twice. It is logged once for each change. |
 | `agent status stream` (info) | `session.id`; `event` (`started`, `ended` or `call_failed`); `reason`, on `ended` (`exit`, `read_error` or `rex_absent`) and on `call_failed` (`timeout`, `failed`, `malformed` or `rex_absent`); `records`, the number of records the stream holds (0 on `started`, the number dropped on `ended`, the number kept on `call_failed`). `started` has no `reason`. `call_failed` is logged once for each block until a call works. The line never holds a record's `msg`. |
 
 A worker that does not stop causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
