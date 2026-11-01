@@ -439,9 +439,17 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
 
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
-    let detail_lines = app
-        .selected_row()
-        .map(|agent| detail_lines(agent, now_ms, detail.width.saturating_sub(2)));
+    let inner_width = detail.width.saturating_sub(2);
+    // When the panel does not fit with the current step, it leaves the step lines out and
+    // keeps the rest. The row still shows the step. The panel hides only when it does not fit
+    // either way, so a step that comes and goes does not make the panel come and go.
+    let detail_lines = app.selected_row().map(|agent| {
+        let with_step = detail_lines(agent, now_ms, inner_width, true);
+        if detail_fits(detail, Some(&with_step)) {
+            return with_step;
+        }
+        detail_lines(agent, now_ms, inner_width, false)
+    });
     if !detail_fits(detail, detail_lines.as_deref()) {
         render_inventory(frame, area, app, now_ms);
         return;
@@ -1439,6 +1447,7 @@ fn detail_lines<'a>(
     agent: &'a crate::app::AgentRow,
     now_ms: i64,
     inner_width: u16,
+    with_step: bool,
 ) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::styled(
@@ -1477,7 +1486,7 @@ fn detail_lines<'a>(
     if let Some(step) = agent
         .current_step
         .as_deref()
-        .filter(|step| !step.is_empty())
+        .filter(|step| with_step && !step.is_empty())
     {
         lines.push(Line::styled(
             "CURRENT STEP",
@@ -2075,6 +2084,9 @@ mod tests {
         for forbidden in ["EVIDENCE", "HOOK", "SCREEN"] {
             assert!(!content.contains(forbidden), "found {forbidden:?}");
         }
+        // The panel shows at this size: the column title and the panel title.
+        assert!(content.contains("SELECTED SIGNAL"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 2);
     }
 
     #[test]
@@ -3036,7 +3048,7 @@ mod tests {
             90_000,
         );
 
-        let lines = super::detail_lines(&agent, 100_000, 40);
+        let lines = super::detail_lines(&agent, 100_000, 40, true);
 
         for (line_index, span_index) in [(3, 1), (4, 1), (5, 1), (9, 0)] {
             assert!(
@@ -3222,7 +3234,37 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_that_does_not_fit_is_hidden_whole_even_with_a_step() {
+    fn a_panel_that_does_not_fit_with_the_step_leaves_out_the_step_lines_and_stays() {
+        for width in [120, 140] {
+            // At 28 rows the panel fits without the step lines and not with them.
+            let content = rendered(&step_app(Some("Running the tests")), width, 28, 100_000);
+
+            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert!(!content.contains("CURRENT STEP"), "width {width}");
+            assert!(!content.contains("Running the tests"), "width {width}");
+            assert!(!content.contains("CURRENT WORK"), "width {width}");
+            assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_panel_does_not_come_and_go_when_the_step_comes_and_goes_near_the_limit() {
+        for width in [120, 140] {
+            for height in 24..=34 {
+                let with = rendered(&step_app(Some("Running the tests")), width, height, 100_000);
+                let without = rendered(&step_app(None), width, height, 100_000);
+
+                assert_eq!(
+                    with.contains("SELECTED SIGNAL"),
+                    without.contains("SELECTED SIGNAL"),
+                    "width {width} height {height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_panel_that_does_not_fit_even_without_the_step_is_hidden_whole() {
         let content = rendered(&step_app(Some("Running the tests")), 140, 20, 100_000);
 
         assert!(!content.contains("SELECTED SIGNAL"));
@@ -3308,7 +3350,10 @@ mod tests {
     fn a_long_recap_never_hides_the_detail_panel() {
         let recap = "Goal: ship the recap to the control tower. ".repeat(8);
         assert!(recap.chars().count() > 300);
-        for (width, height) in [(140, 44), (120, 44)] {
+        // These are the smallest sizes where the whole panel shows, step lines included, with
+        // the cap of 4 lines. With no cap the panel hides at both sizes: it needs 40 rows at
+        // 140 columns and 43 rows at 120 columns, even with the step lines left out.
+        for (width, height) in [(140, 39), (120, 40)] {
             let mut app = recap_app(Some(recap.trim()), Some("Running the tests"));
             app.snapshot.rows[0].work_summary = Some("w".repeat(160));
             let content = rendered(&app, width, height, 100_000);
