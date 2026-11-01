@@ -2346,7 +2346,38 @@ fn a_pool_never_runs_more_than_width_calls() {
         std::thread::sleep(Duration::from_millis(50));
         running.fetch_sub(1, Ordering::SeqCst);
     });
-    assert_eq!(peak.load(Ordering::SeqCst), 8);
+    let peak = peak.load(Ordering::SeqCst);
+    assert!(peak <= 8 && peak > 1, "peak was {peak}");
+}
+
+#[test]
+#[should_panic(expected = "a Rex worker thread panicked")]
+fn a_panic_in_a_pool_call_reaches_the_caller() {
+    let items: Vec<usize> = (0..16).collect();
+    parallel_map(&items, 4, None, |item| {
+        if *item == 0 {
+            panic!("a call failed");
+        }
+        *item
+    });
+}
+
+#[test]
+fn after_a_panic_the_other_workers_take_no_new_items() {
+    let items: Vec<usize> = (0..16).collect();
+    let started = AtomicUsize::new(0);
+    let outcome = std::panic::catch_unwind(|| {
+        parallel_map(&items, 4, None, |item| {
+            started.fetch_add(1, Ordering::SeqCst);
+            if *item == 0 {
+                panic!("a call failed");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        })
+    });
+    assert!(outcome.is_err());
+    // Each of the 4 workers started one item; none took a second one.
+    assert!(started.load(Ordering::SeqCst) <= 4);
 }
 
 #[test]

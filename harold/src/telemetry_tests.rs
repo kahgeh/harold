@@ -1993,6 +1993,7 @@ const ATTRIBUTES: &[&str] = &[
     "multiplexer",
     "host",
     "operation",
+    "purpose",
     "provider_id",
     "first_audio_ms",
     "loaded",
