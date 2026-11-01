@@ -35,3 +35,9 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "summary_tests.rs"]
 mod summary_tests;
+
+pub(crate) mod pane_route;
+
+#[cfg(test)]
+#[path = "pane_route_tests.rs"]
+mod pane_route_tests;
