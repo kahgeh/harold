@@ -2757,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn control_tower_command_never_reads_path() {
+    fn control_tower_command_uses_only_the_given_folder() {
         let empty = tower_folder(false);
         let other = tower_folder(true);
         let error = control_tower_command(

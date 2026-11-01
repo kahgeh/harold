@@ -39,12 +39,7 @@ impl Fixture {
 
     fn run_program(&self, program: &std::path::Path, args: &[&str]) -> Output {
         let mut command = Command::new(program);
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("HAROLD") {
-                command.env_remove(name);
-            }
-        }
-        let child = command
+        let child = without_harold_variables(&mut command)
             .args(args)
             // The caller's own pane must not fill in a missing `--src-id`.
             .env_remove("REX_BLOCK")
@@ -838,11 +833,7 @@ impl Fixture {
     /// nor the user's tmux server.
     fn daemon_command(&self, launchd: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_harold"));
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("HAROLD") {
-                command.env_remove(name);
-            }
-        }
+        without_harold_variables(&mut command);
         if launchd {
             command.env("HAROLD_LAUNCHD", "1");
         }
@@ -1171,6 +1162,16 @@ fn a_bad_engine_or_idle_time_is_refused_by_the_install_check() {
     }
 }
 
+/// Remove every `HAROLD` variable the caller has, so the test sets its own.
+fn without_harold_variables(command: &mut Command) -> &mut Command {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("HAROLD") {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
 /// A fresh folder that holds a copy of the `harold` program, and the path of that copy.
 fn folder_with_harold() -> (PathBuf, PathBuf) {
     let folder = std::env::temp_dir().join(format!("harold-bundle-{}", uuid::Uuid::new_v4()));
@@ -1250,6 +1251,26 @@ fn start_control_tower_exits_with_the_program_exit_code() {
 }
 
 #[test]
+fn start_control_tower_through_a_link_uses_the_control_tower_beside_the_real_harold() {
+    let fixture = Fixture::new(VALID);
+    let (folder, harold) = folder_with_harold();
+    write_control_tower(&folder, PRINT_ARGUMENTS, true);
+    // The link sits in a folder with no control-tower.
+    let links = std::env::temp_dir().join(format!("harold-link-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&links).unwrap();
+    let link = links.join("harold");
+    std::os::unix::fs::symlink(&harold, &link).unwrap();
+    let output = fixture.run_program(&link, &["start-control-tower"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("--endpoint\n{}\n", grpc_endpoint(&fixture))
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+    std::fs::remove_dir_all(&links).unwrap();
+}
+
+#[test]
 fn start_control_tower_prints_one_line_when_the_program_is_missing() {
     let fixture = Fixture::new(VALID);
     let (folder, harold) = folder_with_harold();
@@ -1258,12 +1279,7 @@ fn start_control_tower_prints_one_line_when_the_program_is_missing() {
     std::fs::create_dir(&elsewhere).unwrap();
     write_control_tower(&elsewhere, PRINT_ARGUMENTS, true);
     let mut command = Command::new(&harold);
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("HAROLD") {
-            command.env_remove(name);
-        }
-    }
-    let child = command
+    let child = without_harold_variables(&mut command)
         .arg("start-control-tower")
         .env("PATH", path_with_first(&elsewhere))
         .env("HAROLD_CONFIG_DIR", &fixture.0)
