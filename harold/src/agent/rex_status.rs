@@ -389,6 +389,8 @@ struct Registry {
     streams: HashMap<String, Stream>,
     /// The session of each block, from the last `sync`.
     owners: HashMap<String, String>,
+    /// Set by `stop_all`. A later `sync` starts no stream.
+    closed: bool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -455,6 +457,9 @@ impl RexStatus {
     pub(crate) fn sync(&self, slots: &[RexBlockSlot]) {
         let now = (self.clock)();
         let mut registry = lock(&self.registry);
+        if registry.closed {
+            return;
+        }
         let mut sessions: Vec<(&str, Vec<String>)> = Vec::new();
         registry.owners.clear();
         for slot in slots {
@@ -585,13 +590,12 @@ impl RexStatus {
         Lookup::Stream(record)
     }
 
-    /// Kills and reaps every child.
+    /// Kills and reaps every child. A `sync` after this call starts no stream.
     pub(crate) fn stop_all(&self) {
-        let streams: Vec<Stream> = lock(&self.registry)
-            .streams
-            .drain()
-            .map(|(_, stream)| stream)
-            .collect();
+        let mut registry = lock(&self.registry);
+        registry.closed = true;
+        let streams: Vec<Stream> = registry.streams.drain().map(|(_, stream)| stream).collect();
+        drop(registry);
         let threads: Vec<_> = streams.into_iter().filter_map(Stream::stop).collect();
         for thread in threads {
             let _ = thread.join();

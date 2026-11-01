@@ -1194,6 +1194,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         },
         shutdown_rx.clone(),
     );
+    // Stops the `rex events` children on every exit path, an early `?` return too.
+    let status_guard = StatusStreamsGuard {
+        rex: cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex,
+    };
 
     let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
     if let Some(queue) = &telemetry_tasks.alert_queue {
@@ -1320,9 +1324,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     }
     telemetry_tasks.stopped().await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
-    if cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex {
-        agent::rex::status().stop_all();
-    }
+    drop(status_guard);
     if server_result.is_ok()
         && let Some(guard) = guard
     {
@@ -1467,6 +1469,19 @@ async fn start_telemetry_tasks(
         pod_stats,
         alerts,
         alert_queue,
+    }
+}
+
+/// Stops the Rex status streams when dropped. It never creates them.
+struct StatusStreamsGuard {
+    rex: bool,
+}
+
+impl Drop for StatusStreamsGuard {
+    fn drop(&mut self) {
+        if self.rex {
+            agent::rex::stop_started_status();
+        }
     }
 }
 

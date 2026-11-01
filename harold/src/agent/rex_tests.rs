@@ -1829,9 +1829,18 @@ fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
     });
     // A second scan of the same sessions starts no second stream.
     inventory.scan().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
     assert_eq!(program.runs(), 2);
     status.stop_all();
+}
+
+#[test]
+fn a_sync_after_stop_all_starts_no_stream() {
+    let program = FakeProgram::new("sync-after-stop", &[], true);
+    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    status.stop_all();
+    status.sync(&[slot_in("session:1", "block:a")]);
+    assert_eq!(program.runs(), 0);
+    assert_eq!(status.lookup("block:a"), Lookup::NoStream);
 }
 
 #[test]

@@ -1201,6 +1201,13 @@ pub(crate) fn status() -> Arc<RexStatus> {
     }))
 }
 
+/// Stops the status streams, if the daemon created them. It never creates them.
+pub(crate) fn stop_started_status() {
+    if let Some(status) = STATUS.get() {
+        status.stop_all();
+    }
+}
+
 #[path = "rex_status.rs"]
 mod status;
 #[allow(
