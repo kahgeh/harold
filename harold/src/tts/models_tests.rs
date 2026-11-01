@@ -55,7 +55,8 @@ async fn kokoro_with_a_record_that_holds_is_ready_and_nothing_is_asked_of_the_hu
     assert_eq!(listed[0].state, InfoState::Ready);
 }
 
-// macOS only: the fake Hub is asked to check the files of a Hugging Face snapshot that has no record.
+// macOS only: the fake Hub is asked to check the files of a Hugging Face snapshot that has no
+// record.
 // The release path asks no hub: with no record it downloads.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
@@ -99,7 +100,8 @@ async fn kokoros_record_from_the_speech_models_still_holds_after_the_upgrade_and
     assert!(scratch.folder().join(&name).exists());
 }
 
-// macOS only: this test checks the fake Hub's `check` and `download` calls. The Linux twin is `onnx_a_missing_kokoro_release_is_downloaded_and_logged_before_it_is_listed_ready`.
+// macOS only: this test checks the fake Hub's `check` and `download` calls. The Linux twin is
+// `onnx_a_missing_kokoro_release_is_downloaded_and_logged_before_it_is_listed_ready`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_ready() {
@@ -128,7 +130,8 @@ async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_r
     assert!(text.contains("bytes=100"), "{text}");
 }
 
-// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_until_the_release_is_downloaded_a_request_is_told_it_is_downloading`.
+// macOS only: this test checks a download through the fake Hub. The Linux twin is
+// `onnx_until_the_release_is_downloaded_a_request_is_told_it_is_downloading`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
@@ -206,7 +209,8 @@ async fn a_full_disk_fails_the_download_before_it_starts() {
     );
 }
 
-// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_on_the_hotspot_the_release_download_waits_until_a_call_starts_it`.
+// macOS only: this test checks a download through the fake Hub. The Linux twin is
+// `onnx_on_the_hotspot_the_release_download_waits_until_a_call_starts_it`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
@@ -242,7 +246,8 @@ async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
     );
 }
 
-// macOS only: this test checks a failed download through the fake Hub. The Linux twin is `onnx_a_call_tries_a_failed_release_download_again_unless_the_disk_was_full`.
+// macOS only: this test checks a failed download through the fake Hub. The Linux twin is
+// `onnx_a_call_tries_a_failed_release_download_again_unless_the_disk_was_full`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_call_tries_a_failed_download_again_unless_the_disk_was_full_or_it_is_not_allowed() {
@@ -725,7 +730,8 @@ async fn two_downloads_never_run_at_once() {
     assert_eq!(scratch.hub.most_running.load(Ordering::SeqCst), 1);
 }
 
-// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_a_release_download_waits_while_another_holds_the_download_slot`.
+// macOS only: this test checks a download through the fake Hub. The Linux twin is
+// `onnx_a_release_download_waits_while_another_holds_the_download_slot`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_download_waits_while_another_holds_the_machines_download_slot() {
@@ -1207,6 +1213,8 @@ async fn onnx_a_call_tries_a_failed_release_download_again_unless_the_disk_was_f
     registry.start_up();
     until(&registry, kokoro_failed).await;
     assert_eq!(registry.list()[0].reason, "disk_full");
+    // Room is back, so a wrong retry would reach the server.
+    scratch.host.free.store(u64::MAX, Ordering::SeqCst);
 
     registry.for_call();
     tokio::task::yield_now().await;
@@ -1228,6 +1236,8 @@ async fn onnx_a_release_download_waits_while_another_holds_the_download_slot() {
         tokio::task::yield_now().await;
     }
     assert_eq!(server.requests(), 0);
+    // Waiting for the slot, the pass has not set Downloading yet.
+    assert_eq!(registry.default_status(), DefaultStatus::Checking);
 
     drop(slot);
     until(&registry, kokoro_ready).await;
