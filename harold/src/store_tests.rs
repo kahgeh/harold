@@ -3170,7 +3170,11 @@ async fn a_stored_done_state_reads_as_done_with_its_paired_columns() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
     let conn = store.state.connect().unwrap();
-    for (pane, hook, screen) in [("%7", "'done'", "NULL"), ("%8", "NULL", "'done'")] {
+    for (pane, hook, screen) in [
+        ("%7", "'done'", "NULL"),
+        ("%8", "NULL", "'done'"),
+        ("%9", "NULL", "'done'"),
+    ] {
         conn.execute(&agent_pane_row_sql(pane, hook, screen, "unknown"), ())
             .await
             .unwrap();
@@ -3223,8 +3227,22 @@ async fn a_stored_done_state_reads_as_done_with_its_paired_columns() {
     assert_eq!(hook_row.hook_state, Some(ObservedAgentState::Done));
     assert!(hook_row.hook_observed_at_ms.is_some());
     assert_eq!(hook_row.screen_state, Some(ObservedAgentState::Working));
+    // The screen read at 200 ms falls inside the grace of the stored `done` hook state, so the
+    // hook state wins. Before `Done` existed the stored word read as no observation, so the
+    // screen state (Working) won.
+    assert_eq!(hook_row.effective_state, EffectiveAgentState::Done);
     let screen_row = pane("%8");
     assert_eq!(screen_row.hook_state, Some(ObservedAgentState::Idle));
+    assert_eq!(screen_row.effective_state, EffectiveAgentState::Idle);
+    // A hook report starts a new epoch for the screen reading, so it clears all three columns.
+    assert_eq!(screen_row.screen_state, None);
+    assert_eq!(screen_row.screen_classifier_id, None);
+    assert_eq!(screen_row.screen_observed_at_ms, None);
+    // A pane with a stored `done` screen state and no new event keeps the paired columns.
+    let kept = pane("%9");
+    assert_eq!(kept.screen_state, Some(ObservedAgentState::Done));
+    assert_eq!(kept.screen_classifier_id.as_deref(), Some("screen-v1"));
+    assert_eq!(kept.screen_observed_at_ms, Some(2));
 }
 
 #[test]
