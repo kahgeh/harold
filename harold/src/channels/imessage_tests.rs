@@ -230,10 +230,7 @@ impl std::io::Write for LogBuf {
 /// summary and the log text it wrote.
 #[cfg(unix)]
 fn summarise_logging(name: &str, stdout: &str, code: i32) -> (String, String) {
-    let cli = fake_cli(
-        name,
-        &format!("printf '%s' '{stdout}'\nexit {code}\n"),
-    );
+    let cli = fake_cli(name, &format!("printf '%s' '{stdout}'\nexit {code}\n"));
     let buf = LogBuf::default();
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
