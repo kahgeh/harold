@@ -158,3 +158,30 @@ async fn no_chief_and_no_agents_give_an_empty_document() {
     assert!(!facts.chief);
     assert!(facts.agents.is_empty() && facts.pods.is_empty());
 }
+
+#[tokio::test]
+async fn the_watch_facts_do_not_hold_the_current_step() {
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%3", 20, Some("LEAKCHECK-7f3a".into()));
+    let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
+    worker.work_summary = Some("Plain summary".into());
+    let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
+    let pods: Arc<dyn Pods> = Arc::new(FakePods::default());
+    let chief: Arc<dyn ChiefPane> = FakeChief::at(Some("%1"));
+    let facts = gather(
+        &sources(&agents, &pods, &chief),
+        1_800_000_000_000,
+        WatchEntry {
+            run: 1,
+            runs_left: 1,
+            previous_outcome: None,
+        },
+    )
+    .await;
+    assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(
+        !serde_json::to_string(&facts)
+            .unwrap()
+            .contains("LEAKCHECK-7f3a")
+    );
+}

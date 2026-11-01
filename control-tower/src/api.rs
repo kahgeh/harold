@@ -800,6 +800,7 @@ mod tests {
             state: state.into(),
             last_transition_at_ms: 2_000 + index as i64,
             work_summary: Some(format!("task {index}")),
+            current_step: None,
         })
         .collect();
 
@@ -1371,6 +1372,7 @@ mod tests {
             state: ProtoAgentState::Working.into(),
             last_transition_at_ms: 400,
             work_summary: Some("implement API".into()),
+            current_step: None,
         }
     }
 

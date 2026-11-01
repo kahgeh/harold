@@ -219,7 +219,6 @@ impl CurrentSteps {
     }
 
     /// The step of the block, only when the stored pid is `pid`.
-    #[allow(dead_code, reason = "the watch stream reads the steps in a later task")]
     pub(crate) fn get(&self, block_id: &str, pid: u32) -> Option<String> {
         let steps = self
             .inner
@@ -232,10 +231,6 @@ impl CurrentSteps {
             .map(|(_, step)| step.clone())
     }
 
-    #[allow(
-        dead_code,
-        reason = "the watch stream waits on the steps in a later task"
-    )]
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.version.subscribe()
     }
@@ -446,7 +441,6 @@ impl RexStatus {
         }
     }
 
-    #[allow(dead_code, reason = "the watch stream reads the steps in a later task")]
     pub(crate) fn steps(&self) -> CurrentSteps {
         self.shared.steps.clone()
     }

@@ -10,6 +10,7 @@ use super::agent::domain::{
     MonitorHealthProjection, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::agent::inventory::{AgentInventoryPort, InventoryError};
+use super::agent::rex::CurrentSteps;
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
@@ -92,6 +93,7 @@ where
             tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx,
             restart_reminder: None,
+            current_steps: crate::agent::rex::CurrentSteps::default(),
         },
         shutdown,
         task,
@@ -1036,7 +1038,7 @@ async fn overlapping_mute_requests_wait_for_the_one_in_progress() {
 #[test]
 fn snapshot_mapping_carries_the_harold_version() {
     assert_eq!(
-        map_agent_snapshot(empty_snapshot()).harold_version,
+        map_agent_snapshot(empty_snapshot(), &CurrentSteps::default()).harold_version,
         HAROLD_VERSION
     );
     // Tests build without HAROLD_RELEASE_VERSION.
@@ -1054,7 +1056,7 @@ fn an_unset_or_empty_release_version_is_source() {
 fn snapshot_mapping_carries_tts_muted() {
     let mut snapshot = empty_snapshot();
     snapshot.tts_muted = true;
-    assert!(map_agent_snapshot(snapshot).tts_muted);
+    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default()).tts_muted);
 }
 
 #[tokio::test]
@@ -1109,7 +1111,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
 fn snapshot_mapping_carries_messaging_paused() {
     let mut snapshot = empty_snapshot();
     snapshot.messaging_paused = true;
-    assert!(map_agent_snapshot(snapshot).messaging_paused);
+    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default()).messaging_paused);
 }
 
 #[tokio::test]
@@ -2316,4 +2318,193 @@ async fn the_log_trim_starts_only_when_launchd_started_harold() {
     assert!(super::start_log_trim(false, &shutdown_rx).is_none());
     let started = super::start_log_trim(true, &shutdown_rx).expect("trim starts under launchd");
     started.await.expect("trim stops with the shutdown signal");
+}
+
+/// The pane and agent pid of `populated_snapshot`.
+const STEP_PANE: &str = "%8";
+const STEP_PID: u32 = 82;
+
+fn step_of(snapshot: &super::harold::AgentStateSnapshot) -> Option<String> {
+    snapshot.panes[0].current_step.clone()
+}
+
+/// Runs `forward_agent_snapshots` over a hub and the steps, and gives the stream end.
+fn step_stream(
+    steps: &CurrentSteps,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+) {
+    let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    tokio::spawn(super::forward_agent_snapshots(
+        hub.subscribe(),
+        steps.clone(),
+        sender,
+        shutdown_rx,
+    ));
+    (receiver, shutdown, hub)
+}
+
+async fn next_item(
+    receiver: &mut tokio::sync::mpsc::Receiver<
+        Result<super::harold::AgentStateSnapshot, tonic::Status>,
+    >,
+) -> super::harold::AgentStateSnapshot {
+    tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("a stream item in time")
+        .expect("the stream is open")
+        .expect("an item, not an error")
+}
+
+async fn no_item(
+    receiver: &mut tokio::sync::mpsc::Receiver<
+        Result<super::harold::AgentStateSnapshot, tonic::Status>,
+    >,
+) {
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(300), receiver.recv()).await;
+    assert!(waited.is_err(), "no stream item is expected");
+}
+
+#[tokio::test]
+async fn a_working_record_gives_current_step_on_the_stream() {
+    let steps = CurrentSteps::default();
+    steps.set(STEP_PANE, STEP_PID, Some("Run the tests".into()));
+    let (mut receiver, _shutdown, _hub) = step_stream(&steps);
+    let item = next_item(&mut receiver).await;
+    assert_eq!(step_of(&item).as_deref(), Some("Run the tests"));
+    // A step of another agent pid in the same pane does not show.
+    steps.set(STEP_PANE, STEP_PID + 1, Some("Other agent".into()));
+    let item = next_item(&mut receiver).await;
+    assert_eq!(step_of(&item), None);
+}
+
+#[tokio::test]
+async fn a_blocked_record_gives_its_step() {
+    let steps = CurrentSteps::default();
+    steps.set(STEP_PANE, STEP_PID, Some("Allow Bash?".into()));
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
+}
+
+/// The writer drops the step of a done, idle or error record, and of a record with no
+/// `msg`. The tests `a_done_idle_and_error_record_write_no_step` and
+/// `done_idle_and_error_records_give_no_step` in `agent/rex_tests.rs` prove that.
+#[test]
+fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
+    let steps = CurrentSteps::default();
+    steps.set(STEP_PANE, STEP_PID, None);
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    assert_eq!(step_of(&mapped), None);
+    // A step that is removed goes from the next snapshot too.
+    steps.set(STEP_PANE, STEP_PID, Some("Run".into()));
+    steps.set(STEP_PANE, STEP_PID, None);
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    assert_eq!(step_of(&mapped), None);
+}
+
+#[tokio::test]
+async fn a_new_msg_sends_a_new_snapshot() {
+    let steps = CurrentSteps::default();
+    let (mut receiver, _shutdown, _hub) = step_stream(&steps);
+    assert_eq!(step_of(&next_item(&mut receiver).await), None);
+    steps.set(STEP_PANE, STEP_PID, Some("First".into()));
+    assert_eq!(
+        step_of(&next_item(&mut receiver).await).as_deref(),
+        Some("First")
+    );
+    // The same step again changes nothing.
+    steps.set(STEP_PANE, STEP_PID, Some("First".into()));
+    no_item(&mut receiver).await;
+    steps.set(STEP_PANE, STEP_PID, Some("Second".into()));
+    assert_eq!(
+        step_of(&next_item(&mut receiver).await).as_deref(),
+        Some("Second")
+    );
+}
+
+const LEAKCHECK: &str = "LEAKCHECK-7f3a";
+
+/// Opens a store and a service whose steps hold `LEAKCHECK`, and reads one stream item.
+/// The item holds the marker: that proves the marker is in play where the tests look.
+async fn watch_with_the_marker(
+    directory: &std::path::Path,
+) -> (Arc<store::HaroldStore>, HaroldService) {
+    let store = Arc::new(store::HaroldStore::open(directory).await.unwrap());
+    let (service, _shutdown, _task) = test_service(
+        Arc::clone(&store),
+        populated_snapshot(1, Some("Plain summary")),
+    );
+    service
+        .current_steps
+        .set(STEP_PANE, STEP_PID, Some(LEAKCHECK.into()));
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let item = stream.next().await.expect("an item").unwrap();
+    assert_eq!(step_of(&item).as_deref(), Some(LEAKCHECK));
+    assert!(!format!("{:?}", item.panes[0].work_summary).contains(LEAKCHECK));
+    (store, service)
+}
+
+#[tokio::test]
+async fn the_current_step_is_not_in_the_captured_logs() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let (_store, service) = watch_with_the_marker(&directory).await;
+    service
+        .current_steps
+        .set(STEP_PANE, STEP_PID, Some(format!("{LEAKCHECK} again")));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!logs.text().contains(LEAKCHECK), "{}", logs.text());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn the_current_step_is_not_in_the_exported_spans_or_log_records() {
+    crate::telemetry::test_support::install();
+    let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let (_store, _service) = watch_with_the_marker(&directory).await;
+    let spans = format!("{:?}", crate::telemetry::test_support::spans());
+    let records = format!("{:?}", crate::telemetry::test_support::logs());
+    assert!(!spans.contains(LEAKCHECK));
+    assert!(!records.contains(LEAKCHECK));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn the_current_step_is_not_in_the_stored_rows() {
+    let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let (store, service) = watch_with_the_marker(&directory).await;
+    super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
+        .await
+        .unwrap();
+    let stored = format!("{:?}", store.load_agent_snapshot().await.unwrap());
+    assert!(!stored.contains(LEAKCHECK));
+    let mut files = vec![directory.clone()];
+    while let Some(path) = files.pop() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes
+                    .windows(LEAKCHECK.len())
+                    .any(|w| w == LEAKCHECK.as_bytes()),
+                "{path:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&directory);
 }

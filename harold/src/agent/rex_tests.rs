@@ -1301,6 +1301,46 @@ fn working(pid: u32, msg: &str) -> Lookup {
 }
 
 #[test]
+fn a_done_idle_and_error_record_write_no_step() {
+    let program = FakeProgram::new("none", &[], true);
+    let api = Arc::new(fake_with_statuses(&[
+        ("block:d", reply("done", 1, "was busy")),
+        ("block:i", reply("idle", 2, "was busy")),
+        ("block:e", reply("error", 3, "was busy")),
+        (
+            "block:n",
+            json!({"records": [{"state": "working", "owner": {"pid": 4}}]}),
+        ),
+        ("block:w", reply("working", 5, "busy")),
+    ]));
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[
+        slot_in("session:1", "block:d"),
+        slot_in("session:1", "block:i"),
+        slot_in("session:1", "block:e"),
+        slot_in("session:1", "block:n"),
+        slot_in("session:1", "block:w"),
+    ]);
+    wait_until("every block has a record", || {
+        ["block:d", "block:i", "block:e", "block:n", "block:w"]
+            .iter()
+            .all(|block| {
+                status.lookup(block) != Lookup::NoStream
+                    && status.lookup(block) != Lookup::Stream(None)
+            })
+    });
+    assert_eq!(steps.get("block:w", 5).as_deref(), Some("busy"));
+    for (block, pid) in [
+        ("block:d", 1),
+        ("block:i", 2),
+        ("block:e", 3),
+        ("block:n", 4),
+    ] {
+        assert_eq!(steps.get(block, pid), None, "{block}");
+    }
+}
+
+#[test]
 fn a_stream_reads_the_first_record_of_each_block_then_a_call_replaces_it() {
     let program = FakeProgram::new("first", &[changed_line("block:a")], true);
     let api = fake_with_sequences(&[

@@ -242,3 +242,18 @@ fn find_chief_logs_the_pane_once_per_change() {
     assert!(text.contains("state=\"found\""), "{text}");
     assert!(!text.contains("state=\"ambiguous\""), "{text}");
 }
+
+/// The phone app reads panes only to find the chief: a pane id and a busy flag. No row
+/// holds a step, so the marker cannot show.
+#[test]
+fn the_phone_apps_pane_view_does_not_hold_the_current_step() {
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%1", 20, Some("LEAKCHECK-7f3a".into()));
+    let found = find_chief(
+        &chief_and_pod(EffectiveAgentState::Working),
+        Some(CHIEF),
+        None,
+    );
+    assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(!format!("{found:?}").contains("LEAKCHECK-7f3a"));
+}

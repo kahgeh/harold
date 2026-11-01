@@ -120,6 +120,9 @@ message AgentPaneState {
   AgentState state = 12;
   int64 last_transition_at_ms = 13;
   optional string work_summary = 14;
+  // 15 and 16 are kept free.
+  // The current step of a Rex agent, from its status record. It is in memory only.
+  optional string current_step = 17;
 }
 
 message AgentMonitorHealth {

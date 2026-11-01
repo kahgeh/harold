@@ -382,3 +382,18 @@ async fn activity_summary_real_claude_probe() {
         start.elapsed().as_millis()
     );
 }
+
+/// The input holds an instruction and a reply, nothing else. The destructure stops
+/// compiling if a field is added, so the current step cannot enter without this test.
+#[test]
+fn the_activity_summary_input_does_not_hold_the_current_step() {
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%2", 20, Some("LEAKCHECK-7f3a".into()));
+    let ActivitySummaryInput {
+        instruction,
+        assistant_reply,
+    } = input();
+    assert_eq!(steps.get("%2", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(!instruction.contains("LEAKCHECK-7f3a"));
+    assert!(assistant_reply.is_none());
+}

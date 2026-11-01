@@ -73,6 +73,8 @@ struct HaroldService {
     shutdown: watch::Receiver<()>,
     /// Told of each turn end once it is stored. `None` when `[restart_reminder]` is off.
     restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
+    /// The current steps from the Rex status records. Empty for tmux.
+    current_steps: agent::rex::CurrentSteps,
 }
 
 /// The provider id of Claude Code panes.
@@ -85,6 +87,7 @@ fn harold_service(
     snapshots: agent::snapshot::AgentSnapshotHub,
     shutdown: watch::Receiver<()>,
     restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
+    current_steps: agent::rex::CurrentSteps,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -94,6 +97,7 @@ fn harold_service(
         tts_switch: tokio::sync::Mutex::new(None),
         shutdown,
         restart_reminder,
+        current_steps,
     }
 }
 
@@ -364,7 +368,8 @@ impl Harold for HaroldService {
         let snapshots = self.snapshots.subscribe();
         let shutdown = self.shutdown.clone();
         let (sender, receiver) = mpsc::channel(1);
-        tokio::spawn(forward_agent_snapshots(snapshots, sender, shutdown));
+        let steps = self.current_steps.clone();
+        tokio::spawn(forward_agent_snapshots(snapshots, steps, sender, shutdown));
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
@@ -538,6 +543,7 @@ fn call_response(status: &voice_input::CallStatus) -> CallResponse {
 
 async fn forward_agent_snapshots(
     mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
+    steps: agent::rex::CurrentSteps,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -545,7 +551,9 @@ async fn forward_agent_snapshots(
         return;
     }
 
-    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone());
+    let mut step_versions = steps.subscribe();
+    step_versions.borrow_and_update();
+    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps);
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }
@@ -559,7 +567,16 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow_and_update().clone());
+                let snapshot = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps);
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = step_versions.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -580,7 +597,10 @@ async fn send_agent_snapshot(
     }
 }
 
-fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnapshot {
+fn map_agent_snapshot(
+    snapshot: agent::domain::AgentSnapshot,
+    steps: &agent::rex::CurrentSteps,
+) -> AgentStateSnapshot {
     AgentStateSnapshot {
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
@@ -606,6 +626,7 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
             .into_iter()
             .map(|projection| {
                 let pane = projection.pane;
+                let current_step = steps.get(&pane.incarnation.pane_id, pane.incarnation.agent_pid);
                 AgentPaneState {
                     pane_id: pane.incarnation.pane_id,
                     tmux_target: pane.tmux_target,
@@ -625,6 +646,7 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
                     },
                     last_transition_at_ms: projection.last_transition_at_ms,
                     work_summary: projection.work_summary,
+                    current_step,
                 }
             })
             .collect(),
@@ -1275,12 +1297,19 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             data_folder,
         )) as Arc<dyn restart_reminder::TurnEnds>
     });
+    // Only Rex has status records. tmux never creates the shared status.
+    let current_steps = if cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex {
+        agent::rex::status().steps()
+    } else {
+        agent::rex::CurrentSteps::default()
+    };
     let service = harold_service(
         monitor,
         Arc::clone(&store),
         snapshots,
         shutdown_rx.clone(),
         restart_reminder,
+        current_steps,
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
