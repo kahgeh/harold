@@ -575,13 +575,19 @@ fn list_slots(api: &dyn RexApi) -> Result<Vec<RexBlockSlot>, RexError> {
 }
 
 /// The session that holds the block: the last scan knows it, and a new listing finds it.
-pub(crate) fn session_of(api: &dyn RexApi, block_id: &str) -> Result<String, RexError> {
+/// `Ok(None)` means a listing that succeeded does not hold the block.
+pub(crate) fn find_session(api: &dyn RexApi, block_id: &str) -> Result<Option<String>, RexError> {
     if let Some(session) = directory_get(block_id) {
-        return Ok(session);
+        return Ok(Some(session));
     }
     let slots = list_slots(api)?;
     directory_set(&slots);
-    directory_get(block_id).ok_or(RexError::Failed)
+    Ok(directory_get(block_id))
+}
+
+/// The session that holds the block, or `RexError::Failed` when no listing holds it.
+pub(crate) fn session_of(api: &dyn RexApi, block_id: &str) -> Result<String, RexError> {
+    find_session(api, block_id)?.ok_or(RexError::Failed)
 }
 
 /// Whether the block is gone: a fresh listing succeeds and does not hold it.
@@ -771,8 +777,17 @@ impl AgentInventoryPort for RexAgentInventory {
     /// the same agent pid with the same start time is found there.
     fn is_current(&self, incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
         let block_id = incarnation.pane_id.as_str();
-        let session_id = session_of(&*self.api, block_id)?;
-        let process = self.api.process(&session_id, block_id)?;
+        if !valid_rex_pane_id(block_id) {
+            return Ok(false);
+        }
+        let Some(session_id) = find_session(&*self.api, block_id)? else {
+            return Ok(false);
+        };
+        let process = match self.api.process(&session_id, block_id) {
+            Ok(process) => process,
+            Err(_) if block_is_gone(&*self.api, block_id) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
         let Some((agent, _)) = find_agent(&process, &self.settings) else {
             return Ok(false);
         };

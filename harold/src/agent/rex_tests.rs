@@ -377,6 +377,85 @@ fn is_current_passes_for_the_same_pid_and_start_time_in_ancestors_and_fails_othe
     assert!(!inventory.is_current(&incarnation).unwrap());
 }
 
+fn incarnation_for(inventory: &RexAgentInventory, block: &str) -> AgentIncarnation {
+    let mut incarnation = inventory.scan().unwrap()[0].incarnation.clone();
+    incarnation.pane_id = block.to_string();
+    incarnation
+}
+
+#[test]
+fn is_current_answers_false_for_a_tmux_pane_id_without_a_rex_call() {
+    let mut api = fake(&[("block:ic1", Ok(claude_process()))]);
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake(&[("block:ic1", Ok(claude_process()))])),
+        settings(),
+    );
+    let incarnation = incarnation_for(&inventory, "%2");
+    api.list_error = Some(RexError::Absent);
+    let inventory = RexAgentInventory::new(Arc::new(api), settings());
+    assert_eq!(inventory.is_current(&incarnation), Ok(false));
+}
+
+#[test]
+fn is_current_answers_false_for_a_block_a_successful_listing_does_not_hold() {
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake(&[("block:ic2", Ok(claude_process()))])),
+        settings(),
+    );
+    let incarnation = incarnation_for(&inventory, "block:ic2gone");
+    assert_eq!(inventory.is_current(&incarnation), Ok(false));
+}
+
+#[test]
+fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
+    let first = RexAgentInventory::new(
+        Arc::new(fake(&[("block:ic3", Ok(claude_process()))])),
+        settings(),
+    );
+    let incarnation = incarnation_for(&first, "block:ic3");
+    // The listing no longer holds the block, and its process call fails.
+    let mut api = fake(&[("block:ic3other", Ok(claude_process()))]);
+    api.processes
+        .lock()
+        .unwrap()
+        .insert("block:ic3".into(), Err(RexError::Failed));
+    let inventory = RexAgentInventory::new(Arc::new(api), settings());
+    assert_eq!(inventory.is_current(&incarnation), Ok(false));
+}
+
+#[test]
+fn is_current_stays_an_error_when_the_listing_fails() {
+    for (error, expected) in [
+        (RexError::Failed, InventoryError::RexFailed),
+        (RexError::Timeout, InventoryError::RexTimeout),
+    ] {
+        let first = RexAgentInventory::new(
+            Arc::new(fake(&[("block:ic4", Ok(claude_process()))])),
+            settings(),
+        );
+        let incarnation = incarnation_for(&first, "block:ic4unknown");
+        let mut api = fake(&[]);
+        api.list_error = Some(error);
+        let inventory = RexAgentInventory::new(Arc::new(api), settings());
+        assert_eq!(inventory.is_current(&incarnation), Err(expected));
+    }
+}
+
+#[test]
+fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() {
+    let api = Arc::new(fake(&[("block:ic5", Ok(claude_process()))]));
+    let inventory = RexAgentInventory::new(api.clone(), settings());
+    let incarnation = incarnation_for(&inventory, "block:ic5");
+    api.processes
+        .lock()
+        .unwrap()
+        .insert("block:ic5".into(), Err(RexError::Failed));
+    assert_eq!(
+        inventory.is_current(&incarnation),
+        Err(InventoryError::RexFailed)
+    );
+}
+
 #[test]
 fn a_failed_listing_or_an_absent_rex_fails_the_scan() {
     for (error, expected) in [
