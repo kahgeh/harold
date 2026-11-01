@@ -176,11 +176,29 @@ Each port has one implementation for each multiplexer:
 | `PaneCapturePort`, `VisibleScreenPort` | `TmuxPaneCapture`, `TmuxVisibleScreen` (`tmux-visible-v1`): `tmux capture-pane` | `RexPaneCapture`, `RexVisibleScreen` (`rex-visible-v1`): a tail read with the block methods `format` and `blob_read` |
 | `Ports` typing steps | `tmux send-keys` | a paste event (`block.event`) and `rex send-key` |
 
-At start, Harold builds the inventory and the screen reader for the chosen multiplexer. A typing step acts by the form of the pane id it gets. The two forms are `%47` for a tmux pane and `block:<id>` for a Rex block. A pane id of the other form is refused. Both multiplexers show the pane label `<session>:<window>.<pane>`, and Harold stores it in `tmux_target`.
+At start, Harold builds the inventory and the screen reader for the chosen multiplexer. A typing step acts by the form of the pane id it gets. The two forms are `%47` for a tmux pane and `block:<id>` for a Rex block. A pane id of the other form is refused (a third form, for agents on Rex hosts, is below). Both multiplexers show the pane label `<session>:<window>.<pane>`, and Harold stores it in `tmux_target`.
 
 With Rex, the program status record of a block is a fourth source of evidence. Harold keeps one `rex events` child process for each Rex session. An event only triggers a `program_status` call for the block, and the answer of the call is the record. A record of the agent's pid gives a state with no screen read. Without a usable record, Harold reads the screen. The record's `msg` is the agent's current step, which goes only to the control-tower. [ADR 0024](../adr/0024-agents-have-six-states-and-harold-takes-them-from-the-terminal-when-it-reports-them.md) gives the decision.
 
 Harold never starts a Rex server. A Rex call that fails makes the listing fail, and the snapshot keeps its panes. The code is in `harold/src/agent/rex.rs`.
+
+### Rex hosts and the pane id forms
+
+With `multiplexer = "rex"`, Harold can also list the agents on other machines. Each machine is a **Rex host**: another Rex server that this Mac's Rex knows by a label, such as `omarchy`. The setting `[agent_monitor] rex_hosts` names the labels. Harold reaches a host with `rex -S <label>` and only reads: it types nothing there, and it reads no screen and no transcript there. It keeps these agents in memory, outside the agent snapshot, the reducer and the store.
+
+A pane id has three forms:
+
+| Where the pane is | Form | Example |
+|---|---|---|
+| This Mac, tmux | `%<n>` | `%47` |
+| This Mac, Rex | `block:<id>` | `block:01a1955f-74fd-7e5f-b71b-99ed90790ae0` |
+| A Rex host | `rex:<label>/block:<id>` | `rex:omarchy/block:01a19080-9102-7989-944c-5dcb46fb894c` |
+
+The first two forms are the **local forms**. They do not change, and a bare `block:<id>` always means this Mac. The third form is the **host pane id**. It holds the label and not the host's `host_id`, because Harold knows the label at load, `rex -S` takes a label, and a reader can read it.
+
+Every writer takes only a local form. A writer is code that sends a pane id to the Mac's tmux or Rex: phone replies, timed prompts, alerts, the chief's typing, screen reads and the control-tower's focus. All writers call one function first, `rex::route_pane(pane_id)`. It decides by the shape of the id alone. It returns Rex for a valid `block:<id>`, tmux for a valid `%<n>`, and a refusal for every other id. A host pane id gives the reason `on_rex_host`, and any other id gives `invalid_pane_id`. The route runs before any lock, log line, `tmux` call or `rex` call. The Rex layer checks again: `rex::find_session` returns no session for an id that is not a valid `block:<id>`.
+
+The daemon's entry points apply the same rule. `turn_complete` drops a report whose pane id is not a local form, and `send_message_to_away_device` and `speak_line` refuse a host pane id as `src_id`. No host pane id enters the store, so no stored data changes.
 
 ### Follow one task
 

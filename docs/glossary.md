@@ -25,7 +25,12 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | multiplexer | The program that holds the panes an agent runs in: tmux or Rex. Harold works with one, the one `agent_monitor.multiplexer` names | "back end", "terminal" for it |
 | Rex | The Superlogical terminal multiplexer: a macOS app with a server. A Rex pane is a block, with an id such as `block:01a1…` | "Rex terminal" for the server |
 | `agent_monitor.multiplexer` | The setting that picks the multiplexer Harold works with, `"tmux"` (the default) or `"rex"`. Harold reads it at start | — |
-| pane, pane id | The tmux pane or the Rex block an agent runs in, and its id, such as `%47` or `block:01a1…` | "pane address", "target" |
+| pane, pane id | The tmux pane or the Rex block an agent runs in, and its id. The id has three forms: `%47` (tmux, this machine), `block:01a1…` (Rex, this machine) and `rex:omarchy/block:01a1…` (Rex, a Rex host; see host pane id). The first two are the local forms | "pane address", "target" |
+| Rex host | Another machine's Rex server that this Mac's Rex knows by a label, such as `omarchy`. Harold reads the agents of the hosts in `[agent_monitor] rex_hosts`, read-only. `rex hosts list` lists the hosts, and `rex -S <label>` reaches one | "node" |
+| agent on a Rex host | An agent in a Rex host's pane. Harold shows it in the control-tower and does nothing else with it. In the code: `RexHostAgent` | "remote agent" |
+| host pane id | The pane id of an agent on a Rex host, `rex:<label>/block:<id>`. No writer takes it | "remote id", "qualified id", "pane address" |
+| host icon | The icon name of a Rex host: the one set in `rex_host_marks`, else the one Rex keeps (`rex hosts edit --icon`), such as `server.rack` | "host logo", "host image" |
+| host marker | The glyph, emoji or label and dot that the control-tower's WHERE column shows before the session of an agent on a Rex host. `[control_tower] host_marker` picks the kind | "host badge", "icon prefix", "host tag" |
 | pane label | The text the agent list shows and a routing tag matches: `<session>:<window>.<pane>` | "target" |
 | INSERT mode | Claude Code's Vim editor mode in which keys type text into the input box | — |
 | NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |
@@ -53,7 +58,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | local stack | The services in `~/code/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |
 | export, export on, export off | Harold sending to the collector, set by `[telemetry] export`, `otlp_endpoint` and `otlp_http_endpoint`. Export is on by default; `export = false` sets it off, and then Harold also leaves out the page's tracing script and drops any browser span posted to it | "telemetry on/off" for export, "disabled", "enabled", "no address", "push" |
 | multiplexer call | One request that Harold makes to its multiplexer, today one run of the `rex` or `tmux` program. Harold counts each one in `harold.multiplexer.calls` and times it in `harold.multiplexer.call.duration` | "rex call" or "tmux call" for the general idea |
-| host | The machine whose multiplexer holds a pane. It can be another machine than the one Harold runs on. The metric attribute `host` is the empty string for Harold's own machine. Machine stats are always about Harold's own machine, not about a host | "server" for the machine, "node" |
+| host | The machine whose multiplexer holds a pane. It can be another machine than the one Harold runs on. The metric attribute `host` is the empty string for Harold's own machine. Machine stats are always about Harold's own machine, not about a host. For an agent on a Rex host, it is the label of that Rex host | "server" for the machine, "node" |
 | machine stats | The disk, memory, swap and CPU use that Harold reads on its own machine and sends to HyperDX | "system metrics" alone, "host metrics" |
 | normal range | For one machine, metric and local hour of the day, the use from 0 to the top that Harold computes from the same hour on the last 7 days | "baseline" (that is the pane's prompt fingerprints), "threshold" (that is HyperDX's fixed limit) |
 | hourly use | The mean of one machine stat for one local hour, kept for 14 days in the hourly use file, `data/machine-hourly-use.json` | "baseline", "history" (that is a pane's history capture, or a history note) |

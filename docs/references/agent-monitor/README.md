@@ -332,6 +332,67 @@ The shipped named defaults cover Codex, Claude, and OpenCode state markers. Code
 
 See [provider screen adapters](screen-adapters.md) for capture timing, incarnation baselines, prompt selection, and provider limitations.
 
+## Agents on Rex hosts
+
+Some agents run on another machine, in a pane of that machine's Rex server. This section describes how Harold shows them. Harold shows each one in the control-tower and does nothing else with it.
+
+### The setting
+
+The setting `[agent_monitor] rex_hosts` is a list of host labels. A label is a name that this Mac's Rex knows for another Rex server, such as `omarchy`. `rex hosts list` lists the labels. The shipped list is empty.
+
+- Each label has 1 to 32 letters, digits, `.` or `-`. A label that repeats is an error.
+- The list needs `multiplexer = "rex"`. With `multiplexer = "tmux"`, a list that is not empty stops Harold at start.
+- `[agent_monitor.rex_host_marks]` gives a host a mark: `"arch"`, `"linux"` or `"mac"`. It can name only a host that is in `rex_hosts`.
+- `[control_tower] host_marker` picks how the control-tower draws the mark: `"glyph"` (the default), `"emoji"` or `"text"`.
+
+### The pane id forms
+
+A pane id has three forms.
+
+| Where the pane is | Form | Example |
+| --- | --- | --- |
+| This Mac, tmux | `%<n>` | `%47` |
+| This Mac, Rex | `block:<id>` | `block:01a1955f-74fd-7e5f-b71b-99ed90790ae0` |
+| A Rex host | `rex:<label>/block:<id>` | `rex:omarchy/block:01a19080-9102-7989-944c-5dcb46fb894c` |
+
+The first two forms are the local forms, and they mean this Mac. The third form is the host pane id. The label in it is the exact value that Harold passes to `rex -S`.
+
+### Read-only
+
+Harold only reads on a Rex host. It types nothing there, and it reads no screen and no transcript there. It keeps the agents of the Rex hosts in memory. They are not in `AgentSnapshot`, the reducer or the store. A Harold restart, or a renamed label, starts their incarnations again.
+
+### The route that takes only local forms
+
+Every writer calls `rex::route_pane(pane_id)` before it acts. The route looks at the shape of the id and reads no map and no setting.
+
+| Pane id | Result |
+| --- | --- |
+| A valid `%<n>` | tmux |
+| A valid `block:<id>` | Rex |
+| A host pane id | Refused, with the reason `on_rex_host` |
+| Any other id | Refused, with the reason `invalid_pane_id` |
+
+The route runs before any lock, log line, `tmux` call or `rex` call. `rex::find_session` checks the id again and returns no session for an id that is not a valid `block:<id>`. The daemon's entry points also refuse a host pane id: `turn_complete` drops the report, and `send_message_to_away_device` and `speak_line` refuse it as `src_id`.
+
+### When a host is offline
+
+The Mac's own scan never waits for a Rex host. Each host has its own calls with a 2-second limit. After 3 failed listings, Harold tries that host only every 30 seconds. While a host is offline, its agents leave the control-tower.
+
+### Grouping
+
+The control-tower puts an agent on a Rex host in the group of the first word of its session name, as it does for every agent. A worker on omarchy and a worker on this Mac that belong to the same pod share one group. The [control-tower README](../../../control-tower/README.md#agents-on-other-rex-hosts) describes the WHERE column and the host marker.
+
+### What a worker on omarchy has before the Linux Harold
+
+Such a worker has its state and its current step in the control-tower, in the group of its pod. It has none of the following:
+
+- turn-end updates
+- questions on the user's phone
+- Harold's typing rules for the lines it receives
+- recaps
+
+The chief's tools carry its lines with `rex send` and `pod say`. Typing into a Rex host from Harold waits for a Harold on that host.
+
 ## Metrics
 
 The agent monitor sends eight metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
