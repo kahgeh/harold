@@ -1,27 +1,13 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::*;
+use crate::test_support::fake_program::{Language, write_fake_program};
 
 /// A generous limit for a child to start or be reaped; a passing test never waits for it.
 const EVENTUALLY: Duration = Duration::from_secs(10);
 
 struct Fixture(PathBuf);
-
-fn python_executable() -> &'static str {
-    static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PYTHON.get_or_init(|| {
-        // On macOS /usr/bin/python3 is a developer-tool launcher. Invoke the
-        // interpreter directly so fixture startup cannot depend on that wrapper.
-        let output = std::process::Command::new("/usr/bin/python3")
-            .args(["-c", "import sys; print(sys.executable)"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    })
-}
 
 impl Fixture {
     fn new(script: &str) -> Self {
@@ -29,16 +15,7 @@ impl Fixture {
             std::env::temp_dir().join(format!("harold-summary-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let fixture = Self(directory);
-        std::fs::write(
-            fixture.path("claude"),
-            format!("#!{}\n{script}\n", python_executable()),
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            fixture.path("claude"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        write_fake_program(&fixture.path("claude"), Language::Python, script);
         fixture
     }
 

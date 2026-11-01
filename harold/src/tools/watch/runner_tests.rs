@@ -1,6 +1,5 @@
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
+use crate::test_support::fake_program::{Language, write_fake_program};
 
 fn job(folder: &std::path::Path) -> ModelJob {
     ModelJob {
@@ -121,8 +120,7 @@ impl Temp {
 
     fn script(&self, name: &str, body: &str) -> String {
         let path = self.0.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_program(&path, Language::Shell, body);
         path.to_str().unwrap().to_string()
     }
 }

@@ -1,3 +1,7 @@
+// The same file as the unit tests use: it needs no other item of the crate.
+#[path = "../src/test_support/fake_program.rs"]
+mod fake_program;
+
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{
@@ -1180,6 +1184,9 @@ fn folder_with_harold() -> (PathBuf, PathBuf) {
     let folder = folder.canonicalize().unwrap();
     let harold = folder.join("harold");
     std::fs::copy(env!("CARGO_BIN_EXE_harold"), &harold).unwrap();
+    // The copy is a file this test just wrote. Another test thread can fork while it is open,
+    // and the start then fails with "Text file busy" until that child runs `exec`.
+    fake_program::probe_until_it_starts(&harold);
     (folder, harold)
 }
 
@@ -1187,12 +1194,15 @@ fn folder_with_harold() -> (PathBuf, PathBuf) {
 fn write_control_tower(folder: &std::path::Path, body: &str, executable: bool) {
     use std::os::unix::fs::PermissionsExt;
     let path = folder.join("control-tower");
-    std::fs::write(&path, body).unwrap();
-    let mode = if executable { 0o755 } else { 0o644 };
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    if executable {
+        fake_program::write_fake_program(&path, fake_program::Language::Shell, body);
+    } else {
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
 }
 
-const PRINT_ARGUMENTS: &str = "#!/bin/sh\nfor argument in \"$@\"; do echo \"$argument\"; done\n";
+const PRINT_ARGUMENTS: &str = "for argument in \"$@\"; do echo \"$argument\"; done\n";
 
 /// The caller's `PATH` with `first` put in front; the settings still need the rest of it.
 fn path_with_first(first: &std::path::Path) -> std::ffi::OsString {
@@ -1247,7 +1257,7 @@ fn start_control_tower_prefers_the_endpoint_the_user_gives() {
 fn start_control_tower_exits_with_the_program_exit_code() {
     let fixture = Fixture::new(VALID);
     let (folder, harold) = folder_with_harold();
-    write_control_tower(&folder, "#!/bin/sh\nexit 7\n", true);
+    write_control_tower(&folder, "exit 7", true);
     let output = fixture.run_program(&harold, &["start-control-tower"]);
     assert_eq!(output.status.code(), Some(7), "{output:?}");
     std::fs::remove_dir_all(&folder).unwrap();

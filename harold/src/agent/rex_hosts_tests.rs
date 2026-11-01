@@ -1,9 +1,9 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::settings::{AgentProviderSettings, AgentSettings, ScreenAdapter};
+use crate::test_support::fake_program::{Language, write_fake_program};
 
 use super::domain::{EffectiveAgentState, ObservedAgentState};
 use super::rex::RexError;
@@ -33,7 +33,7 @@ impl Fake {
         let dir = std::env::temp_dir().join(format!("rex-hosts-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = format!(
-            "#!/bin/sh\nD='{}'\necho \"$*\" >> \"$D/calls.log\"\ncase \"$*\" in\n\
+            "D='{}'\necho \"$*\" >> \"$D/calls.log\"\ncase \"$*\" in\n\
              *whoami*) cat \"$D/whoami.json\";;\n\
              *\" ls --json\"*) cat \"$D/ls.json\";;\n\
              *session.view*) cat \"$D/view.json\";;\n\
@@ -45,8 +45,7 @@ impl Fake {
             dir.display()
         );
         let path = dir.join("rex");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_program(&path, Language::Shell, &script);
         std::fs::write(dir.join("calls.log"), "").unwrap();
         let fake = Self { dir };
         fake.put("whoami.json", r#"{"host_id":"host-1"}"#);
