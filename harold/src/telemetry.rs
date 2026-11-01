@@ -1128,7 +1128,7 @@ impl RowSent {
 /// `typing_from`. The span continues the trace of the first of `traces`, the answers'
 /// `traceparent`s, and links the others. The prompt is recorded with its context, so the
 /// chief's turn joins the trace. With no usable trace, such as a line of answers from the
-/// dash, nothing is recorded and the turn is a root as before.
+/// control-tower, nothing is recorded and the turn is a root as before.
 pub(crate) fn answers_typed(pane_id: &str, traces: &[String], typing_from: OffsetDateTime) {
     let mut parents = traces
         .iter()

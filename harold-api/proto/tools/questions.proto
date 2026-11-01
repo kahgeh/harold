@@ -217,7 +217,7 @@ message TickStepRequest {
 message TickStepResponse {}
 
 // Replaces the saved picks of a waiting question at the version the
-// dash saw. The picks follow the revise rule: any picks so far, in decision
+// control-tower saw. The picks follow the revise rule: any picks so far, in decision
 // order, keys valid, a free pick with `text`. An empty list clears them.
 message SavePicksRequest {
   string id = 1;
