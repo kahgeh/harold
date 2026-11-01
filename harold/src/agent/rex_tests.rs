@@ -413,7 +413,7 @@ fn the_inventory_lists_agents_and_reads_a_start_time_once_per_pid() {
             )),
         ),
     ]));
-    let inventory = RexAgentInventory::new(api.clone(), settings());
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
     let first = inventory.scan().unwrap();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].tmux_target, "harold-main:1.1");
@@ -443,7 +443,7 @@ fn is_current_passes_for_the_same_pid_and_start_time_in_ancestors_and_fails_othe
         vec![proc(5, "claude", None), proc(1, "login", None)],
     );
     let api = Arc::new(fake(&[("block:a", Ok(in_tool))]));
-    let inventory = RexAgentInventory::new(api.clone(), settings());
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
     let observed = inventory.scan().unwrap();
     let incarnation = observed[0].incarnation.clone();
     assert!(inventory.is_current(&incarnation).unwrap());
@@ -475,10 +475,11 @@ fn is_current_answers_false_for_a_tmux_pane_id_without_a_rex_call() {
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic1", Ok(claude_process()))])),
         settings(),
+        inert_status(),
     );
     let incarnation = incarnation_for(&inventory, "%2");
     api.list_error = Some(RexError::Absent);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings());
+    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
 }
 
@@ -487,6 +488,7 @@ fn is_current_answers_false_for_a_block_a_successful_listing_does_not_hold() {
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic2", Ok(claude_process()))])),
         settings(),
+        inert_status(),
     );
     let incarnation = incarnation_for(&inventory, "block:ic2gone");
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
@@ -497,6 +499,7 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
     let first = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic3", Ok(claude_process()))])),
         settings(),
+        inert_status(),
     );
     let incarnation = incarnation_for(&first, "block:ic3");
     // The listing no longer holds the block, and its process call fails.
@@ -505,7 +508,7 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
         .lock()
         .unwrap()
         .insert("block:ic3".into(), Err(RexError::Failed));
-    let inventory = RexAgentInventory::new(Arc::new(api), settings());
+    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
 }
 
@@ -518,11 +521,12 @@ fn is_current_stays_an_error_when_the_listing_fails() {
         let first = RexAgentInventory::new(
             Arc::new(fake(&[("block:ic4", Ok(claude_process()))])),
             settings(),
+            inert_status(),
         );
         let incarnation = incarnation_for(&first, "block:ic4unknown");
         let mut api = fake(&[]);
         api.list_error = Some(error);
-        let inventory = RexAgentInventory::new(Arc::new(api), settings());
+        let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
         assert_eq!(inventory.is_current(&incarnation), Err(expected));
     }
 }
@@ -530,7 +534,7 @@ fn is_current_stays_an_error_when_the_listing_fails() {
 #[test]
 fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() {
     let api = Arc::new(fake(&[("block:ic5", Ok(claude_process()))]));
-    let inventory = RexAgentInventory::new(api.clone(), settings());
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
     let incarnation = incarnation_for(&inventory, "block:ic5");
     api.processes
         .lock()
@@ -551,11 +555,11 @@ fn a_failed_listing_or_an_absent_rex_fails_the_scan() {
     ] {
         let mut api = fake(&[]);
         api.list_error = Some(error);
-        let inventory = RexAgentInventory::new(Arc::new(api), settings());
+        let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
         assert_eq!(inventory.scan(), Err(expected));
     }
     let api = fake(&[("block:a", Err(RexError::Timeout))]);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings());
+    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
     assert_eq!(inventory.scan(), Err(InventoryError::RexTimeout));
 }
 
@@ -699,6 +703,7 @@ fn typing_ports_use_the_session_of_the_block() {
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:z", Ok(claude_process()))])),
         settings(),
+        inert_status(),
     );
     inventory.scan().unwrap();
     assert_eq!(session_of(&api, "block:z").unwrap(), "session:1");
@@ -889,15 +894,18 @@ fn fake_of_3_sessions_and_14_blocks() -> FakeRex {
 #[test]
 fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() {
     crate::telemetry::take_noted_listings();
-    let inventory =
-        RexAgentInventory::new(Arc::new(fake_of_3_sessions_and_14_blocks()), settings());
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake_of_3_sessions_and_14_blocks()),
+        settings(),
+        inert_status(),
+    );
     assert_eq!(inventory.scan().unwrap().len(), 0);
     assert_eq!(crate::telemetry::take_noted_listings(), vec![(3, 14)]);
     let failing = FakeRex {
         list_error: Some(RexError::Failed),
         ..FakeRex::default()
     };
-    let inventory = RexAgentInventory::new(Arc::new(failing), settings());
+    let inventory = RexAgentInventory::new(Arc::new(failing), settings(), inert_status());
     assert!(inventory.scan().is_err());
     assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
 }
@@ -1757,4 +1765,115 @@ fn a_stopped_reader_reads_no_queued_line_and_makes_no_call() {
     assert_eq!(gate.calls(), 1);
     assert_eq!(status.lookup(block), Lookup::NoStream);
     assert_eq!(steps.get(block, 1), None);
+}
+
+// -- the inventory starts the streams ---------------------------------------------
+
+/// A status whose program is never found, so its streams end at once. Inventory tests that
+/// look at other things use it.
+fn inert_status() -> Arc<RexStatus> {
+    let program: Program = Arc::new(|| Err(RexError::Absent));
+    Arc::new(RexStatus::new(
+        Arc::new(FakeRex::default()),
+        program,
+        CurrentSteps::default(),
+    ))
+}
+
+/// A fake with one block in each of the sessions `session:1` and `session:2`. The fake
+/// can list only the first `listed` sessions.
+fn fake_of_two_sessions(listed: usize) -> FakeRex {
+    let sessions = ["session:1", "session:2"];
+    let blocks = ["block:a", "block:b"];
+    let mut fake = fake(&[
+        ("block:a", Ok(claude_process())),
+        ("block:b", Ok(claude_process())),
+    ]);
+    fake.sessions = sessions[..listed]
+        .iter()
+        .map(|id| RexSession {
+            id: (*id).to_string(),
+            label: (*id).to_string(),
+        })
+        .collect();
+    for (session, block) in sessions.iter().zip(blocks) {
+        fake.views
+            .insert((*session).to_string(), vec![vec![block.to_string()]]);
+    }
+    fake.sequences = blocks
+        .iter()
+        .map(|block| {
+            (
+                (*block).to_string(),
+                vec![Some(reply("working", 5, "step"))],
+            )
+        })
+        .collect();
+    fake
+}
+
+#[test]
+fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
+    let program = FakeProgram::new("scan-starts", &[], true);
+    let (status, _) = status_with(fake_of_two_sessions(2), &program, now_clock());
+    let status = Arc::new(status);
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake_of_two_sessions(2)),
+        settings(),
+        Arc::clone(&status),
+    );
+    inventory.scan().unwrap();
+    wait_until("one child for each session", || program.runs() == 2);
+    wait_until("both streams are ready", || {
+        status.lookup("block:a") != Lookup::NoStream && status.lookup("block:b") != Lookup::NoStream
+    });
+    // A second scan of the same sessions starts no second stream.
+    inventory.scan().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(program.runs(), 2);
+    status.stop_all();
+}
+
+#[test]
+fn a_session_that_leaves_the_listing_has_its_stream_stopped() {
+    let program = FakeProgram::new("scan-leaves", &[], true);
+    let (status, _) = status_with(fake_of_two_sessions(2), &program, now_clock());
+    let status = Arc::new(status);
+    let both = RexAgentInventory::new(
+        Arc::new(fake_of_two_sessions(2)),
+        settings(),
+        Arc::clone(&status),
+    );
+    both.scan().unwrap();
+    wait_until("both streams are ready", || {
+        status.lookup("block:a") != Lookup::NoStream && status.lookup("block:b") != Lookup::NoStream
+    });
+    let one = RexAgentInventory::new(
+        Arc::new(fake_of_two_sessions(1)),
+        settings(),
+        Arc::clone(&status),
+    );
+    one.scan().unwrap();
+    assert_eq!(status.lookup("block:b"), Lookup::NoStream);
+    assert_ne!(status.lookup("block:a"), Lookup::NoStream);
+    status.stop_all();
+}
+
+#[test]
+fn a_tmux_setting_starts_no_stream() {
+    let settings = crate::settings::settings_with("[agent_monitor]\nmultiplexer = \"tmux\"");
+    let _inventory = inventory_with(&settings, || {
+        panic!("a tmux setting must not create the status streams")
+    });
+}
+
+#[test]
+fn a_rex_setting_gives_the_inventory_the_status() {
+    let settings = crate::settings::settings_with("[agent_monitor]\nmultiplexer = \"rex\"");
+    let asked = std::cell::Cell::new(false);
+    let _inventory = inventory_with(&settings, || {
+        asked.set(true);
+        inert_status()
+    });
+    assert!(asked.get());
 }

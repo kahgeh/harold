@@ -667,21 +667,23 @@ pub(crate) struct RexAgentInventory {
     start_times: Mutex<HashMap<u32, i64>>,
     /// Each observed agent process's program, from the last scan, by pane id and agent pid.
     programs: Mutex<HashMap<(String, u32), String>>,
+    /// The status streams. Each scan gives them the listed sessions.
+    status: Arc<RexStatus>,
 }
 
 impl RexAgentInventory {
-    pub(crate) fn new(api: Arc<dyn RexApi>, settings: AgentSettings) -> Self {
+    pub(crate) fn new(
+        api: Arc<dyn RexApi>,
+        settings: AgentSettings,
+        status: Arc<RexStatus>,
+    ) -> Self {
         Self {
             api,
             settings,
+            status,
             start_times: Mutex::new(HashMap::new()),
             programs: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// An inventory that calls the `rex` program.
-    pub(crate) fn system(settings: AgentSettings) -> Self {
-        Self::new(system(), settings)
     }
 
     fn scan_inner(
@@ -697,6 +699,7 @@ impl RexAgentInventory {
             u64::try_from(slots.len()).unwrap_or(u64::MAX),
         );
         directory_set(&slots);
+        self.status.sync(&slots);
         let signal = current_stop();
         let processes = parallel_map(&slots, PROCESS_WIDTH, signal, |slot| {
             self.api.process(&slot.session_id, &slot.block_id)
@@ -1129,10 +1132,20 @@ pub(crate) fn parse_lstart(text: &str) -> Option<i64> {
 
 /// The inventory of the multiplexer that `[agent_monitor] multiplexer` names.
 pub(crate) fn inventory_for(settings: &crate::settings::Settings) -> Arc<dyn AgentInventoryPort> {
+    inventory_with(settings, status)
+}
+
+/// Like `inventory_for`. `status` runs only for Rex, so a tmux setting never creates it.
+fn inventory_with(
+    settings: &crate::settings::Settings,
+    status: impl FnOnce() -> Arc<RexStatus>,
+) -> Arc<dyn AgentInventoryPort> {
     match settings.agent_monitor.multiplexer() {
-        crate::settings::Multiplexer::Rex => {
-            Arc::new(RexAgentInventory::system(settings.agents.clone()))
-        }
+        crate::settings::Multiplexer::Rex => Arc::new(RexAgentInventory::new(
+            system(),
+            settings.agents.clone(),
+            status(),
+        )),
         crate::settings::Multiplexer::Tmux => Arc::new(super::inventory::TmuxAgentInventory::new(
             settings.agents.clone(),
         )),
@@ -1170,6 +1183,21 @@ pub(crate) fn system() -> Arc<SystemRex> {
         let setting = crate::settings::try_get_settings()
             .and_then(|settings| settings.agent_monitor.rex.clone());
         Arc::new(SystemRex::new(setting))
+    }))
+}
+
+static STATUS: OnceLock<Arc<RexStatus>> = OnceLock::new();
+
+/// The shared status streams of the daemon. Only a Rex setting creates them.
+pub(crate) fn status() -> Arc<RexStatus> {
+    Arc::clone(STATUS.get_or_init(|| {
+        let api = system();
+        let rex = Arc::clone(&api);
+        Arc::new(RexStatus::new(
+            api,
+            Arc::new(move || rex.program()),
+            CurrentSteps::default(),
+        ))
     }))
 }
 

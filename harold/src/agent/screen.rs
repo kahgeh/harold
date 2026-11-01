@@ -265,13 +265,7 @@ pub(crate) struct RexVisibleScreen {
 impl RexVisibleScreen {
     pub(crate) fn new() -> Self {
         let api = super::rex::system();
-        let rex = Arc::clone(&api);
-        let status = super::rex::RexStatus::new(
-            api.clone(),
-            Arc::new(move || rex.program()),
-            super::rex::CurrentSteps::default(),
-        );
-        Self::with_status(api, Arc::new(status))
+        Self::with_status(api, super::rex::status())
     }
 
     pub(crate) fn with_status(

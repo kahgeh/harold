@@ -4,11 +4,6 @@
 //! writes about itself. This module parses that record and the `rex events` lines about it,
 //! maps the record state to an agent state, and keeps each agent's current step in memory.
 
-#![allow(
-    dead_code,
-    reason = "the inventory scan starts the streams and the watch stream reads the steps in a later task"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -224,6 +219,7 @@ impl CurrentSteps {
     }
 
     /// The step of the block, only when the stored pid is `pid`.
+    #[allow(dead_code, reason = "the watch stream reads the steps in a later task")]
     pub(crate) fn get(&self, block_id: &str, pid: u32) -> Option<String> {
         let steps = self
             .inner
@@ -236,6 +232,10 @@ impl CurrentSteps {
             .map(|(_, step)| step.clone())
     }
 
+    #[allow(
+        dead_code,
+        reason = "the watch stream waits on the steps in a later task"
+    )]
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.version.subscribe()
     }
@@ -444,6 +444,7 @@ impl RexStatus {
         }
     }
 
+    #[allow(dead_code, reason = "the watch stream reads the steps in a later task")]
     pub(crate) fn steps(&self) -> CurrentSteps {
         self.shared.steps.clone()
     }

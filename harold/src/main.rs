@@ -1320,6 +1320,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     }
     telemetry_tasks.stopped().await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
+    if cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex {
+        agent::rex::status().stop_all();
+    }
     if server_result.is_ok()
         && let Some(guard) = guard
     {
