@@ -43,11 +43,14 @@ impl RecordState {
         }
     }
 
-    /// Stage 2 has two agent states. A blocked agent counts as working.
+    /// Each record state is one observed state.
     pub(crate) fn observed(self) -> ObservedAgentState {
         match self {
-            Self::Working | Self::Blocked => ObservedAgentState::Working,
-            Self::Done | Self::Idle | Self::Error => ObservedAgentState::Idle,
+            Self::Working => ObservedAgentState::Working,
+            Self::Blocked => ObservedAgentState::Blocked,
+            Self::Done => ObservedAgentState::Done,
+            Self::Idle => ObservedAgentState::Idle,
+            Self::Error => ObservedAgentState::Error,
         }
     }
 }

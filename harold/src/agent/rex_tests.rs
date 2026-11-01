@@ -1017,18 +1017,23 @@ fn done_idle_and_error_records_give_no_step() {
         let text = status_text(&root_record(word, 5, Some("a step")));
         let record = parse_program_status(&text).unwrap().unwrap();
         assert_eq!(record.msg, None, "{word}");
-        assert_eq!(record.state.observed(), ObservedAgentState::Idle, "{word}");
+        let expected = match word {
+            "done" => ObservedAgentState::Done,
+            "error" => ObservedAgentState::Error,
+            _ => ObservedAgentState::Idle,
+        };
+        assert_eq!(record.state.observed(), expected, "{word}");
     }
     let text = status_text(&root_record("working", 5, None));
     assert_eq!(parse_program_status(&text).unwrap().unwrap().msg, None);
 }
 
 #[test]
-fn blocked_maps_to_working_and_gives_its_step() {
+fn blocked_maps_to_blocked_and_gives_its_step() {
     let text = status_text(&root_record("blocked", 5, Some("Allow Bash?")));
     let record = parse_program_status(&text).unwrap().unwrap();
     assert_eq!(record.state, RecordState::Blocked);
-    assert_eq!(record.state.observed(), ObservedAgentState::Working);
+    assert_eq!(record.state.observed(), ObservedAgentState::Blocked);
     assert_eq!(record.msg.as_deref(), Some("Allow Bash?"));
 }
 

@@ -2918,14 +2918,14 @@ async fn a_new_event_is_written_with_working() {
 }
 
 #[tokio::test]
-async fn an_event_with_a_stage_3_word_reads_as_unknown_without_error() {
+async fn an_event_with_an_unknown_word_reads_as_unknown_without_error() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
     store
         .append([
             pane_observed_event(),
-            lifecycle_json(json!("Done")),
-            screen_json(json!("Done")),
+            lifecycle_json(json!("Sleeping")),
+            screen_json(json!("Sleeping")),
         ])
         .await
         .unwrap();
@@ -2948,7 +2948,7 @@ async fn a_lifecycle_event_with_no_state_leaves_the_hook_state_as_it_was() {
         .append([
             pane_observed_event(),
             lifecycle_json(json!("Working")),
-            at_time(lifecycle_json(json!("Done")), 150),
+            at_time(lifecycle_json(json!("Sleeping")), 150),
         ])
         .await
         .unwrap();
@@ -2965,18 +2965,21 @@ async fn a_lifecycle_event_with_no_state_leaves_the_hook_state_as_it_was() {
 #[test]
 fn an_unknown_effective_state_word_reads_as_unknown_and_busy_reads_as_working() {
     let busy: EffectiveAgentState = serde_json::from_value(json!("Busy")).unwrap();
-    let done: EffectiveAgentState = serde_json::from_value(json!("Done")).unwrap();
+    let unknown: EffectiveAgentState = serde_json::from_value(json!("Sleeping")).unwrap();
     assert_eq!(busy, EffectiveAgentState::Working);
-    assert_eq!(done, EffectiveAgentState::Unknown);
+    assert_eq!(unknown, EffectiveAgentState::Unknown);
     assert_eq!(
         super::parse_effective_state("busy").unwrap(),
         EffectiveAgentState::Working
     );
     assert_eq!(
-        super::parse_effective_state("done").unwrap(),
+        super::parse_effective_state("sleeping").unwrap(),
         EffectiveAgentState::Unknown
     );
-    assert_eq!(super::parse_observed_state("done".into()).unwrap(), None);
+    assert_eq!(
+        super::parse_observed_state("sleeping".into()).unwrap(),
+        None
+    );
     assert_eq!(
         super::parse_observed_state("working".into()).unwrap(),
         Some(ObservedAgentState::Working)
@@ -3160,10 +3163,10 @@ async fn a_failing_statement_in_the_006_sql_leaves_agent_panes_as_it_was() {
     );
 }
 
-/// A row from a later build holds a state word this build cannot read. The next event for the
-/// pane must still project, so the paired columns of an unknown word read as no observation.
+/// A stored `done` row reads as `Done` with its paired columns, and the next event for the pane
+/// still projects. (The CHECK rules of migration 006 keep any other word out of the table.)
 #[tokio::test]
-async fn a_stored_stage_three_state_reads_as_no_observation_with_its_paired_columns() {
+async fn a_stored_done_state_reads_as_done_with_its_paired_columns() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
     let conn = store.state.connect().unwrap();
@@ -3217,14 +3220,61 @@ async fn a_stored_stage_three_state_reads_as_no_observation_with_its_paired_colu
             .unwrap_or_else(|| panic!("{id} projects"))
     };
     let hook_row = pane("%7");
-    assert_eq!(hook_row.hook_state, None);
-    assert_eq!(hook_row.hook_observed_at_ms, None);
+    assert_eq!(hook_row.hook_state, Some(ObservedAgentState::Done));
+    assert!(hook_row.hook_observed_at_ms.is_some());
     assert_eq!(hook_row.screen_state, Some(ObservedAgentState::Working));
-    assert_eq!(hook_row.effective_state, EffectiveAgentState::Working);
     let screen_row = pane("%8");
     assert_eq!(screen_row.hook_state, Some(ObservedAgentState::Idle));
-    assert_eq!(screen_row.screen_state, None);
-    assert_eq!(screen_row.screen_classifier_id, None);
-    assert_eq!(screen_row.screen_observed_at_ms, None);
-    assert_eq!(screen_row.effective_state, EffectiveAgentState::Idle);
+}
+
+#[test]
+fn state_words_round_trip_through_the_store_text() {
+    let observed = [
+        (ObservedAgentState::Working, "working", "Working"),
+        (ObservedAgentState::Blocked, "blocked", "Blocked"),
+        (ObservedAgentState::Done, "done", "Done"),
+        (ObservedAgentState::Idle, "idle", "Idle"),
+        (ObservedAgentState::Error, "error", "Error"),
+    ];
+    for (state, word, event_word) in observed {
+        assert_eq!(super::observed_state_text(state), word);
+        assert_eq!(
+            super::parse_observed_state(word.into()).unwrap(),
+            Some(state)
+        );
+        let from_event: ObservedAgentState = serde_json::from_value(json!(event_word)).unwrap();
+        assert_eq!(from_event, state);
+        let effective = state.effective();
+        assert_eq!(super::effective_state_text(effective), word);
+        assert_eq!(super::parse_effective_state(word).unwrap(), effective);
+        let effective_event: EffectiveAgentState =
+            serde_json::from_value(json!(event_word)).unwrap();
+        assert_eq!(effective_event, effective);
+    }
+}
+
+#[tokio::test]
+async fn blocked_done_and_error_events_project_to_the_same_effective_state() {
+    for (event_word, effective) in [
+        ("Blocked", EffectiveAgentState::Blocked),
+        ("Done", EffectiveAgentState::Done),
+        ("Error", EffectiveAgentState::Error),
+    ] {
+        let directory = TestDirectory::new();
+        let store = HaroldStore::open(directory.path()).await.unwrap();
+        store
+            .append([pane_observed_event(), lifecycle_json(json!(event_word))])
+            .await
+            .unwrap();
+        store.project_unhandled_events(500).await.unwrap();
+        let snapshot = store.load_agent_snapshot().await.unwrap();
+        assert_eq!(snapshot.panes[0].effective_state, effective, "{event_word}");
+        assert_eq!(
+            snapshot.panes[0]
+                .hook_state
+                .map(ObservedAgentState::effective),
+            Some(effective),
+            "{event_word}"
+        );
+    }
 }

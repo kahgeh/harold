@@ -124,7 +124,7 @@ pub(crate) fn reduce_agent_event(
             }
             if let Some(state) = screen.state {
                 let state_needs_revalidation = projection.screen_state != Some(state)
-                    || projection.effective_state != observed_to_effective(state)
+                    || projection.effective_state != state.effective()
                     || revalidates_hook_epoch(&projection, screen.observed_at_ms, graces);
                 if state_needs_revalidation {
                     projection.screen_state = Some(state);
@@ -329,7 +329,7 @@ fn effective_state(projection: &AgentPaneProjection, graces: GraceWindows) -> Ef
     let Some(hook_state) = projection.hook_state else {
         return projection
             .screen_state
-            .map_or(EffectiveAgentState::Unknown, observed_to_effective);
+            .map_or(EffectiveAgentState::Unknown, ObservedAgentState::effective);
     };
     let hook_observed_at_ms = projection.hook_observed_at_ms.unwrap_or(i64::MAX);
     let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
@@ -338,16 +338,9 @@ fn effective_state(projection: &AgentPaneProjection, graces: GraceWindows) -> Ef
         (projection.screen_state, projection.screen_observed_at_ms)
         && screen_observed_at_ms >= hook_grace_ends_at_ms
     {
-        return observed_to_effective(screen_state);
+        return screen_state.effective();
     }
-    observed_to_effective(hook_state)
-}
-
-fn observed_to_effective(state: super::domain::ObservedAgentState) -> EffectiveAgentState {
-    match state {
-        super::domain::ObservedAgentState::Working => EffectiveAgentState::Working,
-        super::domain::ObservedAgentState::Idle => EffectiveAgentState::Idle,
-    }
+    hook_state.effective()
 }
 
 fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: EventVersion) {

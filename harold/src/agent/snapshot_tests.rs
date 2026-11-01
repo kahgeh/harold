@@ -205,6 +205,9 @@ fn two_working_agents_give_zero_idle_and_zero_unknown_for_their_provider() {
     assert_eq!(
         super::snapshot::agent_counts(&snapshot),
         vec![
+            row("blocked", "provider-a", 0),
+            row("done", "provider-a", 0),
+            row("error", "provider-a", 0),
             row("idle", "provider-a", 0),
             row("unknown", "provider-a", 0),
             row("working", "provider-a", 2),
@@ -263,14 +266,19 @@ fn row(state: &'static str, provider_id: &str, count: u64) -> AgentCount {
 }
 
 fn mixed_rows() -> Vec<AgentCount> {
-    vec![
-        row("idle", "provider-a", 1),
-        row("idle", "provider-b", 0),
-        row("unknown", "provider-a", 0),
-        row("unknown", "provider-b", 1),
-        row("working", "provider-a", 2),
-        row("working", "provider-b", 1),
-    ]
+    let mut rows = Vec::new();
+    for (state, a, b) in [
+        ("blocked", 0, 0),
+        ("done", 0, 0),
+        ("error", 0, 0),
+        ("idle", 1, 0),
+        ("unknown", 0, 1),
+        ("working", 2, 1),
+    ] {
+        rows.push(row(state, "provider-a", a));
+        rows.push(row(state, "provider-b", b));
+    }
+    rows
 }
 
 #[test]

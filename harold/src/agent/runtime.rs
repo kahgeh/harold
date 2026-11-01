@@ -1406,14 +1406,12 @@ impl AgentMonitorRuntime {
                 fallback_summary: summary.clone(),
                 observed_at_ms: observation.observed_at_ms,
             };
-            let previous_state = match tracked
+            let previous_state = tracked
                 .screen_state
                 .or(tracked.last_hook.map(|(state, _)| state))
-            {
-                Some(ObservedAgentState::Working) => super::domain::EffectiveAgentState::Working,
-                Some(ObservedAgentState::Idle) => super::domain::EffectiveAgentState::Idle,
-                None => super::domain::EffectiveAgentState::Unknown,
-            };
+                .map_or(super::domain::EffectiveAgentState::Unknown, |state| {
+                    state.effective()
+                });
             let changes_activity = super::reducer::screen_changes_activity(
                 previous_state,
                 tracked.screen_summary.as_deref(),

@@ -735,8 +735,12 @@ fn map_agent_snapshot(
                     provider_display_name: pane.provider_display_name,
                     working_directory: pane.working_directory,
                     state: match projection.effective_state {
-                        agent::domain::EffectiveAgentState::Working => AgentState::Working.into(),
-                        agent::domain::EffectiveAgentState::Idle => AgentState::Idle.into(),
+                        // Task 5 gives Blocked, Done and Error their own API values.
+                        agent::domain::EffectiveAgentState::Working
+                        | agent::domain::EffectiveAgentState::Blocked => AgentState::Working.into(),
+                        agent::domain::EffectiveAgentState::Done
+                        | agent::domain::EffectiveAgentState::Idle
+                        | agent::domain::EffectiveAgentState::Error => AgentState::Idle.into(),
                         agent::domain::EffectiveAgentState::Unknown => AgentState::Unknown.into(),
                     },
                     last_transition_at_ms: projection.last_transition_at_ms,

@@ -214,10 +214,7 @@ fn observe_through(
 
 /// Counts one observation on `harold.agent.state_observed`, with the mapped state word.
 fn count_observation(source: StateSource, observation: &ScreenObservation) {
-    let state = observation.state.map(|state| match state {
-        ObservedAgentState::Working => "working",
-        ObservedAgentState::Idle => "idle",
-    });
+    let state = observation.state.map(|state| state.effective().as_str());
     record_state_observed(source, state, &observation.incarnation.provider_id);
 }
 

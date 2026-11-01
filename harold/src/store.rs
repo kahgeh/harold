@@ -1968,15 +1968,21 @@ async fn pause_snapshot_read_after_query(gate: &std::sync::Mutex<Option<Snapshot
 fn observed_state_text(state: ObservedAgentState) -> &'static str {
     match state {
         ObservedAgentState::Working => "working",
+        ObservedAgentState::Blocked => "blocked",
+        ObservedAgentState::Done => "done",
         ObservedAgentState::Idle => "idle",
+        ObservedAgentState::Error => "error",
     }
 }
 
-/// Reads `working`, the old `busy` and `idle`. Any other word reads as no observation.
+/// Reads the five state words and the old `busy`. Any other word reads as no observation.
 fn parse_observed_state(value: String) -> Result<Option<ObservedAgentState>> {
     Ok(match value.as_str() {
         "working" | "busy" => Some(ObservedAgentState::Working),
+        "blocked" => Some(ObservedAgentState::Blocked),
+        "done" => Some(ObservedAgentState::Done),
         "idle" => Some(ObservedAgentState::Idle),
+        "error" => Some(ObservedAgentState::Error),
         _ => None,
     })
 }
@@ -1984,16 +1990,22 @@ fn parse_observed_state(value: String) -> Result<Option<ObservedAgentState>> {
 fn effective_state_text(state: EffectiveAgentState) -> &'static str {
     match state {
         EffectiveAgentState::Working => "working",
+        EffectiveAgentState::Blocked => "blocked",
+        EffectiveAgentState::Done => "done",
         EffectiveAgentState::Idle => "idle",
+        EffectiveAgentState::Error => "error",
         EffectiveAgentState::Unknown => "unknown",
     }
 }
 
-/// Reads `working`, the old `busy` and `idle`. Any other word reads as unknown.
+/// Reads the five state words and the old `busy`. Any other word reads as unknown.
 fn parse_effective_state(value: &str) -> Result<EffectiveAgentState> {
     Ok(match value {
         "working" | "busy" => EffectiveAgentState::Working,
+        "blocked" => EffectiveAgentState::Blocked,
+        "done" => EffectiveAgentState::Done,
         "idle" => EffectiveAgentState::Idle,
+        "error" => EffectiveAgentState::Error,
         _ => EffectiveAgentState::Unknown,
     })
 }

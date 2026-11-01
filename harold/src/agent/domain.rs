@@ -25,23 +25,37 @@ pub(crate) enum CompletionSummaryUpdate {
 pub(crate) enum ObservedAgentState {
     #[serde(alias = "Busy")]
     Working,
+    Blocked,
+    Done,
     Idle,
+    Error,
 }
 
 impl ObservedAgentState {
-    /// True while the agent works.
+    /// True while the agent works. A blocked agent waits inside its turn, so it counts.
     pub(crate) fn is_working(self) -> bool {
-        matches!(self, Self::Working)
+        matches!(self, Self::Working | Self::Blocked)
     }
 
     /// True while the agent rests.
     pub(crate) fn is_at_rest(self) -> bool {
-        matches!(self, Self::Idle)
+        matches!(self, Self::Done | Self::Idle | Self::Error)
+    }
+
+    /// The one map from an observed state to the effective state.
+    pub(crate) fn effective(self) -> EffectiveAgentState {
+        match self {
+            Self::Working => EffectiveAgentState::Working,
+            Self::Blocked => EffectiveAgentState::Blocked,
+            Self::Done => EffectiveAgentState::Done,
+            Self::Idle => EffectiveAgentState::Idle,
+            Self::Error => EffectiveAgentState::Error,
+        }
     }
 }
 
-/// Reads an observed state from an event. A word that is not `Working`, the old `Busy` or
-/// `Idle` (for example a later stage's word) reads as no observation.
+/// Reads an observed state from an event. A word that is not one of the five states or the old
+/// `Busy` (for example a later stage's word) reads as no observation.
 pub(crate) fn lenient_observed_state<'de, D>(
     deserializer: D,
 ) -> Result<Option<ObservedAgentState>, D::Error>
@@ -51,7 +65,10 @@ where
     let word = Option::<String>::deserialize(deserializer)?;
     Ok(match word.as_deref() {
         Some("Working" | "Busy") => Some(ObservedAgentState::Working),
+        Some("Blocked") => Some(ObservedAgentState::Blocked),
+        Some("Done") => Some(ObservedAgentState::Done),
         Some("Idle") => Some(ObservedAgentState::Idle),
+        Some("Error") => Some(ObservedAgentState::Error),
         _ => None,
     })
 }
@@ -60,7 +77,10 @@ where
 pub(crate) enum EffectiveAgentState {
     #[serde(alias = "Busy")]
     Working,
+    Blocked,
+    Done,
     Idle,
+    Error,
     #[serde(other)]
     Unknown,
 }
@@ -68,19 +88,22 @@ pub(crate) enum EffectiveAgentState {
 impl EffectiveAgentState {
     /// True while the agent works.
     pub(crate) fn is_working(self) -> bool {
-        matches!(self, Self::Working)
+        matches!(self, Self::Working | Self::Blocked)
     }
 
     /// True while the agent rests. `Unknown` is neither working nor at rest.
     pub(crate) fn is_at_rest(self) -> bool {
-        matches!(self, Self::Idle)
+        matches!(self, Self::Done | Self::Idle | Self::Error)
     }
 
     /// The `state` attribute word of the agent metrics.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
             Self::Idle => "idle",
+            Self::Error => "error",
             Self::Unknown => "unknown",
         }
     }
@@ -238,18 +261,52 @@ mod tests {
     fn the_two_functions_follow_the_state_table() {
         let observed = [
             (ObservedAgentState::Working, (true, false)),
+            (ObservedAgentState::Blocked, (true, false)),
+            (ObservedAgentState::Done, (false, true)),
             (ObservedAgentState::Idle, (false, true)),
+            (ObservedAgentState::Error, (false, true)),
         ];
         for (state, expected) in observed {
             assert_eq!((state.is_working(), state.is_at_rest()), expected);
         }
         let effective = [
             (EffectiveAgentState::Working, (true, false)),
+            (EffectiveAgentState::Blocked, (true, false)),
+            (EffectiveAgentState::Done, (false, true)),
             (EffectiveAgentState::Idle, (false, true)),
+            (EffectiveAgentState::Error, (false, true)),
             (EffectiveAgentState::Unknown, (false, false)),
         ];
         for (state, expected) in effective {
             assert_eq!((state.is_working(), state.is_at_rest()), expected);
         }
+    }
+
+    #[test]
+    fn effective_is_one_to_one_and_as_str_gives_the_six_words() {
+        let pairs = [
+            (
+                ObservedAgentState::Working,
+                EffectiveAgentState::Working,
+                "working",
+            ),
+            (
+                ObservedAgentState::Blocked,
+                EffectiveAgentState::Blocked,
+                "blocked",
+            ),
+            (ObservedAgentState::Done, EffectiveAgentState::Done, "done"),
+            (ObservedAgentState::Idle, EffectiveAgentState::Idle, "idle"),
+            (
+                ObservedAgentState::Error,
+                EffectiveAgentState::Error,
+                "error",
+            ),
+        ];
+        for (observed, effective, word) in pairs {
+            assert_eq!(observed.effective(), effective);
+            assert_eq!(effective.as_str(), word);
+        }
+        assert_eq!(EffectiveAgentState::Unknown.as_str(), "unknown");
     }
 }

@@ -1191,10 +1191,10 @@ mod rex_observer {
     fn each_state_word_maps_to_an_observed_state() {
         let cases = [
             ("working", ObservedAgentState::Working),
-            ("blocked", ObservedAgentState::Working),
-            ("done", ObservedAgentState::Idle),
+            ("blocked", ObservedAgentState::Blocked),
+            ("done", ObservedAgentState::Done),
             ("idle", ObservedAgentState::Idle),
-            ("error", ObservedAgentState::Idle),
+            ("error", ObservedAgentState::Error),
         ];
         for (word, expected) in cases {
             let block = format!("block:obs-word-{word}");
@@ -1234,16 +1234,16 @@ mod rex_observer {
         let script = FakeEvents::new("countstream", &[]);
         let (screen, status) = streaming_screen(&api, &script, block);
         observe_as(&screen, block, "count-stream-provider");
-        // A blocked record maps to the working state.
+        // A blocked record keeps the blocked state.
         assert_eq!(
-            observed("count-stream-provider", "program_status", "working"),
+            observed("count-stream-provider", "program_status", "blocked"),
             1
         );
         assert_eq!(
-            observed("count-stream-provider", "program_status_call", "working"),
+            observed("count-stream-provider", "program_status_call", "blocked"),
             0
         );
-        assert_eq!(observed("count-stream-provider", "screen", "working"), 0);
+        assert_eq!(observed("count-stream-provider", "screen", "blocked"), 0);
         status.stop_all();
     }
 
@@ -1253,13 +1253,13 @@ mod rex_observer {
         let api = api_with(block, Some(reply("done", 20)));
         let screen = no_stream_screen(&api);
         observe_as(&screen, block, "count-call-provider");
-        // A done record maps to the idle state.
+        // A done record keeps the done state.
         assert_eq!(
-            observed("count-call-provider", "program_status_call", "idle"),
+            observed("count-call-provider", "program_status_call", "done"),
             1
         );
-        assert_eq!(observed("count-call-provider", "program_status", "idle"), 0);
-        assert_eq!(observed("count-call-provider", "screen", "idle"), 0);
+        assert_eq!(observed("count-call-provider", "program_status", "done"), 0);
+        assert_eq!(observed("count-call-provider", "screen", "done"), 0);
     }
 
     #[test]
