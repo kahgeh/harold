@@ -2432,9 +2432,14 @@ const LEAKCHECK: &str = "LEAKCHECK-7f3a";
 /// The item holds the marker: that proves the marker is in play where the tests look.
 async fn watch_with_the_marker(
     directory: &std::path::Path,
-) -> (Arc<store::HaroldStore>, HaroldService) {
+) -> (
+    Arc<store::HaroldStore>,
+    HaroldService,
+    <HaroldService as Harold>::WatchAgentStatesStream,
+    watch::Sender<()>,
+) {
     let store = Arc::new(store::HaroldStore::open(directory).await.unwrap());
-    let (service, _shutdown, _task) = test_service(
+    let (service, shutdown, _task) = test_service(
         Arc::clone(&store),
         populated_snapshot(1, Some("Plain summary")),
     );
@@ -2449,7 +2454,7 @@ async fn watch_with_the_marker(
     let item = stream.next().await.expect("an item").unwrap();
     assert_eq!(step_of(&item).as_deref(), Some(LEAKCHECK));
     assert!(!format!("{:?}", item.panes[0].work_summary).contains(LEAKCHECK));
-    (store, service)
+    (store, service, stream, shutdown)
 }
 
 #[tokio::test]
@@ -2457,11 +2462,13 @@ async fn the_current_step_is_not_in_the_captured_logs() {
     let logs = crate::outbound::fake::CapturedLogs::start();
     let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let (_store, service) = watch_with_the_marker(&directory).await;
+    let (_store, service, mut stream, _shutdown) = watch_with_the_marker(&directory).await;
     service
         .current_steps
         .set(STEP_PANE, STEP_PID, Some(format!("{LEAKCHECK} again")));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The step change reaches the live stream; the logs stay clean.
+    let second = stream.next().await.expect("a second item").unwrap();
+    assert_eq!(step_of(&second), Some(format!("{LEAKCHECK} again")));
     assert!(!logs.text().contains(LEAKCHECK), "{}", logs.text());
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -2471,7 +2478,7 @@ async fn the_current_step_is_not_in_the_exported_spans_or_log_records() {
     crate::telemetry::test_support::install();
     let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let (_store, _service) = watch_with_the_marker(&directory).await;
+    let (_store, _service, _stream, _shutdown) = watch_with_the_marker(&directory).await;
     let spans = format!("{:?}", crate::telemetry::test_support::spans());
     let records = format!("{:?}", crate::telemetry::test_support::logs());
     assert!(!spans.contains(LEAKCHECK));
@@ -2483,7 +2490,7 @@ async fn the_current_step_is_not_in_the_exported_spans_or_log_records() {
 async fn the_current_step_is_not_in_the_stored_rows() {
     let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let (store, service) = watch_with_the_marker(&directory).await;
+    let (store, service, _stream, _shutdown) = watch_with_the_marker(&directory).await;
     super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
         .await
         .unwrap();

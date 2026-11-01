@@ -151,6 +151,8 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("state".to_string(), 12),
             ("last_transition_at_ms".to_string(), 13),
             ("work_summary".to_string(), 14),
+            // 15 and 16 stay free.
+            ("current_step".to_string(), 17),
         ]
     );
 }
