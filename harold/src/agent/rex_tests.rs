@@ -1078,6 +1078,23 @@ fn current_steps_notify_only_on_a_change() {
 const LIVE_CHANGED: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a196ca-ea23-70c7-a0f5-bea252f4f6df","event":{"type":"block_event","payload":{"block_id":"block:01a196ca-ea23-7148-9fc0-352b07759d6f","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"","record":{"state":"working","app":"x","effective_app":"x","msg":"hi","updated_at":"2026-11-01T22:07:52.056616+11:00"},"reason":"report"}}}}}"#;
 const LIVE_CLOSED: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a196ca-ea23-70c7-a0f5-bea252f4f6df","event":{"type":"block_closed","payload":{"block_id":"block:01a196ca-ea23-7148-9fc0-352b07759d6f"}}}}"#;
 
+// A live removal, captured from Rex 2026-11-01 (a throwaway session whose program wrote
+// `state=clear`). The removed ids sit in `ids`; `""` is the root record. The record of a live
+// change event carries `owner.pid` when the program in the block wrote it.
+const LIVE_REMOVED: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a19704-54ee-7392-b814-ff045a554c13","event":{"type":"block_event","payload":{"block_id":"block:01a19704-54ee-7407-a42c-4ce8c9e5a775","creator_name":"com.superlogical.terminal","name":"program_status_removed","payload":{"ids":[""],"reason":"clear"}}}}}"#;
+
+#[test]
+fn a_live_removal_of_the_root_triggers_and_a_child_only_removal_does_not() {
+    assert_eq!(
+        parse_event_line(LIVE_REMOVED),
+        Some(StatusEvent::Removed {
+            block_id: "block:01a19704-54ee-7407-a42c-4ce8c9e5a775".to_string(),
+        })
+    );
+    let child_only = LIVE_REMOVED.replace(r#""ids":[""]"#, r#""ids":["child"]"#);
+    assert_eq!(parse_event_line(&child_only), None);
+}
+
 #[test]
 fn a_live_line_and_a_flat_event_parse() {
     // The live record has no owner pid. The event is only a trigger for a call.

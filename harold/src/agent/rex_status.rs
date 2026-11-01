@@ -150,6 +150,13 @@ pub(crate) fn parse_event_line(line: &str) -> Option<StatusEvent> {
             if has_id(data) || has_id(record) {
                 return None;
             }
+            // A real event lists the removed ids: `"ids":[""]` is the root record. A list
+            // without the root only removed child records.
+            if let Some(ids) = data.get("ids").and_then(Value::as_array)
+                && !ids.iter().any(|id| id.as_str() == Some(""))
+            {
+                return None;
+            }
             Some(StatusEvent::Removed { block_id })
         }
         "block_closed" => Some(StatusEvent::BlockClosed { block_id }),
