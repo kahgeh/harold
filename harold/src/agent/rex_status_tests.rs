@@ -542,3 +542,23 @@ fn a_direct_call_does_not_replace_the_step_of_a_stream_record() {
     status.note_direct("block:a", &record(RecordState::Working, 7, Some("older")));
     assert_eq!(steps.get("block:a", 7).as_deref(), Some("newer"));
 }
+
+// -- captured events -------------------------------------------------------------------
+
+// A live removal, captured from Rex 2026-11-02 in a throwaway block of a session. The program
+// of the block wrote `OSC 7501` with the body `state=working` and then exited. The removed
+// ids sit in `ids`; `""` is the root record.
+const LIVE_REMOVED_AT_EXIT: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a196e8-1616-752e-808e-78a147e7ae79","event":{"type":"block_event","payload":{"block_id":"block:01a197c4-3e09-7c54-a618-c0ddf1bca71a","creator_name":"com.superlogical.terminal","name":"program_status_removed","payload":{"ids":[""],"reason":"child_exited"}}}}}"#;
+
+#[test]
+fn a_live_removal_when_the_program_exits_triggers_a_call_for_the_block() {
+    assert_eq!(
+        parse_event_line(LIVE_REMOVED_AT_EXIT),
+        Some(StatusEvent::Removed {
+            block_id: "block:01a197c4-3e09-7c54-a618-c0ddf1bca71a".to_string(),
+        })
+    );
+    // The same line with a child record removed, and not the root, triggers nothing.
+    let child_only = LIVE_REMOVED_AT_EXIT.replace(r#""ids":[""]"#, r#""ids":["child"]"#);
+    assert_eq!(parse_event_line(&child_only), None);
+}
