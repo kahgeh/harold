@@ -95,6 +95,12 @@ command = "say"
 # text = "digest"                              # typed exactly, then Enter
 # give_up_after_minutes = 120                  # how long after `at` Harold keeps trying; 1 to 1439
 
+# The mark of a host in the control-tower: "arch", "linux" or "mac". A host with no entry shows no mark.
+# A key is a label in `rex_hosts` or this machine's `machine_name`.
+# [agent_monitor.rex_host_marks]
+# omarchy = "arch"
+# laptop-mac = "mac"
+
 # Two Macs need only `machines` and the same Apple ID.
 
 # The home-screen app, served to the phone through `tailscale serve`. Absent: off.

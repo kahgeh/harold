@@ -97,9 +97,11 @@ report_grace_ms = 30000
 # rex = "/path/to/rex"
 # The labels of other Rex hosts whose agents Harold reads (read-only). Needs multiplexer = "rex".
 rex_hosts = []
-# A mark for a host in rex_hosts: "arch", "linux" or "mac".
+# The only source of host marks: "arch", "linux" or "mac". A host with no entry shows no mark.
+# A key is a label in rex_hosts or this machine's machine_name.
 # [agent_monitor.rex_host_marks]
 # omarchy = "arch"
+# laptop-mac = "mac"
 
 [control_tower]
 # How the control-tower marks a host: "glyph", "emoji" or "text".

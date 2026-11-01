@@ -29,8 +29,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Rex host | Another machine's Rex server that this Mac's Rex knows by a label, such as `omarchy`. Harold reads the agents of the hosts in `[agent_monitor] rex_hosts`, read-only. `rex hosts list` lists the hosts, and `rex -S <label>` reaches one | "node" |
 | agent on a Rex host | An agent in a Rex host's pane. Harold shows it in the control-tower and does nothing else with it. In the code: `RexHostAgent` | "remote agent" |
 | host pane id | The pane id of an agent on a Rex host, `rex:<label>/block:<id>`. No writer takes it | "remote id", "qualified id", "pane address" |
-| host icon | The icon name of a Rex host: the one set in `rex_host_marks`, else the one Rex keeps (`rex hosts edit --icon`), such as `server.rack` | "host logo", "host image" |
-| host marker | The glyph, emoji or label and dot that the control-tower's WHERE column shows before the session of an agent on a Rex host. `[control_tower] host_marker` picks the kind | "host badge", "icon prefix", "host tag" |
+| host icon | The mark name that `[agent_monitor.rex_host_marks]` gives a host, `arch`, `linux` or `mac`, keyed by a label in `rex_hosts` or by Harold's own `machine_name`. A host with no entry has none | "host logo", "host image" |
+| host marker | The glyph, emoji or label and dot that the control-tower's WHERE column shows before the session of an agent: the mark of its host icon, or, in text mode, the label of a Rex host | "host badge", "icon prefix", "host tag" |
 | pane label | The text the agent list shows and a routing tag matches: `<session>:<window>.<pane>` | "target" |
 | INSERT mode | Claude Code's Vim editor mode in which keys type text into the input box | — |
 | NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |

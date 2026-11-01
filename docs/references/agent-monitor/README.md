@@ -349,7 +349,8 @@ The setting `[agent_monitor] rex_hosts` is a list of host labels. A label is a n
 
 - Each label has 1 to 32 letters, digits, `.` or `-`. A label that repeats is an error.
 - The list needs `multiplexer = "rex"`. With `multiplexer = "tmux"`, a list that is not empty stops Harold at start.
-- `[agent_monitor.rex_host_marks]` gives a host a mark: `"arch"`, `"linux"` or `"mac"`. It can name only a host that is in `rex_hosts`.
+- `[agent_monitor.rex_host_marks]` is the only source of host marks. It gives a host a mark: `"arch"`, `"linux"` or `"mac"`. A key is a label in `rex_hosts` or the `machine_name` of Harold's own machine. The `machine_name` key matches without case. A host with no entry has no mark. Harold does not read the icon that Rex keeps for a host.
+- Harold refuses a key that names neither a label in `rex_hosts` nor `machine_name`. It also refuses a label in `rex_hosts` that equals `machine_name`, without case.
 - `[control_tower] host_marker` picks how the control-tower draws the mark: `"glyph"` (the default), `"emoji"` or `"text"`.
 
 ### The pane id forms

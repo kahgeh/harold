@@ -86,21 +86,19 @@ Such a row has a pane id of the form `rex:<label>/block:<id>`, and the fields `h
 The host mark depends on `--host-marker`:
 
 - `glyph`: the Nerd Font glyph of the host icon, then a space (2 cells).
-- `emoji`: an emoji (2 cells). It is also the mark for an icon name that is not in the table, and for a host with no icon.
-- `text`: the label and a dot, such as `omarchy ·`. It is as wide as the label.
+- `emoji`: the emoji of the host icon (2 cells).
+- `text`: the label and a dot, such as `omarchy ·`. It is as wide as the label. A row of Harold's own machine has no label, so it shows nothing.
+
+In `glyph` and `emoji` mode, a row with no host icon shows no mark. This holds for a row on a Rex host and for a row of Harold's own machine.
+When any visible row has a mark, each row without one starts its session after 3 blank cells, so the session names start in the same column. When no row has a mark, no row is padded.
 
 | Icon name | Glyph | Emoji |
 | --- | --- | --- |
-| `server.rack` | U+F233 | U+1F4BB |
-| `desktopcomputer`, `macmini`, `macstudio` | U+F108 | U+1F4BB |
-| `macbook` | U+F109 | U+1F4BB |
-| `globe` | U+F0AC | U+1F310 |
-| `cloud` | U+F0C2 | U+1F310 |
 | `arch` | U+F303 | U+1F427 |
 | `linux` | U+F31A | U+1F427 |
 | `mac` | U+F179 | U+1F34E |
 
-The names `arch`, `linux` and `mac` come from `[agent_monitor] rex_host_marks`. A terminal font
+The icon names come only from `[agent_monitor.rex_host_marks]`. A key is a label in `rex_hosts` or the `machine_name` of Harold's own machine. A host with no entry has no icon. The control-tower never uses the icon that Rex keeps for a host. A terminal font
 with no Nerd Font shows a box for a glyph. Set `[control_tower] host_marker = "emoji"` in the config to fix that. Or pass `--host-marker emoji` to the `control-tower` program directly.
 
 The control-tower decides whether the agents are in Rex from the first row with a local pane id.
