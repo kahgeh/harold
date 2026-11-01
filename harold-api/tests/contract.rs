@@ -557,3 +557,16 @@ fn a_tts_audio_chunk_round_trips() {
     };
     assert_eq!(round_trip(&model), model);
 }
+
+#[test]
+fn agent_state_has_working_idle_unknown_on_numbers_1_2_3() {
+    assert_eq!(AgentState::Working as i32, 1);
+    assert_eq!(AgentState::Idle as i32, 2);
+    assert_eq!(AgentState::Unknown as i32, 3);
+    assert_eq!(AgentState::try_from(1), Ok(AgentState::Working));
+    assert_eq!(
+        AgentState::from_str_name("AGENT_STATE_WORKING"),
+        Some(AgentState::Working)
+    );
+    assert_eq!(AgentState::from_str_name("AGENT_STATE_BUSY"), None);
+}
