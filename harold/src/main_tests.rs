@@ -2988,6 +2988,7 @@ async fn a_host_agent_is_in_the_watch_stream_and_not_in_the_snapshot_events_or_p
     assert_eq!(host.state, i32::from(AgentState::Working));
     assert_eq!(host.current_step.as_deref(), Some("Edit files"));
     assert_eq!(host.work_summary, None);
+    assert_eq!((host.recap.as_deref(), host.recap_at_ms), (None, 0));
 
     // A change on the host sends a new item.
     service

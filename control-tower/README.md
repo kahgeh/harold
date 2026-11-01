@@ -41,7 +41,7 @@ The resulting development executable is `../target/release/control-tower`.
 An installed Harold starts the control-tower with this command:
 
 ```sh
-harold start-control-tower [--endpoint URI] [--host-marker glyph|emoji|text]
+harold start-control-tower [--endpoint URI]
 ```
 
 The command passes the gRPC address from the Harold settings. The `--endpoint` argument overrides it.
@@ -101,7 +101,7 @@ The host mark depends on `--host-marker`:
 | `mac` | U+F179 | U+1F34E |
 
 The names `arch`, `linux` and `mac` come from `[agent_monitor] rex_host_marks`. A terminal font
-with no Nerd Font shows a box for a glyph. Use `--host-marker emoji` to fix that.
+with no Nerd Font shows a box for a glyph. Set `[control_tower] host_marker = "emoji"` in the config to fix that. Or pass `--host-marker emoji` to the `control-tower` program directly.
 
 The control-tower decides whether the agents are in Rex from the first row with a local pane id.
 A row on a Rex host never decides it.
