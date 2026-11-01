@@ -316,7 +316,7 @@ fn tts_refusal_line(status: &tonic::Status) -> String {
         (_, "model_not_ready") => "the model is not ready: it waits for approval".into(),
         (_, "model_downloading") => "the TTS model is still downloading: try again soon".into(),
         (_, "model_missing") => "the TTS model is not on this machine: run harold tool tts models".into(),
-        (_, "voice_muted") => "the voice is muted: nothing was said (unmute it in the dash)".into(),
+        (_, "voice_muted") => "the voice is muted: nothing was said (unmute it in the control-tower)".into(),
         (_, "worker_failed") => "the TTS worker failed: see harold.log".into(),
         (_, "timed_out") => "the TTS worker did not answer in time".into(),
         (_, "invalid_text") => "the text must be 1 to 4,000 characters".into(),
@@ -5389,7 +5389,7 @@ mod tests {
         );
         assert_eq!(
             line(tonic::Code::FailedPrecondition, "voice_muted"),
-            "the voice is muted: nothing was said (unmute it in the dash)"
+            "the voice is muted: nothing was said (unmute it in the control-tower)"
         );
         assert_eq!(
             line(tonic::Code::FailedPrecondition, "default_model"),

@@ -795,7 +795,9 @@ fn print_help() {
         "                          Add a question from JSON on stdin; prints its id and version"
     );
     println!("  harold tool questions dismiss ID --reason TEXT");
-    println!("                          Withdraw a question, with a reason the dash shows");
+    println!(
+        "                          Withdraw a question, with a reason the control-tower shows"
+    );
     println!("  harold tool questions order ID...   Put the listed questions first, in order");
     println!("  harold tool questions list          List the waiting questions");
     println!("  harold tool questions show ID       Print a question's picks");

@@ -65,7 +65,7 @@ The default layout is:
 ~/bin/haroldctl
 ```
 
-An install from before stage 1 leaves `~/bin/tmx-agent-dash`. The installer copies it into the backup, then removes it. If the copy fails, the installer keeps the old file.
+An install from before the control-tower moved into the bundle leaves `~/bin/tmx-agent-dash`. The installer copies it into the backup, then removes it. If the copy fails, the installer keeps the old file.
 
 `local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the seven variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG`, `LC_ALL` and `HAROLD_LAUNCHD`) win on a clash.
 

@@ -944,6 +944,15 @@ class InstalledServiceTests(unittest.TestCase):
                       output)
         self.assertIn('Harold ready at', output)
 
+    def test_a_failed_rollback_copy_over_the_new_layout_names_no_old_program(self):
+        self.install_existing(saved='-')
+        self.assertFalse((self.prefix / 'tmx-agent-dash').exists())
+        with patch.object(self.install, 'keep_rollback_copy', side_effect=OSError(28, 'No space left on device')):
+            output = self.run_install('-')
+        self.assertIn('Rollback copy incomplete (No space left on device); the old bundle is still in the folder below.',
+                      output)
+        self.assertNotIn('stays in place', output)
+
     def test_a_symlinked_old_program_is_still_refused(self):
         target = self.prefix.parent / 'elsewhere'
         target.write_text('x')

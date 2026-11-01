@@ -41,7 +41,7 @@ REFUSAL_SENTENCES = (
 )
 SKILL_NAME = 'send-message-to-away-device'
 SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)
-# The program that stage 1 moved into the bundle as control-tower.
+# The program that moved into the bundle as control-tower.
 OLD_PROGRAM = 'tmx-agent-dash'
 # What the skill source writes where the installed harold binary's path goes.
 BIN_PLACEHOLDER = '{{HAROLD_BIN}}'
@@ -594,7 +594,7 @@ def keep_rollback_copy(prefix, backup, reinstall, metadata):
     """Copy haroldctl and, when it is there, tmx-agent-dash into `backup`, which holds the old
     bundle, and write ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
     copied = []
-    # An install before stage 1 keeps tmx-agent-dash beside the bundle, not in it. This copy
+    # An install from before that move keeps tmx-agent-dash beside the bundle, not in it. This copy
     # must run before remove_old_program deletes that file.
     for name in ('haroldctl', 'tmx-agent-dash'):
         if (prefix / name).is_file():
@@ -736,9 +736,11 @@ def install(args, repo):
                     keep_rollback_copy(prefix, backup, args.reinstall, metadata)
                 except Exception as error:
                     copy_kept = False
-                    print('Rollback copy incomplete ({}); the old tmx-agent-dash stays in place; '
+                    old_stays = ('the old {} stays in place; '.format(OLD_PROGRAM)
+                                 if (prefix / OLD_PROGRAM).is_file() else '')
+                    print('Rollback copy incomplete ({}); {}'
                           'the old bundle is still in the folder below.'.format(
-                              getattr(error, 'strerror', None) or error), flush=True)
+                              getattr(error, 'strerror', None) or error, old_stays), flush=True)
                 print('Previous installation archived at {}'.format(backup), flush=True)
             if copy_kept:
                 remove_old_program(prefix)

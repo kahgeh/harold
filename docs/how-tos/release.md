@@ -37,4 +37,4 @@ Both commands take these options on the `make` command line:
 
 Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and, when it exists, `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When it prints steps for macOS permissions instead of saying they carry over, follow them; [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
 
-A rollback across stage 1 returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before stage 1. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
+A rollback to an install from before that move returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before that move. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
