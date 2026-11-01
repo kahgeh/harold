@@ -1350,7 +1350,7 @@ fn at_thirty_seconds_the_record_decides() {
 }
 
 #[test]
-fn a_hook_idle_wins_over_a_record_saying_working_until_thirty_seconds_of_working() {
+fn a_hook_idle_wins_over_a_record_saying_working_until_thirty_seconds_after_the_hook_report() {
     let reported = apply_report_30_s(
         observed_pane(),
         mod_report(ObservedAgentState::Idle, 1_000),
