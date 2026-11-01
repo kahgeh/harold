@@ -402,6 +402,10 @@ pub(crate) fn route_to_chief(
     route_to_chief_in(text, photo, chief, type_into, None)
 }
 
+/// The error text when the pane listing fails and the chief's pane is not known.
+pub(crate) const CHIEF_PANE_UNKNOWN: &str =
+    "the tmux pane listing is failing, so the chief's pane is not known";
+
 /// `route_to_chief` for a reply whose phone request has the context `request`: the typed
 /// prompt keeps it, so the chief's turn joins the request's trace.
 pub(crate) fn route_to_chief_in(
@@ -415,9 +419,7 @@ pub(crate) fn route_to_chief_in(
         ChiefPane::One { pane_id, busy } => (pane_id, *busy),
         ChiefPane::NoChief => return Ok(ChiefRouting::NoChief),
         ChiefPane::ListingFailed => {
-            return Err(
-                "the tmux pane listing is failing, so the chief's pane is not known".into(),
-            );
+            return Err(CHIEF_PANE_UNKNOWN.into());
         }
     };
     let line = match photo {

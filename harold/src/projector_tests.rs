@@ -4249,7 +4249,7 @@ async fn a_state_write_failure_after_typing_does_not_retype() {
 }
 
 #[tokio::test]
-async fn a_to_chief_reply_while_the_listing_fails_is_retried_and_types_nothing() {
+async fn dispatch_reply_maps_a_failed_listing_to_inventory_failed() {
     let directory = TestDirectory::new();
     let mut events = chief_in("%app-chief-listing");
     events.push(inventory_unhealthy());
@@ -4262,12 +4262,36 @@ async fn a_to_chief_reply_while_the_listing_fails_is_retried_and_types_nothing()
     );
 
     assert!(
-        matches!(outcome, Err(DispatchError::Retryable(_))),
+        matches!(outcome, Err(DispatchError::InventoryFailed(_))),
         "{outcome:?}"
     );
     assert!(with.typed.lock().unwrap().is_empty());
     assert!(with.routed.lock().unwrap().is_empty());
     assert!(with.app.reply_states().is_empty());
+}
+
+#[tokio::test]
+async fn dispatch_reply_maps_a_failed_typing_step_to_retryable() {
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        chief_in("%app-chief-typing"),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let failing: ChiefTyper = Arc::new(|_: &str, _: &str| Err("tmux send-keys failed".to_string()));
+    let dispatcher = with.dispatcher.with_chief_typer(failing);
+
+    let outcome = dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Err(DispatchError::Retryable(_))),
+        "{outcome:?}"
+    );
 }
 
 #[tokio::test]

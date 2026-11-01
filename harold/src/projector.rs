@@ -66,6 +66,10 @@ pub(crate) enum DispatchError {
     #[error("{0}")]
     Retryable(String),
 
+    /// The chief's pane is not known because the pane listing fails.
+    #[error("{0}")]
+    InventoryFailed(String),
+
     #[error("{0}")]
     Permanent(String),
 }
@@ -351,6 +355,8 @@ impl ProductionDispatcher {
         // The reply's text is never logged: an error names the listing or tmux only.
         let photo = self.photo_path(&reply);
         let request = phone_request_on(&delivery.event_id, origin, telemetry::WEB_APP_CHANNEL);
+        let chief = self.chief_pane();
+        let listing_failed = matches!(chief, ChiefPane::ListingFailed);
         let routing_span = info_span!(target: TRACE_TARGET, "harold.route");
         // Fails only when no export layer is installed, and then there is no trace to join.
         let _ = routing_span.set_parent(request.cx.clone());
@@ -359,12 +365,18 @@ impl ProductionDispatcher {
                 route_to_chief_in(
                     &reply.text,
                     photo.as_deref(),
-                    &self.chief_pane(),
+                    &chief,
                     self.chief_typer.as_ref(),
                     Some(request.cx.clone()),
                 )
             })
-            .map_err(DispatchError::Retryable)?;
+            .map_err(|error| {
+                if listing_failed {
+                    DispatchError::InventoryFailed(error)
+                } else {
+                    DispatchError::Retryable(error)
+                }
+            })?;
         drop(routing_span);
         telemetry::finish_phone_request(
             &request,
@@ -956,7 +968,8 @@ async fn handle_next_delivery_inner(
                 });
                 Ok(true)
             }
-            DispatchError::Retryable(error) => {
+            // Task 3 gives InventoryFailed its own wait. Until then it acts as Retryable.
+            DispatchError::Retryable(error) | DispatchError::InventoryFailed(error) => {
                 if !last_try {
                     store.record_delivery_failure(&event_id, &error).await?;
                     return Err(HandlerError::Delivery {
@@ -1046,12 +1059,16 @@ fn dispatch_in_spans(
             delivering.record("reason", *reason);
             "held_back"
         }
-        Err(DispatchError::Retryable(_)) if last_try => "given_up",
+        // Task 3 gives InventoryFailed its own wait. Until then it acts as Retryable.
+        Err(DispatchError::Retryable(_) | DispatchError::InventoryFailed(_)) if last_try => {
+            "given_up"
+        }
         Err(_) => "failed",
     };
     delivering.record("outcome", outcome);
     if !last_try
-        && let (Some(turn), Err(DispatchError::Retryable(_))) = (turn, &result)
+        && let (Some(turn), Err(DispatchError::Retryable(_) | DispatchError::InventoryFailed(_))) =
+            (turn, &result)
         && let Ok(event_id) = uuid::Uuid::parse_str(&delivery.event_id)
     {
         telemetry::keep_turn_delivery(event_id, turn);
