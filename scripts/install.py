@@ -860,6 +860,7 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
+            print('restart the control-tower to see blocked, done and error', flush=True)
             message = permissions_message(old_requirement,
                                           new_requirement, identity, bundle / 'harold')
             if message:

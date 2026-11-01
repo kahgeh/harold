@@ -846,6 +846,12 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertNotIn('Not carried over', output)
         self.assertNotIn('New store:', output)
 
+    def test_install_tells_to_restart_the_control_tower(self):
+        output = self.run_install('-')
+        line = 'restart the control-tower to see blocked, done and error'
+        self.assertIn(line + '\n', output)
+        self.assertLess(output.index('Harold ready at'), output.index(line))
+
     def test_launchd_starts_harold_itself(self):
         self.run_install()
         plist = plistlib.loads((self.bundle / 'service.plist').read_bytes())
