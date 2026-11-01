@@ -528,6 +528,15 @@ pub(crate) enum ScreenAdapter {
     ClaudeV1,
 }
 
+/// How Harold reads a recap that an agent writes outside the screen.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RecapAdapter {
+    #[default]
+    None,
+    ClaudeTranscriptV1,
+}
+
 fn default_screen_history_lines() -> u16 {
     2000
 }
@@ -545,6 +554,8 @@ pub(crate) struct AgentProviderSettings {
     pub summary_line_prefixes: Vec<String>,
     #[serde(default)]
     pub screen_adapter: ScreenAdapter,
+    #[serde(default)]
+    pub recap_adapter: RecapAdapter,
     #[serde(default = "default_screen_history_lines")]
     pub screen_history_lines: u16,
 }
@@ -2327,6 +2338,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             idle_all: vec!["Ready".to_string()],
             summary_line_prefixes: vec![">".to_string()],
             screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+            recap_adapter: super::RecapAdapter::None,
             screen_history_lines: 2000,
         }
     }
@@ -2359,6 +2371,44 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
                 .iter()
                 .all(|provider| provider.screen_adapter == super::ScreenAdapter::GenericV1)
         );
+    }
+
+    #[test]
+    fn recap_adapter_defaults_to_none() {
+        let parsed = parse_agent_config(&[r#"[[agents]]
+            id = "custom"
+            display_name = "Custom"
+            command_contains = ["custom"]
+        "#]);
+        let AgentSettings(providers) = parsed.agents;
+        assert_eq!(providers[0].recap_adapter, super::RecapAdapter::None);
+    }
+
+    #[test]
+    fn claude_transcript_v1_reads() {
+        assert_eq!(
+            serde_json::from_str::<super::RecapAdapter>(r#""claude-transcript-v1""#).unwrap(),
+            super::RecapAdapter::ClaudeTranscriptV1
+        );
+    }
+
+    #[test]
+    fn an_unknown_recap_adapter_is_refused() {
+        assert!(serde_json::from_str::<super::RecapAdapter>(r#""unknown-v1""#).is_err());
+    }
+
+    #[test]
+    fn default_toml_sets_recap_adapter_on_claude_only() {
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        let AgentSettings(providers) = shipped.agents;
+        for provider in &providers {
+            let expected = if provider.id == "claude" {
+                super::RecapAdapter::ClaudeTranscriptV1
+            } else {
+                super::RecapAdapter::None
+            };
+            assert_eq!(provider.recap_adapter, expected, "{}", provider.id);
+        }
     }
 
     #[test]

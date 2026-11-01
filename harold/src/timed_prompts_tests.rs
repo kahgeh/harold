@@ -429,6 +429,7 @@ pub(crate) fn provider(id: &str, screen_adapter: ScreenAdapter) -> AgentProvider
         idle_all: Vec::new(),
         summary_line_prefixes: Vec::new(),
         screen_adapter,
+        recap_adapter: crate::settings::RecapAdapter::None,
         screen_history_lines: 2000,
     }
 }

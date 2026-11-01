@@ -2749,6 +2749,7 @@ fn provider() -> AgentProviderSettings {
         idle_all: vec!["Ready".into()],
         summary_line_prefixes: vec!["Task: ".into()],
         screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+        recap_adapter: crate::settings::RecapAdapter::None,
         screen_history_lines: 2000,
     }
 }

@@ -1,7 +1,7 @@
 use super::domain::{CompletionSummaryUpdate, WorkSummaryUpdate};
 use super::summary::{
-    completion_summary_update, explicit_summary_update, normalize_work_summary,
-    sanitize_bounded_metadata,
+    RECAP_MAX_SCALARS, completion_summary_update, explicit_summary_update, normalize_recap,
+    normalize_work_summary, sanitize_bounded_metadata,
 };
 
 #[test]
@@ -85,4 +85,31 @@ fn summary_update_defaults_preserve_existing_values() {
         CompletionSummaryUpdate::default(),
         CompletionSummaryUpdate::Unchanged
     );
+}
+
+#[test]
+fn normalize_recap_keeps_345_chars_whole() {
+    let input = "a".repeat(345);
+    assert_eq!(normalize_recap(&input), Some(input));
+}
+
+#[test]
+fn normalize_recap_cuts_500_chars_to_400() {
+    let output = normalize_recap(&"b".repeat(500)).unwrap();
+    assert_eq!(output.chars().count(), RECAP_MAX_SCALARS);
+    assert_eq!(RECAP_MAX_SCALARS, 400);
+}
+
+#[test]
+fn normalize_recap_collapses_white_space_and_drops_control_characters() {
+    assert_eq!(
+        normalize_recap("  one\r\ntwo\tthree \u{1b}[31mred\u{1b}[0m  "),
+        Some("one two three red".to_string())
+    );
+}
+
+#[test]
+fn normalize_recap_gives_none_for_blank() {
+    assert_eq!(normalize_recap(""), None);
+    assert_eq!(normalize_recap(" \t\r\n "), None);
 }

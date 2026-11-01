@@ -28,6 +28,18 @@ pub(crate) fn normalize_work_summary(input: &str) -> Option<String> {
     (!output.is_empty()).then_some(output)
 }
 
+/// Most Unicode scalars a recap keeps.
+// Task 3 reads this; remove the allow then.
+#[allow(dead_code)]
+pub(crate) const RECAP_MAX_SCALARS: usize = 400;
+
+// Task 3 calls this; remove the allow then.
+#[allow(dead_code)]
+pub(crate) fn normalize_recap(input: &str) -> Option<String> {
+    let output = sanitize_terminal_text(input, WhitespaceMode::Collapse, Some(RECAP_MAX_SCALARS));
+    (!output.is_empty()).then_some(output)
+}
+
 pub(crate) fn normalize_visible_grid(input: &str) -> String {
     sanitize_terminal_text(input, WhitespaceMode::PreserveLines, None)
 }
