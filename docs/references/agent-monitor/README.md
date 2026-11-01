@@ -154,7 +154,7 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 
 The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Work summary changes remain independent and can append during a grace period.
 
-A record refines a report only when it is a `program_status` observation, because Harold makes that observation only for a record of the agent's pid. A screen reading refines nothing. When the record changes to a state that does not refine the report, the runtime appends it at once, and the report decides again.
+A record refines a report only when it is a `program_status` observation, because Harold makes that observation only for a record of the agent's pid. A screen reading refines nothing. Inside the grace, when the record changes to a state that does not refine the report, the runtime appends it at once, and the report decides again. After the grace, the new record decides at once.
 
 One reduction (`reduce_state` in `harold/src/agent/reducer.rs`) gives the agent's state from the report and the screen evidence. The projection and the `agent blocked long` timer use it, so the timer fires only for an agent that the control-tower shows as `BLOCKED`.
 
