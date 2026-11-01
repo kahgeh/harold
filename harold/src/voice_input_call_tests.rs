@@ -133,8 +133,11 @@ async fn a_worker_that_never_says_ready_fails_its_load_after_120_s() {
     let folder = std::env::temp_dir().join(format!("harold-call-load-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&folder).unwrap();
     let script = folder.join("silent-worker");
-    std::fs::write(&script, "#!/bin/sh\nexec sleep 600\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::fake_program::write_fake_program(
+        &script,
+        crate::test_support::fake_program::Language::Shell,
+        "exec sleep 600",
+    );
     let command = WorkerCommand {
         python: script.display().to_string(),
         stt_model: "stt".into(),

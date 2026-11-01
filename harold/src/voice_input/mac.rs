@@ -935,8 +935,11 @@ mod tests {
     fn script(dir: &Path, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("fake.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::fake_program::write_fake_program(
+            &path,
+            crate::test_support::fake_program::Language::Shell,
+            body,
+        );
         path
     }
 

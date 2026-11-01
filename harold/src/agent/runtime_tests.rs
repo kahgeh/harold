@@ -3359,18 +3359,14 @@ impl Drop for ReleaseSummaryScreen {
 
 #[tokio::test]
 async fn activity_summary_forced_main_shutdown_reaps_active_cli_during_blocked_screen_scan() {
-    use std::os::unix::fs::PermissionsExt;
     let directory = TestDirectory::new();
     let script = directory.0.join("claude");
-    std::fs::write(
+    crate::test_support::fake_program::write_fake_program(
         &script,
-        r#"#!/bin/sh
-printf '%s\n%s\n' "$$" "$PWD" > "${0%/*}/started"
-exec /bin/sleep 60
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_support::fake_program::Language::Shell,
+        r#"printf '%s\n%s\n' "$$" "$PWD" > "${0%/*}/started"
+exec /bin/sleep 60"#,
+    );
     let settings = crate::settings::ActivitySummarySettings {
         enabled: true,
         cli_path: script.to_string_lossy().into_owned(),

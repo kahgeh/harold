@@ -5908,13 +5908,15 @@ mod tests {
 
         #[tokio::test]
         async fn speak_plays_the_audio_it_gets_with_the_player() {
-            use std::os::unix::fs::PermissionsExt;
             let folder =
                 std::env::temp_dir().join(format!("harold-cli-tts-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&folder).unwrap();
             let player = folder.join("player");
-            std::fs::write(&player, "#!/bin/sh\ncp \"$1\" \"$0.wav\"\n").unwrap();
-            std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_support::fake_program::write_fake_program(
+                &player,
+                crate::test_support::fake_program::Language::Shell,
+                "cp \"$1\" \"$0.wav\"",
+            );
             let fake = Fake::default();
             let calls = fake.calls.clone();
             let address = serve(fake).await;

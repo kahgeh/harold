@@ -808,7 +808,6 @@ fn the_tmux_check_after_a_failed_capture_is_counted_under_list() {
 
 mod rex_observer {
     use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use serde_json::{Value, json};
@@ -937,15 +936,18 @@ mod rex_observer {
             let dir = std::env::temp_dir()
                 .join(format!("harold-rex-observer-{}-{name}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
-            let mut script = String::from("#!/bin/sh\ncat <<'END_OF_EVENTS'\n");
+            let mut script = String::from("cat <<'END_OF_EVENTS'\n");
             for line in lines {
                 script.push_str(line);
                 script.push('\n');
             }
             script.push_str("END_OF_EVENTS\nexec sleep 30\n");
             let path = dir.join("rex");
-            std::fs::write(&path, script).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::fake_program::write_fake_program(
+                &path,
+                crate::test_support::fake_program::Language::Shell,
+                &script,
+            );
             Self { dir }
         }
 

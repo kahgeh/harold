@@ -87,11 +87,14 @@ impl Scratch {
     fn fake_python(&self, body: &str) -> String {
         let script = self.root.join("fake-python");
         let text = format!(
-            "#!/bin/sh\necho \"$*\" >> {log}\nenv > {log}.env\n{body}\n",
+            "echo \"$*\" >> {log}\nenv > {log}.env\n{body}\n",
             log = self.log().display()
         );
-        std::fs::write(&script, text).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_support::fake_program::write_fake_program(
+            &script,
+            crate::test_support::fake_program::Language::Shell,
+            &text,
+        );
         script.display().to_string()
     }
 

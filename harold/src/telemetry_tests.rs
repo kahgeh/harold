@@ -4313,7 +4313,7 @@ fn the_knowledge_lines_export_their_counts_and_no_text() {
 /// `STAND_IN_HDX`. It reads the key from the `-K -` config on stdin and keeps it in
 /// `$STORE/key_seen`, and keeps its command line in `$STORE/curl_args`, so a test can see that the
 /// key arrived on stdin and not on the command line.
-const STAND_IN_CURL: &str = r#"#!/bin/sh
+const STAND_IN_CURL: &str = r#"
 cat > "$STORE/key_seen"
 echo "$@" > "$STORE/curl_args"
 for url; do :; done
@@ -4343,8 +4343,11 @@ impl StandIn {
         let bin = self.store.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let curl = bin.join("curl");
-        std::fs::write(&curl, STAND_IN_CURL).unwrap();
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::fake_program::write_fake_program(
+            &curl,
+            crate::test_support::fake_program::Language::Shell,
+            STAND_IN_CURL,
+        );
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
         let key_file = self.store.join("hyperdx-access-key");
         std::fs::write(&key_file, format!("{key}\n")).unwrap();

@@ -179,8 +179,11 @@ fn a_long_text_keeps_its_question_past_character_280_as_its_own_message() {
 fn fake_cli(name: &str, script: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!("harold-{name}-{}", std::process::id()));
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::fake_program::write_fake_program(
+        &path,
+        crate::test_support::fake_program::Language::Shell,
+        script,
+    );
     path.to_string_lossy().into_owned()
 }
 
@@ -190,7 +193,7 @@ fn summarise_returns_a_600_char_cli_text_uncut() {
     let cli = fake_cli(
         "cli-ok",
         &format!(
-            "#!/bin/sh\nprintf '{{\"subtype\":\"success\",\"is_error\":false,\"result\":\"{}\"}}'\n",
+            "printf '{{\"subtype\":\"success\",\"is_error\":false,\"result\":\"{}\"}}'\n",
             "a".repeat(600)
         ),
     );
@@ -201,7 +204,7 @@ fn summarise_returns_a_600_char_cli_text_uncut() {
 #[cfg(unix)]
 #[test]
 fn summarise_returns_the_whole_reply_when_the_cli_fails() {
-    let cli = fake_cli("cli-bad", "#!/bin/sh\nexit 1\n");
+    let cli = fake_cli("cli-bad", "exit 1\n");
     let reply = format!("{}\n{}", "b".repeat(300), "c".repeat(300));
     let result = summarise_with(Some(&cli), &reply, "prompt");
     assert_eq!(result, format!("{} {}", "b".repeat(300), "c".repeat(300)));
@@ -229,7 +232,7 @@ impl std::io::Write for LogBuf {
 fn summarise_logging(name: &str, stdout: &str, code: i32) -> (String, String) {
     let cli = fake_cli(
         name,
-        &format!("#!/bin/sh\nprintf '%s' '{stdout}'\nexit {code}\n"),
+        &format!("printf '%s' '{stdout}'\nexit {code}\n"),
     );
     let buf = LogBuf::default();
     let writer = buf.clone();

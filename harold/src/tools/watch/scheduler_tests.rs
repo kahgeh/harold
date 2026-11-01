@@ -753,16 +753,14 @@ async fn a_run_stopped_after_midnight_counts_toward_the_day_it_started() {
 
 #[tokio::test]
 async fn stopping_a_watch_kills_the_child_its_run_started() {
-    use std::os::unix::fs::PermissionsExt;
     let folder = TempFolder::with_skill("pod-watch", "---\nname: pod-watch\n---\nCheck.\n");
     let data = TempFolder::new();
     let cli = data.0.join("fake-claude");
-    std::fs::write(
+    crate::test_support::fake_program::write_fake_program(
         &cli,
-        "#!/bin/sh\nsleep 300 &\necho $! > child.pid\ncat > /dev/null\nsleep 300\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::fake_program::Language::Shell,
+        "sleep 300 &\necho $! > child.pid\ncat > /dev/null\nsleep 300",
+    );
     let store = Arc::new(WatchStore::open(&data.0).await.unwrap());
     let (_stop, shutdown) = signal::channel(());
     let scheduler = Scheduler::new(Deps {

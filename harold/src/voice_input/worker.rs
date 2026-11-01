@@ -840,11 +840,14 @@ mod tests {
         let log = folder.join("log.txt");
         let script = folder.join("fake-worker");
         let text = format!(
-            "#!/bin/sh\n{ready}\nwhile IFS= read -r line; do\necho \"$line\" >> {log}\n{body}\ndone\necho closed >> {log}\n",
+            "{ready}\nwhile IFS= read -r line; do\necho \"$line\" >> {log}\n{body}\ndone\necho closed >> {log}\n",
             log = log.display()
         );
-        std::fs::write(&script, text).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_support::fake_program::write_fake_program(
+            &script,
+            crate::test_support::fake_program::Language::Shell,
+            &text,
+        );
         let command = WorkerCommand {
             python: script.display().to_string(),
             stt_model: "stt".into(),

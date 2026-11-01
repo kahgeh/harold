@@ -564,17 +564,15 @@ mod tests {
 
     use crate::tts::play::wav_bytes;
     use crate::tts::test_support::fixture;
-    use std::os::unix::fs::PermissionsExt;
 
     /// A player that copies the WAV file it is given to `<out>.wav` and notes its path.
     fn copying_player(folder: &std::path::Path) -> String {
         let player = folder.join("player");
-        std::fs::write(
+        crate::test_support::fake_program::write_fake_program(
             &player,
-            "#!/bin/sh\ncp \"$1\" \"$0.wav\"\nprintf %s \"$1\" > \"$0.path\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_support::fake_program::Language::Shell,
+            "cp \"$1\" \"$0.wav\"\nprintf %s \"$1\" > \"$0.path\"",
+        );
         player.display().to_string()
     }
 
@@ -726,12 +724,11 @@ mod tests {
         let folder = scratch_folder();
         let marker = folder.join("started");
         let player = folder.join("slow-player");
-        std::fs::write(
+        crate::test_support::fake_program::write_fake_program(
             &player,
-            format!("#!/bin/sh\ntouch '{}'\nsleep 5\n", marker.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_support::fake_program::Language::Shell,
+            &format!("touch '{}'\nsleep 5", marker.display()),
+        );
         let out = folder.join("fallback-out");
         let tts = server_tts(&out);
         let stopper = Arc::new(LineStopper::default());
