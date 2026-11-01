@@ -7,7 +7,6 @@ use crate::settings::KOKORO_REVISION;
 use crate::tts::test_support::*;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
-#[cfg(target_os = "macos")]
 use tokio::time::timeout;
 
 const REVISION: &str = "b71e4d38b236d968966a2002c4c895dbd12b1c3c";
@@ -30,7 +29,6 @@ fn kokoro_failed(registry: &Registry) -> bool {
     matches!(registry.default_status(), DefaultStatus::Failed { .. })
 }
 
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[tokio::test(flavor = "current_thread")]
@@ -57,8 +55,8 @@ async fn kokoro_with_a_record_that_holds_is_ready_and_nothing_is_asked_of_the_hu
     assert_eq!(listed[0].state, InfoState::Ready);
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: the fake Hub is asked to check the files of a Hugging Face snapshot that has no record.
+// The release path asks no hub: with no record it downloads.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn kokoro_cached_without_a_record_is_checked_and_downloads_nothing() {
@@ -79,8 +77,8 @@ async fn kokoro_cached_without_a_record_is_checked_and_downloads_nothing() {
     assert_eq!(scratch.hub.calls(), [format!("check {}", kokoro_model())]);
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: the record of the old speech models is for a Hugging Face snapshot. `ensure_release`
+// never reads it.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn kokoros_record_from_the_speech_models_still_holds_after_the_upgrade_and_needs_no_network()
@@ -101,8 +99,7 @@ async fn kokoros_record_from_the_speech_models_still_holds_after_the_upgrade_and
     assert!(scratch.folder().join(&name).exists());
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: this test checks the fake Hub's `check` and `download` calls. The Linux twin is `onnx_a_missing_kokoro_release_is_downloaded_and_logged_before_it_is_listed_ready`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_ready() {
@@ -131,8 +128,7 @@ async fn a_missing_kokoro_is_downloaded_checked_and_logged_before_it_is_listed_r
     assert!(text.contains("bytes=100"), "{text}");
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_until_the_release_is_downloaded_a_request_is_told_it_is_downloading`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
@@ -162,8 +158,8 @@ async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
     assert!(registry.resolve("", "").is_ok());
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: the fake Hub fails a Hugging Face check. The Linux twin is
+// `a_release_row_whose_download_fails_its_check_is_listed_failed_with_check_failed`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_file_that_fails_its_check_is_not_listed_ready_and_logs_check_failed() {
@@ -210,8 +206,7 @@ async fn a_full_disk_fails_the_download_before_it_starts() {
     );
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_on_the_hotspot_the_release_download_waits_until_a_call_starts_it`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
@@ -247,8 +242,7 @@ async fn on_the_hotspot_the_download_waits_until_a_call_starts_it() {
     );
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: this test checks a failed download through the fake Hub. The Linux twin is `onnx_a_call_tries_a_failed_release_download_again_unless_the_disk_was_full`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_call_tries_a_failed_download_again_unless_the_disk_was_full_or_it_is_not_allowed() {
@@ -681,15 +675,21 @@ async fn a_request_resolves_to_the_model_voice_and_worker_files() {
     );
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
-#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn two_downloads_never_run_at_once() {
     let scratch = Scratch::new();
     scratch.safe_files();
     scratch.approve(REPO, REVISION, WorkerKind::THIS_BUILD.as_str());
     scratch.approve("org/third", REVISION, WorkerKind::THIS_BUILD.as_str());
+    // Kokoro is downloaded through the fake Hub on macOS. On Linux it is a release, so its files
+    // are on disk and only the two models asked for are downloaded.
+    let downloads = match WorkerKind::THIS_BUILD {
+        WorkerKind::Mlx => 3,
+        WorkerKind::Onnx => {
+            scratch.cached(kokoro_model(), kokoro_commit(), 100);
+            2
+        }
+    };
     let gate = Arc::new(Notify::new());
     *scratch.hub.gate.lock().unwrap() = Some(gate.clone());
     let registry = scratch.registry();
@@ -703,7 +703,7 @@ async fn two_downloads_never_run_at_once() {
         .await
         .unwrap();
 
-    for _ in 0..3 {
+    for _ in 0..downloads {
         timeout(Duration::from_secs(10), async {
             while scratch.hub.running.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -725,8 +725,7 @@ async fn two_downloads_never_run_at_once() {
     assert_eq!(scratch.hub.most_running.load(Ordering::SeqCst), 1);
 }
 
-// macOS only: here Kokoro is a Hugging Face model, downloaded through the fake Hub. On Linux it is
-// the files of a GitHub release, which `ReleaseDownloader` fetches (see release_download_tests.rs).
+// macOS only: this test checks a download through the fake Hub. The Linux twin is `onnx_a_release_download_waits_while_another_holds_the_download_slot`.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_download_waits_while_another_holds_the_machines_download_slot() {
@@ -1015,4 +1014,222 @@ async fn a_request_that_waited_for_approval_is_format_checked_after_a_restart() 
             .iter()
             .any(|call| call.starts_with("check"))
     );
+}
+
+// The Linux twins of the macOS-only download tests. On Linux Kokoro is the two files of a GitHub
+// release, which `ReleaseDownloader` fetches. These tests serve two small files from a server on
+// loopback in their place.
+
+/// The two small files that the test server serves in place of the pinned ones.
+#[cfg(not(target_os = "macos"))]
+const SMALL_RELEASE: [release_download::ReleaseFile; 2] = [
+    release_download::ReleaseFile {
+        name: release_download::MODEL_FILE,
+        size: 5,
+        sha256: "9372c470eeadd5ecd9c3c74c2b3cb633f8e2f2fad799250a0f70d652b6b825e4",
+    },
+    release_download::ReleaseFile {
+        name: release_download::VOICES_FILE,
+        size: 6,
+        sha256: "db9cf15a9a701d0583df98351f97d69c586e1e6f9c8e5c8daf915c6bfb09e762",
+    },
+];
+
+/// A server on loopback that serves `SMALL_RELEASE`.
+#[cfg(not(target_os = "macos"))]
+struct ReleaseServer {
+    port: u16,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    open: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl ReleaseServer {
+    /// Starts the server. With `held` it answers nothing until `open` is called. With
+    /// `fail_first` its first answer is a 500.
+    async fn start(held: bool, fail_first: bool) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (open, _) = tokio::sync::watch::channel(!held);
+        let (counted, gate) = (requests.clone(), open.clone());
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (counted, mut gate) = (counted.clone(), gate.subscribe());
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let read = stream.read(&mut request).await.unwrap_or(0);
+                    let first = String::from_utf8_lossy(&request[..read]).to_string();
+                    let number = counted.fetch_add(1, Ordering::SeqCst);
+                    let _ = gate.wait_for(|open| *open).await;
+                    let body: &[u8] = if first.contains(release_download::MODEL_FILE) {
+                        b"model"
+                    } else {
+                        b"voices"
+                    };
+                    let head = if fail_first && number == 0 {
+                        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                    };
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    if !(fail_first && number == 0) {
+                        let _ = stream.write_all(body).await;
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            requests,
+            open,
+        }
+    }
+
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+
+    fn open(&self) {
+        self.open.send_replace(true);
+    }
+
+    /// A registry for `scratch` whose release downloader asks this server.
+    fn registry(&self, scratch: &Scratch) -> Arc<Registry> {
+        let mut deps = scratch.deps();
+        deps.release = Arc::new(release_download::ReleaseDownloader::for_test(
+            format!("http://127.0.0.1:{}/release", self.port),
+            SMALL_RELEASE.to_vec(),
+            vec!["127.0.0.1".to_string()],
+        ));
+        Registry::new(deps, scratch.kokoro())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "current_thread")]
+async fn onnx_a_missing_kokoro_release_is_downloaded_and_logged_before_it_is_listed_ready() {
+    let logs = CapturedLogs::start();
+    let scratch = Scratch::new();
+    let server = ReleaseServer::start(false, false).await;
+    let registry = server.registry(&scratch);
+    assert_eq!(registry.default_status(), DefaultStatus::Checking);
+
+    registry.start_up();
+
+    until(&registry, kokoro_ready).await;
+    assert_eq!(server.requests(), 2);
+    assert!(scratch.hub.calls().is_empty());
+    let text = logs.text();
+    assert!(text.contains("tts model download started"), "{text}");
+    assert!(text.contains("tts model downloaded"), "{text}");
+    assert!(
+        text.contains(&format!("model={}", kokoro_model())),
+        "{text}"
+    );
+    assert!(text.contains("bytes=11"), "{text}");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "current_thread")]
+async fn onnx_until_the_release_is_downloaded_a_request_is_told_it_is_downloading() {
+    let scratch = Scratch::new();
+    let server = ReleaseServer::start(true, false).await;
+    let registry = server.registry(&scratch);
+
+    assert_eq!(registry.resolve("", ""), Err(ResolveError::Downloading));
+    registry.start_up();
+    until(&registry, |registry| {
+        matches!(registry.default_status(), DefaultStatus::Downloading { .. })
+    })
+    .await;
+    assert_eq!(registry.resolve("", ""), Err(ResolveError::Downloading));
+    assert_eq!(
+        registry.default_status(),
+        DefaultStatus::Downloading {
+            model: kokoro_model().into(),
+            bytes: 0,
+            total: release_download::total_size()
+        }
+    );
+
+    server.open();
+    until(&registry, kokoro_ready).await;
+    assert!(registry.resolve("", "").is_ok());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "current_thread")]
+async fn onnx_on_the_hotspot_the_release_download_waits_until_a_call_starts_it() {
+    let logs = CapturedLogs::start();
+    let scratch = Scratch::new();
+    scratch.host.on_hotspot();
+    let server = ReleaseServer::start(false, false).await;
+    let registry = server.registry(&scratch);
+
+    registry.start_up();
+
+    until(&registry, |registry| {
+        registry.default_status() == DefaultStatus::Waiting
+    })
+    .await;
+    assert_eq!(server.requests(), 0);
+    assert!(logs.text().contains("tts model download waiting"));
+
+    registry.for_call();
+
+    until(&registry, kokoro_ready).await;
+    assert_eq!(server.requests(), 2);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "current_thread")]
+async fn onnx_a_call_tries_a_failed_release_download_again_unless_the_disk_was_full() {
+    let scratch = Scratch::new();
+    let server = ReleaseServer::start(false, true).await;
+    let registry = server.registry(&scratch);
+    registry.start_up();
+    until(&registry, kokoro_failed).await;
+
+    registry.for_call();
+
+    until(&registry, kokoro_ready).await;
+
+    let scratch = Scratch::new();
+    scratch.host.free.store(0, Ordering::SeqCst);
+    let server = ReleaseServer::start(false, false).await;
+    let registry = server.registry(&scratch);
+    registry.start_up();
+    until(&registry, kokoro_failed).await;
+    assert_eq!(registry.list()[0].reason, "disk_full");
+
+    registry.for_call();
+    tokio::task::yield_now().await;
+
+    assert!(kokoro_failed(&registry));
+    assert_eq!(server.requests(), 0);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "current_thread")]
+async fn onnx_a_release_download_waits_while_another_holds_the_download_slot() {
+    let scratch = Scratch::new();
+    let server = ReleaseServer::start(false, false).await;
+    let registry = server.registry(&scratch);
+    let slot = download_slot().lock().await;
+
+    registry.start_up();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(server.requests(), 0);
+
+    drop(slot);
+    until(&registry, kokoro_ready).await;
+    assert_eq!(server.requests(), 2);
 }
