@@ -87,9 +87,124 @@ pub fn display_work_summary(summary: Option<&str>) -> &str {
     }
 }
 
+/// How the WHERE column marks an agent on another Rex host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostMarker {
+    /// A Nerd Font glyph, such as the server icon.
+    #[default]
+    Glyph,
+    /// An emoji, which needs no special font.
+    Emoji,
+    /// The host label and a dot.
+    Text,
+}
+
+impl std::str::FromStr for HostMarker {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "glyph" => Ok(Self::Glyph),
+            "emoji" => Ok(Self::Emoji),
+            "text" => Ok(Self::Text),
+            _ => Err(()),
+        }
+    }
+}
+
+const EMOJI_COMPUTER: &str = "\u{1F4BB}";
+const EMOJI_GLOBE: &str = "\u{1F310}";
+const EMOJI_PENGUIN: &str = "\u{1F427}";
+const EMOJI_APPLE: &str = "\u{1F34E}";
+
+/// The glyph (Nerd Font) and the emoji for a host icon name, or `None` for an unknown name.
+fn host_mark_pair(icon: &str) -> Option<(char, &'static str)> {
+    match icon {
+        "server.rack" => Some(('\u{f233}', EMOJI_COMPUTER)),
+        "desktopcomputer" | "macmini" | "macstudio" => Some(('\u{f108}', EMOJI_COMPUTER)),
+        "macbook" => Some(('\u{f109}', EMOJI_COMPUTER)),
+        "globe" => Some(('\u{f0ac}', EMOJI_GLOBE)),
+        "cloud" => Some(('\u{f0c2}', EMOJI_GLOBE)),
+        "arch" => Some(('\u{f303}', EMOJI_PENGUIN)),
+        "linux" => Some(('\u{f31a}', EMOJI_PENGUIN)),
+        "mac" => Some(('\u{f179}', EMOJI_APPLE)),
+        _ => None,
+    }
+}
+
+/// The mark for an agent on another Rex host.
+///
+/// The glyph and the emoji are 2 cells wide: the glyph is one cell and one space. The text
+/// form is the label and a dot, as wide as the label. An unknown or empty icon gives the emoji.
+pub fn host_mark(icon: &str, marker: HostMarker, label: &str) -> String {
+    match (marker, host_mark_pair(icon)) {
+        (HostMarker::Text, _) => format!("{label} \u{b7}"),
+        (HostMarker::Glyph, Some((glyph, _))) => format!("{glyph} "),
+        (_, Some((_, emoji))) => emoji.to_owned(),
+        (_, None) => EMOJI_COMPUTER.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{display_work_summary, normalize_search, sanitize_display};
+    use ratatui::text::Line;
+
+    use super::{HostMarker, display_work_summary, host_mark, normalize_search, sanitize_display};
+
+    const TABLE: [(&str, char, &str); 8] = [
+        ("server.rack", '\u{f233}', "\u{1F4BB}"),
+        ("desktopcomputer", '\u{f108}', "\u{1F4BB}"),
+        ("macbook", '\u{f109}', "\u{1F4BB}"),
+        ("globe", '\u{f0ac}', "\u{1F310}"),
+        ("cloud", '\u{f0c2}', "\u{1F310}"),
+        ("arch", '\u{f303}', "\u{1F427}"),
+        ("linux", '\u{f31a}', "\u{1F427}"),
+        ("mac", '\u{f179}', "\u{1F34E}"),
+    ];
+
+    #[test]
+    fn every_table_row_is_two_cells_wide() {
+        for (icon, glyph, emoji) in TABLE {
+            let mark = host_mark(icon, HostMarker::Glyph, "h");
+            assert_eq!(mark, format!("{glyph} "), "{icon}");
+            assert_eq!(Line::raw(mark).width(), 2, "{icon}");
+            let mark = host_mark(icon, HostMarker::Emoji, "h");
+            assert_eq!(mark, emoji, "{icon}");
+            assert_eq!(Line::raw(mark).width(), 2, "{icon}");
+        }
+        for icon in ["macmini", "macstudio"] {
+            assert_eq!(host_mark(icon, HostMarker::Glyph, "h"), "\u{f108} ");
+        }
+    }
+
+    #[test]
+    fn unknown_and_empty_icons_give_the_computer_emoji() {
+        for icon in ["", "unicorn"] {
+            for marker in [HostMarker::Glyph, HostMarker::Emoji] {
+                let mark = host_mark(icon, marker, "h");
+                assert_eq!(mark, "\u{1F4BB}");
+                assert_eq!(Line::raw(mark).width(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn the_text_mark_is_the_label_and_a_dot() {
+        assert_eq!(
+            host_mark("globe", HostMarker::Text, "omarchy"),
+            "omarchy \u{b7}"
+        );
+        assert_eq!(host_mark("", HostMarker::Text, "omarchy"), "omarchy \u{b7}");
+    }
+
+    #[test]
+    fn host_marker_parses_three_names_only() {
+        assert_eq!("glyph".parse(), Ok(HostMarker::Glyph));
+        assert_eq!("emoji".parse(), Ok(HostMarker::Emoji));
+        assert_eq!("text".parse(), Ok(HostMarker::Text));
+        assert!("icons".parse::<HostMarker>().is_err());
+        assert!("".parse::<HostMarker>().is_err());
+    }
 
     #[test]
     fn strips_c0_del_and_c1_controls_without_losing_printable_unicode() {

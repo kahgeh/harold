@@ -170,8 +170,21 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("recap".to_string(), 15),
             ("recap_at_ms".to_string(), 16),
             ("current_step".to_string(), 17),
+            ("host".to_string(), 18),
+            ("host_icon".to_string(), 19),
         ]
     );
+
+    let remote = AgentPaneState {
+        pane_id: "rex:omarchy/block:abc".to_string(),
+        host: "omarchy".to_string(),
+        host_icon: "arch".to_string(),
+        ..Default::default()
+    };
+    let decoded = round_trip(&remote);
+    assert_eq!(decoded.host, "omarchy");
+    assert_eq!(decoded.host_icon, "arch");
+    assert!(round_trip(&AgentPaneState::default()).host.is_empty());
 }
 
 #[test]

@@ -144,6 +144,8 @@ fn row(
     last_transition_at_ms: i64,
 ) -> AgentRow {
     AgentRow {
+        host: String::new(),
+        host_icon: String::new(),
         incarnation,
         provider_display_name: provider_display_name.into(),
         tmux_target: tmux_target.into(),

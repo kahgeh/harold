@@ -41,7 +41,7 @@ The resulting development executable is `../target/release/control-tower`.
 An installed Harold starts the control-tower with this command:
 
 ```sh
-harold start-control-tower [--endpoint URI]
+harold start-control-tower [--endpoint URI] [--host-marker glyph|emoji|text]
 ```
 
 The command passes the gRPC address from the Harold settings. The `--endpoint` argument overrides it.
@@ -58,13 +58,53 @@ Select a different endpoint explicitly:
 cargo run -- --endpoint http://127.0.0.1:6000
 ```
 
-The command accepts one optional `--endpoint` argument. The value must be an
-absolute `http://` URI with an authority. There is no environment-variable or
-configuration-file override.
+The command accepts the optional `--endpoint` and `--host-marker` arguments, each one time. The
+`--endpoint` value must be an absolute `http://` URI with an authority. There is no
+environment-variable or configuration-file override.
+
+The `--host-marker` value is `glyph` (the default), `emoji` or `text`. Harold passes the
+`[control_tower] host_marker` setting. Any other value is a usage error.
 
 The loopback default is the intended local security boundary. An explicitly
 configured non-loopback endpoint is accepted, but transport authentication is
 outside this MVP; use a trusted deployment boundary for remote connections.
+
+## Agents on other Rex hosts
+
+Harold can list the agents on the Rex hosts that the user names in `[agent_monitor] rex_hosts`.
+Such a row has a pane id of the form `rex:<label>/block:<id>`, and the fields `host` and
+`host_icon`. The control-tower treats it as follows.
+
+| Place | An agent on a Rex host |
+| --- | --- |
+| Group | The first word of its session name, as for every agent. |
+| WHERE column | The host mark, a space, then the name. The column keeps its fixed width, and a longer text is cut with `…`. |
+| Detail panel | A `HOST` line with the label. |
+| Enter | The status line shows `on <label>`. No `rex` or `tmux` command runs. |
+| Filter (`f`) | Also matches the host label. |
+
+The host mark depends on `--host-marker`:
+
+- `glyph`: the Nerd Font glyph of the host icon, then a space (2 cells).
+- `emoji`: an emoji (2 cells). It is also the mark for an icon name that is not in the table, and for a host with no icon.
+- `text`: the label and a dot, such as `omarchy ·`. It is as wide as the label.
+
+| Icon name | Glyph | Emoji |
+| --- | --- | --- |
+| `server.rack` | U+F233 | U+1F4BB |
+| `desktopcomputer`, `macmini`, `macstudio` | U+F108 | U+1F4BB |
+| `macbook` | U+F109 | U+1F4BB |
+| `globe` | U+F0AC | U+1F310 |
+| `cloud` | U+F0C2 | U+1F310 |
+| `arch` | U+F303 | U+1F427 |
+| `linux` | U+F31A | U+1F427 |
+| `mac` | U+F179 | U+1F34E |
+
+The names `arch`, `linux` and `mac` come from `[agent_monitor] rex_host_marks`. A terminal font
+with no Nerd Font shows a box for a glyph. Use `--host-marker emoji` to fix that.
+
+The control-tower decides whether the agents are in Rex from the first row with a local pane id.
+A row on a Rex host never decides it.
 
 ## Keys
 

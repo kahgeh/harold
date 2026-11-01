@@ -686,6 +686,8 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
         recap_at_ms: pane.recap_at_ms,
         state: map_agent_state(pane.state),
         last_transition_at_ms: pane.last_transition_at_ms,
+        host: sanitize_display(&pane.host, PANE_FIELD_LIMIT),
+        host_icon: sanitize_display(&pane.host_icon, PANE_FIELD_LIMIT),
     })
 }
 
@@ -813,6 +815,8 @@ mod tests {
             current_step: None,
             recap: None,
             recap_at_ms: 0,
+            host: String::new(),
+            host_icon: String::new(),
         })
         .collect();
 
@@ -1467,7 +1471,23 @@ mod tests {
             current_step: None,
             recap: None,
             recap_at_ms: 0,
+            host: String::new(),
+            host_icon: String::new(),
         }
+    }
+
+    #[test]
+    fn host_and_host_icon_reach_the_row_and_are_cleaned() {
+        let mut pane = proto_pane("rex:omarchy/block:abc");
+        pane.host = "omarchy\x1b[31m".into();
+        pane.host_icon = "arch".into();
+        let row = super::map_pane(pane).unwrap();
+        assert_eq!(row.host, "omarchy");
+        assert_eq!(row.host_icon, "arch");
+        assert!(row.is_on_host());
+        let local = super::map_pane(proto_pane("%1")).unwrap();
+        assert!(local.host.is_empty() && local.host_icon.is_empty());
+        assert!(!local.is_on_host());
     }
 
     fn proto_health(

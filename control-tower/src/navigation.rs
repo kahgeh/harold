@@ -14,6 +14,29 @@ const REX_SERVER_COPY: &str = "Library/Application Support/com.superlogical.rex/
 const REX_BUNDLE_COPY: &str = "Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
 /// A Rex pane id starts with this. A tmux pane id starts with `%`.
 pub const REX_BLOCK_PREFIX: &str = "block:";
+/// A pane id on another Rex host starts with this: `rex:<label>/block:<id>`.
+pub const REX_HOST_PREFIX: &str = "rex:";
+
+/// Whether `id` is `%<n>`, a tmux pane on this Mac.
+pub fn is_tmux_pane_id(id: &str) -> bool {
+    id.strip_prefix('%')
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Whether `id` is `block:<id>`, a Rex block on this Mac.
+pub fn is_local_rex_pane_id(id: &str) -> bool {
+    id.strip_prefix(REX_BLOCK_PREFIX).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+/// Whether `id` is a local form: `%<n>` or `block:<id>`. A host pane id is not.
+pub fn is_local_pane_id(id: &str) -> bool {
+    is_tmux_pane_id(id) || is_local_rex_pane_id(id)
+}
 
 struct CommandOutput {
     success: bool,
@@ -329,6 +352,10 @@ impl PaneNavigator for TmuxNavigator {
         if pane_id.trim().is_empty() {
             return Err(NavigationError::EmptyPane);
         }
+        // A second check: only a tmux pane id reaches tmux. A host pane id never does.
+        if !is_tmux_pane_id(pane_id) {
+            return Err(NavigationError::BadRexTarget);
+        }
 
         // No `-c`: a client name is its tty path, which a suspended client on the same
         // tty shares, and tmux resolves a shared name to the oldest match. Left to
@@ -487,7 +514,8 @@ fn sanitize_detail(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandOutput, CommandRunner, NavigationError, PaneNavigator, ProcessContext, TmuxNavigator,
+        CommandOutput, CommandRunner, NavigationError, PaneNavigator, ProcessContext,
+        TmuxNavigator, is_local_pane_id,
     };
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, ConnectionState, SearchState, Snapshot,
@@ -794,6 +822,48 @@ mod tests {
         assert!(observed_runner.calls().is_empty());
     }
 
+    /// Pane ids from other Rex hosts, and malformed ids, as the daemon's route tests list them.
+    const NOT_LOCAL_IDS: [&str; 10] = [
+        "rex:omarchy/block:abc",
+        "rex:a_b/block:x",
+        "rex:/block:a",
+        "rex:h/",
+        "rex:h/block:",
+        "rex:h/%4",
+        "rex:h/rex:h/block:a",
+        "main:0.1",
+        "%",
+        "%4x",
+    ];
+
+    #[test]
+    fn jump_to_refuses_every_id_that_is_not_a_tmux_pane_id() {
+        let runner = FakeRunner::with_outputs(Vec::new());
+        let (navigator, observed_runner) = navigator_with(runner, FakeContext::valid());
+
+        for id in NOT_LOCAL_IDS
+            .into_iter()
+            .chain(["block:abc", "rex:omarchy/block:abc"])
+        {
+            assert_eq!(
+                navigator.jump_to("client-1", id),
+                Err(NavigationError::BadRexTarget),
+                "{id:?}"
+            );
+        }
+        assert!(observed_runner.calls().is_empty());
+    }
+
+    #[test]
+    fn the_local_id_check_takes_only_the_local_forms() {
+        for id in NOT_LOCAL_IDS {
+            assert!(!is_local_pane_id(id), "{id:?}");
+        }
+        for id in ["%0", "%27", "block:abc"] {
+            assert!(is_local_pane_id(id), "{id:?}");
+        }
+    }
+
     #[test]
     fn vanished_pane_error_sanitizes_and_caps_hostile_tmux_stderr() {
         let hostile = format!("\x1b[31mvanished\x1b[0m\n{}", "界".repeat(600));
@@ -845,6 +915,8 @@ mod tests {
                 server_time_ms: 1,
                 monitor_health: Vec::new(),
                 rows: vec![AgentRow {
+                    host: String::new(),
+                    host_icon: String::new(),
                     incarnation: incarnation.clone(),
                     provider_display_name: "Codex".into(),
                     tmux_target: "agents:0.0".into(),

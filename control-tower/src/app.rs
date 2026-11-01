@@ -2,7 +2,7 @@ use crate::notes::{NotesAction, NotesEvent, NotesKey, NotesView};
 use crate::questions::{
     BlockEffect, Mode, Outgoing, PickView, QStop, QuestionBlock, Queue, SendResult,
 };
-use crate::text::normalize_search;
+use crate::text::{HostMarker, normalize_search};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 use std::fmt;
@@ -66,9 +66,18 @@ pub struct AgentRow {
     pub recap_at_ms: i64,
     pub state: AgentState,
     pub last_transition_at_ms: i64,
+    /// The Rex host label, empty for an agent on this Mac.
+    pub host: String,
+    /// The host's mark name, empty for this Mac and for a host with no icon.
+    pub host_icon: String,
 }
 
 impl AgentRow {
+    /// Whether the agent runs on another Rex host.
+    pub fn is_on_host(&self) -> bool {
+        !self.host.is_empty()
+    }
+
     /// Project the agent belongs to: the first word of its tmux session name.
     pub fn group(&self) -> &str {
         self.session_name
@@ -225,6 +234,8 @@ pub(crate) enum RuntimeStatus {
     },
     NavigationUnavailable,
     NavigationFailed(String),
+    /// The selected agent runs on another Rex host, with this label.
+    OnHost(String),
     VoiceFailed(String),
     MessagingFailed(String),
     CallFailed(String),
@@ -286,6 +297,8 @@ pub struct App {
     /// question keys are dropped until Esc, so letters typed for the old question never
     /// act on the new one.
     holding_block_keys: bool,
+    /// How the WHERE column marks an agent on another Rex host.
+    pub host_marker: HostMarker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,6 +405,7 @@ impl App {
             focus_tracking: false,
             swallowing_keys: false,
             holding_block_keys: false,
+            host_marker: HostMarker::default(),
         }
     }
 
@@ -1320,6 +1334,7 @@ impl From<&AgentRow> for SearchableRow {
                 normalize_search(row.recap.as_deref().unwrap_or_default()),
                 normalize_search(&row.tmux_target),
                 normalize_search(&row.working_directory),
+                normalize_search(&row.host),
             ],
         }
     }
@@ -1871,6 +1886,8 @@ mod tests {
     #[test]
     fn search_matches_each_supported_field_case_insensitively() {
         let matched = AgentRow {
+            host: String::new(),
+            host_icon: String::new(),
             incarnation: incarnation("%17", 17, 170, 1_700, "provider-id"),
             provider_display_name: "Codex Prime".into(),
             tmux_target: "Agents:2.7".into(),
@@ -1958,6 +1975,41 @@ mod tests {
 
         assert!(SearchableRow::from(&stepped).matches("haystack"));
         assert!(!SearchableRow::from(&other).matches("haystack"));
+    }
+
+    #[test]
+    fn search_matches_the_host_label() {
+        let mut remote = row(
+            incarnation("rex:omarchy/block:abc", 17, 170, 1_700, "claude"),
+            AgentState::Working,
+            "harold",
+            0,
+            0,
+        );
+        remote.host = "Omarchy".into();
+        let local = row(
+            incarnation("%18", 18, 180, 1_800, "claude"),
+            AgentState::Idle,
+            "harold",
+            0,
+            1,
+        );
+        let app = App::new(
+            ConnectionState::Live,
+            snapshot(1, 1, vec![remote, local]),
+            SearchState {
+                query: "omarc".into(),
+                editing: false,
+            },
+            None,
+        );
+        assert_eq!(
+            app.visible_rows()
+                .iter()
+                .map(|agent| agent.incarnation.pane_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rex:omarchy/block:abc"]
+        );
     }
 
     #[test]
@@ -2279,6 +2331,8 @@ mod tests {
         pane_index: u32,
     ) -> AgentRow {
         AgentRow {
+            host: String::new(),
+            host_icon: String::new(),
             tmux_target: format!("{session_name}:{window_index}.{pane_index}"),
             session_name: session_name.into(),
             window_index,

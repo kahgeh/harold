@@ -18,7 +18,9 @@ use crate::app::{
     Snapshot, SnapshotError,
 };
 use crate::cli::Options;
-use crate::navigation::{NavigationError, PaneNavigator, REX_BLOCK_PREFIX, TmuxNavigator};
+use crate::navigation::{
+    NavigationError, PaneNavigator, REX_BLOCK_PREFIX, REX_HOST_PREFIX, TmuxNavigator,
+};
 use crate::notes::{DEBOUNCE, NoteLine, NotesAction, NotesEvent, SharedBackend};
 use crate::questions::{Outgoing, PickView, Queue, SendResult};
 use crate::terminal::{TerminalError, TerminalGuard};
@@ -82,7 +84,6 @@ pub fn run(
     source: AgentStateSource,
     navigator: TmuxNavigator,
 ) -> Result<(), AppError> {
-    let endpoint_display = sanitize_display(&options.endpoint, ERROR_LIMIT);
     let (client, navigation_issue) = resolve_client(navigator.discover_client());
     let runtime = Builder::new_multi_thread()
         .enable_all()
@@ -99,7 +100,7 @@ pub fn run(
             client,
             navigation_issue,
             shutdown,
-            endpoint_display,
+            &options,
         ))
     }));
     let restore_result = terminal.restore().map_err(AppError::from);
@@ -131,9 +132,11 @@ async fn run_async(
     client: Option<String>,
     navigation_issue: Option<RuntimeStatus>,
     mut shutdown: ShutdownSignals,
-    endpoint_display: String,
+    options: &Options,
 ) -> Result<(), AppError> {
+    let endpoint_display = sanitize_display(&options.endpoint, ERROR_LIMIT);
     let mut core = RuntimeCore::new_with_endpoint(client, &endpoint_display);
+    core.app.host_marker = options.host_marker;
     if let Some(status) = navigation_issue {
         core.set_navigation_issue(status);
     }
@@ -769,6 +772,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
     match status {
         RuntimeStatus::Retrying { detail, .. }
         | RuntimeStatus::NavigationFailed(detail)
+        | RuntimeStatus::OnHost(detail)
         | RuntimeStatus::VoiceFailed(detail)
         | RuntimeStatus::MessagingFailed(detail)
         | RuntimeStatus::CallFailed(detail)
@@ -1389,7 +1393,12 @@ impl RuntimeCore {
     }
 
     fn accept_snapshot(&mut self, snapshot: Snapshot, received_at_ms: i64) -> StreamControl {
-        if let Some(row) = snapshot.rows.first() {
+        // A host row says nothing about this Mac's multiplexer: the first local row decides.
+        if let Some(row) = snapshot
+            .rows
+            .iter()
+            .find(|row| !row.incarnation.pane_id.starts_with(REX_HOST_PREFIX))
+        {
             let in_rex = row.incarnation.pane_id.starts_with(REX_BLOCK_PREFIX);
             AGENTS_ARE_IN_REX.store(in_rex, Ordering::Release);
             self.agents_in_rex = Some(in_rex);
@@ -1478,6 +1487,26 @@ impl RuntimeCore {
             Effect::OpenLink(link) => Control::OpenLink(link),
             Effect::Notes(action) => {
                 self.start_notes(action);
+                Control::Continue
+            }
+            Effect::Navigate { pane_id } if pane_id.starts_with(REX_HOST_PREFIX) => {
+                // An agent on another Rex host: nothing here can reach it, so no navigator runs.
+                let label = self
+                    .app
+                    .snapshot
+                    .rows
+                    .iter()
+                    .find(|row| row.incarnation.pane_id == pane_id)
+                    .map(|row| row.host.as_str())
+                    .filter(|host| !host.is_empty())
+                    .or_else(|| {
+                        pane_id
+                            .strip_prefix(REX_HOST_PREFIX)
+                            .and_then(|rest| rest.split('/').next())
+                    })
+                    .map(|label| sanitize_display(label, ERROR_LIMIT))
+                    .unwrap_or_default();
+                self.app.set_runtime_status(RuntimeStatus::OnHost(label));
                 Control::Continue
             }
             Effect::Navigate { pane_id } if pane_id.starts_with(REX_BLOCK_PREFIX) => {
@@ -1882,6 +1911,98 @@ mod tests {
             core.app.runtime_status(),
             Some(RuntimeStatus::NavigationFailed(_))
         ));
+    }
+
+    fn host_snapshot(revision: u64, local_first: bool, local_id: Option<&str>) -> Snapshot {
+        let mut base = snapshot(revision, MonitorHealthState::Healthy);
+        let mut host_row = base.rows[0].clone();
+        host_row.incarnation.pane_id = "rex:omarchy/block:abc".into();
+        host_row.incarnation.pane_pid = 90;
+        host_row.incarnation.agent_pid = 91;
+        host_row.host = "omarchy".into();
+        host_row.host_icon = "server.rack".into();
+        host_row.session_name = "harold".into();
+        base.rows.clear();
+        let local_row = local_id.map(|id| {
+            let mut row = host_row.clone();
+            row.incarnation.pane_id = id.into();
+            row.incarnation.pane_pid = 70;
+            row.incarnation.agent_pid = 71;
+            row.host = String::new();
+            row.host_icon = String::new();
+            row
+        });
+        if !local_first {
+            base.rows.push(host_row.clone());
+        }
+        base.rows.extend(local_row);
+        if local_first {
+            base.rows.push(host_row);
+        }
+        base
+    }
+
+    #[test]
+    fn enter_on_a_host_row_shows_on_label_and_runs_no_navigator() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // The navigator panics on a tmux jump and records a Rex focus.
+        let navigator = RexNavigator {
+            calls: calls.clone(),
+            fail: false,
+        };
+        for client in [None, Some("client-7".to_owned())] {
+            let mut core = RuntimeCore::new(client);
+            core.begin_stream();
+            core.accept_snapshot(host_snapshot(1, false, None), 1);
+            assert_eq!(
+                core.handle_key(KeyCode::Enter, &navigator),
+                Control::Continue
+            );
+            assert_eq!(
+                core.app.runtime_status(),
+                Some(&RuntimeStatus::OnHost("omarchy".into()))
+            );
+        }
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_host_row_first_does_not_bring_back_navigation_unavailable_for_rex_agents() {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, false, Some("block:abc")), 1);
+        assert_eq!(core.agents_in_rex, Some(true));
+        assert_ne!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+        // The same with tmux agents: the first local row decides.
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, false, Some("%1")), 1);
+        assert_eq!(core.agents_in_rex, Some(false));
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+    }
+
+    #[test]
+    fn with_no_local_row_accept_snapshot_keeps_its_last_value() {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, true, Some("block:abc")), 1);
+        assert_eq!(core.agents_in_rex, Some(true));
+        core.accept_snapshot(host_snapshot(2, true, None), 2);
+        assert_eq!(core.agents_in_rex, Some(true));
+        let mut fresh = RuntimeCore::new(None);
+        fresh.begin_stream();
+        fresh.accept_snapshot(host_snapshot(1, true, None), 1);
+        assert_eq!(fresh.agents_in_rex, None);
+        assert_ne!(
+            fresh.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
     }
 
     #[test]
@@ -3927,6 +4048,8 @@ mod tests {
                 observed_at_ms: 1,
             }],
             rows: vec![AgentRow {
+                host: String::new(),
+                host_icon: String::new(),
                 incarnation: AgentIncarnation {
                     pane_id: "%7".into(),
                     pane_pid: 70,

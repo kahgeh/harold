@@ -105,6 +105,8 @@ message ReportAgentStateResponse {
 message WatchAgentStatesRequest {}
 
 message AgentPaneState {
+  // The pane id. It has one of three forms: "%<n>" (tmux, this Mac), "block:<id>" (Rex,
+  // this Mac) or "rex:<label>/block:<id>" (a block on another Rex host, read only).
   string pane_id = 1;
   // The pane label, <session>:<window>.<pane>, for tmux and Rex.
   string tmux_target = 2;
@@ -125,6 +127,11 @@ message AgentPaneState {
   int64 recap_at_ms = 16;
   // The current step of a Rex agent, from its status record. It is in memory only.
   optional string current_step = 17;
+  // The Rex host label, empty for this Mac.
+  string host = 18;
+  // The host's mark name: a Rex icon name, or arch, linux or mac. Empty for this Mac
+  // and for a host with no icon.
+  string host_icon = 19;
 }
 
 message AgentMonitorHealth {
@@ -161,7 +168,7 @@ message SetMessagingPausedResponse {
 }
 
 message SendMessageToAwayDeviceRequest {
-  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex).
+  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex). Only the local forms are valid.
   string src_id = 1;
   string text = 2;
 }
@@ -171,7 +178,7 @@ message SendMessageToAwayDeviceResponse {
 }
 
 message SpeakLineRequest {
-  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex).
+  // The pane id of the sending agent, such as "%47" (tmux) or "block:<id>" (Rex). Only the local forms are valid.
   string src_id = 1;
   string text = 2;
 }

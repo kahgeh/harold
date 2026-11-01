@@ -14,7 +14,7 @@ use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState
 use crate::questions::{
     ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
 };
-use crate::text::{display_work_summary, sanitize_display};
+use crate::text::{HostMarker, display_work_summary, host_mark, sanitize_display};
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
 const PANEL: Color = Color::Rgb(25, 25, 21);
@@ -279,6 +279,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             RuntimeStatus::NavigationFailed(detail) => {
                 format!("NAVIGATION FAILED: {detail}")
             }
+            RuntimeStatus::OnHost(label) => format!("on {label}"),
             RuntimeStatus::VoiceFailed(detail) => format!("VOICE ERROR: {detail}"),
             RuntimeStatus::MessagingFailed(detail) => format!("MESSAGING ERROR: {detail}"),
             RuntimeStatus::CallFailed(detail) => format!("CALL ERROR: {detail}"),
@@ -625,7 +626,11 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 )),
                 Cell::from(format!(
                     "  {}",
-                    fit_with_suffix("", app.label_parts(agent), usize::from(where_width) - 2)
+                    fit_with_suffix(
+                        &host_prefix(agent, app.host_marker),
+                        app.label_parts(agent),
+                        usize::from(where_width) - 2
+                    )
                 )),
                 Cell::from(Line::styled(
                     if app.is_waiting(&agent.incarnation) {
@@ -1374,6 +1379,15 @@ fn call_buttons(
 
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
 /// tells colliding agents apart always stays visible.
+/// What leads the WHERE text of an agent on another Rex host: the host mark and a space.
+/// It is empty for an agent on this Mac.
+fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker) -> String {
+    if !agent.is_on_host() {
+        return String::new();
+    }
+    format!("{} ", host_mark(&agent.host_icon, marker, &agent.host))
+}
+
 fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> String {
     let suffix_width = Line::raw(suffix).width();
     let head = format!("{prefix}{name}");
@@ -1480,6 +1494,10 @@ fn detail_lines<'a>(
         display_work_summary(agent.work_summary.as_deref()),
         Style::default().fg(INK),
     ));
+    if agent.is_on_host() {
+        // Right after the STATE line.
+        lines.insert(3, fact("HOST", &agent.host));
+    }
     lines
 }
 
@@ -1963,6 +1981,7 @@ mod tests {
         AgentIncarnation, AgentRow, AgentState, App, CallState, CallView, ConnectionState,
         MonitorHealth, MonitorHealthState, SearchState, Snapshot,
     };
+    use crate::text::HostMarker;
 
     #[test]
     fn wide_dashboard_shows_operator_signals_without_evidence_provenance() {
@@ -3337,6 +3356,8 @@ mod tests {
         last_transition_at_ms: i64,
     ) -> AgentRow {
         AgentRow {
+            host: String::new(),
+            host_icon: String::new(),
             incarnation,
             provider_display_name: provider_display_name.into(),
             tmux_target: tmux_target.into(),
@@ -3436,6 +3457,184 @@ mod tests {
                 "session suffix must not show"
             );
         }
+    }
+
+    /// A local row and a row on the host `omarchy`, both in the `harold` group, with the
+    /// same work summary so the tests can compare the WORK SUMMARY column.
+    fn host_app(marker: HostMarker, icon: &str, host_dir: &str, selected: Option<&str>) -> App {
+        let local = located(
+            "%1",
+            AgentState::Working,
+            "Claude",
+            "harold  main",
+            "/p/harold/main",
+            "SUMMARYX",
+        );
+        let mut remote = located(
+            "rex:omarchy/block:abc",
+            AgentState::Working,
+            "Claude",
+            "harold",
+            host_dir,
+            "SUMMARYX",
+        );
+        remote.host = "omarchy".into();
+        remote.host_icon = icon.into();
+        let selected = selected.map(|pane_id| {
+            if pane_id == "%1" {
+                local.incarnation.clone()
+            } else {
+                remote.incarnation.clone()
+            }
+        });
+        let mut app = live_app(vec![local, remote], selected);
+        app.host_marker = marker;
+        app
+    }
+
+    /// The terminal rows of the buffer as text, one string per row, with a wide
+    /// character's second cell left out.
+    fn buffer_rows(buffer: &Buffer) -> Vec<String> {
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| {
+                let mut text = String::new();
+                let mut skip = 0;
+                for cell in row {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    skip = Line::raw(cell.symbol()).width().saturating_sub(1);
+                    text.push_str(cell.symbol());
+                }
+                text
+            })
+            .collect()
+    }
+
+    /// The cell column where `needle` starts in `row`.
+    fn cell_column(row: &str, needle: &str) -> usize {
+        let at = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {row:?}"));
+        Line::raw(&row[..at]).width()
+    }
+
+    fn text_row_with<'a>(rows: &'a [String], needle: &str) -> &'a str {
+        rows.iter()
+            .find(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("no row has {needle:?}"))
+    }
+
+    #[test]
+    fn host_rows_keep_the_where_column_width_in_all_three_modes() {
+        let long = "/w/a-very-long-session-name-for-a-worker";
+        for (marker, mark) in [
+            (HostMarker::Glyph, "\u{f233}  "),
+            (HostMarker::Emoji, "\u{1F4BB} "),
+            (HostMarker::Text, "omarchy \u{b7} "),
+        ] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let app = host_app(marker, "server.rack", long, None);
+                let rows = buffer_rows(&rendered_buffer(&app, width, height, 100_000));
+                let local = text_row_with(&rows, "main");
+                let summary_at = cell_column(local, "SUMMARYX");
+                let host = rows
+                    .iter()
+                    .find(|row| row.contains(mark.trim_end()) && row.contains("SUMMARYX"))
+                    .unwrap_or_else(|| panic!("host row for {marker:?} at {width}: {rows:#?}"));
+                assert_eq!(
+                    cell_column(host, "SUMMARYX"),
+                    summary_at,
+                    "{marker:?} {width}"
+                );
+                // The long name is cut with an ellipsis before the next column.
+                let before = &host[..host.find("SUMMARYX").unwrap()];
+                assert!(before.contains('\u{2026}'), "{marker:?} {width}: {host:?}");
+                assert!(
+                    before.contains(mark.trim_end()),
+                    "{marker:?} {width}: {host:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_text_mark_shows_the_label_then_the_session_and_cuts_at_the_column() {
+        let app = host_app(HostMarker::Text, "", "/w/harold", None);
+        let rows = buffer_rows(&rendered_buffer(&app, 80, 24, 100_000));
+        assert!(text_row_with(&rows, "omarchy \u{b7} harold").contains("SUMMARYX"));
+        let app = host_app(HostMarker::Text, "", "/w/brave-summit-session", None);
+        let rows = buffer_rows(&rendered_buffer(&app, 60, 20, 100_000));
+        let host = text_row_with(&rows, "omarchy \u{b7} brave");
+        assert!(host.contains("omarchy \u{b7} brave-s\u{2026}"), "{host:?}");
+    }
+
+    #[test]
+    fn glyph_and_emoji_marks_show_for_each_table_icon() {
+        for (icon, glyph, emoji) in [
+            ("arch", '\u{f303}', "\u{1F427}"),
+            ("linux", '\u{f31a}', "\u{1F427}"),
+            ("mac", '\u{f179}', "\u{1F34E}"),
+            ("unicorn", '\u{1F4BB}', "\u{1F4BB}"),
+        ] {
+            let rows = buffer_rows(&rendered_buffer(
+                &host_app(HostMarker::Glyph, icon, "/w/harold", None),
+                100,
+                24,
+                100_000,
+            ));
+            let glyph_shown = if icon == "unicorn" {
+                "\u{1F4BB} harold".to_owned()
+            } else {
+                format!("{glyph}  harold")
+            };
+            assert!(
+                rows.iter().any(|row| row.contains(&glyph_shown)),
+                "{icon}: {rows:#?}"
+            );
+            let rows = buffer_rows(&rendered_buffer(
+                &host_app(HostMarker::Emoji, icon, "/w/harold", None),
+                100,
+                24,
+                100_000,
+            ));
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains(&format!("{emoji} harold"))),
+                "{icon}: {rows:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_row_joins_its_session_group_and_the_summary_counts_it() {
+        let app = host_app(HostMarker::Glyph, "server.rack", "/w/harold", None);
+        let groups = app.visible_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "harold");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(app.state_counts(), (2, 0, 0));
+    }
+
+    #[test]
+    fn the_detail_panel_names_the_host_for_a_host_row_only() {
+        let app = host_app(
+            HostMarker::Glyph,
+            "server.rack",
+            "/w/harold",
+            Some("rex:omarchy/block:abc"),
+        );
+        let rows = buffer_rows(&rendered_buffer(&app, 140, 38, 100_000));
+        assert!(
+            rows.iter().any(|row| row.contains("HOST      omarchy")),
+            "{rows:#?}"
+        );
+        let app = host_app(HostMarker::Glyph, "server.rack", "/w/harold", Some("%1"));
+        let rows = buffer_rows(&rendered_buffer(&app, 140, 38, 100_000));
+        assert!(!rows.iter().any(|row| row.contains("HOST ")), "{rows:#?}");
     }
 
     #[test]

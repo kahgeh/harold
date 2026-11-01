@@ -719,6 +719,8 @@ fn map_agent_snapshot(
                     current_step,
                     recap_at_ms: recap.as_ref().map_or(0, |line| line.at_ms),
                     recap: recap.map(|line| line.text),
+                    host: String::new(),
+                    host_icon: String::new(),
                 }
             })
             .collect(),
