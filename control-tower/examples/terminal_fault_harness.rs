@@ -24,15 +24,15 @@ fn main() -> ExitCode {
     match run_terminal_fault_harness(scenario) {
         Ok(report) => {
             println!(
-                "TMX_FAULT scenario={} outcome=expected cleanup=exactly-once",
+                "CONTROL_TOWER_FAULT scenario={} outcome=expected cleanup=exactly-once",
                 report.scenario().name()
             );
-            println!("TMX_FAULT calls={}", report.calls().join(","));
+            println!("CONTROL_TOWER_FAULT calls={}", report.calls().join(","));
             ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!(
-                "TMX_FAULT scenario={} outcome=unexpected error={error}",
+                "CONTROL_TOWER_FAULT scenario={} outcome=unexpected error={error}",
                 scenario.name()
             );
             ExitCode::FAILURE

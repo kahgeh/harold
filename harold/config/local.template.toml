@@ -16,7 +16,7 @@ handle_ids = [1, 36]
 [ai]
 cli_path = "/path/to/claude"
 
-# Dashboard descriptions use Claude authentication independently of [ai].
+# Activity summaries use Claude authentication independently of [ai].
 [activity_summary]
 enabled = true
 cli_path = "/path/to/claude"

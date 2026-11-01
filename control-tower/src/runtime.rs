@@ -61,7 +61,7 @@ impl fmt::Display for AppError {
             Self::Signal(detail) => {
                 write!(formatter, "could not install shutdown signal: {detail}")
             }
-            Self::Panic(detail) => write!(formatter, "dashboard panicked: {detail}"),
+            Self::Panic(detail) => write!(formatter, "control-tower panicked: {detail}"),
             Self::ExitAndRestore { primary, cleanup } => {
                 write!(formatter, "{primary}; additionally, {cleanup}")
             }
@@ -1528,6 +1528,14 @@ mod tests {
         handle_input, merge_exit, open_stream, resolve_client, run_loop, spawn_focus_worker,
         wait_for_retry,
     };
+
+    #[test]
+    fn a_panic_error_names_the_control_tower() {
+        assert_eq!(
+            super::AppError::Panic("boom".into()).to_string(),
+            "control-tower panicked: boom"
+        );
+    }
     use crate::api::SourceError;
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
@@ -3929,7 +3937,7 @@ mod tests {
             self.times.push(now_ms);
             if self.fail {
                 return Err(crate::terminal::TerminalError::new(
-                    "render dashboard",
+                    "render control-tower",
                     io::Error::other("injected render failure"),
                 ));
             }

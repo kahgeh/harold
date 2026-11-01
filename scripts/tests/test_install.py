@@ -566,7 +566,7 @@ class InstalledServiceTests(unittest.TestCase):
         (self.bundle / 'service.json').write_text(json.dumps(metadata))
 
     def install_existing_programs(self, log):
-        """The rest of an install from v0.5.0: its haroldctl, dashboard, data, version and revision.
+        """The rest of an install from v0.5.0: its haroldctl, control-tower program, data, version and revision.
         The old haroldctl writes `old <command>` to `log`."""
         (self.prefix / 'haroldctl').write_text('#!/bin/sh\necho "old $*" >> {}\n'.format(shlex.quote(str(log))))
         (self.prefix / 'haroldctl').chmod(0o755)
@@ -1080,7 +1080,7 @@ class InstalledServiceTests(unittest.TestCase):
         _, note, commands = self.rollback()
         self.assertIn('- Version: not recorded\n', note)
         self.assertIn('- Revision: not recorded\n', note)
-        # No haroldctl or dashboard was installed, so none is moved back.
+        # No haroldctl or old control-tower program was installed, so none is moved back.
         self.assertNotIn('harold/haroldctl', commands)
 
     def test_a_bundle_started_through_python_names_that_python(self):

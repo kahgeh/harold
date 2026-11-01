@@ -168,7 +168,7 @@ impl CallState {
     }
 }
 
-/// What the dashboard asks of Harold's call.
+/// What the control-tower asks of Harold's call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallAction {
     Start,

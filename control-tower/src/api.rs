@@ -606,7 +606,7 @@ fn question_text(text: &str) -> String {
     sanitize_display(text, QUESTION_FIELD_LIMIT)
 }
 
-/// How long the dashboard waits for Harold's answer to `action`. A Status poll is awaited
+/// How long the control-tower waits for Harold's answer to `action`. A Status poll is awaited
 /// inline every 500 ms during a call and Harold answers it at once, so it keeps the short
 /// voice timeout; a press waits `CALL_REQUEST_TIMEOUT`.
 pub(crate) fn call_request_timeout(action: CallAction) -> Duration {
@@ -616,7 +616,7 @@ pub(crate) fn call_request_timeout(action: CallAction) -> Duration {
     }
 }
 
-/// Harold's call answer as the dashboard shows it. A state the dashboard does not
+/// Harold's call answer as the control-tower shows it. A state the control-tower does not
 /// know counts as not set up, so the button never offers a call it cannot follow.
 pub fn map_call(response: CallResponse) -> CallView {
     let state = match ProtoCallState::try_from(response.state) {

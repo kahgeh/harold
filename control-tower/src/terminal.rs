@@ -281,7 +281,7 @@ impl TerminalGuard {
         self.terminal
             .draw(|frame| ui::render(frame, app, now_ms))
             .map(|_| ())
-            .map_err(|error| TerminalError::new("render dashboard", error))
+            .map_err(|error| TerminalError::new("render control-tower", error))
     }
 
     /// Clears the screen and Ratatui's buffer, so the next draw repaints every cell.
