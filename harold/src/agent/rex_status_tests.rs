@@ -2,11 +2,11 @@
 //! records, the pending calls and the registry. The fakes here are small, so the file does
 //! not depend on the fakes of `rex_tests.rs`.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
+use crate::test_support::fake_program::{Language, write_fake_program};
 
 // -- fakes ---------------------------------------------------------------------------
 
@@ -170,10 +170,7 @@ impl Script {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let ending = if hold { "exec sleep 30\n" } else { "exit 0\n" };
-        install_script(
-            &dir.join("rex"),
-            &format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{ending}"),
-        );
+        write_fake_program(&dir.join("rex"), Language::Shell, ending);
         Self { dir }
     }
 
@@ -192,12 +189,10 @@ impl Script {
                 .unwrap()
                 .success()
         );
-        install_script(
+        write_fake_program(
             &dir.join("rex"),
-            &format!(
-                "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nexec cat '{}'\n",
-                fifo.display()
-            ),
+            Language::Shell,
+            &format!("exec cat '{}'", fifo.display()),
         );
         Self { dir }
     }
@@ -266,26 +261,6 @@ impl Script {
 impl Drop for Script {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// Writes an executable script and waits until the system lets it start. Another test
-/// thread can fork while the file is open for writing, and until that child runs `exec` a
-/// start of the script fails with "Text file busy". The probe run succeeds only when no
-/// such child is left.
-fn install_script(path: &Path, script: &str) {
-    std::fs::write(path, script).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match Command::new(path).arg("--probe").status() {
-            Ok(_) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                assert!(Instant::now() < deadline, "the script stays busy: {error}");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("the probe run of the script failed: {error}"),
-        }
     }
 }
 

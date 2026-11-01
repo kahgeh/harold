@@ -269,7 +269,11 @@ mod tests {
             let folder = std::env::temp_dir().join(format!("harold-hub-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&folder).unwrap();
             let program = folder.join("python");
-            crate::tts::test_support::write_fake_program(&program, body);
+            crate::test_support::fake_program::write_fake_program(
+                &program,
+                crate::test_support::fake_program::Language::Shell,
+                body,
+            );
             Self {
                 python: program.display().to_string(),
                 folder,

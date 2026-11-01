@@ -8,6 +8,7 @@ use crate::agent::domain::ObservedAgentState;
 use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::*;
+use crate::test_support::fake_program::{Language, write_fake_program};
 
 fn provider(id: &str, command_contains: &[&str]) -> AgentProviderSettings {
     AgentProviderSettings {
@@ -731,10 +732,7 @@ fn an_absent_program_is_absent_and_a_slow_one_times_out() {
     let dir = std::env::temp_dir().join(format!("rex-timeout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("slow-rex.sh");
-    install_script(
-        &script,
-        "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nsleep 5\n",
-    );
+    write_fake_program(&script, Language::Shell, "sleep 5");
     let started = Instant::now();
     let slow = run_program(&script, &["ls"], Duration::from_millis(100));
     assert_eq!(slow, Err(RexError::Timeout));
@@ -787,9 +785,9 @@ fn fake_rex(name: &str, rules: &str) -> SystemRex {
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("rex");
     let body = format!(
-        "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\ncase \"$*\" in\n{rules}\n*\" ls --json\"*) echo '{{\"sessions\":[]}}';;\n*session.view*) echo '{{\"windows\":[]}}';;\n*\" process\"*) echo '{{\"child\":{{\"pid\":1,\"name\":\"login\"}}}}';;\n*) echo '{{}}';;\nesac\n"
+        "case \"$*\" in\n{rules}\n*\" ls --json\"*) echo '{{\"sessions\":[]}}';;\n*session.view*) echo '{{\"windows\":[]}}';;\n*\" process\"*) echo '{{\"child\":{{\"pid\":1,\"name\":\"login\"}}}}';;\n*) echo '{{}}';;\nesac\n"
     );
-    install_script(&script, &body);
+    write_fake_program(&script, Language::Shell, &body);
     SystemRex::new(Some(script.to_string_lossy().into_owned()))
 }
 
@@ -1191,7 +1189,6 @@ fn a_live_line_and_a_flat_event_parse() {
 
 // -- the event streams ---------------------------------------------------------
 
-use std::os::unix::fs::PermissionsExt;
 /// A temp folder with a fake `rex` script. The script counts its runs, saves its pid, prints
 /// fixed lines and, when `hold` is set, waits until a test kills it.
 struct FakeProgram {
@@ -1200,35 +1197,13 @@ struct FakeProgram {
     writer: Mutex<Option<std::fs::File>>,
 }
 
-/// Writes an executable script and waits until the system lets it start.
-///
-/// Another test thread can fork while this file is open for writing. The child keeps the
-/// write handle until it runs `exec`, and until then a start of the script fails with
-/// "Text file busy". The probe run (the script ends at once on `--probe`) succeeds only
-/// when no such child is left, so the start by the code under test cannot meet the error.
-fn install_script(path: &Path, script: &str) {
-    std::fs::write(path, script).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match std::process::Command::new(path).arg("--probe").status() {
-            Ok(_) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                assert!(Instant::now() < deadline, "the script stays busy: {error}");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("the probe run of the script failed: {error}"),
-        }
-    }
-}
-
 impl FakeProgram {
     fn new(name: &str, lines: &[String], hold: bool) -> Self {
         let dir =
             std::env::temp_dir().join(format!("harold-rex-status-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut script = format!(
-            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho run >> '{runs}'\necho $$ > '{pid}'\ncat <<'END_OF_EVENTS'\n",
+            "echo run >> '{runs}'\necho $$ > '{pid}'\ncat <<'END_OF_EVENTS'\n",
             runs = dir.join("runs").display(),
             pid = dir.join("pid").display(),
         );
@@ -1241,7 +1216,7 @@ impl FakeProgram {
             script.push_str("exec sleep 30\n");
         }
         let path = dir.join("rex");
-        install_script(&path, &script);
+        write_fake_program(&path, Language::Shell, &script);
         Self {
             dir,
             writer: Mutex::new(None),
@@ -1262,13 +1237,13 @@ impl FakeProgram {
                 .success()
         );
         let script = format!(
-            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho run >> '{runs}'\necho $$ > '{pid}'\nexec cat '{fifo}'\n",
+            "echo run >> '{runs}'\necho $$ > '{pid}'\nexec cat '{fifo}'\n",
             runs = dir.join("runs").display(),
             pid = dir.join("pid").display(),
             fifo = fifo.display(),
         );
         let path = dir.join("rex");
-        install_script(&path, &script);
+        write_fake_program(&path, Language::Shell, &script);
         Self {
             dir,
             writer: Mutex::new(None),

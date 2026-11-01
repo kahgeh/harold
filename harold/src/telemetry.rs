@@ -2763,33 +2763,14 @@ pub(crate) mod test_support {
     /// Writes an executable `sh` script with this body and returns its path. The test meter
     /// is shared, so a caller compares counts before and after its own call.
     pub(crate) fn fake_program(tag: &str, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("harold-fake-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("tmux");
-        std::fs::write(
+        crate::test_support::fake_program::write_fake_program(
             &script,
-            format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Another test thread can fork while the file is open for writing, and until that
-        // child runs `exec` a start of the script fails with "Text file busy". The probe run
-        // works only when no such child is left.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match std::process::Command::new(&script).arg("--probe").status() {
-                Ok(_) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the script stays busy"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(error) => panic!("the probe run of the script failed: {error}"),
-            }
-        }
+            crate::test_support::fake_program::Language::Shell,
+            body,
+        );
         script.to_string_lossy().into_owned()
     }
 

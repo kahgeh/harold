@@ -341,7 +341,11 @@ impl FakePython {
         let folder = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&folder).unwrap();
         let program = folder.join("fake-python");
-        write_fake_program(&program, body);
+        crate::test_support::fake_program::write_fake_program(
+            &program,
+            crate::test_support::fake_program::Language::Shell,
+            body,
+        );
         Self { folder, program }
     }
 
