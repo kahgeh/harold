@@ -328,6 +328,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome` |
 | `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
+| `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `idle`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.multiplexer.sessions` | gauge, `{session}` | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | gauge, `{pane}` | `multiplexer`, `host` |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
@@ -335,6 +336,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 `pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product, 0 included.
 
 A multiplexer call is one request that Harold makes to its multiplexer. Harold records each one at its end, with its operation, its outcome and its time. Each call has one operation, the same word for Rex and tmux. A call that has no operation word is recorded as `other`, so a new call does not go unseen. The calls of the control-tower are not Harold's and are not recorded.
+
+`harold.agent.state_observed` counts one observation of an agent's state. `source` is `program_status` when the observation comes from a running record stream, `program_status_call` when it comes from a direct status call, and `screen` when Harold read the screen. `state` is the state word that Harold maps, or `unknown` when the observation holds no state. `multiplexer` comes from the settings. No `pane_id` is an attribute.
 
 `harold.agents` is read at each export from the agent snapshot. For each provider in the snapshot, it reports all three states, with 0 for a state that has no agents. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
 
@@ -531,8 +534,9 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Agents and multiplexer | Failed and timed-out calls, by operation and outcome | `harold.multiplexer.calls` with `outcome` not `ok` | SQL: the counter rule. Shows which call fails, and whether the multiplexer answers at all (`list`) |
 | Agents and multiplexer | Multiplexer call time, p95 and mean, by operation | `harold.multiplexer.call.duration` | SQL: the counter rule on the buckets for the p95, and the rise of the sum divided by the rise of the count for the mean. Shows which kind of call is slow |
 | Agents and multiplexer | Sessions and panes | `harold.multiplexer.sessions` and `harold.multiplexer.panes` | SQL: a gauge, no counter rule. Shows how much the multiplexer holds |
+| Agents and multiplexer | Share of state observations read from the screen, by provider and hour | `harold.agent.state_observed` | SQL: the counter rule. Shows how often the program status record is not enough. Info, not an alert |
 
-The seven cards of the group "Agents and multiplexer" have no earlier tile. Each one is a single chart or table over the dashboard's time range. A quantile in the cards that read a histogram ("Time in each state" and "Multiplexer call time") can fall in the overflow bucket, above the last explicit bound. The card then shows the last explicit bound, so the number is a lower bound.
+The eight cards of the group "Agents and multiplexer" have no earlier tile. Each one is a single chart or table over the dashboard's time range. A quantile in the cards that read a histogram ("Time in each state" and "Multiplexer call time") can fall in the overflow bucket, above the last explicit bound. The card then shows the last explicit bound, so the number is a lower bound.
 
 Some cards are tables and have no earlier tile: the notifications card, the call turn card and the table cards of the group "Agents and multiplexer". Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 

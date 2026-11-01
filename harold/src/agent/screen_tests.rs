@@ -906,7 +906,11 @@ mod rex_observer {
         RexVisibleScreen::with_status(api.clone(), Arc::new(status))
     }
 
+    /// The block directory is global, so observations that list blocks run one at a time.
+    static DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
+
     fn observe(screen: &RexVisibleScreen, block: &str) -> ScreenObservation {
+        let _one_at_a_time = DIRECTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         screen.observe(&pane(block), &provider()).unwrap()
     }
 
@@ -1078,4 +1082,114 @@ mod rex_observer {
             assert_eq!(observation.state, Some(expected), "state word {word}");
         }
     }
+
+    /// How many observations of this provider were counted, by source and state.
+    fn observed(provider_id: &str, source: &str, state: &str) -> u64 {
+        crate::telemetry::test_support::counter_value(
+            "harold.agent.state_observed",
+            &[
+                ("provider_id", provider_id),
+                ("source", source),
+                ("state", state),
+                ("multiplexer", crate::telemetry::configured_multiplexer()),
+            ],
+        )
+        .unwrap_or(0)
+    }
+
+    fn observe_as(screen: &RexVisibleScreen, block: &str, provider_id: &str) {
+        let mut observed = pane(block);
+        observed.incarnation.provider_id = provider_id.to_string();
+        let _one_at_a_time = DIRECTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        screen.observe(&observed, &provider()).unwrap();
+    }
+
+    #[test]
+    fn a_program_status_observation_counts_with_source_program_status() {
+        let block = "block:count-stream";
+        let api = api_with(block, Some(reply("blocked", 20)));
+        let script = FakeEvents::new("countstream", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        observe_as(&screen, block, "count-stream-provider");
+        // A blocked record maps to the working state.
+        assert_eq!(
+            observed("count-stream-provider", "program_status", "working"),
+            1
+        );
+        assert_eq!(
+            observed("count-stream-provider", "program_status_call", "working"),
+            0
+        );
+        assert_eq!(observed("count-stream-provider", "screen", "working"), 0);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_program_status_observation_counts_with_source_program_status_call() {
+        let block = "block:count-call";
+        let api = api_with(block, Some(reply("done", 20)));
+        let screen = no_stream_screen(&api);
+        observe_as(&screen, block, "count-call-provider");
+        // A done record maps to the idle state.
+        assert_eq!(
+            observed("count-call-provider", "program_status_call", "idle"),
+            1
+        );
+        assert_eq!(observed("count-call-provider", "program_status", "idle"), 0);
+        assert_eq!(observed("count-call-provider", "screen", "idle"), 0);
+    }
+
+    #[test]
+    fn a_screen_observation_counts_with_source_screen() {
+        let block = "block:count-screen";
+        let api = api_with(block, None);
+        let screen = no_stream_screen(&api);
+        observe_as(&screen, block, "count-screen-provider");
+        assert_eq!(observed("count-screen-provider", "screen", "idle"), 1);
+        assert_eq!(
+            observed("count-screen-provider", "program_status_call", "idle"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_record_of_another_pid_counts_only_the_screen_read() {
+        let block = "block:count-other-pid";
+        let api = api_with(block, Some(reply("working", 99)));
+        let screen = no_stream_screen(&api);
+        observe_as(&screen, block, "count-other-pid-provider");
+        assert_eq!(observed("count-other-pid-provider", "screen", "idle"), 1);
+        assert_eq!(
+            observed("count-other-pid-provider", "program_status_call", "working"),
+            0
+        );
+    }
+}
+
+#[test]
+fn a_tmux_screen_observation_counts_with_source_screen() {
+    let provider_id = "count-tmux-provider";
+    let mut observed = pane("%7");
+    observed.incarnation.provider_id = provider_id.to_string();
+    let count = |state: &str| {
+        crate::telemetry::test_support::counter_value(
+            "harold.agent.state_observed",
+            &[
+                ("provider_id", provider_id),
+                ("source", "screen"),
+                ("state", state),
+                ("multiplexer", crate::telemetry::configured_multiplexer()),
+            ],
+        )
+        .unwrap_or(0)
+    };
+    for (text, state) in [("Ready", "idle"), ("nothing known", "unknown")] {
+        let screen = TmuxVisibleScreen::with_runner(FakeRunner::output(true, text), || 99);
+        screen.observe(&observed, &provider()).unwrap();
+        assert_eq!(count(state), 1, "{state}");
+    }
+    // A failed capture is not an observation.
+    let failed = TmuxVisibleScreen::with_runner(FakeRunner::error(io::ErrorKind::NotFound), || 99);
+    assert!(failed.observe(&observed, &provider()).is_err());
+    assert_eq!(count("idle") + count("unknown"), 2);
 }

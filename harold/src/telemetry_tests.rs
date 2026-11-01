@@ -1964,6 +1964,7 @@ const METRICS: &[&str] = &[
     "harold.multiplexer.call.duration",
     "harold.agents",
     "harold.agent.state.duration",
+    "harold.agent.state_observed",
     "harold.multiplexer.sessions",
     "harold.multiplexer.panes",
 ];
@@ -2549,7 +2550,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 7] = [
+const AGENT_CARDS: [&str; 8] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2557,6 +2558,7 @@ const AGENT_CARDS: [&str; 7] = [
     "Failed and timed-out calls, by operation and outcome",
     "Multiplexer call time, p95 and mean, by operation",
     "Sessions and panes",
+    "Share of state observations read from the screen, by provider and hour",
 ];
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
@@ -2775,8 +2777,9 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     }
     // Seven counter cards and two lead-time cards, each with its earlier number, the
     // notifications card, the browser spans not forwarded card and three trends panels.
-    // The agents group adds four: calls, failed calls, time in each state, call time.
-    assert_eq!(counted, 27);
+    // The agents group adds five: calls, failed calls, time in each state, call time and
+    // the share of observations read from the screen.
+    assert_eq!(counted, 28);
 }
 
 #[test]
@@ -3302,6 +3305,59 @@ fn no_metric_name_holds_rex_or_tmux() {
         }
     }
     assert_eq!(MULTIPLEXER_METRIC_NAMES.len(), 6);
+}
+
+#[test]
+fn a_state_observation_counts_with_its_source_state_provider_and_multiplexer() {
+    for (source, word, state) in [
+        (
+            StateSource::ProgramStatus,
+            "program_status",
+            Some("working"),
+        ),
+        (
+            StateSource::ProgramStatusCall,
+            "program_status_call",
+            Some("idle"),
+        ),
+        (StateSource::Screen, "screen", None),
+    ] {
+        record_state_observed_for("rex", source, state, "observed_probe");
+        let set = [
+            ("source", word),
+            ("state", state.unwrap_or("unknown")),
+            ("provider_id", "observed_probe"),
+            ("multiplexer", "rex"),
+        ];
+        assert_eq!(
+            test_support::exact_counter_value("harold.agent.state_observed", &set),
+            Some(1),
+            "{word}"
+        );
+    }
+}
+
+#[test]
+fn the_counter_name_and_attributes_hold_no_multiplexer_name_except_the_multiplexer_value() {
+    let name = "harold.agent.state_observed";
+    for word in ["rex", "tmux", "claude"] {
+        assert!(!name.contains(word), "{name} holds {word}");
+    }
+    record_state_observed_for("rex", StateSource::Screen, Some("idle"), "words_probe");
+    let set = [("provider_id", "words_probe")];
+    let pairs = test_support::counter_attributes(name, &set);
+    assert_eq!(pairs.len(), 4, "{pairs:?}");
+    for (key, value) in pairs {
+        assert!(!key.contains("rex") && !key.contains("tmux"), "{key}");
+        if key == "multiplexer" {
+            assert_eq!(value, "rex");
+            continue;
+        }
+        assert!(
+            !value.contains("rex") && !value.contains("tmux"),
+            "{key}={value}"
+        );
+    }
 }
 
 #[test]
@@ -4474,7 +4530,7 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             .unwrap_or_else(|| panic!("no card {name}"))
     };
     // (card, metrics read, the counter rule, the histogram rule)
-    let expected: [(&str, &[&str], bool, bool); 7] = [
+    let expected: [(&str, &[&str], bool, bool); 8] = [
         (AGENT_CARDS[0], &["harold.agents"], false, false),
         (AGENT_CARDS[1], &["harold.agents"], false, false),
         (
@@ -4495,6 +4551,12 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             AGENT_CARDS[6],
             &["harold.multiplexer.panes", "harold.multiplexer.sessions"],
             false,
+            false,
+        ),
+        (
+            AGENT_CARDS[7],
+            &["harold.agent.state_observed"],
+            true,
             false,
         ),
     ];

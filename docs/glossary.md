@@ -107,8 +107,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | unknown | An agent runs in the pane, and no evidence gives its state yet | "Unknown" with a capital, "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
-| work summary | Short text saying what an agent is working on | "task description", "current work", "dashboard description", "summary" alone |
+| work summary | Short text that names what an agent is working on. A current step is not a work summary | "task description", "current work", "dashboard description", "summary" alone |
 | activity summary | A work summary that Claude Code writes from the agent's evidence, when `[activity_summary]` is on | "generated description" |
+| program status record | What a terminal keeps for a pane from the program's `OSC 7501` reports: the state, `app`, `msg` and the `owner` pid. Harold reads the root record only | "tab status" |
+| current step | The one line an agent reports as its step now, from the `msg` of its program status record, while the state of the record is working or blocked. It is not a work summary | "status", "activity" |
 | waiting agent | An agent that stopped working while you were not looking at it: its state went from working to idle. The control-tower marks it `◆` until you go to it | — |
 | focus tracking | The control-tower's check, once a second, of which pane the user's tmux client or the Rex app shows | — |
 

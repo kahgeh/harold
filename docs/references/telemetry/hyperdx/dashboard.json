@@ -1144,6 +1144,22 @@
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT ts, sumIf(last_value, MetricName = 'harold.multiplexer.sessions') AS sessions, sumIf(last_value, MetricName = 'harold.multiplexer.panes') AS panes FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 5 MINUTE) AS ts, MetricName, Attributes, argMax(Value, TimeUnix) AS last_value FROM $__sourceTable(gauge) WHERE MetricName IN ('harold.multiplexer.sessions', 'harold.multiplexer.panes') AND $__timeFilter(TimeUnix) GROUP BY ts, MetricName, Attributes, ResourceAttributes['harold.machine']) GROUP BY ts ORDER BY ts"
       }
+    },
+    {
+      "id": "state-observed-screen-share",
+      "name": "Share of state observations read from the screen, by provider and hour",
+      "x": 12,
+      "y": 68,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ts, provider_id, sumIf(rise, source = 'screen') / sum(rise) AS screen_share FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 1 HOUR) AS ts, Attributes['provider_id'] AS provider_id, Attributes['source'] AS source, rise FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.agent.state_observed') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix)) GROUP BY ts, provider_id HAVING sum(rise) > 0 ORDER BY ts, provider_id"
+      }
     }
   ]
 }

@@ -26,6 +26,7 @@ use capture::{
 
 use super::domain::{AgentPaneObservation, ObservedAgentState, ScreenObservation};
 use super::summary::{normalize_visible_grid, normalize_work_summary};
+use crate::telemetry::{StateSource, record_state_observed};
 
 const CLASSIFIER_ID: &str = "tmux-visible-v1";
 const REX_CLASSIFIER_ID: &str = "rex-visible-v1";
@@ -211,6 +212,15 @@ fn observe_through(
     })
 }
 
+/// Counts one observation on `harold.agent.state_observed`, with the mapped state word.
+fn count_observation(source: StateSource, observation: &ScreenObservation) {
+    let state = observation.state.map(|state| match state {
+        ObservedAgentState::Working => "working",
+        ObservedAgentState::Idle => "idle",
+    });
+    record_state_observed(source, state, &observation.incarnation.provider_id);
+}
+
 fn scan_prompts_through(
     capture: &impl PaneCapturePort,
     pane: &AgentPaneObservation,
@@ -234,13 +244,15 @@ impl<R: CommandRunner> VisibleScreenPort for TmuxVisibleScreen<R> {
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
-        observe_through(
+        let observation = observe_through(
             &self.capture,
             CLASSIFIER_ID,
             (self.now_ms)(),
             pane,
             provider,
-        )
+        )?;
+        count_observation(StateSource::Screen, &observation);
+        Ok(observation)
     }
 
     fn scan_prompts(
@@ -279,20 +291,29 @@ impl RexVisibleScreen {
     }
 
     /// The observation from the block's record, when a record of this agent exists.
-    fn record_observation(&self, pane: &AgentPaneObservation) -> Option<ScreenObservation> {
+    fn record_observation(
+        &self,
+        pane: &AgentPaneObservation,
+    ) -> Option<(ScreenObservation, StateSource)> {
         use super::rex::Lookup;
         let block_id = &pane.incarnation.pane_id;
-        let record = match self.status.lookup(block_id) {
-            Lookup::Stream(record) => record,
-            Lookup::NoStream => self.record_by_call(block_id),
-        }?;
+        let (record, source) = match self.status.lookup(block_id) {
+            Lookup::Stream(record) => (record?, StateSource::ProgramStatus),
+            Lookup::NoStream => (
+                self.record_by_call(block_id)?,
+                StateSource::ProgramStatusCall,
+            ),
+        };
         // A record of another pid belongs to an agent that is gone.
-        (record.pid == pane.incarnation.agent_pid).then(|| ScreenObservation {
-            incarnation: pane.incarnation.clone(),
-            state: Some(record.state.observed()),
-            fallback_summary: None,
-            classifier_id: PROGRAM_STATUS_CLASSIFIER_ID.to_string(),
-            observed_at_ms: system_now_ms(),
+        (record.pid == pane.incarnation.agent_pid).then(|| {
+            let observation = ScreenObservation {
+                incarnation: pane.incarnation.clone(),
+                state: Some(record.state.observed()),
+                fallback_summary: None,
+                classifier_id: PROGRAM_STATUS_CLASSIFIER_ID.to_string(),
+                observed_at_ms: system_now_ms(),
+            };
+            (observation, source)
         })
     }
 
@@ -315,16 +336,19 @@ impl VisibleScreenPort for RexVisibleScreen {
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
-        if let Some(observation) = self.record_observation(pane) {
+        if let Some((observation, source)) = self.record_observation(pane) {
+            count_observation(source, &observation);
             return Ok(observation);
         }
-        observe_through(
+        let observation = observe_through(
             &self.capture,
             REX_CLASSIFIER_ID,
             system_now_ms(),
             pane,
             provider,
-        )
+        )?;
+        count_observation(StateSource::Screen, &observation);
+        Ok(observation)
     }
 
     fn scan_prompts(

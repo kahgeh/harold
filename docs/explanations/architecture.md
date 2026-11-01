@@ -178,6 +178,8 @@ Each port has one implementation for each multiplexer:
 
 At start, Harold builds the inventory and the screen reader for the chosen multiplexer. A typing step acts by the form of the pane id it gets. The two forms are `%47` for a tmux pane and `block:<id>` for a Rex block. A pane id of the other form is refused. Both multiplexers show the pane label `<session>:<window>.<pane>`, and Harold stores it in `tmux_target`.
 
+With Rex, the program status record of a block is a fourth source of evidence. Harold keeps one `rex events` child process for each Rex session. An event only triggers a `program_status` call for the block, and the answer of the call is the record. A record of the agent's pid gives a state with no screen read. Without a usable record, Harold reads the screen. The record's `msg` is the agent's current step, which goes only to the control-tower. [ADR 0024](../adr/0024-agents-have-six-states-and-harold-takes-them-from-the-terminal-when-it-reports-them.md) gives the decision.
+
 Harold never starts a Rex server. A Rex call that fails makes the listing fail, and the snapshot keeps its panes. The code is in `harold/src/agent/rex.rs`.
 
 ### Follow one task
@@ -255,6 +257,7 @@ Each source answers a different question:
 | Process inventory | Which agent process is present in each pane | Presence alone does not establish working or idle |
 | Lifecycle hooks | The agent explicitly started or finished work | Hooks can be missed |
 | Screen adapters | The visible terminal matches a configured working or idle marker | The terminal can be stale, ambiguous, or changed by a provider update |
+| Rex program status record | The agent reports its own state to Rex, and Rex keeps the record of the block (Rex only) | A record counts only with the agent's pid, and only some programs write one |
 
 A **screen adapter** interprets the terminal format used by a particular agent. It returns observations for the agent monitor to record; it does not edit the state database.
 

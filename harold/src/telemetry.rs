@@ -344,6 +344,8 @@ pub(crate) struct Instruments {
     pub multiplexer_call_duration: Histogram<f64>,
     /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
     pub agent_state_duration: Histogram<f64>,
+    /// `harold.agent.state_observed`, `{observation}`, by `source`, `state`, `provider_id`, `multiplexer`.
+    pub agent_state_observed: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -420,6 +422,7 @@ pub(crate) fn instruments() -> &'static Instruments {
                     10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
                 ],
             ),
+            agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
         }
     })
 }
@@ -607,7 +610,7 @@ pub(crate) fn outcome_of_io(error: &std::io::Error) -> MultiplexerOutcome {
 }
 
 /// The multiplexer name from the settings: `tmux` when the settings are not set yet.
-fn configured_multiplexer() -> &'static str {
+pub(crate) fn configured_multiplexer() -> &'static str {
     crate::settings::try_get_settings().map_or("tmux", |settings| {
         settings.agent_monitor.multiplexer.as_str()
     })
@@ -751,6 +754,55 @@ pub(crate) fn record_agent_state_duration(
     seconds: f64,
 ) {
     record_agent_state_duration_for(configured_multiplexer(), left_state, provider_id, seconds);
+}
+
+/// Where an agent state observation came from, as the `source` attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateSource {
+    /// A record from a running stream.
+    ProgramStatus,
+    /// A record from a direct status call.
+    ProgramStatusCall,
+    /// A read of the screen.
+    Screen,
+}
+
+impl StateSource {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProgramStatus => "program_status",
+            Self::ProgramStatusCall => "program_status_call",
+            Self::Screen => "screen",
+        }
+    }
+}
+
+/// Counts one state observation on `harold.agent.state_observed`. `state` is the mapped
+/// state word, or `unknown` when the observation has none. The multiplexer comes from the
+/// settings.
+pub(crate) fn record_state_observed(
+    source: StateSource,
+    state: Option<&'static str>,
+    provider_id: &str,
+) {
+    record_state_observed_for(configured_multiplexer(), source, state, provider_id);
+}
+
+fn record_state_observed_for(
+    multiplexer: &str,
+    source: StateSource,
+    state: Option<&'static str>,
+    provider_id: &str,
+) {
+    instruments().agent_state_observed.add(
+        1,
+        &[
+            KeyValue::new("source", source.as_str()),
+            KeyValue::new("state", state.unwrap_or("unknown")),
+            KeyValue::new("provider_id", provider_id.to_owned()),
+            KeyValue::new("multiplexer", multiplexer.to_owned()),
+        ],
+    );
 }
 
 fn record_agent_state_duration_for(
@@ -2542,6 +2594,25 @@ pub(crate) mod test_support {
                 })
                 .map(|point| point.value())
         })
+    }
+
+    /// The attribute pairs of the first data point of counter `name` that carries every
+    /// attribute in `wanted`. It is empty when none does.
+    pub(crate) fn counter_attributes(name: &str, wanted: &[(&str, &str)]) -> Vec<(String, String)> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            sum.data_points()
+                .find(|point| carries_all(point.attributes(), wanted))
+                .map(|point| {
+                    point
+                        .attributes()
+                        .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
     }
 
     /// How many `harold.multiplexer.calls` carry this `operation` and `outcome` so far.

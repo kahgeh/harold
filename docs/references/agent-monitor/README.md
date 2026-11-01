@@ -128,7 +128,7 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | `AgentPaneObserved` | Pane metadata, provider display data, full incarnation, observation time | Inserts or refreshes the matching pane. A new incarnation replaces the row and starts `Unknown` with empty evidence. |
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
 | `AgentLifecycleObserved` | Full incarnation, `Working`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
-| `AgentScreenObserved` | Full incarnation, optional `Working`/`Idle`, optional normalized fallback work summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
+| `AgentScreenObserved` | Full incarnation, optional `Working`/`Idle`, optional normalized fallback work summary, classifier ID (`tmux-visible-v1`, `rex-visible-v1` or `program_status`), observation time | Applies each present fact independently. An absent field preserves its candidate. A `program_status` observation has a state and no fallback work summary. |
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, activity summary, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
@@ -155,6 +155,12 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Work summary changes remain independent and can append during a grace period.
 
 The Claude Code mod reports `Working` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
+
+A `program_status` observation is a conclusive screen observation. It follows rules 3 to 7 in the place of a screen read. It takes the state of the program status record of the block: `working` and `blocked` read as `Working`, and `done`, `idle` and `error` read as `Idle`. A record counts only when its `owner.pid` is the agent's pid. With no usable record of the agent, Harold sends no `program_status` observation and reads the screen.
+
+The record is the fourth source of evidence, next to the process inventory, the hooks and the screen adapters. Events are only triggers. Harold starts one `rex events` child process for each Rex session. A `program_status_changed` or `program_status_removed` event for a block causes one `program_status` call, and the answer of the call replaces the record of the block. Harold runs at most one call for each block at a time. When a call fails, Harold drops the record of the block. The next sample then makes one direct `program_status` call, and reads the screen only if that call also fails.
+
+The `msg` of a record is the current step of the agent. Harold keeps it in memory only, and sends it only on `WatchAgentStates`, as `current_step`. It is not a source of work summaries, and a new `msg` is not new activity.
 
 Harold keeps these facts about the state words:
 
@@ -328,7 +334,7 @@ See [provider screen adapters](screen-adapters.md) for capture timing, incarnati
 
 ## Metrics
 
-The agent monitor sends six metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
+The agent monitor sends seven metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
 
 | Metric | What it shows | Attributes |
 |---|---|---|
@@ -336,6 +342,7 @@ The agent monitor sends six metrics to the collector when export is on. The [tel
 | `harold.multiplexer.call.duration` | The time of each multiplexer call, in ms | `multiplexer`, `host`, `operation`, `outcome` |
 | `harold.agents` | The agents in the snapshot, read at each export | `state`, `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state.duration` | The time an agent spent in the state it left, in s | `state`, `provider_id`, `multiplexer`, `host` |
+| `harold.agent.state_observed` | The state observations, a count. `source` is `program_status` (a running stream), `program_status_call` (a direct call) or `screen`. `state` is `unknown` when the observation has no state | `source`, `state`, `provider_id`, `multiplexer` |
 | `harold.multiplexer.sessions` | The sessions in the last inventory listing that worked | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | The panes in the last inventory listing that worked, with or without an agent | `multiplexer`, `host` |
 
