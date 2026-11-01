@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 /// Release tag compiled in by the release workflow; "source" for any other build.
-pub const DASH_VERSION: &str = version_or_source(option_env!("HAROLD_RELEASE_VERSION"));
+pub const CONTROL_TOWER_VERSION: &str = version_or_source(option_env!("HAROLD_RELEASE_VERSION"));
 
 const fn version_or_source(value: Option<&'static str>) -> &'static str {
     match value {
@@ -245,7 +245,7 @@ pub enum FocusReading {
 pub struct App {
     pub connection: ConnectionState,
     /// This control-tower's own release, fixed at compile time.
-    pub dash_version: String,
+    pub control_tower_version: String,
     pub snapshot: Snapshot,
     pub search: SearchState,
     pub palette: Option<PaletteState>,
@@ -365,7 +365,7 @@ impl App {
         let row_labels = build_labels(&snapshot.rows);
         Self {
             connection,
-            dash_version: DASH_VERSION.to_owned(),
+            control_tower_version: CONTROL_TOWER_VERSION.to_owned(),
             snapshot,
             search,
             palette: None,
@@ -2082,7 +2082,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dash_version_defaults_to_source_in_tests() {
+    fn the_control_tower_version_defaults_to_source_in_tests() {
         let search = SearchState {
             query: String::new(),
             editing: false,
@@ -2093,7 +2093,7 @@ mod tests {
             search,
             None,
         );
-        assert_eq!(app.dash_version, "source");
+        assert_eq!(app.control_tower_version, "source");
     }
 
     #[test]

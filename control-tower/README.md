@@ -136,7 +136,7 @@ every connected control-tower shows `■ MSG PAUSED` after the voice state; noth
 while messaging is running. The masthead title always shows the control-tower's own release version (`source` for a
 source build), whatever Harold reports and even before the first snapshot or after a
 disconnect. A control-tower left running through an install shows its old version until it is
-restarted. As the line gets tight `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
+restarted. As the line gets tight `HAROLD / CONTROL-TOWER` shortens to `CONTROL-TOWER`, then `CONTROL-TOWER`
 goes, then `REV`, then the version, so transport, voice and the paused marker stay
 visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
 [operation reference](../docs/references/operation/README.md#pausing-messaging)
