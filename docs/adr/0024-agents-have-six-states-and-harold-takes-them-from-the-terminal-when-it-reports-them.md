@@ -1,7 +1,7 @@
 # 24. Agents have six states, and Harold takes them from the terminal when the agent reports them
 
 Date: 2026-11-01
-Status: Proposed (rex-state-from-rex). Builds on 0022.
+Status: Accepted (rex-state-from-rex). Builds on 0022.
 
 ## Context
 
