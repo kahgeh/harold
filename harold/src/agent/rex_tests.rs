@@ -2252,3 +2252,82 @@ fn find_session_refuses_a_host_pane_id_without_listing() {
     assert_eq!(api.1.keys.lock().unwrap().len(), 1);
     assert!(api.0.load(Ordering::SeqCst) > 0);
 }
+
+#[test]
+fn a_pool_with_one_slow_call_takes_the_time_of_that_call() {
+    // Width 4. Item 0 takes 300 ms and the 8 others take 100 ms each.
+    // Chunks of 4 need 300 + 100 + 100 = 500 ms. A pool needs about 300 ms,
+    // because the 3 free workers do the 8 other items in 3 rounds.
+    let items: Vec<usize> = (0..9).collect();
+    let started = Instant::now();
+    let results = parallel_map(&items, 4, None, |item| {
+        let pause = if *item == 0 { 300 } else { 100 };
+        std::thread::sleep(Duration::from_millis(pause));
+        *item
+    });
+    let elapsed = started.elapsed();
+    assert_eq!(results.len(), 9);
+    assert!(elapsed < Duration::from_millis(420), "took {elapsed:?}");
+}
+
+#[test]
+fn a_pool_never_runs_more_than_width_calls() {
+    let items: Vec<usize> = (0..16).collect();
+    let running = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    parallel_map(&items, 8, None, |_| {
+        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(20));
+        running.fetch_sub(1, Ordering::SeqCst);
+    });
+    assert_eq!(peak.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn a_pool_keeps_the_order_of_the_items() {
+    let items: Vec<u64> = (0..12).collect();
+    let results = parallel_map(&items, 4, None, |item| {
+        // Late items end first.
+        std::thread::sleep(Duration::from_millis((12 - *item) * 5));
+        *item * 10
+    });
+    let expected: Vec<u64> = items.iter().map(|item| item * 10).collect();
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_pool_with_width_zero_or_no_items_returns_at_once() {
+    let none: Vec<u32> = Vec::new();
+    assert!(parallel_map(&none, 8, None, |item| *item).is_empty());
+    assert!(parallel_map(&none, 0, None, |item| *item).is_empty());
+    let items = vec![1u32, 2, 3];
+    assert_eq!(
+        parallel_map(&items, 0, None, |item| item + 1),
+        vec![2, 3, 4]
+    );
+}
+
+#[test]
+fn a_stop_during_the_pool_ends_the_calls() {
+    within_30s("a_stop_during_the_pool_ends_the_calls", || {
+        let items: Vec<usize> = (0..16).collect();
+        let signal = StopSignal::default();
+        let stopper = signal.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stopper.request();
+        });
+        let started = Instant::now();
+        // Each call waits until its thread sees the stop.
+        let results = parallel_map(&items, 4, Some(signal), |item| {
+            while !stop_requested() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            *item
+        });
+        handle.join().unwrap();
+        assert_eq!(results.len(), 16);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    });
+}

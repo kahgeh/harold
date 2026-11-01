@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -856,32 +857,62 @@ fn now_ms() -> Result<i64, InventoryError> {
 }
 
 /// Runs `call` for each item, at most `width` at a time, and returns the results in order.
-/// Each worker thread gets the caller's stop signal.
-fn parallel_map<T: Sync, R: Send>(
+/// A worker starts the next item as soon as its call ends. Each worker thread gets the
+/// caller's stop signal.
+pub(crate) fn parallel_map<T: Sync, R: Send>(
     items: &[T],
     width: usize,
     signal: Option<StopSignal>,
     call: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    let mut results = Vec::with_capacity(items.len());
-    for chunk in items.chunks(width.max(1)) {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|item| {
-                    let (call, signal) = (&call, signal.clone());
-                    scope.spawn(move || match signal {
-                        Some(signal) => run_stoppable(signal, || call(item)),
-                        None => call(item),
-                    })
+    let workers = width.max(1).min(items.len());
+    let next = AtomicUsize::new(0);
+    let slots: Mutex<Vec<Option<R>>> = Mutex::new(items.iter().map(|_| None).collect());
+    let work = || {
+        // A panic in `call` stops the other workers from taking new items.
+        let _stop_on_panic = StopOnPanic(&next, items.len());
+        loop {
+            let index = next.fetch_add(1, Ordering::SeqCst);
+            let Some(item) = items.get(index) else {
+                return;
+            };
+            let result = call(item);
+            slots.lock().unwrap_or_else(PoisonError::into_inner)[index] = Some(result);
+        }
+    };
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (work, signal) = (&work, signal.clone());
+                scope.spawn(move || match signal {
+                    Some(signal) => run_stoppable(signal, work),
+                    None => work(),
                 })
-                .collect();
-            for handle in handles {
-                results.push(handle.join().unwrap_or_else(|_| panic_result()));
+            })
+            .collect();
+        for handle in handles {
+            if handle.join().is_err() {
+                panic_result::<()>();
             }
-        });
+        }
+    });
+    slots
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(panic_result))
+        .collect()
+}
+
+/// Moves the pool's cursor to the end when its worker panics.
+struct StopOnPanic<'a>(&'a AtomicUsize, usize);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(self.1, Ordering::SeqCst);
+        }
     }
-    results
 }
 
 fn panic_result<R>() -> R {
