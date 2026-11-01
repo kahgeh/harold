@@ -99,6 +99,7 @@ where
             current_steps: crate::agent::rex::CurrentSteps::default(),
             recaps: crate::agent::recap::Recaps::default(),
             host_agents: HostAgents::default(),
+            local_icon: String::new(),
         },
         shutdown,
         task,
@@ -1053,7 +1054,8 @@ fn snapshot_mapping_carries_the_harold_version() {
             empty_snapshot(),
             &CurrentSteps::default(),
             &Recaps::default(),
-            &HostAgents::default()
+            &HostAgents::default(),
+            ""
         )
         .harold_version,
         HAROLD_VERSION
@@ -1079,6 +1081,7 @@ fn snapshot_mapping_gives_each_effective_state_its_own_number() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            "",
         );
         assert_eq!(mapped.panes[0].state, expected, "{effective:?}");
     }
@@ -1101,6 +1104,7 @@ fn snapshot_mapping_carries_tts_muted() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            "",
         )
         .tts_muted
     );
@@ -1164,6 +1168,7 @@ fn snapshot_mapping_carries_messaging_paused() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            "",
         )
         .messaging_paused
     );
@@ -2530,6 +2535,7 @@ fn recap_stream(
         steps.clone(),
         recaps.clone(),
         HostAgents::default(),
+        String::new(),
         sender,
         shutdown_rx,
     ));
@@ -2579,6 +2585,7 @@ async fn a_blocked_record_gives_its_step() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        "",
     );
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
 }
@@ -2595,6 +2602,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        "",
     );
     assert_eq!(step_of(&mapped), None);
     // A step that is removed goes from the next snapshot too.
@@ -2605,6 +2613,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        "",
     );
     assert_eq!(step_of(&mapped), None);
 }
@@ -2836,6 +2845,7 @@ async fn a_recap_reaches_the_stream_with_its_time() {
         &CurrentSteps::default(),
         &other,
         &HostAgents::default(),
+        "",
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -2847,6 +2857,7 @@ fn a_pane_without_a_recap_has_none_and_zero() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &HostAgents::default(),
+        "",
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -3069,11 +3080,52 @@ fn an_unreachable_host_shows_its_last_agents_as_unknown() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &hosts,
+        "",
     );
     assert_eq!(mapped.panes[0].state, i32::from(AgentState::Working));
     assert_eq!(mapped.panes[1].state, i32::from(AgentState::Unknown));
     assert_eq!(mapped.panes[1].last_transition_at_ms, 9_900);
     assert_eq!(mapped.panes[1].current_step, None);
+}
+
+#[test]
+fn own_rows_carry_the_mark_of_machine_name() {
+    // Without a Rex host row.
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        "mac",
+    );
+    assert_eq!(mapped.panes[0].host_icon, "mac");
+    assert_eq!(mapped.panes[0].host, "");
+    // With a Rex host row: the own row keeps the mark of the machine.
+    let hosts = HostAgents::new(vec!["omarchy".into()]);
+    hosts.record("omarchy", reached(ObservedAgentState::Working), 9_000);
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &hosts,
+        "mac",
+    );
+    assert_eq!(mapped.panes.len(), 2);
+    assert_eq!(mapped.panes[0].host_icon, "mac");
+    assert_eq!(mapped.panes[0].host, "");
+}
+
+#[test]
+fn own_rows_carry_no_mark_without_an_entry() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        "",
+    );
+    assert_eq!(mapped.panes[0].host_icon, "");
+    assert_eq!(mapped.panes[0].host, "");
 }
 
 /// The row that the daemon builds for a fixed host agent, with no clock.

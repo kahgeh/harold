@@ -259,15 +259,37 @@ fn the_first_seen_time_stays_and_a_new_pid_is_a_new_incarnation() {
 }
 
 #[test]
-fn the_icon_comes_from_the_host_list_and_a_failed_read_keeps_it() {
+fn the_icon_is_empty_with_no_override_and_the_rex_icon_is_not_used() {
     let fake = Fake::new("icon");
+    let inventory = fake.inventory("omarchy", None, clock(0));
+    assert_eq!(inventory.icon(), "");
+    // The list still tells a known label from an unknown one.
+    assert_eq!(inventory.listed(), Some(true));
+    assert_eq!(
+        fake.inventory("unknown", None, clock(0)).listed(),
+        Some(false)
+    );
+}
+
+#[test]
+fn the_mark_override_is_the_icon() {
+    let fake = Fake::new("mark");
+    let inventory = fake.inventory("omarchy", Some("arch"), clock(0));
+    assert_eq!(inventory.icon(), "arch");
+    let _ = inventory.scan();
+    assert_eq!(inventory.icon(), "arch");
+}
+
+#[test]
+fn the_host_list_is_read_at_most_once_a_minute_and_a_failed_read_keeps_listed() {
+    let fake = Fake::new("listread");
     let time = clock(0);
     let inventory = fake.inventory("omarchy", None, Arc::clone(&time));
-    assert_eq!(inventory.icon(), "server.rack");
+    assert_eq!(inventory.listed(), Some(true));
     fake.remove_hosts();
     // Inside the minute, no new read happens.
     time.store(30_000, Ordering::SeqCst);
-    assert_eq!(inventory.icon(), "server.rack");
+    assert_eq!(inventory.listed(), Some(true));
     let reads = |fake: &Fake| {
         fake.calls()
             .iter()
@@ -277,7 +299,7 @@ fn the_icon_comes_from_the_host_list_and_a_failed_read_keeps_it() {
     assert_eq!(reads(&fake), 1);
     // After the minute the read fails and the value stays.
     time.store(61_000, Ordering::SeqCst);
-    assert_eq!(inventory.icon(), "server.rack");
+    assert_eq!(inventory.listed(), Some(true));
     assert_eq!(reads(&fake), 2);
     let call = fake
         .calls()
@@ -288,23 +310,6 @@ fn the_icon_comes_from_the_host_list_and_a_failed_read_keeps_it() {
         call.contains("--timeout 2s") && call.contains("--json"),
         "{call}"
     );
-}
-
-#[test]
-fn a_host_with_no_icon_gives_an_empty_icon() {
-    let fake = Fake::new("noicon");
-    fake.put("hosts.json", r#"{"hosts":[{"host":{"label":"omarchy"}}]}"#);
-    assert_eq!(fake.inventory("omarchy", None, clock(0)).icon(), "");
-}
-
-#[test]
-fn the_mark_override_replaces_the_icon_and_reads_nothing() {
-    let fake = Fake::new("mark");
-    let inventory = fake.inventory("omarchy", Some("arch"), clock(0));
-    assert_eq!(inventory.icon(), "arch");
-    let _ = inventory.scan();
-    assert_eq!(inventory.icon(), "arch");
-    assert!(!fake.calls().iter().any(|call| call.contains("hosts list")));
 }
 
 #[test]

@@ -89,7 +89,6 @@ struct Seen {
 
 #[derive(Default)]
 struct IconState {
-    value: String,
     /// When the last read started. `None` before the first read.
     last_read_ms: Option<i64>,
     /// Whether the last host list that Harold could read names the label. `None` before
@@ -379,19 +378,14 @@ impl RexHostInventory {
         }
     }
 
-    /// The icon name of the host: the mark from the settings, else the Rex icon. The Rex
-    /// icon is read at most once a minute. A failed read keeps the last value.
+    /// The icon name of the host: the mark from the settings, or empty. Harold reads no
+    /// icon from Rex.
     pub(crate) fn icon(&self) -> String {
-        if let Some(mark) = &self.mark_override {
-            return mark.clone();
-        }
-        let mut state = self.icon.lock().unwrap_or_else(PoisonError::into_inner);
-        self.read_host_list(&mut state);
-        state.value.clone()
+        self.mark_override.clone().unwrap_or_default()
     }
 
     /// Whether `rex hosts list` names the label: `Some(false)` when Rex does not know the
-    /// host, `None` when no read of the list worked. It shares the icon's once-a-minute read.
+    /// host, `None` when no read of the list worked. It reads the list at most once a minute.
     pub(crate) fn listed(&self) -> Option<bool> {
         let mut state = self.icon.lock().unwrap_or_else(PoisonError::into_inner);
         self.read_host_list(&mut state);
@@ -414,17 +408,15 @@ impl RexHostInventory {
                 false,
                 &["hosts", "list", "--json"],
             )
-            .and_then(|text| parse_icon(&text, &self.label));
-        if let Ok(entry) = read {
-            state.listed = Some(entry.is_some());
-            state.value = entry.unwrap_or_default();
+            .and_then(|text| parse_listed(&text, &self.label));
+        if let Ok(listed) = read {
+            state.listed = Some(listed);
         }
     }
 }
 
-/// The icon of the host `label` in the output of `rex hosts list --json`. A host with no
-/// icon gives an empty icon, and a label with no entry gives `None`.
-fn parse_icon(text: &str, label: &str) -> Result<Option<String>, RexError> {
+/// Whether the output of `rex hosts list --json` has a host with the label `label`.
+fn parse_listed(text: &str, label: &str) -> Result<bool, RexError> {
     let value = parse_json(text)?;
     let hosts = value
         .get("hosts")
@@ -433,11 +425,5 @@ fn parse_icon(text: &str, label: &str) -> Result<Option<String>, RexError> {
     Ok(hosts
         .iter()
         .filter_map(|entry| entry.get("host"))
-        .find(|host| host.get("label").and_then(Value::as_str) == Some(label))
-        .map(|host| {
-            host.get("icon")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        }))
+        .any(|host| host.get("label").and_then(Value::as_str) == Some(label)))
 }
