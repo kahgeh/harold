@@ -962,7 +962,12 @@ async fn the_warm_up_reads_the_facts_and_starts_the_program_once_and_the_answer_
 
 #[test]
 fn the_call_facts_have_no_current_step_field() {
+    // The agent works and reports a current step. The step lives beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%1", 20, Some("LEAKCHECK-7f3a".into()));
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
+    assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(!facts.to_string().contains("LEAKCHECK-7f3a"), "{facts}");
     assert!(!facts.to_string().contains("step"), "{facts}");
 }
 

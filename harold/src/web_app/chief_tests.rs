@@ -247,10 +247,24 @@ fn find_chief_logs_the_pane_once_per_change() {
 /// has no step field. This fails if one is added.
 #[test]
 fn the_phone_apps_chief_result_has_no_current_step_field() {
+    // The chief works and reports a current step. The step lives beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set(CHIEF, 20, Some("LEAKCHECK-7f3a".into()));
     let found = find_chief(
         &chief_and_pod(EffectiveAgentState::Working),
         Some(CHIEF),
         None,
+    );
+    // The destructure stops compiling when a field is added, so a step cannot enter without
+    // this test.
+    let ChiefPane::One { pane_id, busy: _ } = &found else {
+        panic!("the chief is found: {found:?}");
+    };
+    assert!(!pane_id.contains("LEAKCHECK-7f3a"), "{found:?}");
+    assert_eq!(steps.get(CHIEF, 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(
+        !format!("{found:?}").contains("LEAKCHECK-7f3a"),
+        "{found:?}"
     );
     assert!(!format!("{found:?}").contains("step"), "{found:?}");
 }

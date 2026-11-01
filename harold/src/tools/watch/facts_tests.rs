@@ -161,6 +161,9 @@ async fn no_chief_and_no_agents_give_an_empty_document() {
 
 #[tokio::test]
 async fn the_watch_facts_have_no_current_step_field() {
+    // The agent works and reports a current step. The step lives beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%3", 20, Some("LEAKCHECK-7f3a".into()));
     let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
     worker.work_summary = Some("Plain summary".into());
     let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
@@ -177,7 +180,9 @@ async fn the_watch_facts_have_no_current_step_field() {
     )
     .await;
     let json = serde_json::to_string(&facts).unwrap();
+    assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-7f3a"));
     assert!(json.contains("Plain summary"), "{json}");
+    assert!(!json.contains("LEAKCHECK-7f3a"), "{json}");
     assert!(!json.contains("step"), "{json}");
 }
 

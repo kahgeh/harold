@@ -1091,6 +1091,9 @@ fn the_agents_port_rows_have_no_current_step_field() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
+    // The agent works and reports a current step. The step lives beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%7", 20, Some("LEAKCHECK-7f3a".into()));
     let pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     let agents = SnapshotAgents {
         ports: Arc::new(Fake::at(DAY, "09:00:00")),
@@ -1098,7 +1101,35 @@ fn the_agents_port_rows_have_no_current_step_field() {
         providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
     };
     let rows = format!("{:?}", agents.agents());
+    // The destructure stops compiling when a field is added to a row, so a step field cannot
+    // enter without this test. Each text field is checked for the step.
+    for row in agents.agents() {
+        let AgentFact {
+            pane_id,
+            tmux_target,
+            folder,
+            provider_id,
+            reads_as_claude: _,
+            state: _,
+            state_since_ms: _,
+            work_summary,
+        } = row;
+        for text in [
+            Some(pane_id),
+            Some(tmux_target),
+            Some(folder),
+            Some(provider_id),
+            work_summary,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(!text.contains("LEAKCHECK-7f3a"), "{text}");
+        }
+    }
+    assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-7f3a"));
     assert!(rows.contains("%7"), "{rows}");
+    assert!(!rows.contains("LEAKCHECK-7f3a"), "{rows}");
     assert!(
         !rows.contains("current_step") && !rows.contains("step"),
         "{rows}"
