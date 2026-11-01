@@ -339,17 +339,10 @@ pub(crate) struct Instruments {
     pub app_spans_not_forwarded: Counter<u64>,
     /// `harold.multiplexer.calls`, `{call}`, by `multiplexer`, `host`, `operation`, `outcome`.
     pub multiplexer_calls: Counter<u64>,
-    #[allow(
-        dead_code,
-        reason = "Task 2 and later tasks call this; remove the allow then"
-    )]
     /// `harold.multiplexer.call.duration`, milliseconds, with the same attributes.
     pub multiplexer_call_duration: Histogram<f64>,
-    #[allow(
-        dead_code,
-        reason = "Task 2 and later tasks call this; remove the allow then"
-    )]
     /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
+    #[allow(dead_code, reason = "Task 5 records this; remove the allow then")]
     pub agent_state_duration: Histogram<f64>,
 }
 
@@ -575,10 +568,6 @@ impl MultiplexerOperation {
 }
 
 /// How a multiplexer call ended, as the `outcome` attribute.
-#[allow(
-    dead_code,
-    reason = "Task 2 and later tasks call this; remove the allow then"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MultiplexerOutcome {
     Ok,
@@ -604,10 +593,6 @@ impl MultiplexerOutcome {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 2 and later tasks call this; remove the allow then"
-)]
 /// The multiplexer name from the settings: `tmux` when the settings are not set yet.
 fn configured_multiplexer() -> &'static str {
     crate::settings::try_get_settings().map_or("tmux", |settings| {
@@ -615,10 +600,6 @@ fn configured_multiplexer() -> &'static str {
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 2 and later tasks call this; remove the allow then"
-)]
 /// Counts one multiplexer call and records its time. The multiplexer comes from the
 /// settings. The host is Harold's own machine.
 pub(crate) fn record_multiplexer_call(
@@ -635,10 +616,6 @@ pub(crate) fn record_multiplexer_call(
     );
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 2 and later tasks call this; remove the allow then"
-)]
 /// Adds 1 to `harold.multiplexer.calls` and records `elapsed` in milliseconds on
 /// `harold.multiplexer.call.duration`, with all four attributes.
 pub(crate) fn record_call(

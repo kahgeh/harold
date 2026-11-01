@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::settings::AgentSettings;
+use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_multiplexer_call};
 
 use super::domain::{AgentIncarnation, AgentPaneObservation};
 use super::inventory::{
@@ -965,6 +966,36 @@ fn run_program(program: &Path, args: &[&str], timeout: Duration) -> Result<Strin
 pub(crate) struct SystemRex {
     setting: Option<String>,
     found: Mutex<Option<PathBuf>>,
+    timeout: Duration,
+}
+
+/// Times `call` and counts it as a multiplexer call under `operation`. The result passes
+/// through unchanged.
+fn recorded<T>(
+    operation: MultiplexerOperation,
+    call: impl FnOnce() -> Result<T, RexError>,
+) -> Result<T, RexError> {
+    let started = Instant::now();
+    let result = call();
+    let outcome = match &result {
+        Ok(_) => MultiplexerOutcome::Ok,
+        Err(RexError::Absent) => MultiplexerOutcome::Absent,
+        Err(RexError::Timeout) => MultiplexerOutcome::Timeout,
+        Err(RexError::Failed) => MultiplexerOutcome::Failed,
+        Err(RexError::Malformed) => MultiplexerOutcome::Malformed,
+    };
+    record_multiplexer_call(operation, outcome, started.elapsed());
+    result
+}
+
+/// The operation that a `block call` method counts as.
+fn block_call_operation(method: &str) -> MultiplexerOperation {
+    match method {
+        "size" => MultiplexerOperation::ScreenSize,
+        "format" | "blob_read" => MultiplexerOperation::ScreenRead,
+        "program_status" => MultiplexerOperation::Status,
+        _ => MultiplexerOperation::Other,
+    }
 }
 
 impl SystemRex {
@@ -972,7 +1003,15 @@ impl SystemRex {
         Self {
             setting,
             found: Mutex::new(None),
+            timeout: CALL_TIMEOUT,
         }
+    }
+
+    /// The same program with another call limit, for tests.
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// The path of the `rex` program, or `Absent`.
@@ -987,7 +1026,7 @@ impl SystemRex {
     }
 
     fn run(&self, args: &[&str]) -> Result<String, RexError> {
-        run_program(&self.program()?, args, CALL_TIMEOUT)
+        run_program(&self.program()?, args, self.timeout)
     }
 
     /// The output of `rex version`, for the start line.
@@ -1005,19 +1044,27 @@ impl SystemRex {
 impl RexApi for SystemRex {
     fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
         // No answer from the first call means no server runs.
-        match self.run(&["ls", "--json"]) {
-            Err(RexError::Failed) => Err(RexError::Absent),
-            other => parse_sessions(&other?),
-        }
+        recorded(MultiplexerOperation::List, || {
+            match self.run(&["ls", "--json"]) {
+                Err(RexError::Failed) => Err(RexError::Absent),
+                other => parse_sessions(&other?),
+            }
+        })
     }
 
     fn session_view(&self, session_id: &str) -> Result<Vec<Vec<String>>, RexError> {
         let args = json!({"session_id": session_id}).to_string();
-        parse_session_view(&self.run(&["api", "call", "session.view", &args])?)
+        recorded(MultiplexerOperation::Layout, || {
+            parse_session_view(&self.run(&["api", "call", "session.view", &args])?)
+        })
     }
 
     fn process(&self, session_id: &str, block_id: &str) -> Result<RexProcess, RexError> {
-        parse_process(&self.run(&["block", "call", "-s", session_id, "-b", block_id, "process"])?)
+        recorded(MultiplexerOperation::Process, || {
+            parse_process(
+                &self.run(&["block", "call", "-s", session_id, "-b", block_id, "process"])?,
+            )
+        })
     }
 
     fn start_time_ms(&self, pid: u32) -> Option<i64> {
@@ -1040,20 +1087,26 @@ impl RexApi for SystemRex {
         args: &Value,
     ) -> Result<Value, RexError> {
         let args = args.to_string();
-        parse_json(&self.run(&[
-            "block", "call", "-s", session_id, "-b", block_id, method, &args,
-        ])?)
+        recorded(block_call_operation(method), || {
+            parse_json(&self.run(&[
+                "block", "call", "-s", session_id, "-b", block_id, method, &args,
+            ])?)
+        })
     }
 
     fn paste(&self, session_id: &str, block_id: &str, text: &str) -> Result<(), RexError> {
         let event = paste_event_json(session_id, block_id, text);
-        self.run(&["api", "call", "block.event", &event])
-            .map(|_| ())
+        recorded(MultiplexerOperation::Type, || {
+            self.run(&["api", "call", "block.event", &event])
+                .map(|_| ())
+        })
     }
 
     fn send_key(&self, session_id: &str, block_id: &str, key: &str) -> Result<(), RexError> {
-        self.run(&["send-key", "-s", session_id, "-b", block_id, key])
-            .map(|_| ())
+        recorded(MultiplexerOperation::Key, || {
+            self.run(&["send-key", "-s", session_id, "-b", block_id, key])
+                .map(|_| ())
+        })
     }
 }
 

@@ -634,3 +634,115 @@ fn a_pane_id_of_the_other_form_is_told_apart_from_a_bad_one() {
         assert!(!pane_id_is_other_multiplexer(bad), "{bad}");
     }
 }
+
+/// A `rex` shell script. `rules` come first as `case` arms and the default arms follow.
+fn fake_rex(name: &str, rules: &str) -> SystemRex {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("rex-record-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("rex");
+    let body = format!(
+        "#!/bin/sh\ncase \"$*\" in\n{rules}\n*\" ls --json\"*) echo '{{\"sessions\":[]}}';;\n*session.view*) echo '{{\"windows\":[]}}';;\n*\" process\"*) echo '{{\"child\":{{\"pid\":1,\"name\":\"login\"}}}}';;\n*) echo '{{}}';;\nesac\n"
+    );
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    SystemRex::new(Some(script.to_string_lossy().into_owned()))
+}
+
+fn calls(operation: &str, outcome: &str) -> u64 {
+    crate::telemetry::test_support::counter_value(
+        "harold.multiplexer.calls",
+        &[("operation", operation), ("outcome", outcome)],
+    )
+    .unwrap_or(0)
+}
+
+/// Runs `call` and returns how much the counter for the pair rose.
+fn rise<T>(operation: &str, outcome: &str, call: impl FnOnce() -> T) -> (T, u64) {
+    let before = calls(operation, outcome);
+    let result = call();
+    (result, calls(operation, outcome) - before)
+}
+
+#[test]
+fn each_rex_call_is_counted_as_ok_under_its_operation() {
+    let rex = fake_rex("ok", "");
+    let args = json!({});
+    assert_eq!(rise("list", "ok", || rex.sessions().is_ok()), (true, 1));
+    assert_eq!(
+        rise("layout", "ok", || rex.session_view("s").is_ok()),
+        (true, 1)
+    );
+    assert_eq!(
+        rise("process", "ok", || rex.process("s", "b").is_ok()),
+        (true, 1)
+    );
+    for (method, operation) in [
+        ("size", "screen_size"),
+        ("format", "screen_read"),
+        ("blob_read", "screen_read"),
+        ("program_status", "status"),
+        ("frobnicate", "other"),
+    ] {
+        let (result, risen) = rise(operation, "ok", || rex.block_call("s", "b", method, &args));
+        assert!(result.is_ok(), "{method}");
+        // Two methods share `screen_read`, but each call adds 1.
+        assert_eq!(risen, 1, "{method}");
+    }
+    assert_eq!(
+        rise("type", "ok", || rex.paste("s", "b", "x").is_ok()),
+        (true, 1)
+    );
+    assert_eq!(
+        rise("key", "ok", || rex.send_key("s", "b", "enter").is_ok()),
+        (true, 1)
+    );
+}
+
+#[test]
+fn a_failed_size_call_is_screen_size_failed() {
+    let rex = fake_rex("size-fail", "*\" size\"*) exit 1;;");
+    let (result, risen) = rise("screen_size", "failed", || {
+        rex.block_call("s", "b", "size", &json!({}))
+    });
+    assert_eq!(result, Err(RexError::Failed));
+    assert_eq!(risen, 1);
+}
+
+#[test]
+fn a_slow_status_call_is_status_timeout() {
+    let rex = fake_rex("status-slow", "*program_status*) sleep 3;;")
+        .with_timeout(Duration::from_millis(100));
+    let (result, risen) = rise("status", "timeout", || {
+        rex.block_call("s", "b", "program_status", &json!({}))
+    });
+    assert_eq!(result, Err(RexError::Timeout));
+    assert_eq!(risen, 1);
+}
+
+#[test]
+fn the_recorder_maps_an_absent_program_to_absent() {
+    let (result, risen) = rise("key", "absent", || {
+        recorded(MultiplexerOperation::Key, || -> Result<(), RexError> {
+            Err(RexError::Absent)
+        })
+    });
+    assert_eq!(result, Err(RexError::Absent));
+    assert_eq!(risen, 1);
+}
+
+#[test]
+fn a_reply_that_is_not_json_is_process_malformed() {
+    let rex = fake_rex("process-bad", "*\" process\"*) echo nope;;");
+    let (result, risen) = rise("process", "malformed", || rex.process("s", "b"));
+    assert_eq!(result.err(), Some(RexError::Malformed));
+    assert_eq!(risen, 1);
+}
+
+#[test]
+fn a_failed_ls_is_list_absent() {
+    let rex = fake_rex("ls-fail", "*\" ls --json\"*) exit 1;;");
+    let (result, risen) = rise("list", "absent", || rex.sessions());
+    assert_eq!(result.err(), Some(RexError::Absent));
+    assert_eq!(risen, 1);
+}
