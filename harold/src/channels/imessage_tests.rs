@@ -446,7 +446,20 @@ fn a_send_through_cat_succeeds() {
 
 #[test]
 fn a_program_that_fails_is_reported_without_the_text() {
-    let error = send_imessage_to_with("false", "secret words", "+61400000000").unwrap_err();
+    // The program reads the whole script and then fails, so the write always completes.
+    let directory = TestDirectory::new();
+    let program = directory.0.join("osascript");
+    crate::test_support::fake_program::write_fake_program(
+        &program,
+        crate::test_support::fake_program::Language::Shell,
+        "cat >/dev/null; exit 1",
+    );
+    let error = send_imessage_to_with(
+        program.to_str().expect("program path is text"),
+        "secret words",
+        "+61400000000",
+    )
+    .unwrap_err();
     assert!(error.contains("osascript exited unsuccessfully"), "{error}");
     assert!(!error.contains("secret"), "{error}");
 }
