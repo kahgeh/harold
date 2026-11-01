@@ -3084,3 +3084,78 @@ async fn migration_moves_busy_rows_to_working_and_takes_six_states() {
     );
     assert_eq!(raw_states(&conn, "%3").await, words("-", "-", "unknown"));
 }
+
+/// A store at the 005 shape with one busy row, ready for the 006 SQL to run again.
+async fn store_before_006(directory: &TestDirectory) -> HaroldStore {
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let old_sql = include_str!("store/migrations/001_initial.sql");
+    let start = old_sql.find("CREATE TABLE agent_panes (").unwrap();
+    let end = start + old_sql[start..].find(");").unwrap() + 2;
+    let conn = store.state.connect().unwrap();
+    conn.execute_batch(&format!(
+        "DELETE FROM _migrations WHERE name = '006_agent_states'; \
+         DROP TABLE agent_panes; {}",
+        &old_sql[start..end]
+    ))
+    .await
+    .unwrap();
+    conn.execute(&agent_pane_row_sql("%1", "'busy'", "NULL", "busy"), ())
+        .await
+        .unwrap();
+    store
+}
+
+#[tokio::test]
+async fn running_the_006_sql_a_second_time_succeeds_and_loses_no_row() {
+    let directory = TestDirectory::new();
+    let store = store_before_006(&directory).await;
+    drop(store);
+    let migrated = HaroldStore::open(directory.path()).await.unwrap();
+    // Forget the record and leave a stray table: the next open runs the SQL again.
+    let conn = migrated.state.connect().unwrap();
+    conn.execute_batch(
+        "DELETE FROM _migrations WHERE name = '006_agent_states'; \
+         CREATE TABLE agent_panes_new (x INTEGER)",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(migrated);
+
+    let again = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = again.state.connect().unwrap();
+    assert_eq!(
+        raw_states(&conn, "%1").await,
+        (
+            "working".to_string(),
+            "-".to_string(),
+            "working".to_string()
+        )
+    );
+    assert!(!has_table(&conn, "agent_panes_new").await);
+}
+
+#[tokio::test]
+async fn a_failing_statement_in_the_006_sql_leaves_agent_panes_as_it_was() {
+    let directory = TestDirectory::new();
+    let store = store_before_006(&directory).await;
+    let sql = include_str!("store/migrations/006_agent_states.sql");
+    let broken = sql.replace(
+        "ALTER TABLE agent_panes_new RENAME TO agent_panes;",
+        "SELECT * FROM no_such_table;",
+    );
+    assert_ne!(broken, sql);
+    let conn = store.state.connect().unwrap();
+    // The runner's transaction, as in initialize_state_schema.
+    conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    conn.execute_batch(&broken)
+        .await
+        .expect_err("the batch fails");
+    conn.execute("ROLLBACK", ()).await.unwrap();
+    assert!(has_table(&conn, "agent_panes").await);
+    assert!(!has_table(&conn, "agent_panes_new").await);
+    assert_eq!(
+        raw_states(&conn, "%1").await,
+        ("busy".to_string(), "-".to_string(), "busy".to_string())
+    );
+}

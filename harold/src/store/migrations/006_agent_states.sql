@@ -1,5 +1,9 @@
 -- Widens the agent state CHECK rules and renames the state word busy to working.
 -- Turso cannot alter a CHECK, so the table is rebuilt.
+-- The runner (initialize_state_schema) runs all migrations in one BEGIN IMMEDIATE transaction,
+-- so this file has no BEGIN. The DROP IF EXISTS lets a run after a leftover table succeed.
+DROP TABLE IF EXISTS agent_panes_new;
+
 CREATE TABLE agent_panes_new (
     pane_id TEXT PRIMARY KEY,
     pane_pid INTEGER NOT NULL,
