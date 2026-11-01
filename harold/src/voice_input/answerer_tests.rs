@@ -961,10 +961,7 @@ async fn the_warm_up_reads_the_facts_and_starts_the_program_once_and_the_answer_
 }
 
 #[test]
-fn the_call_facts_do_not_hold_the_current_step() {
-    let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set("%2", 20, Some("LEAKCHECK-7f3a".into()));
+fn the_call_facts_have_no_current_step_field() {
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
-    assert_eq!(steps.get("%2", 20).as_deref(), Some("LEAKCHECK-7f3a"));
-    assert!(!facts.to_string().contains("LEAKCHECK-7f3a"));
+    assert!(!facts.to_string().contains("step"), "{facts}");
 }

@@ -1084,21 +1084,23 @@ fn the_pods_port_returns_a_copy_of_the_gauge_snapshot() {
     assert!(!GaugePods.pods().slots.contains_key("invented"));
 }
 
-/// `AgentFact` has no step field, so the port cannot carry the current step. This fails
-/// if a step reaches the list through the work summary or any other field.
+/// The agents port lists `AgentFact` rows. The list has no `current_step` field. This fails
+/// if a field of that name is added to a row.
 #[test]
-fn the_agents_port_does_not_carry_the_current_step() {
+fn the_agents_port_rows_have_no_current_step_field() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
-    let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set("%7", 20, Some("LEAKCHECK-7f3a".into()));
     let pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     let agents = SnapshotAgents {
         ports: Arc::new(Fake::at(DAY, "09:00:00")),
         snapshots: AgentSnapshotHub::new(snapshot(None, vec![pane])),
         providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
     };
-    assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-7f3a"));
-    assert!(!format!("{:?}", agents.agents()).contains("LEAKCHECK-7f3a"));
+    let rows = format!("{:?}", agents.agents());
+    assert!(rows.contains("%7"), "{rows}");
+    assert!(
+        !rows.contains("current_step") && !rows.contains("step"),
+        "{rows}"
+    );
 }

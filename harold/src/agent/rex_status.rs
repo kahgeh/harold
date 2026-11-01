@@ -257,6 +257,9 @@ pub(crate) enum Lookup {
     Stream(Option<StatusRecord>),
     /// The block's session has no running stream.
     NoStream,
+    /// The block's session has a running stream, and the last call for the block failed. The
+    /// stream holds no record for it, so the observer makes one direct call.
+    CallFailed,
 }
 
 pub(crate) type Program = Arc<dyn Fn() -> Result<PathBuf, RexError> + Send + Sync>;
@@ -269,6 +272,9 @@ struct Shared {
     api: Arc<dyn RexApi>,
     steps: CurrentSteps,
     records: Records,
+    /// The blocks whose last trigger call failed, with the generation of the stream that
+    /// saw it. Code that takes this lock holds the records lock first.
+    call_failed: Mutex<HashMap<String, u64>>,
     /// The source of stream generations. A stream tags every write with its generation, so
     /// a stale reader cannot change what a newer stream of the same session wrote.
     next_generation: AtomicU64,
@@ -290,7 +296,45 @@ impl Shared {
             records.remove(block);
             self.steps.clear_block(block);
         }
+        lock(&self.call_failed).retain(|_, owner| *owner != generation);
         blocks.len()
+    }
+
+    /// Whether the last trigger call for the block failed.
+    fn call_failed(&self, block_id: &str) -> bool {
+        let _records = lock(&self.records);
+        lock(&self.call_failed).contains_key(block_id)
+    }
+
+    /// Notes a failed call of stream `generation`: the block has no record and the mark is
+    /// set. A stream that was asked to stop, or a closed block, sets nothing.
+    fn fail(
+        &self,
+        generation: u64,
+        stop: &AtomicBool,
+        block_id: &str,
+        closed: impl FnOnce() -> bool,
+    ) {
+        let mut records = lock(&self.records);
+        if stop.load(Ordering::Acquire) || closed() {
+            return;
+        }
+        if records
+            .get(block_id)
+            .is_none_or(|(owner, _)| *owner == generation)
+        {
+            records.remove(block_id);
+            self.steps.clear_block(block_id);
+        }
+        lock(&self.call_failed).insert(block_id.to_string(), generation);
+    }
+
+    /// Clears the mark when stream `generation` set it.
+    fn clear_failed(&self, generation: u64, block_id: &str) {
+        let mut marks = lock(&self.call_failed);
+        if marks.get(block_id) == Some(&generation) {
+            marks.remove(block_id);
+        }
     }
 
     fn count(&self, generation: u64) -> usize {
@@ -323,6 +367,7 @@ impl Shared {
         };
         self.steps.set(block_id, record.pid, step);
         records.insert(block_id.to_string(), (generation, record));
+        self.clear_failed(generation, block_id);
     }
 
     /// Removes the record of the block, unless a newer stream wrote it or the stream was
@@ -332,6 +377,7 @@ impl Shared {
         if stop.load(Ordering::Acquire) {
             return;
         }
+        self.clear_failed(generation, block_id);
         if records
             .get(block_id)
             .is_some_and(|(owner, _)| *owner != generation)
@@ -439,6 +485,7 @@ impl RexStatus {
                 api,
                 steps,
                 records: Mutex::new(HashMap::new()),
+                call_failed: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(1),
                 dispatch: dispatcher::get_default(Dispatch::clone),
             }),
@@ -461,6 +508,8 @@ impl RexStatus {
         if registry.closed {
             return;
         }
+        // Reader threads of ended streams. They are joined after the registry lock goes.
+        let mut old_threads: Vec<JoinHandle<()>> = Vec::new();
         let mut sessions: Vec<(&str, Vec<String>)> = Vec::new();
         registry.owners.clear();
         for slot in slots {
@@ -493,14 +542,16 @@ impl RexStatus {
                     continue;
                 }
                 if let Some(old) = registry.streams.remove(id) {
-                    // The reader has ended, so the join returns at once.
-                    if let Some(thread) = old.stop() {
-                        let _ = thread.join();
-                    }
+                    // The reader may still wait for a call thread that is in a `block_call`.
+                    old_threads.extend(old.stop());
                 }
             }
             let stream = self.start(id, blocks, now);
             registry.streams.insert(id.to_string(), stream);
+        }
+        drop(registry);
+        for thread in old_threads {
+            let _ = thread.join();
         }
     }
 
@@ -588,6 +639,9 @@ impl RexStatus {
         let record = lock(&self.shared.records)
             .get(block_id)
             .map(|(_, record)| record.clone());
+        if record.is_none() && self.shared.call_failed(block_id) {
+            return Lookup::CallFailed;
+        }
         Lookup::Stream(record)
     }
 
@@ -888,7 +942,9 @@ impl Worker {
                     self.shared.remove(self.generation, stop, block_id);
                 }
                 Err(error) => {
-                    self.shared.remove(self.generation, stop, block_id);
+                    self.shared.fail(self.generation, stop, block_id, || {
+                        self.pending.is_closed(block_id)
+                    });
                     if self.pending.note_failed(block_id) && !stop.load(Ordering::Acquire) {
                         log_stream(
                             &self.shared.dispatch,

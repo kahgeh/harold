@@ -823,6 +823,8 @@ mod rex_observer {
         blocks: Vec<String>,
         /// The `program_status` reply for each block. A block with none fails.
         statuses: HashMap<String, Value>,
+        /// The first calls to `program_status` that fail, before the replies above apply.
+        fail_first: std::sync::atomic::AtomicUsize,
         calls: Mutex<Vec<String>>,
     }
 
@@ -866,7 +868,17 @@ mod rex_observer {
         ) -> Result<Value, RexError> {
             self.calls.lock().unwrap().push(method.to_string());
             match method {
-                "program_status" => self.statuses.get(block).cloned().ok_or(RexError::Failed),
+                "program_status" => {
+                    let failing = self.fail_first.fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |left| left.checked_sub(1),
+                    );
+                    if failing.is_ok() {
+                        return Err(RexError::Failed);
+                    }
+                    self.statuses.get(block).cloned().ok_or(RexError::Failed)
+                }
                 "size" => Ok(json!({"rows": 24, "columns": 80})),
                 "format" => Ok(json!({"id": 7, "total": 5})),
                 "blob_read" => {
@@ -906,11 +918,8 @@ mod rex_observer {
         RexVisibleScreen::with_status(api.clone(), Arc::new(status))
     }
 
-    /// The block directory is global, so observations that list blocks run one at a time.
-    static DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
-
     fn observe(screen: &RexVisibleScreen, block: &str) -> ScreenObservation {
-        let _one_at_a_time = DIRECTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _one_at_a_time = crate::agent::rex::directory_test_lock();
         screen.observe(&pane(block), &provider()).unwrap()
     }
 
@@ -973,6 +982,65 @@ mod rex_observer {
         }
         let screen = RexVisibleScreen::with_status(api.clone(), status.clone());
         (screen, status)
+    }
+
+    fn api_failing_first(block: &str, status: Option<Value>, failing: usize) -> Arc<CountingRex> {
+        let mut api = CountingRex {
+            blocks: vec![block.to_string()],
+            ..CountingRex::default()
+        };
+        api.fail_first = std::sync::atomic::AtomicUsize::new(failing);
+        if let Some(status) = status {
+            api.statuses.insert(block.to_string(), status);
+        }
+        Arc::new(api)
+    }
+
+    #[test]
+    fn a_failed_trigger_call_makes_one_direct_call_and_no_screen_read_when_it_works() {
+        let block = "block:obs-call-failed";
+        // The first call of the stream fails. The direct call of the observer works.
+        let api = api_failing_first(block, Some(reply("working", 20)), 1);
+        let script = FakeEvents::new("callfailed", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        assert_eq!(status.lookup(block), Lookup::CallFailed);
+        let calls_before = api.count("program_status");
+        let observation = observe(&screen, block);
+        assert_eq!(observation.state, Some(ObservedAgentState::Working));
+        assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+        assert_eq!(api.count("program_status"), calls_before + 1);
+        assert_eq!(api.screen_reads(), 0);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_failed_trigger_call_and_a_failed_direct_call_read_the_screen() {
+        let block = "block:obs-both-fail";
+        let api = api_failing_first(block, None, 0);
+        let script = FakeEvents::new("bothfail", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        assert_eq!(status.lookup(block), Lookup::CallFailed);
+        let calls_before = api.count("program_status");
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert_eq!(api.count("program_status"), calls_before + 1);
+        assert!(api.screen_reads() > 0);
+        status.stop_all();
+    }
+
+    #[test]
+    fn a_stream_with_no_record_and_no_failure_reads_the_screen_with_no_direct_call() {
+        let block = "block:obs-never-reported";
+        let api = api_with(block, Some(json!({"records": []})));
+        let script = FakeEvents::new("neverreported", &[]);
+        let (screen, status) = streaming_screen(&api, &script, block);
+        assert_eq!(status.lookup(block), Lookup::Stream(None));
+        let calls_before = api.count("program_status");
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, "rex-visible-v1");
+        assert_eq!(api.count("program_status"), calls_before);
+        assert!(api.screen_reads() > 0);
+        status.stop_all();
     }
 
     #[test]
@@ -1100,7 +1168,7 @@ mod rex_observer {
     fn observe_as(screen: &RexVisibleScreen, block: &str, provider_id: &str) {
         let mut observed = pane(block);
         observed.incarnation.provider_id = provider_id.to_string();
-        let _one_at_a_time = DIRECTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _one_at_a_time = crate::agent::rex::directory_test_lock();
         screen.observe(&observed, &provider()).unwrap();
     }
 

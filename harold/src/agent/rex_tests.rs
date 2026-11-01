@@ -248,12 +248,20 @@ struct Gate {
     calls: std::sync::atomic::AtomicUsize,
     open: Mutex<bool>,
     changed: std::sync::Condvar,
-    first: Value,
-    later: Value,
+    first: Result<Value, RexError>,
+    later: Result<Value, RexError>,
 }
 
 impl Gate {
     fn new(block: &str, first: Value, later: Value) -> Arc<Self> {
+        Self::with(block, Ok(first), Ok(later))
+    }
+
+    fn with(
+        block: &str,
+        first: Result<Value, RexError>,
+        later: Result<Value, RexError>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             block: block.to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -264,7 +272,7 @@ impl Gate {
         })
     }
 
-    fn call(&self) -> Value {
+    fn call(&self) -> Result<Value, RexError> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n > 0 {
             return self.later.clone();
@@ -328,7 +336,7 @@ impl RexApi for FakeRex {
                     *n - 1
                 };
                 if let Some(gate) = self.gate.as_ref().filter(|gate| gate.block == block) {
-                    return Ok(gate.call());
+                    return gate.call();
                 }
                 let sequence = self.sequences.get(block).ok_or(RexError::Failed)?;
                 sequence[n.min(sequence.len() - 1)]
@@ -402,6 +410,7 @@ fn claude_process() -> RexProcess {
 
 #[test]
 fn the_inventory_lists_agents_and_reads_a_start_time_once_per_pid() {
+    let _directory = directory_test_lock();
     let api = Arc::new(fake(&[
         ("block:a", Ok(claude_process())),
         (
@@ -437,6 +446,7 @@ fn the_inventory_lists_agents_and_reads_a_start_time_once_per_pid() {
 
 #[test]
 fn is_current_passes_for_the_same_pid_and_start_time_in_ancestors_and_fails_otherwise() {
+    let _directory = directory_test_lock();
     let in_tool = process(
         1,
         Some(proc(30, "sleep", None)),
@@ -471,6 +481,7 @@ fn incarnation_for(inventory: &RexAgentInventory, block: &str) -> AgentIncarnati
 
 #[test]
 fn is_current_answers_false_for_a_tmux_pane_id_without_a_rex_call() {
+    let _directory = directory_test_lock();
     let mut api = fake(&[("block:ic1", Ok(claude_process()))]);
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic1", Ok(claude_process()))])),
@@ -485,6 +496,7 @@ fn is_current_answers_false_for_a_tmux_pane_id_without_a_rex_call() {
 
 #[test]
 fn is_current_answers_false_for_a_block_a_successful_listing_does_not_hold() {
+    let _directory = directory_test_lock();
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic2", Ok(claude_process()))])),
         settings(),
@@ -496,6 +508,7 @@ fn is_current_answers_false_for_a_block_a_successful_listing_does_not_hold() {
 
 #[test]
 fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
+    let _directory = directory_test_lock();
     let first = RexAgentInventory::new(
         Arc::new(fake(&[("block:ic3", Ok(claude_process()))])),
         settings(),
@@ -514,6 +527,7 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
 
 #[test]
 fn is_current_stays_an_error_when_the_listing_fails() {
+    let _directory = directory_test_lock();
     for (error, expected) in [
         (RexError::Failed, InventoryError::RexFailed),
         (RexError::Timeout, InventoryError::RexTimeout),
@@ -533,6 +547,7 @@ fn is_current_stays_an_error_when_the_listing_fails() {
 
 #[test]
 fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() {
+    let _directory = directory_test_lock();
     let api = Arc::new(fake(&[("block:ic5", Ok(claude_process()))]));
     let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
     let incarnation = incarnation_for(&inventory, "block:ic5");
@@ -548,6 +563,7 @@ fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() 
 
 #[test]
 fn a_failed_listing_or_an_absent_rex_fails_the_scan() {
+    let _directory = directory_test_lock();
     for (error, expected) in [
         (RexError::Timeout, InventoryError::RexTimeout),
         (RexError::Absent, InventoryError::RexAbsent),
@@ -699,6 +715,7 @@ fn lstart_parses_as_utc() {
 
 #[test]
 fn typing_ports_use_the_session_of_the_block() {
+    let _directory = directory_test_lock();
     let api = fake(&[("block:z", Ok(claude_process()))]);
     let inventory = RexAgentInventory::new(
         Arc::new(fake(&[("block:z", Ok(claude_process()))])),
@@ -1546,7 +1563,7 @@ fn a_failed_call_drops_the_record_and_logs_call_failed_once_until_a_call_works()
     };
     program.feed(&changed_line("block:a"));
     wait_until("the failed call drops the record", || {
-        status.lookup("block:a") == Lookup::Stream(None)
+        status.lookup("block:a") == Lookup::CallFailed
     });
     wait_until("the failure is logged", || failed() == 1);
     assert_eq!(steps.get("block:a", 5), None);
@@ -1565,7 +1582,126 @@ fn a_failed_call_drops_the_record_and_logs_call_failed_once_until_a_call_works()
     // The next failure logs again.
     program.feed(&changed_line("block:a"));
     wait_until("the failure is logged again", || failed() == 2);
+    assert_eq!(status.lookup("block:a"), Lookup::CallFailed);
+}
+
+fn is_failed(status: &RexStatus, block: &str) -> bool {
+    status.lookup(block) == Lookup::CallFailed
+}
+
+#[test]
+fn the_call_failed_mark_is_set_by_a_failed_call_and_cleared_by_a_working_one() {
+    let program = FakeProgram::new_fifo("markset");
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![
+            Some(reply("working", 5, "ok")),
+            None,
+            Some(reply("working", 5, "back")),
+            None,
+            Some(no_root()),
+        ],
+    )]);
+    let (status, _) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the first read", || {
+        status.lookup("block:a") == working(5, "ok")
+    });
+    program.feed(&changed_line("block:a"));
+    wait_until("the mark is set", || is_failed(&status, "block:a"));
+    program.feed(&changed_line("block:a"));
+    wait_until("a working call clears it", || {
+        status.lookup("block:a") == working(5, "back")
+    });
+    // A call that answers with no root record also counts as a call that works.
+    program.feed(&changed_line("block:a"));
+    wait_until("the mark is set again", || is_failed(&status, "block:a"));
+    program.feed(&changed_line("block:a"));
+    wait_until("an answer with no root clears it", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+}
+
+#[test]
+fn block_closed_clears_the_call_failed_mark() {
+    let program = FakeProgram::new_fifo("markclosed");
+    let api = fake_with_sequences(&[("block:a", vec![Some(reply("working", 5, "ok")), None])]);
+    let (status, _) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the first read", || {
+        status.lookup("block:a") == working(5, "ok")
+    });
+    program.feed(&changed_line("block:a"));
+    wait_until("the mark is set", || is_failed(&status, "block:a"));
+    program.feed(&event_line("block_closed", &json!({"block_id": "block:a"})));
+    wait_until("the close clears the mark", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+}
+
+#[test]
+fn dropping_the_stream_clears_the_call_failed_mark() {
+    let program = FakeProgram::new("markdrop", &[], true);
+    // The first stream's first call fails. The second stream's first call has no root record.
+    let api = fake_with_sequences(&[("block:a", vec![None, Some(no_root())])]);
+    let (status, _) = status_with(Arc::clone(&api), &program, now_clock());
+    let slots = [slot_in("session:1", "block:a")];
+    status.sync(&slots);
+    wait_until("the mark is set", || is_failed(&status, "block:a"));
+    status.sync(&[]);
+    assert_eq!(status.lookup("block:a"), Lookup::NoStream);
+    status.sync(&slots);
+    wait_until("the new stream has no mark", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+}
+
+#[test]
+fn a_stale_generation_cannot_set_the_call_failed_mark() {
+    let (logs, _guard) = capture_logs();
+    let program = FakeProgram::new("markstaleset", &[], true);
+    // The old stream's held call fails after its stream stopped. The new stream's call works.
+    let gate = Gate::with("block:a", Err(RexError::Failed), Ok(no_root()));
+    let api = Arc::new(FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        ..FakeRex::default()
+    });
+    let (status, _) = status_with(api, &program, now_clock());
+    let slots = [slot_in("session:1", "block:a")];
+    status.sync(&slots);
+    wait_until("the old call is held", || gate.calls() == 1);
+    status.sync(&[]);
+    status.sync(&slots);
+    wait_until("the new stream is ready", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+    gate.release();
+    wait_until("the old reader ends", || ended_lines(&logs) == 1);
     assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
+}
+
+#[test]
+fn a_stale_generation_cannot_clear_the_call_failed_mark() {
+    let (logs, _guard) = capture_logs();
+    let program = FakeProgram::new("markstaleclear", &[], true);
+    // The old stream's held call works after its stream stopped. The new stream's call fails.
+    let gate = Gate::with("block:a", Ok(no_root()), Err(RexError::Failed));
+    let api = Arc::new(FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        ..FakeRex::default()
+    });
+    let (status, _) = status_with(api, &program, now_clock());
+    let slots = [slot_in("session:1", "block:a")];
+    status.sync(&slots);
+    wait_until("the old call is held", || gate.calls() == 1);
+    status.sync(&[]);
+    status.sync(&slots);
+    wait_until("the new stream has the mark", || {
+        is_failed(&status, "block:a")
+    });
+    gate.release();
+    wait_until("the old reader ends", || ended_lines(&logs) == 1);
+    assert!(is_failed(&status, "block:a"));
 }
 
 #[test]

@@ -299,7 +299,8 @@ impl RexVisibleScreen {
         let block_id = &pane.incarnation.pane_id;
         let (record, source) = match self.status.lookup(block_id) {
             Lookup::Stream(record) => (record?, StateSource::ProgramStatus),
-            Lookup::NoStream => (
+            // A failed trigger call leaves no record, so the observer asks once itself.
+            Lookup::NoStream | Lookup::CallFailed => (
                 self.record_by_call(block_id)?,
                 StateSource::ProgramStatusCall,
             ),

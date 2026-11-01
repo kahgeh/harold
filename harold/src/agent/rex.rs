@@ -549,6 +549,13 @@ pub(crate) fn read_screen_text(
 
 static DIRECTORY: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
+/// Tests that write the directory take this lock, so they do not read each other's blocks.
+#[cfg(test)]
+pub(crate) fn directory_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn directory_set(slots: &[RexBlockSlot]) {
     let map = slots
         .iter()
@@ -1210,14 +1217,9 @@ pub(crate) fn stop_started_status() {
 
 #[path = "rex_status.rs"]
 mod status;
-#[allow(
-    unused_imports,
-    reason = "the observer and the streams use these in later tasks"
-)]
-pub(crate) use status::{
-    Clock, CurrentSteps, Lookup, Program, RESTART_GAP, RecordState, RexStatus, StatusEvent,
-    StatusRecord, parse_event_line, parse_program_status,
-};
+#[cfg(test)]
+pub(crate) use status::{Clock, Program, RESTART_GAP, RecordState, StatusEvent, parse_event_line};
+pub(crate) use status::{CurrentSteps, Lookup, RexStatus, StatusRecord, parse_program_status};
 
 #[cfg(test)]
 #[path = "rex_tests.rs"]
