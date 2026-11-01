@@ -229,6 +229,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "waiting",
     "schema_steps",
     "records",
+    "event",
     "voided",
     "metric",
     "value",

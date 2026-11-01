@@ -1180,7 +1180,8 @@ mod status;
     reason = "the observer and the streams use these in later tasks"
 )]
 pub(crate) use status::{
-    CurrentSteps, RecordState, StatusEvent, StatusRecord, parse_event_line, parse_program_status,
+    Clock, CurrentSteps, Lookup, Program, RESTART_GAP, RecordState, RexStatus, StatusEvent,
+    StatusRecord, parse_event_line, parse_program_status,
 };
 
 #[cfg(test)]

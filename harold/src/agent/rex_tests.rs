@@ -233,6 +233,8 @@ struct FakeRex {
     keys: Mutex<Vec<(String, String)>>,
     /// The windows of a session, when they differ from `windows`.
     views: HashMap<String, Vec<Vec<String>>>,
+    /// The reply of `program_status` for each block.
+    statuses: HashMap<String, Value>,
 }
 
 impl RexApi for FakeRex {
@@ -257,12 +259,19 @@ impl RexApi for FakeRex {
         self.start_reads.lock().unwrap().push(pid);
         self.starts.lock().unwrap().get(&pid).copied()
     }
-    fn block_call(&self, _: &str, _: &str, method: &str, args: &Value) -> Result<Value, RexError> {
+    fn block_call(
+        &self,
+        _: &str,
+        block: &str,
+        method: &str,
+        args: &Value,
+    ) -> Result<Value, RexError> {
         self.calls
             .lock()
             .unwrap()
             .push((method.to_string(), args.clone()));
         match method {
+            "program_status" => self.statuses.get(block).cloned().ok_or(RexError::Failed),
             "size" => Ok(json!({"rows": 24, "columns": 80})),
             "format" => Ok(json!({"id": 7, "total": self.blob.len()})),
             "blob_read" => {
@@ -986,4 +995,417 @@ fn current_steps_notify_only_on_a_change() {
     steps.clear_block("block:a");
     assert_eq!(*rx.borrow(), 3);
     assert_eq!(steps.get("block:a", 5), None);
+}
+
+// A live line, captured from Rex 2026-11-01 (a throwaway session whose program wrote
+// OSC 7501). The record has no `owner`, and `id` sits beside `record`.
+const LIVE_CHANGED: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a196ca-ea23-70c7-a0f5-bea252f4f6df","event":{"type":"block_event","payload":{"block_id":"block:01a196ca-ea23-7148-9fc0-352b07759d6f","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"","record":{"state":"working","app":"x","effective_app":"x","msg":"hi","updated_at":"2026-11-01T22:07:52.056616+11:00"},"reason":"report"}}}}}"#;
+const LIVE_CLOSED: &str = r#"{"type":"session_event","payload":{"session_id":"session:01a196ca-ea23-70c7-a0f5-bea252f4f6df","event":{"type":"block_closed","payload":{"block_id":"block:01a196ca-ea23-7148-9fc0-352b07759d6f"}}}}"#;
+
+#[test]
+fn a_live_line_and_a_flat_event_parse() {
+    // The live record has no owner pid, so the record is unusable and the stream asks again.
+    assert_eq!(
+        parse_event_line(LIVE_CHANGED),
+        Some(StatusEvent::Changed {
+            block_id: "block:01a196ca-ea23-7148-9fc0-352b07759d6f".to_string(),
+            record: None,
+        })
+    );
+    assert_eq!(
+        parse_event_line(LIVE_CLOSED),
+        Some(StatusEvent::BlockClosed {
+            block_id: "block:01a196ca-ea23-7148-9fc0-352b07759d6f".to_string(),
+        })
+    );
+    let with_id = LIVE_CHANGED.replace(r#""id":"""#, r#""id":"child""#);
+    assert_eq!(parse_event_line(&with_id), None);
+    let flat = json!({
+        "type": "program_status_changed",
+        "block_id": "block:f",
+        "state": "blocked",
+        "owner": {"pid": 9},
+        "msg": "Allow?",
+    })
+    .to_string();
+    assert_eq!(
+        parse_event_line(&flat),
+        Some(StatusEvent::Changed {
+            block_id: "block:f".to_string(),
+            record: Some(StatusRecord {
+                state: RecordState::Blocked,
+                pid: 9,
+                msg: Some("Allow?".to_string()),
+            }),
+        })
+    );
+}
+
+// -- the event streams ---------------------------------------------------------
+
+use std::os::unix::fs::PermissionsExt;
+/// A temp folder with a fake `rex` script. The script counts its runs, saves its pid, prints
+/// fixed lines and, when `hold` is set, waits until a test kills it.
+struct FakeProgram {
+    dir: PathBuf,
+}
+
+impl FakeProgram {
+    fn new(name: &str, lines: &[String], hold: bool) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("harold-rex-status-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut script = format!(
+            "#!/bin/sh\necho run >> '{runs}'\necho $$ > '{pid}'\ncat <<'END_OF_EVENTS'\n",
+            runs = dir.join("runs").display(),
+            pid = dir.join("pid").display(),
+        );
+        for line in lines {
+            script.push_str(line);
+            script.push('\n');
+        }
+        script.push_str("END_OF_EVENTS\n");
+        if hold {
+            script.push_str("exec sleep 30\n");
+        }
+        let path = dir.join("rex");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    fn program(&self) -> Program {
+        let path = self.dir.join("rex");
+        Arc::new(move || Ok(path.clone()))
+    }
+
+    fn runs(&self) -> usize {
+        std::fs::read_to_string(self.dir.join("runs")).map_or(0, |text| text.lines().count())
+    }
+
+    /// The pid of the script, once it has saved it.
+    fn pid(&self) -> String {
+        let mut pid = String::new();
+        wait_until("the script saves its pid", || {
+            pid = std::fs::read_to_string(self.dir.join("pid"))
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default();
+            pid.parse::<u32>().is_ok()
+        });
+        pid
+    }
+}
+
+impl Drop for FakeProgram {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn slot_in(session: &str, block: &str) -> RexBlockSlot {
+    RexBlockSlot {
+        session_id: session.to_string(),
+        session_label: session.to_string(),
+        window: 1,
+        pane: 1,
+        block_id: block.to_string(),
+    }
+}
+
+fn changed_line(block: &str, state: &str, pid: u32, msg: &str) -> String {
+    event_line(
+        "program_status_changed",
+        &json!({"block_id": block, "record": {"state": state, "owner": {"pid": pid}, "msg": msg}}),
+    )
+}
+
+fn status_with(api: FakeRex, program: &FakeProgram, clock: Clock) -> (RexStatus, CurrentSteps) {
+    let steps = CurrentSteps::default();
+    let status = RexStatus::with_clock(Arc::new(api), program.program(), steps.clone(), clock);
+    (status, steps)
+}
+
+fn now_clock() -> Clock {
+    Arc::new(Instant::now)
+}
+
+fn fake_with_statuses(statuses: &[(&str, Value)]) -> FakeRex {
+    FakeRex {
+        statuses: statuses
+            .iter()
+            .map(|(block, value)| ((*block).to_string(), value.clone()))
+            .collect(),
+        ..FakeRex::default()
+    }
+}
+
+fn reply(state: &str, pid: u32, msg: &str) -> Value {
+    json!({"records": [{"state": state, "owner": {"pid": pid}, "msg": msg}, {"id": "c", "state": "idle"}]})
+}
+
+fn record(state: RecordState, pid: u32, msg: Option<&str>) -> StatusRecord {
+    StatusRecord {
+        state,
+        pid,
+        msg: msg.map(str::to_string),
+    }
+}
+
+#[test]
+fn a_stream_reads_the_first_record_of_each_block_then_applies_changes() {
+    let program = FakeProgram::new(
+        "first",
+        &[changed_line("block:a", "done", 5, "ignored")],
+        true,
+    );
+    let api = fake_with_statuses(&[
+        ("block:a", reply("working", 5, "first read")),
+        ("block:b", reply("blocked", 7, "Allow Bash?")),
+    ]);
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[
+        slot_in("session:1", "block:a"),
+        slot_in("session:1", "block:b"),
+    ]);
+    wait_until("the change replaces the first read", || {
+        status.lookup("block:a") == Lookup::Stream(Some(record(RecordState::Done, 5, None)))
+    });
+    assert_eq!(
+        status.lookup("block:b"),
+        Lookup::Stream(Some(record(RecordState::Blocked, 7, Some("Allow Bash?"))))
+    );
+    assert_eq!(steps.get("block:b", 7).as_deref(), Some("Allow Bash?"));
+    assert_eq!(steps.get("block:a", 5), None);
+    assert_eq!(status.lookup("block:other"), Lookup::NoStream);
+    assert_eq!(program.runs(), 1);
+}
+
+#[test]
+fn a_change_with_no_owner_pid_asks_for_the_record_again() {
+    let program = FakeProgram::new("noowner", &[LIVE_CHANGED.to_string()], true);
+    let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
+    let api = fake_with_statuses(&[(block, reply("working", 11, "full record"))]);
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[slot_in("session:1", block)]);
+    wait_until("the record arrives", || {
+        status.lookup(block)
+            == Lookup::Stream(Some(record(RecordState::Working, 11, Some("full record"))))
+    });
+    assert_eq!(steps.get(block, 11).as_deref(), Some("full record"));
+}
+
+#[test]
+fn a_removal_and_a_closed_block_drop_the_record() {
+    let program = FakeProgram::new(
+        "removal",
+        &[
+            event_line("program_status_removed", &json!({"block_id": "block:a"})),
+            event_line("block_closed", &json!({"block_id": "block:b"})),
+        ],
+        true,
+    );
+    let api = fake_with_statuses(&[
+        ("block:a", reply("working", 5, "one")),
+        ("block:b", reply("working", 6, "two")),
+        ("block:c", reply("working", 7, "three")),
+    ]);
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[
+        slot_in("session:1", "block:a"),
+        slot_in("session:1", "block:b"),
+        slot_in("session:1", "block:c"),
+    ]);
+    wait_until("both records drop", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+            && status.lookup("block:b") == Lookup::Stream(None)
+    });
+    assert_eq!(steps.get("block:a", 5), None);
+    assert_eq!(steps.get("block:b", 6), None);
+    assert_eq!(steps.get("block:c", 7).as_deref(), Some("three"));
+    assert_eq!(
+        status.lookup("block:c"),
+        Lookup::Stream(Some(record(RecordState::Working, 7, Some("three"))))
+    );
+}
+
+#[test]
+fn a_bad_line_and_an_unknown_event_are_skipped() {
+    let program = FakeProgram::new(
+        "bad",
+        &[
+            "this is not json".to_string(),
+            "{\"type\":".to_string(),
+            event_line("client_connected", &json!({"block_id": "block:a"})),
+            changed_line("block:a", "working", 5, "after the bad lines"),
+        ],
+        true,
+    );
+    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the good line applies", || {
+        status.lookup("block:a")
+            == Lookup::Stream(Some(record(
+                RecordState::Working,
+                5,
+                Some("after the bad lines"),
+            )))
+    });
+}
+
+#[test]
+fn a_stream_that_ends_drops_the_sessions_records_and_restarts_after_five_seconds() {
+    let (logs, _guard) = capture_logs();
+    let program = FakeProgram::new(
+        "ends",
+        &[changed_line("block:a", "working", 5, "step")],
+        false,
+    );
+    let base = Instant::now();
+    let offset = Arc::new(Mutex::new(Duration::ZERO));
+    let clock: Clock = {
+        let offset = Arc::clone(&offset);
+        Arc::new(move || base + *offset.lock().unwrap())
+    };
+    let (status, steps) = status_with(FakeRex::default(), &program, clock);
+    let slots = [slot_in("session:1", "block:a")];
+    status.sync(&slots);
+    wait_until("the stream ends", || {
+        logs.with("agent status stream")
+            .iter()
+            .any(|line| line.contains("event=\"ended\""))
+    });
+    wait_until("the records drop", || {
+        status.lookup("block:a") == Lookup::NoStream
+    });
+    assert_eq!(steps.get("block:a", 5), None);
+    let ended = logs
+        .with("agent status stream")
+        .into_iter()
+        .find(|line| line.contains("event=\"ended\""))
+        .unwrap();
+    assert!(ended.contains("session.id=\"session:1\""), "{ended}");
+    assert!(ended.contains("reason=\"exit\""), "{ended}");
+    assert!(ended.contains("records=1"), "{ended}");
+    assert!(!ended.contains("step"), "{ended}");
+    // Less than the gap later: no new child.
+    *offset.lock().unwrap() = RESTART_GAP - Duration::from_millis(1);
+    status.sync(&slots);
+    assert_eq!(program.runs(), 1);
+    // The gap has passed: a new child.
+    *offset.lock().unwrap() = RESTART_GAP;
+    status.sync(&slots);
+    wait_until("the second run", || program.runs() == 2);
+    let started = logs
+        .with("agent status stream")
+        .iter()
+        .filter(|line| line.contains("event=\"started\""))
+        .count();
+    assert_eq!(started, 2);
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn a_session_that_leaves_the_listing_has_its_child_killed() {
+    let program = FakeProgram::new("leaves", &[], true);
+    let api = fake_with_statuses(&[("block:a", reply("working", 5, "go"))]);
+    let (status, steps) = status_with(api, &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the stream is ready", || {
+        status.lookup("block:a") != Lookup::NoStream
+    });
+    let pid = program.pid();
+    assert!(process_exists(&pid));
+    status.sync(&[]);
+    // `sync` waits for the reader thread, which reaps the child: no zombie remains.
+    assert!(!process_exists(&pid));
+    assert_eq!(status.lookup("block:a"), Lookup::NoStream);
+    assert_eq!(steps.get("block:a", 5), None);
+}
+
+#[test]
+fn stop_all_kills_and_reaps_every_child() {
+    let program = FakeProgram::new("stopall", &[], true);
+    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the child runs", || program.runs() == 1);
+    wait_until("the stream is ready", || {
+        status.lookup("block:a") != Lookup::NoStream
+    });
+    let pid = program.pid();
+    status.stop_all();
+    assert!(!process_exists(&pid));
+    assert_eq!(status.lookup("block:a"), Lookup::NoStream);
+}
+
+#[test]
+fn an_absent_program_logs_rex_absent_and_leaves_no_stream() {
+    let (logs, _guard) = capture_logs();
+    let steps = CurrentSteps::default();
+    let program: Program = Arc::new(|| Err(RexError::Absent));
+    let status = RexStatus::new(Arc::new(FakeRex::default()), program, steps);
+    status.sync(&[slot_in("session:1", "block:a")]);
+    assert_eq!(status.lookup("block:a"), Lookup::NoStream);
+    let lines = logs.with("agent status stream");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    for field in [
+        "session.id=\"session:1\"",
+        "event=\"ended\"",
+        "reason=\"rex_absent\"",
+        "records=0",
+    ] {
+        assert!(lines[0].contains(field), "{field} in {}", lines[0]);
+    }
+}
+
+// -- log capture -----------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Logs {
+    fn with(&self, message: &str) -> Vec<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|line| line.contains(message))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
 }
