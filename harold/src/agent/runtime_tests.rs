@@ -4360,7 +4360,7 @@ async fn a_second_idle_report_restarts_the_working_run() {
 // When a pane turned working, for the turn's start
 // ---------------------------------------------------------------------------
 
-/// A valid pane id (`%` and digits) no other test uses, so this test's busy time is its
+/// A valid pane id (`%` and digits) no other test uses, so this test's working time is its
 /// own in the process-wide map.
 fn unique_numeric_pane() -> String {
     format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18))

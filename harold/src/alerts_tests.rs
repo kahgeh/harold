@@ -649,7 +649,7 @@ async fn a_failed_enter_is_logged_and_never_typed_again() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_next_alert_waits_until_the_pane_has_been_seen_busy() {
+async fn the_next_alert_waits_until_the_pane_has_been_seen_working() {
     let fake = idle_chief();
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 

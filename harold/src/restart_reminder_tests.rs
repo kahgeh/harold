@@ -383,7 +383,7 @@ async fn a_pane_that_reads_idle_a_moment_after_the_turn_end_is_typed_into() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_busy_pane_logs_once_and_types_at_the_next_idle_turn_end() {
+async fn a_working_pane_logs_once_and_types_at_the_next_idle_turn_end() {
     let (logs, _guard) = capture_logs();
     let scratch = Scratch::new();
     scratch.append(&[user_line(hours_ago(30))]);

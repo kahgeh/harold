@@ -441,8 +441,9 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
     let inner_width = detail.width.saturating_sub(2);
     // When the panel does not fit with the current step, it leaves the step lines out and
-    // keeps the rest. The row still shows the step. The panel hides only when it does not fit
-    // either way, so a step that comes and goes does not make the panel come and go.
+    // keeps the rest. The row does not show the step, so the step shows nowhere meanwhile. The
+    // panel hides only when it does not fit either way, so a step that comes and goes does
+    // not make the panel come and go.
     let detail_lines = app.selected_row().map(|agent| {
         let with_step = detail_lines(agent, now_ms, inner_width, true);
         if detail_fits(detail, Some(&with_step)) {

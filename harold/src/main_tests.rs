@@ -647,7 +647,7 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
         .unwrap()
         .into_inner();
     let projected = stream.next().await.expect("projected snapshot").unwrap();
-    assert_watched_busy_incarnation(&projected, &expected_pane, "Implement projector");
+    assert_watched_working_incarnation(&projected, &expected_pane, "Implement projector");
 
     task.abort();
     task.await.expect_err("monitor task should be cancelled");
@@ -677,11 +677,11 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
         .await
         .expect("restart snapshot")
         .unwrap();
-    assert_watched_busy_incarnation(&restarted, &expected_pane, "Implement projector");
+    assert_watched_working_incarnation(&restarted, &expected_pane, "Implement projector");
     restarted_task.abort();
 }
 
-fn assert_watched_busy_incarnation(
+fn assert_watched_working_incarnation(
     snapshot: &super::harold::AgentStateSnapshot,
     expected: &AgentPaneObservation,
     summary: &str,

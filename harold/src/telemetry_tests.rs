@@ -3535,10 +3535,12 @@ fn the_counter_name_and_attributes_hold_no_multiplexer_name_except_the_multiplex
 }
 
 #[test]
-fn with_export_off_no_multiplexer_or_phone_instrument_records_anything() {
+fn instruments_built_from_a_meter_that_exports_nothing_keep_nothing() {
     use opentelemetry::metrics::MeterProvider as _;
-    // Export off leaves the global meter with no reader, as a provider with no reader is. The
-    // instruments made from it take every record and keep none.
+    // This tests `build_instruments`: the instruments take every record from the meter they
+    // get and keep none when that meter exports nothing, as a provider with no reader does.
+    // That `init` installs no provider with export off, and that `main` registers the
+    // multiplexer counters only when exporting, are not tested here.
     let off = build_instruments(
         &opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .build()
