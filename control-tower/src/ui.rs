@@ -313,7 +313,7 @@ where
 }
 
 fn summary_spans<Tz>(
-    (busy, idle, unknown): (usize, usize, usize),
+    (working, idle, unknown): (usize, usize, usize),
     server_time_ms: i64,
     tz: &Tz,
 ) -> Vec<Span<'static>>
@@ -323,7 +323,7 @@ where
 {
     let mut spans = vec![
         Span::styled(
-            format!(" BUSY {busy:02} "),
+            format!(" WORKING {working:02} "),
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -1823,7 +1823,7 @@ fn fit(text: &str, width: usize) -> Cow<'_, str> {
 
 fn state_glyph(state: AgentState) -> &'static str {
     match state {
-        AgentState::Busy => "●",
+        AgentState::Working => "●",
         AgentState::Idle => "●",
         AgentState::Unknown => "○",
     }
@@ -1831,7 +1831,7 @@ fn state_glyph(state: AgentState) -> &'static str {
 
 fn state_style(state: AgentState) -> Style {
     let color = match state {
-        AgentState::Busy => AMBER,
+        AgentState::Working => AMBER,
         AgentState::Idle => GREEN,
         AgentState::Unknown => MUTED,
     };
@@ -1908,7 +1908,7 @@ mod tests {
                 rows: vec![
                     row(
                         selected.clone(),
-                        AgentState::Busy,
+                        AgentState::Working,
                         "Codex",
                         "control-tower:0.1",
                         "Build event snapshot dashboard",
@@ -1957,7 +1957,7 @@ mod tests {
         for expected in [
             "LIVE",
             "MONITOR DEGRADED",
-            "BUSY",
+            "WORKING",
             "IDLE",
             "UNKNOWN",
             "WORK SUMMARY",
@@ -1979,7 +1979,7 @@ mod tests {
     fn table_and_selected_detail_keep_state_words_with_semantic_glyph_colors() {
         for (state, expected, color) in [
             (AgentState::Idle, "● IDLE", Color::Rgb(125, 200, 139)),
-            (AgentState::Busy, "● BUSY", Color::Rgb(224, 174, 85)),
+            (AgentState::Working, "● WORKING", Color::Rgb(224, 174, 85)),
             (AgentState::Unknown, "○ UNKNOWN", Color::Rgb(143, 138, 127)),
         ] {
             let selected = incarnation("%17", 91700, 91844, "codex");
@@ -2098,7 +2098,7 @@ mod tests {
         let app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "agents:2.7",
                 "Build responsive dashboard",
@@ -2129,7 +2129,7 @@ mod tests {
         let app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "agents:2.7",
                 "Responsive summary remains visible at compact widths",
@@ -2144,8 +2144,8 @@ mod tests {
             "STATE",
             "WHERE",
             "WORK SUMMARY",
-            "BUSY",
-            "BUSY 01",
+            "WORKING",
+            "WORKING 01",
             "IDLE 00",
             "Codex",
             "cx",
@@ -2198,7 +2198,7 @@ mod tests {
     fn summary_hides_unknown_at_zero() {
         assert_eq!(
             strip_text((3, 5, 0), SAMPLE_MS),
-            " BUSY 03     IDLE 05     SERVER TIME 21:47:03"
+            " WORKING 03     IDLE 05     SERVER TIME 21:47:03"
         );
     }
 
@@ -2206,7 +2206,7 @@ mod tests {
     fn summary_shows_unpadded_unknown() {
         assert_eq!(
             strip_text((3, 4, 2), SAMPLE_MS),
-            " BUSY 03     IDLE 04     UNKNOWN 2     SERVER TIME 21:47:03"
+            " WORKING 03     IDLE 04     UNKNOWN 2     SERVER TIME 21:47:03"
         );
     }
 
@@ -2294,7 +2294,7 @@ mod tests {
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
                 rows: vec![row(
                     selected.clone(),
-                    AgentState::Busy,
+                    AgentState::Working,
                     "Codex",
                     "agents:2.7",
                     "Retained work remains readable",
@@ -2319,7 +2319,7 @@ mod tests {
         let mut app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "agents:2.7",
                 "Retained work",
@@ -2403,7 +2403,7 @@ mod tests {
                 monitor_health: vec![health(MonitorHealthState::Degraded, "capture_failed")],
                 rows: vec![row(
                     selected.clone(),
-                    AgentState::Busy,
+                    AgentState::Working,
                     "Codex",
                     "agents:2.7",
                     "Last committed work",
@@ -2438,7 +2438,7 @@ mod tests {
     fn live_search_with_no_matches_has_distinct_copy() {
         let row = row(
             incarnation("%17", 91700, 91844, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "agents:2.7",
             "Build dashboard",
@@ -2464,7 +2464,7 @@ mod tests {
     fn compact_search_keeps_visible_total_count_when_query_is_long() {
         let row = row(
             incarnation("%17", 91700, 91844, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "agents:2.7",
             "Build dashboard",
@@ -2512,7 +2512,7 @@ mod tests {
             vec![
                 row(
                     first.clone(),
-                    AgentState::Busy,
+                    AgentState::Working,
                     "Codex",
                     "agents:2.7",
                     "First task",
@@ -2531,12 +2531,12 @@ mod tests {
         );
 
         let before = rendered(&app, 104, 28, 100_000);
-        assert!(before.contains("▶ ● BUSY"));
+        assert!(before.contains("▶ ● WORKING"));
         assert!(!before.contains("▶ ● IDLE"));
 
         app.handle_key(KeyCode::Char('j'));
         let after = rendered(&app, 104, 28, 100_000);
-        assert!(!after.contains("▶ ● BUSY"));
+        assert!(!after.contains("▶ ● WORKING"));
         assert!(after.contains("▶ ● IDLE"));
     }
 
@@ -2575,7 +2575,7 @@ mod tests {
         let app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "agents:2.7",
                 "Build responsive dashboard",
@@ -2804,7 +2804,7 @@ mod tests {
         let summary = "界".repeat(43);
         let mut agent = row(
             selected.clone(),
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "control-tower:2.17",
             &summary,
@@ -2819,7 +2819,7 @@ mod tests {
         assert!(!content.contains("SELECTED SIGNAL"));
         assert!(!content.contains("CURRENT WORK"));
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
-        assert!(content.contains("▶ ● BUSY"));
+        assert!(content.contains("▶ ● WORKING"));
         assert!(content.contains("cx"));
         assert!(!content.contains("control-tower:2.17"));
         // The work column takes whatever width the fixed columns leave, and
@@ -2832,7 +2832,7 @@ mod tests {
         let name = "voice-mute-palette-extended";
         let mut first = row(
             incarnation("%1", 1, 2, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "work:0.3",
             "a",
@@ -2922,7 +2922,7 @@ mod tests {
         let selected = incarnation("%17", 91700, 91844, "codex");
         let agent = row(
             selected,
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "control-tower:2.17",
             "Keep detail text borrowed across measurement and rendering",
@@ -3027,7 +3027,7 @@ mod tests {
                 .to_owned();
         let mut agent = row(
             selected.clone(),
-            AgentState::Busy,
+            AgentState::Working,
             "Codex",
             "control-tower:2.17",
             &summary,
@@ -3132,7 +3132,7 @@ mod tests {
                 vec![
                     located(
                         "%1",
-                        AgentState::Busy,
+                        AgentState::Working,
                         "Claude",
                         "harold  main",
                         "/p/harold/main",
@@ -3392,14 +3392,14 @@ mod tests {
     }
 
     fn waiting_app() -> App {
-        use AgentState::{Busy, Idle};
+        use AgentState::{Idle, Working};
         let mut app = live_app(Vec::new(), None);
         app.observe_focus(crate::app::FocusReading::Active("%99".into()));
-        app.apply_later_snapshot(layout_with_states([Busy, Busy, Busy], 43))
+        app.apply_later_snapshot(layout_with_states([Working, Working, Working], 43))
             .unwrap();
-        app.apply_later_snapshot(layout_with_states([Busy, Busy, Idle], 44))
+        app.apply_later_snapshot(layout_with_states([Working, Working, Idle], 44))
             .unwrap();
-        app.apply_later_snapshot(layout_with_states([Busy, Idle, Idle], 45))
+        app.apply_later_snapshot(layout_with_states([Working, Idle, Idle], 45))
             .unwrap();
         app
     }
@@ -3414,11 +3414,11 @@ mod tests {
                 .map(str::to_owned)
         };
         assert!(line_with("sre").unwrap().contains('◆'));
-        let busy = content
+        let working = content
             .lines()
-            .find(|line| line.contains("BUSY") && line.contains("main"))
+            .find(|line| line.contains("WORKING") && line.contains("main"))
             .unwrap();
-        assert!(!busy.contains('◆'));
+        assert!(!working.contains('◆'));
     }
 
     #[test]
@@ -3558,7 +3558,7 @@ mod tests {
         let lines = text_lines(&moved, 140, 38, 100_000);
         let main = lines
             .iter()
-            .find(|line| line.contains("main") && line.contains("BUSY"))
+            .find(|line| line.contains("main") && line.contains("WORKING"))
             .unwrap();
         assert!(main.contains("[c] 📞 call"));
         assert!(!chief_line(&lines).contains("[c]"));
@@ -3798,7 +3798,7 @@ mod tests {
                 .unwrap();
             let main = before_lines
                 .iter()
-                .find(|line| line.contains("main") && line.contains("BUSY"))
+                .find(|line| line.contains("main") && line.contains("WORKING"))
                 .unwrap();
             assert!(
                 main.contains("cc") && main.contains("fixing handler"),
@@ -4056,7 +4056,7 @@ mod tests {
         let mut app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "control-tower:0.1",
                 "Build the question block",
@@ -4103,7 +4103,7 @@ mod tests {
         let mut app = live_app(
             vec![row(
                 selected.clone(),
-                AgentState::Busy,
+                AgentState::Working,
                 "Codex",
                 "control-tower:0.1",
                 "Build the question block",

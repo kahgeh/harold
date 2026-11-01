@@ -322,7 +322,7 @@ impl Harold for HaroldService {
     ) -> Result<Response<ReportAgentStateResponse>, Status> {
         let req = request.into_inner();
         let state = match AgentState::try_from(req.state) {
-            Ok(AgentState::Busy) => agent::domain::ObservedAgentState::Working,
+            Ok(AgentState::Working) => agent::domain::ObservedAgentState::Working,
             Ok(AgentState::Idle) => agent::domain::ObservedAgentState::Idle,
             Ok(AgentState::Unspecified | AgentState::Unknown) | Err(_) => {
                 return Err(Status::invalid_argument("invalid agent state report"));
@@ -619,7 +619,7 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
                     provider_display_name: pane.provider_display_name,
                     working_directory: pane.working_directory,
                     state: match projection.effective_state {
-                        agent::domain::EffectiveAgentState::Working => AgentState::Busy.into(),
+                        agent::domain::EffectiveAgentState::Working => AgentState::Working.into(),
                         agent::domain::EffectiveAgentState::Idle => AgentState::Idle.into(),
                         agent::domain::EffectiveAgentState::Unknown => AgentState::Unknown.into(),
                     },

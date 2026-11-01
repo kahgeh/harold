@@ -3892,7 +3892,7 @@ mod tests {
                 pane_index: 7,
                 working_directory: "/work".into(),
                 work_summary: Some("runtime work".into()),
-                state: AgentState::Busy,
+                state: AgentState::Working,
                 last_transition_at_ms: 73,
             }],
         }

@@ -399,14 +399,14 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
         test_service_with_inventory(Arc::clone(&store), empty_snapshot(), inventory);
     let oversized = "🦀".repeat(161);
     let cases = [
-        (AgentState::Busy, None, WorkSummaryUpdate::Unchanged),
+        (AgentState::Working, None, WorkSummaryUpdate::Unchanged),
         (
             AgentState::Idle,
             Some(" \u{1b}[31m \t"),
             WorkSummaryUpdate::Clear,
         ),
         (
-            AgentState::Busy,
+            AgentState::Working,
             Some("  refresh\n\u{2003}events  "),
             WorkSummaryUpdate::Set("refresh events".into()),
         ),
@@ -453,7 +453,7 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
         assert_eq!(
             lifecycle.state,
             match state {
-                AgentState::Busy => Some(ObservedAgentState::Working),
+                AgentState::Working => Some(ObservedAgentState::Working),
                 AgentState::Idle => Some(ObservedAgentState::Idle),
                 _ => unreachable!("test table contains only actionable states"),
             }
@@ -475,8 +475,8 @@ async fn report_agent_state_rejects_malformed_inputs_without_durable_events() {
         ("%8", i32::from(AgentState::Unspecified), "codex-hook"),
         ("%8", i32::from(AgentState::Unknown), "codex-hook"),
         ("%8", 99, "codex-hook"),
-        ("8", i32::from(AgentState::Busy), "codex-hook"),
-        ("%8", i32::from(AgentState::Busy), "Codex hook"),
+        ("8", i32::from(AgentState::Working), "codex-hook"),
+        ("%8", i32::from(AgentState::Working), "Codex hook"),
     ];
 
     for (pane_id, state, adapter_id) in cases {
@@ -510,7 +510,7 @@ async fn report_agent_state_maps_unresolved_append_and_runtime_failures_to_bound
         test_service(Arc::clone(&store), empty_snapshot());
     let request = || ReportAgentStateRequest {
         pane_id: "%8".into(),
-        state: AgentState::Busy.into(),
+        state: AgentState::Working.into(),
         adapter_id: "codex-hook".into(),
         work_summary: Some("sensitive request content".into()),
     };
@@ -605,7 +605,7 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
     let response = service
         .report_agent_state(Request::new(ReportAgentStateRequest {
             pane_id: expected_pane.incarnation.pane_id.clone(),
-            state: AgentState::Busy.into(),
+            state: AgentState::Working.into(),
             adapter_id: "codex-hook".into(),
             work_summary: Some("Implement projector".into()),
         }))
@@ -689,7 +689,7 @@ fn assert_watched_busy_incarnation(
         expected.incarnation.agent_started_at_ms
     );
     assert_eq!(pane.provider_id, expected.incarnation.provider_id);
-    assert_eq!(pane.state, i32::from(AgentState::Busy));
+    assert_eq!(pane.state, i32::from(AgentState::Working));
     assert_eq!(pane.work_summary.as_deref(), Some(summary));
 }
 
@@ -748,7 +748,7 @@ async fn watch_sends_complete_current_snapshot_then_coalesced_newer_truth() {
     assert_eq!(pane.provider_id, "codex");
     assert_eq!(pane.provider_display_name, "Codex");
     assert_eq!(pane.working_directory, "/work/harold");
-    assert_eq!(pane.state, i32::from(AgentState::Busy));
+    assert_eq!(pane.state, i32::from(AgentState::Working));
     assert_eq!(pane.last_transition_at_ms, 8_700);
     assert_eq!(pane.work_summary.as_deref(), Some("index events"));
 

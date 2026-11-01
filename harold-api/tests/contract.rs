@@ -94,7 +94,7 @@ fn report_agent_state_preserves_optional_summary_presence() {
     for work_summary in [None, Some(String::new()), Some("index events".to_string())] {
         let request = ReportAgentStateRequest {
             pane_id: "%7".to_string(),
-            state: AgentState::Busy.into(),
+            state: AgentState::Working.into(),
             adapter_id: "codex-hook".to_string(),
             work_summary: work_summary.clone(),
         };

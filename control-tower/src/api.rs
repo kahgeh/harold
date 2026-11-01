@@ -690,7 +690,7 @@ fn map_monitor_health(health: AgentMonitorHealth) -> MonitorHealth {
 
 fn map_agent_state(state: i32) -> AgentState {
     match ProtoAgentState::try_from(state) {
-        Ok(ProtoAgentState::Busy) => AgentState::Busy,
+        Ok(ProtoAgentState::Working) => AgentState::Working,
         Ok(ProtoAgentState::Idle) => AgentState::Idle,
         Ok(ProtoAgentState::Unspecified | ProtoAgentState::Unknown) | Err(_) => AgentState::Unknown,
     }
@@ -770,9 +770,15 @@ mod tests {
     }
 
     #[test]
+    fn proto_number_1_reads_as_working() {
+        assert_eq!(super::map_agent_state(1), AgentState::Working);
+        assert_eq!(AgentState::Working.label(), "WORKING");
+    }
+
+    #[test]
     fn maps_snapshot_metadata_every_pane_field_and_every_known_agent_state() {
         let panes = [
-            (ProtoAgentState::Busy, AgentState::Busy),
+            (ProtoAgentState::Working, AgentState::Working),
             (ProtoAgentState::Idle, AgentState::Idle),
             (ProtoAgentState::Unknown, AgentState::Unknown),
             (ProtoAgentState::Unspecified, AgentState::Unknown),
@@ -812,7 +818,7 @@ mod tests {
         assert_eq!(mapped.server_time_ms, 9_876);
         assert_eq!(mapped.rows.len(), 4);
         for (index, (_, expected_state)) in [
-            (ProtoAgentState::Busy, AgentState::Busy),
+            (ProtoAgentState::Working, AgentState::Working),
             (ProtoAgentState::Idle, AgentState::Idle),
             (ProtoAgentState::Unknown, AgentState::Unknown),
             (ProtoAgentState::Unspecified, AgentState::Unknown),
@@ -1362,7 +1368,7 @@ mod tests {
             provider_id: "codex".into(),
             provider_display_name: "Codex".into(),
             working_directory: "/work/project".into(),
-            state: ProtoAgentState::Busy.into(),
+            state: ProtoAgentState::Working.into(),
             last_transition_at_ms: 400,
             work_summary: Some("implement API".into()),
         }

@@ -1533,7 +1533,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     let error = service
         .report_agent_state(Request::new(ReportAgentStateRequest {
             pane_id: "not-a-pane".into(),
-            state: AgentState::Busy.into(),
+            state: AgentState::Working.into(),
             adapter_id: "codex-hook".into(),
             work_summary: Some(sentinel.clone()),
         }))
@@ -1670,7 +1670,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
     service
         .report_agent_state(Request::new(ReportAgentStateRequest {
             pane_id: "%8".into(),
-            state: AgentState::Busy.into(),
+            state: AgentState::Working.into(),
             adapter_id: "codex-hook".into(),
             work_summary: Some("  Fix\n projector  ".into()),
         }))

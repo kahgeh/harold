@@ -170,7 +170,7 @@ Closed todos take one row, counting questions and instructions together. With an
 ▶ ○ IDLE   chief-of-pods          ◆  Put I1 and Q1 for you
     ▸ 2 todos waiting
   harold
-  ● BUSY   harold-main               Building dash-one-version
+  ● WORKING harold-main             Building dash-one-version
 ```
 
 Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second control-tower shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
@@ -270,11 +270,11 @@ While keys are ignored or held, the quit keys still quit and Ctrl+L still retrie
 
 Each row has Harold's latest classified agent state:
 
-- `BUSY` means Harold currently classifies the agent as working.
+- `WORKING` means Harold currently classifies the agent as working.
 - `IDLE` means Harold currently classifies the agent as idle.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
-The summary strip under the masthead shows the `BUSY` and `IDLE` counts, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
+The summary strip under the masthead shows the `WORKING` and `IDLE` counts, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
 
 Transport and agent monitor health describe different system-level conditions:
 
@@ -309,9 +309,9 @@ Rows of waiting agents are marked with `◆`. `n` and `N` move the cursor to the
 next or previous waiting agent, oldest first, and wrap around. If a search filter
 hides that agent, the filter is cleared.
 
-- An agent starts waiting when it goes from Busy to Idle while its pane is not the
+- An agent starts waiting when it goes from Working to Idle while its pane is not the
   pane you are looking at.
-- It stops when you visit its pane, when it goes Busy again, when it exits, or
+- It stops when you visit its pane, when it goes Working again, when it exits, or
   when you press `Enter` on it. With focus tracking on, `Enter` does not clear
   it directly: it stops once the jump makes its pane active, on the next poll.
   With tracking off, `Enter` clears it.
@@ -336,7 +336,7 @@ seen. Focus is sampled once a second, so leaving a pane less than about a second
 before its agent finishes can keep that agent from waiting. The top border of the
 agent list shows `(focus tracking off)` when the query fails, when no client is
 eligible, and for the first second after start; while it is off, an agent stops
-waiting only on `Enter` or when it goes Busy.
+waiting only on `Enter` or when it goes Working.
 
 An absent or empty work summary is displayed exactly as:
 
@@ -391,7 +391,7 @@ standard error.
 
 This repository includes deterministic renderer, runtime, terminal-lifecycle,
 API-mapping, and tmux-command tests. Live isolated Harold testing has verified
-real Codex and OpenCode inventory, busy-to-idle lifecycle reporting, concurrent
+real Codex and OpenCode inventory, working-to-idle lifecycle reporting, concurrent
 work summaries, summary isolation, and removal of persisted Codex input
 placeholders by the final reviewed Harold implementation across an exact-fixture,
 same-store restart/replay. Live Claude Code lifecycle coverage is not yet

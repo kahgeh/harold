@@ -35,7 +35,7 @@ pub struct AgentIncarnation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
-    Busy,
+    Working,
     Idle,
     Unknown,
 }
@@ -43,7 +43,7 @@ pub enum AgentState {
 impl AgentState {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Busy => "BUSY",
+            Self::Working => "WORKING",
             Self::Idle => "IDLE",
             Self::Unknown => "UNKNOWN",
         }
@@ -460,7 +460,7 @@ impl App {
             .iter()
             .filter(|waiting| {
                 rows.iter()
-                    .any(|row| &row.incarnation == *waiting && row.state != AgentState::Busy)
+                    .any(|row| &row.incarnation == *waiting && row.state != AgentState::Working)
             })
             .cloned()
             .collect();
@@ -468,11 +468,11 @@ impl App {
             if row.state != AgentState::Idle || waiting.contains(&row.incarnation) {
                 continue;
             }
-            let was_busy = self.snapshot.rows.iter().any(|prior| {
-                prior.incarnation == row.incarnation && prior.state == AgentState::Busy
+            let was_working = self.snapshot.rows.iter().any(|prior| {
+                prior.incarnation == row.incarnation && prior.state == AgentState::Working
             });
             let in_view = self.active_pane.as_deref() == Some(row.incarnation.pane_id.as_str());
-            if was_busy && !in_view {
+            if was_working && !in_view {
                 waiting.push(row.incarnation.clone());
             }
         }
@@ -913,10 +913,10 @@ impl App {
         self.snapshot
             .rows
             .iter()
-            .fold((0, 0, 0), |(busy, idle, unknown), row| match row.state {
-                AgentState::Busy => (busy + 1, idle, unknown),
-                AgentState::Idle => (busy, idle + 1, unknown),
-                AgentState::Unknown => (busy, idle, unknown + 1),
+            .fold((0, 0, 0), |(working, idle, unknown), row| match row.state {
+                AgentState::Working => (working + 1, idle, unknown),
+                AgentState::Idle => (working, idle + 1, unknown),
+                AgentState::Unknown => (working, idle, unknown + 1),
             })
     }
 
@@ -1385,7 +1385,7 @@ mod tests {
 
     use super::*;
     use crate::questions::{AnswerKind, Mode};
-    use AgentState::{Busy, Idle, Unknown};
+    use AgentState::{Idle, Unknown, Working};
 
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
@@ -1430,7 +1430,7 @@ mod tests {
             snapshot(
                 90,
                 900,
-                vec![row(selected.clone(), AgentState::Busy, "z", 9, 9)],
+                vec![row(selected.clone(), AgentState::Working, "z", 9, 9)],
             ),
             empty_search(),
             Some(selected),
@@ -1469,7 +1469,7 @@ mod tests {
             700,
             vec![row(
                 incarnation("%7", 7, 70, 700, "codex"),
-                AgentState::Busy,
+                AgentState::Working,
                 "s",
                 0,
                 0,
@@ -1505,7 +1505,7 @@ mod tests {
                 health(MonitorHealthState::Degraded, "capture_failed"),
                 health(MonitorHealthState::Unknown, "not_observed"),
             ],
-            rows: vec![row(pane.clone(), AgentState::Busy, "s", 0, 0)],
+            rows: vec![row(pane.clone(), AgentState::Working, "s", 0, 0)],
         })
         .unwrap();
 
@@ -1547,23 +1547,23 @@ mod tests {
 
     #[test]
     fn snapshot_rows_are_sorted_and_duplicate_identity_is_rejected() {
-        let busy_b = row(
+        let working_b = row(
             incarnation("%4", 4, 40, 400, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "b",
             0,
             0,
         );
-        let busy_a_2 = row(
+        let working_a_2 = row(
             incarnation("%3", 3, 30, 300, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "a",
             1,
             2,
         );
-        let busy_a_1 = row(
+        let working_a_1 = row(
             incarnation("%2", 2, 20, 200, "codex"),
-            AgentState::Busy,
+            AgentState::Working,
             "a",
             1,
             1,
@@ -1587,7 +1587,7 @@ mod tests {
         app.apply_first_snapshot(snapshot(
             1,
             1,
-            vec![unknown, idle, busy_b, busy_a_2, busy_a_1],
+            vec![unknown, idle, working_b, working_a_2, working_a_1],
         ))
         .unwrap();
         assert_eq!(
@@ -1651,7 +1651,7 @@ mod tests {
             vec![
                 row(
                     incarnation("%1", 1, 10, 100, "codex"),
-                    AgentState::Busy,
+                    AgentState::Working,
                     "s",
                     0,
                     0,
@@ -1754,7 +1754,7 @@ mod tests {
             snapshot(
                 1,
                 1,
-                vec![row(selected.clone(), AgentState::Busy, "s", 0, 0)],
+                vec![row(selected.clone(), AgentState::Working, "s", 0, 0)],
             ),
             empty_search(),
             Some(selected),
@@ -1785,7 +1785,7 @@ mod tests {
             pane_index: 7,
             working_directory: "/Users/example/Project-Zeta".into(),
             work_summary: Some("Map Harold snapshots".into()),
-            state: AgentState::Busy,
+            state: AgentState::Working,
             last_transition_at_ms: 1,
         };
         let other = row(
@@ -1827,7 +1827,7 @@ mod tests {
             snapshot(
                 1,
                 1,
-                vec![row(hidden.clone(), AgentState::Busy, "one", 0, 0)],
+                vec![row(hidden.clone(), AgentState::Working, "one", 0, 0)],
             ),
             SearchState {
                 query: "needle".into(),
@@ -1852,7 +1852,7 @@ mod tests {
     fn search_authoritative_snapshot_reselects_when_stable_incarnation_is_hidden() {
         let selected = incarnation("%1", 1, 10, 100, "codex");
         let visible = incarnation("%2", 2, 20, 200, "claude");
-        let mut old_selected = row(selected.clone(), AgentState::Busy, "one", 0, 0);
+        let mut old_selected = row(selected.clone(), AgentState::Working, "one", 0, 0);
         old_selected.work_summary = Some("needle before reconnect".into());
         let mut app = App::new(
             ConnectionState::Stale,
@@ -1887,7 +1887,7 @@ mod tests {
             },
             None,
         );
-        let mut first = row(first_match.clone(), AgentState::Busy, "one", 0, 0);
+        let mut first = row(first_match.clone(), AgentState::Working, "one", 0, 0);
         first.work_summary = Some("first needle".into());
         let mut later = row(later_match, AgentState::Idle, "two", 0, 0);
         later.work_summary = Some("later NEEDLE".into());
@@ -1908,7 +1908,7 @@ mod tests {
             snapshot(
                 8,
                 8,
-                vec![row(departed.clone(), AgentState::Busy, "old", 0, 0)],
+                vec![row(departed.clone(), AgentState::Working, "old", 0, 0)],
             ),
             SearchState {
                 query: "needle".into(),
@@ -1931,7 +1931,7 @@ mod tests {
         let departed = incarnation("%2", 2, 20, 200, "codex");
         let first_match = incarnation("%1", 1, 10, 100, "claude");
         let replacement = incarnation("%2", 2, 21, 201, "codex");
-        let mut old = row(departed.clone(), AgentState::Busy, "old", 0, 0);
+        let mut old = row(departed.clone(), AgentState::Working, "old", 0, 0);
         old.work_summary = Some("needle before restart".into());
         let mut app = App::new(
             ConnectionState::Stale,
@@ -1942,7 +1942,7 @@ mod tests {
             },
             Some(departed.clone()),
         );
-        let mut first = row(first_match.clone(), AgentState::Busy, "new", 0, 0);
+        let mut first = row(first_match.clone(), AgentState::Working, "new", 0, 0);
         first.work_summary = Some("first needle".into());
         let mut restarted = row(replacement.clone(), AgentState::Idle, "old", 0, 0);
         restarted.work_summary = Some("restarted needle".into());
@@ -1961,7 +1961,7 @@ mod tests {
         let one = incarnation("%1", 1, 10, 100, "codex");
         let two = incarnation("%2", 2, 20, 200, "codex");
         let three = incarnation("%3", 3, 30, 300, "codex");
-        let mut first = row(one, AgentState::Busy, "s", 0, 0);
+        let mut first = row(one, AgentState::Working, "s", 0, 0);
         first.work_summary = Some("match one".into());
         let hidden = row(two, AgentState::Idle, "s", 0, 1);
         let mut last = row(three.clone(), AgentState::Unknown, "s", 0, 2);
@@ -2002,7 +2002,7 @@ mod tests {
                 1,
                 1,
                 vec![
-                    row(first.clone(), AgentState::Busy, "s", 0, 0),
+                    row(first.clone(), AgentState::Working, "s", 0, 0),
                     row(selected.clone(), AgentState::Idle, "s", 0, 1),
                 ],
             ),
@@ -2440,7 +2440,7 @@ mod tests {
             1,
             0,
             vec![
-                placed("%4", AgentState::Busy, "home", "/Users/k/Dev/xn", 2),
+                placed("%4", AgentState::Working, "home", "/Users/k/Dev/xn", 2),
                 placed(
                     "%2",
                     AgentState::Idle,
@@ -2449,7 +2449,13 @@ mod tests {
                     3,
                 ),
                 placed("%3", AgentState::Unknown, "home", "/Users/k/code/sre", 1),
-                placed("%1", AgentState::Busy, "harold  main", "/p/harold/main", 3),
+                placed(
+                    "%1",
+                    AgentState::Working,
+                    "harold  main",
+                    "/p/harold/main",
+                    3,
+                ),
             ],
         ))
         .unwrap();
@@ -2470,12 +2476,12 @@ mod tests {
                 placed("%4", AgentState::Idle, "home", "/Users/k/Dev/xn", 2),
                 placed(
                     "%2",
-                    AgentState::Busy,
+                    AgentState::Working,
                     "harold  voice",
                     "/p/harold/voice",
                     3,
                 ),
-                placed("%3", AgentState::Busy, "home", "/Users/k/code/sre", 1),
+                placed("%3", AgentState::Working, "home", "/Users/k/code/sre", 1),
                 placed(
                     "%1",
                     AgentState::Unknown,
@@ -2603,13 +2609,13 @@ mod tests {
     }
 
     #[test]
-    fn busy_to_idle_joins_in_order_and_first_seen_idle_does_not() {
+    fn working_to_idle_joins_in_order_and_first_seen_idle_does_not() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Idle], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Idle], 1))
             .unwrap();
         assert!(waiting_panes(&app).is_empty());
 
-        app.apply_later_snapshot(fleet([Busy, Idle, Idle], 2))
+        app.apply_later_snapshot(fleet([Working, Idle, Idle], 2))
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%2"]);
         app.apply_later_snapshot(fleet([Idle, Idle, Idle], 3))
@@ -2619,15 +2625,15 @@ mod tests {
     }
 
     #[test]
-    fn going_busy_or_disappearing_leaves_and_unknown_stays() {
+    fn going_working_or_disappearing_leaves_and_unknown_stays() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
         app.apply_later_snapshot(fleet([Idle, Idle, Idle], 2))
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%1", "%2", "%3"]);
 
-        app.apply_later_snapshot(fleet([Busy, Unknown, Idle], 3))
+        app.apply_later_snapshot(fleet([Working, Unknown, Idle], 3))
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%2", "%3"]);
 
@@ -2643,9 +2649,9 @@ mod tests {
     #[test]
     fn a_new_incarnation_in_the_same_pane_does_not_inherit_waiting() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
             .unwrap();
         let mut replacement = placed("%1", Idle, "harold  main", "/p/harold/main", 3);
         replacement.incarnation.agent_pid = 999;
@@ -2658,9 +2664,9 @@ mod tests {
     fn focus_clears_waiting_and_suppresses_joining_for_the_pane_in_view() {
         let mut app = empty_app();
         assert!(!app.focus_tracking());
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%1"]);
 
@@ -2670,7 +2676,7 @@ mod tests {
 
         // The user is now looking at %2 when it finishes: it never joins.
         app.observe_focus(FocusReading::Active("%2".into()));
-        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 3))
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 3))
             .unwrap();
         assert!(waiting_panes(&app).is_empty());
 
@@ -2684,11 +2690,11 @@ mod tests {
     #[test]
     fn n_and_shift_n_cycle_waiting_agents_and_wrap() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+        app.apply_later_snapshot(fleet([Working, Working, Idle], 2))
             .unwrap();
-        app.apply_later_snapshot(fleet([Idle, Busy, Idle], 3))
+        app.apply_later_snapshot(fleet([Idle, Working, Idle], 3))
             .unwrap();
         assert_eq!(waiting_panes(&app), ["%3", "%1"]);
         let selected = |app: &App| app.selected.as_ref().map(|s| s.pane_id.clone());
@@ -2711,7 +2717,7 @@ mod tests {
     #[test]
     fn n_and_shift_n_do_nothing_when_nothing_waits() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
         let before = app.selected.clone();
         assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
@@ -2722,9 +2728,9 @@ mod tests {
     #[test]
     fn stepping_to_a_waiting_agent_hidden_by_search_clears_the_search() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+        app.apply_later_snapshot(fleet([Working, Working, Idle], 2))
             .unwrap();
         app.handle_key(KeyCode::Char('f'));
         for character in "main".chars() {
@@ -2971,9 +2977,9 @@ mod tests {
     #[test]
     fn enter_clears_waiting_only_when_focus_tracking_is_off() {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
             .unwrap();
         app.handle_key(KeyCode::Char('n'));
         assert_eq!(
@@ -2985,7 +2991,7 @@ mod tests {
         assert!(waiting_panes(&app).is_empty());
 
         app.observe_focus(FocusReading::Active("%9".into()));
-        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 3))
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 3))
             .unwrap();
         app.handle_key(KeyCode::Char('n'));
         app.handle_key(KeyCode::Enter);
@@ -3559,7 +3565,7 @@ mod tests {
         app.search.query = "voice".into();
         app.search_changed();
         assert!(app.cursor_on_question());
-        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 2))
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 2))
             .unwrap();
         assert!(app.cursor_on_question());
     }
@@ -4024,11 +4030,11 @@ mod tests {
     /// The fleet with %3 and %1 waiting, the call off and %2 selected.
     fn waiting_app() -> App {
         let mut app = empty_app();
-        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
-        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+        app.apply_later_snapshot(fleet([Working, Working, Idle], 2))
             .unwrap();
-        app.apply_later_snapshot(fleet([Idle, Busy, Idle], 3))
+        app.apply_later_snapshot(fleet([Idle, Working, Idle], 3))
             .unwrap();
         app.observe_call(Some(call_view(CallState::Off, "%3")));
         select_pane(&mut app, "%2");

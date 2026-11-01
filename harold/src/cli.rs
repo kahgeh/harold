@@ -158,7 +158,7 @@ impl AcceptEvent {
 
     pub(crate) fn state(self) -> AgentState {
         match self {
-            Self::TurnStarted | Self::StillWorking => AgentState::Busy,
+            Self::TurnStarted | Self::StillWorking => AgentState::Working,
             Self::TurnCompleted | Self::SubagentsFinished => AgentState::Idle,
         }
     }
@@ -3157,8 +3157,8 @@ mod tests {
 
     #[test]
     fn accept_maps_each_event_to_busy_or_idle() {
-        assert_eq!(AcceptEvent::TurnStarted.state(), AgentState::Busy);
-        assert_eq!(AcceptEvent::StillWorking.state(), AgentState::Busy);
+        assert_eq!(AcceptEvent::TurnStarted.state(), AgentState::Working);
+        assert_eq!(AcceptEvent::StillWorking.state(), AgentState::Working);
         assert_eq!(AcceptEvent::TurnCompleted.state(), AgentState::Idle);
         assert_eq!(AcceptEvent::SubagentsFinished.state(), AgentState::Idle);
     }

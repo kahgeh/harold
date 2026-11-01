@@ -83,7 +83,7 @@ fn demo_app() -> App {
             rows: vec![
                 row(
                     selected.clone(),
-                    AgentState::Busy,
+                    AgentState::Working,
                     "Codex",
                     "control-tower:0.1",
                     "/Users/you/code/control-tower",
