@@ -1157,7 +1157,8 @@ fn timed<T>(
     result
 }
 
-/// The operation that a `block call` method counts as.
+/// The operation that a `block call` method counts as. Screen reads go through `read_call`,
+/// so `format` and `blob_read` through `block_call` count as `other`.
 fn block_call_operation(method: &str) -> MultiplexerOperation {
     match method {
         "size" => MultiplexerOperation::ScreenSize,

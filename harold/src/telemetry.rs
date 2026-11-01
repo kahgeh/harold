@@ -745,19 +745,32 @@ fn record_call_with(
         ));
     });
     let instruments = instruments();
-    let mut attributes = vec![
-        KeyValue::new("multiplexer", multiplexer.to_owned()),
-        KeyValue::new("host", host.to_owned()),
-        KeyValue::new("operation", operation.as_str()),
-        KeyValue::new("outcome", outcome.as_str()),
-    ];
-    if let Some(purpose) = purpose {
-        attributes.push(KeyValue::new("purpose", purpose.as_str()));
-    }
+    let attributes = call_attributes(multiplexer, host, operation, purpose, outcome);
     instruments.multiplexer_calls.add(1, &attributes);
     instruments
         .multiplexer_call_duration
         .record(elapsed.as_secs_f64() * 1000.0, &attributes);
+}
+
+/// The attributes of a multiplexer call. `purpose` is the last one, only when it is `Some`.
+fn call_attributes(
+    multiplexer: &str,
+    host: &str,
+    operation: MultiplexerOperation,
+    purpose: Option<ScreenPurpose>,
+    outcome: MultiplexerOutcome,
+) -> Vec<KeyValue> {
+    let mut attributes = Vec::with_capacity(5);
+    attributes.extend([
+        KeyValue::new("multiplexer", multiplexer.to_owned()),
+        KeyValue::new("host", host.to_owned()),
+        KeyValue::new("operation", operation.as_str()),
+        KeyValue::new("outcome", outcome.as_str()),
+    ]);
+    if let Some(purpose) = purpose {
+        attributes.push(KeyValue::new("purpose", purpose.as_str()));
+    }
+    attributes
 }
 
 /// One row of `harold.agents`: how many agents are in `state` for `provider_id`.
@@ -1061,24 +1074,33 @@ pub(crate) fn take_noted_listings() -> Vec<(u64, u64)> {
     LISTINGS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
 }
 
-/// Records 0 once on the 32 failure series of `harold.multiplexer.calls`: 8 operations
-/// (not `other`) times 4 outcomes (not `ok`). `main` calls it once when export is on.
+/// Records 0 once on the 40 failure series of `harold.multiplexer.calls`: 7 operations
+/// (not `other`, not `screen_read`) times 4 outcomes (not `ok`), and `screen_read` for each
+/// of its 3 purposes times 4 outcomes. `main` calls it once when export is on.
 pub(crate) fn register_multiplexer_counters(multiplexer: &str) {
+    const PURPOSES: [Option<ScreenPurpose>; 3] = [
+        Some(ScreenPurpose::State),
+        Some(ScreenPurpose::Prompt),
+        Some(ScreenPurpose::Writer),
+    ];
     let instruments = instruments();
     for operation in MultiplexerOperation::ALL {
         if operation == MultiplexerOperation::Other {
             continue;
         }
-        for outcome in MultiplexerOutcome::FAILURES {
-            instruments.multiplexer_calls.add(
-                0,
-                &[
-                    KeyValue::new("multiplexer", multiplexer.to_owned()),
-                    KeyValue::new("host", HOST_OWN_MACHINE),
-                    KeyValue::new("operation", operation.as_str()),
-                    KeyValue::new("outcome", outcome.as_str()),
-                ],
-            );
+        // A screen read always has a purpose, so it has no series without one.
+        let purposes: &[Option<ScreenPurpose>] = if operation == MultiplexerOperation::ScreenRead {
+            &PURPOSES
+        } else {
+            &[None]
+        };
+        for purpose in purposes {
+            for outcome in MultiplexerOutcome::FAILURES {
+                instruments.multiplexer_calls.add(
+                    0,
+                    &call_attributes(multiplexer, HOST_OWN_MACHINE, operation, *purpose, outcome),
+                );
+            }
         }
     }
 }

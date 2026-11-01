@@ -3407,28 +3407,44 @@ fn record_call_adds_one_and_records_the_time() {
 }
 
 #[test]
-fn start_records_zero_on_the_32_failure_series() {
+fn start_records_zero_on_the_40_failure_series() {
     test_support::install();
     register_multiplexer_counters("zero_probe");
+    let read = |operation: &str, outcome: &str, purpose: Option<&str>| {
+        let mut set = vec![
+            ("multiplexer", "zero_probe"),
+            ("host", HOST_OWN_MACHINE),
+            ("operation", operation),
+            ("outcome", outcome),
+        ];
+        if let Some(purpose) = purpose {
+            set.push(("purpose", purpose));
+        }
+        test_support::exact_counter_value("harold.multiplexer.calls", &set)
+    };
     let mut series = 0;
     for operation in MultiplexerOperation::ALL {
         for outcome in MultiplexerOutcome::FAILURES {
-            let set = [
-                ("multiplexer", "zero_probe"),
-                ("host", HOST_OWN_MACHINE),
-                ("operation", operation.as_str()),
-                ("outcome", outcome.as_str()),
-            ];
-            let value = test_support::exact_counter_value("harold.multiplexer.calls", &set);
-            if operation == MultiplexerOperation::Other {
-                assert_eq!(value, None, "{set:?}");
-                continue;
+            let (operation, outcome) = (operation.as_str(), outcome.as_str());
+            // No series of any operation has a purpose, except the screen reads.
+            for purpose in ["state", "prompt", "writer"] {
+                let expected = (operation == "screen_read").then_some(0);
+                assert_eq!(read(operation, outcome, Some(purpose)), expected);
+                series += usize::from(expected.is_some());
             }
-            assert_eq!(value, Some(0), "{set:?}");
-            series += 1;
+            if operation == "screen_read" || operation == "other" {
+                assert_eq!(read(operation, outcome, None), None, "{outcome}");
+            } else {
+                assert_eq!(
+                    read(operation, outcome, None),
+                    Some(0),
+                    "{operation} {outcome}"
+                );
+                series += 1;
+            }
         }
     }
-    assert_eq!(series, 32);
+    assert_eq!(series, 40);
     assert_eq!(
         test_support::counter_value(
             "harold.multiplexer.calls",
