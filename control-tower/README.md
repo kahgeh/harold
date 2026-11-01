@@ -359,10 +359,13 @@ remain visible as stale.
 
 ### Navigation is unavailable
 
-The control-tower requires non-empty `TMUX` and `TMUX_PANE` values from its invoking
-process before it discovers a client. Run it from the tmux client you intend to
-navigate. An outside-tmux control-tower remains usable for viewing and searching but
-will show `NAVIGATION UNAVAILABLE`.
+For tmux agents, the control-tower needs non-empty `TMUX` and `TMUX_PANE` values from
+its invoking process before it discovers a client. Run it from the tmux client you
+intend to move. Outside tmux, it stays usable for viewing and searching, and the header
+shows `NAVIGATION UNAVAILABLE`.
+
+For Rex agents, Enter runs `rex focus` and `rex do session.select`. These need the `rex`
+program and its server, not tmux. The header shows no navigation warning.
 
 ### Pane switching fails
 
