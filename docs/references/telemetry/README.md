@@ -902,7 +902,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -934,7 +934,7 @@ fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Mach
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -947,7 +947,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'

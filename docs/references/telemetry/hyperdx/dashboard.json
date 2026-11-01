@@ -43,6 +43,11 @@
       "id": "tts",
       "title": "TTS server",
       "collapsed": false
+    },
+    {
+      "id": "agents-multiplexer",
+      "title": "Agents and multiplexer",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -1026,6 +1031,118 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@TRACES_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS slow_reads FROM otel.otel_logs WHERE ServiceName = 'harold' AND ((Body = 'agent inventory scan slow' AND mapContains(LogAttributes, 'rex_ms')) OR Body = 'agent screen read slow') AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
+      "id": "agents-by-state",
+      "name": "Agents by state",
+      "x": 0,
+      "y": 56,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ts, Attributes['state'] AS state, sum(last_value) AS agents FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 5 MINUTE) AS ts, MetricName, Attributes, argMax(Value, TimeUnix) AS last_value FROM $__sourceTable(gauge) WHERE MetricName IN ('harold.agents') AND $__timeFilter(TimeUnix) GROUP BY ts, MetricName, Attributes) GROUP BY ts, state ORDER BY ts"
+      }
+    },
+    {
+      "id": "agents-unknown",
+      "name": "Agents unknown",
+      "x": 12,
+      "y": 56,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ts, sum(last_value) AS unknown_agents FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 15 MINUTE) AS ts, MetricName, Attributes, argMax(Value, TimeUnix) AS last_value FROM $__sourceTable(gauge) WHERE MetricName IN ('harold.agents') AND Attributes['state'] = 'unknown' AND $__timeFilter(TimeUnix) GROUP BY ts, MetricName, Attributes) GROUP BY ts ORDER BY ts"
+      }
+    },
+    {
+      "id": "agent-time-in-state",
+      "name": "Time in each state, p50 and p95, by day",
+      "x": 0,
+      "y": 60,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT day, state, arraySum(counts) AS samples, bounds[greatest(1, least(length(bounds), arrayFirstIndex(c -> c >= 0.5 * arraySum(counts), arrayCumSum(counts))))] AS p50_s, bounds[greatest(1, least(length(bounds), arrayFirstIndex(c -> c >= 0.95 * arraySum(counts), arrayCumSum(counts))))] AS p95_s FROM (SELECT toDate(TimeUnix) AS day, Attributes['state'] AS state, sumForEach(bucket_rise) AS counts, anyLast(bounds) AS bounds FROM (SELECT TimeUnix, Attributes, bounds, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise, if(count < count_before OR empty(buckets_before), buckets, arrayMap((now_count, before_count) -> now_count - before_count, buckets, buckets_before)) AS bucket_rise FROM (SELECT TimeUnix, MetricName, Attributes, toFloat64(Count) AS count, Sum AS total, BucketCounts AS buckets, ExplicitBounds AS bounds, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before, lagInFrame(BucketCounts, 1, CAST([] AS Array(UInt64))) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS buckets_before FROM $__sourceTable(histogram) WHERE MetricName = 'harold.agent.state.duration' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY day, state) ORDER BY day DESC, state"
+      }
+    },
+    {
+      "id": "multiplexer-calls-a-minute",
+      "name": "Multiplexer calls a minute, by operation",
+      "x": 12,
+      "y": 60,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT toStartOfInterval(TimeUnix, INTERVAL 1 MINUTE) AS ts, Attributes['operation'] AS operation, sum(rise) AS calls FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.multiplexer.calls') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY ts, operation ORDER BY ts"
+      }
+    },
+    {
+      "id": "multiplexer-calls-failed",
+      "name": "Failed and timed-out calls, by operation and outcome",
+      "x": 0,
+      "y": 64,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT Attributes['operation'] AS operation, Attributes['outcome'] AS outcome, sum(rise) AS calls FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.multiplexer.calls') AND Attributes['outcome'] != 'ok' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY operation, outcome ORDER BY calls DESC, operation, outcome"
+      }
+    },
+    {
+      "id": "multiplexer-call-time",
+      "name": "Multiplexer call time, p95 and mean, by operation",
+      "x": 12,
+      "y": 64,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT operation, arraySum(counts) AS calls, bounds[greatest(1, least(length(bounds), arrayFirstIndex(c -> c >= 0.95 * arraySum(counts), arrayCumSum(counts))))] AS p95_ms, mean_ms FROM (SELECT Attributes['operation'] AS operation, sumForEach(bucket_rise) AS counts, anyLast(bounds) AS bounds, sum(total_rise) / sum(count_rise) AS mean_ms FROM (SELECT TimeUnix, Attributes, bounds, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise, if(count < count_before OR empty(buckets_before), buckets, arrayMap((now_count, before_count) -> now_count - before_count, buckets, buckets_before)) AS bucket_rise FROM (SELECT TimeUnix, MetricName, Attributes, toFloat64(Count) AS count, Sum AS total, BucketCounts AS buckets, ExplicitBounds AS bounds, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before, lagInFrame(BucketCounts, 1, CAST([] AS Array(UInt64))) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS buckets_before FROM $__sourceTable(histogram) WHERE MetricName = 'harold.multiplexer.call.duration' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY operation) ORDER BY operation"
+      }
+    },
+    {
+      "id": "sessions-and-panes",
+      "name": "Sessions and panes",
+      "x": 0,
+      "y": 68,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ts, sumIf(last_value, MetricName = 'harold.multiplexer.sessions') AS sessions, sumIf(last_value, MetricName = 'harold.multiplexer.panes') AS panes FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 5 MINUTE) AS ts, MetricName, Attributes, argMax(Value, TimeUnix) AS last_value FROM $__sourceTable(gauge) WHERE MetricName IN ('harold.multiplexer.sessions', 'harold.multiplexer.panes') AND $__timeFilter(TimeUnix) GROUP BY ts, MetricName, Attributes) GROUP BY ts ORDER BY ts"
       }
     }
   ]

@@ -1,0 +1,31 @@
+{
+  "name": "multiplexer-calls-failing",
+  "note": "multiplexer-calls-failing",
+  "message": "Multiplexer calls failed or timed out more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "multiplexer-calls-failing",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.multiplexer.calls",
+        "metricType": "sum",
+        "where": "Attributes['outcome'] IN ('failed', 'timeout', 'malformed')",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 300,
+  "thresholdType": "above_exclusive",
+  "interval": "15m",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

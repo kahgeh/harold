@@ -1960,10 +1960,20 @@ const METRICS: &[&str] = &[
     "harold.notifications",
     "harold.knowledge.graph_waiting",
     "harold.knowledge.typed_relations",
+    "harold.multiplexer.calls",
+    "harold.multiplexer.call.duration",
+    "harold.agents",
+    "harold.agent.state.duration",
+    "harold.multiplexer.sessions",
+    "harold.multiplexer.panes",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    "multiplexer",
+    "host",
+    "operation",
+    "provider_id",
     "first_audio_ms",
     "loaded",
     "device",
@@ -2283,6 +2293,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
         [
             "alert-disk-low.json",
             "alert-machine-past-normal.json",
+            "alert-multiplexer-calls-failing.json",
             "alert-phone-request-slow.json",
             "alert-phone-request-unavailable.json",
             "alert-slot-idle.json",
@@ -2293,6 +2304,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "trends.json",
             "webhook-disk-low.json",
             "webhook-machine-past-normal.json",
+            "webhook-multiplexer-calls-failing.json",
             "webhook-phone-request-slow.json",
             "webhook-phone-request-unavailable.json",
             "webhook-slot-idle.json",
@@ -2380,6 +2392,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             INVENTORY_FULL_READS_CARD.to_string(),
             REX_READS_SLOW_CARD.to_string(),
         ])
+        .chain(AGENT_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2399,6 +2412,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
     assert_eq!(
         groups,
         [
+            "Agents and multiplexer",
             "Knowledge index",
             "Notifications (leave the product filter empty)",
             "Phone requests",
@@ -2534,6 +2548,16 @@ const TTS_CARDS: [&str; 2] = [
     "TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days",
     "TTS failures per day, by machine, caller and reason",
 ];
+/// The agents and multiplexer group's cards, in the order the dashboard lists them.
+const AGENT_CARDS: [&str; 7] = [
+    "Agents by state",
+    "Agents unknown",
+    "Time in each state, p50 and p95, by day",
+    "Multiplexer calls a minute, by operation",
+    "Failed and timed-out calls, by operation and outcome",
+    "Multiplexer call time, p95 and mean, by operation",
+    "Sessions and panes",
+];
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
@@ -2662,6 +2686,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("web-app", false),
         ("knowledge", false),
         ("tts", false),
+        // The cards read the agent and multiplexer metrics, which carry no product.
+        ("agents-multiplexer", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -2749,7 +2775,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     }
     // Seven counter cards and two lead-time cards, each with its earlier number, the
     // notifications card, the browser spans not forwarded card and three trends panels.
-    assert_eq!(counted, 23);
+    // The agents group adds four: calls, failed calls, time in each state, call time.
+    assert_eq!(counted, 27);
 }
 
 #[test]
@@ -3486,8 +3513,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -3501,8 +3528,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -3678,8 +3705,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the five created.
-    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
+    // The old webhook, the two kept, and the six created.
+    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -3689,7 +3716,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 5, "{calls:?}");
+    assert_eq!(posts, 6, "{calls:?}");
 }
 
 #[test]
@@ -4031,7 +4058,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
     stand_in
 }
 
@@ -4040,7 +4067,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 7 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 8 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),
@@ -4419,5 +4446,182 @@ fn record_agent_state_duration_writes_the_multiplexer_and_an_empty_host() {
     assert_eq!(
         test_support::histogram_sum("harold.agent.state.duration", &set),
         Some(12.5)
+    );
+}
+
+#[test]
+fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
+    let dashboard = definition("dashboard.json");
+    let card = |name: &str| {
+        tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap_or_else(|| panic!("no card {name}"))
+    };
+    // (card, metrics read, the counter rule, the histogram rule)
+    let expected: [(&str, &[&str], bool, bool); 7] = [
+        (AGENT_CARDS[0], &["harold.agents"], false, false),
+        (AGENT_CARDS[1], &["harold.agents"], false, false),
+        (
+            AGENT_CARDS[2],
+            &["harold.agent.state.duration"],
+            false,
+            true,
+        ),
+        (AGENT_CARDS[3], &["harold.multiplexer.calls"], true, false),
+        (AGENT_CARDS[4], &["harold.multiplexer.calls"], true, false),
+        (
+            AGENT_CARDS[5],
+            &["harold.multiplexer.call.duration"],
+            false,
+            true,
+        ),
+        (
+            AGENT_CARDS[6],
+            &["harold.multiplexer.panes", "harold.multiplexer.sessions"],
+            false,
+            false,
+        ),
+    ];
+    for (name, reads, counter, histogram) in expected {
+        let tile = card(name);
+        assert_eq!(tile["containerId"], "agents-multiplexer", "{name}");
+        let config = &tile["config"];
+        assert_eq!(config["configType"], "sql", "{name}");
+        assert_eq!(
+            config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@",
+            "{name}"
+        );
+        assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@", "{name}");
+        assert_eq!(metrics_read(config), reads, "{name}");
+        let sql = config["sqlTemplate"].as_str().unwrap();
+        assert!(sql.contains("$__timeFilter(TimeUnix)"), "{name}: {sql}");
+        // The product filter does not reach these metrics.
+        assert!(!sql.contains("$__filters"), "{name}: {sql}");
+        for piece in COUNTER_RULE {
+            assert_eq!(sql.contains(piece), counter, "{name} counter rule {piece}");
+        }
+        for piece in HISTOGRAM_RULE {
+            assert_eq!(
+                sql.contains(piece),
+                histogram,
+                "{name} histogram rule {piece}"
+            );
+        }
+        if !counter && !histogram {
+            // A gauge: the last sample of a period, no rise.
+            assert!(sql.contains("FROM $__sourceTable(gauge)"), "{name}: {sql}");
+            assert!(sql.contains("argMax(Value, TimeUnix)"), "{name}: {sql}");
+            assert!(!sql.contains("rise"), "{name}: {sql}");
+        }
+    }
+
+    let by_state = card(AGENT_CARDS[0])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    assert!(by_state.contains("INTERVAL 5 MINUTE"), "{by_state}");
+    assert!(
+        by_state.contains("Attributes['state'] AS state"),
+        "{by_state}"
+    );
+    let unknown = card(AGENT_CARDS[1])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    assert!(unknown.contains("INTERVAL 15 MINUTE"), "{unknown}");
+    assert!(
+        unknown.contains("Attributes['state'] = 'unknown'"),
+        "{unknown}"
+    );
+
+    // The failed card keeps every outcome but `ok`.
+    let failed = card(AGENT_CARDS[4])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    assert!(failed.contains("Attributes['outcome'] != 'ok'"), "{failed}");
+    assert!(failed.contains("GROUP BY operation, outcome"), "{failed}");
+
+    // The p50 and p95 read the risen buckets, by state.
+    let state_time = card(AGENT_CARDS[2])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    for piece in [
+        "BucketCounts",
+        "ExplicitBounds",
+        "sumForEach",
+        "AS p50_s",
+        "AS p95_s",
+        "state",
+    ] {
+        assert!(state_time.contains(piece), "{piece} in {state_time}");
+    }
+    // The call time card: the p95 from the buckets and the mean from the rise of the sum
+    // over the rise of the count.
+    let call_time = card(AGENT_CARDS[5])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    for piece in [
+        "BucketCounts",
+        "sumForEach",
+        "AS p95_ms",
+        "sum(total_rise) / sum(count_rise) AS mean_ms",
+        "GROUP BY operation",
+    ] {
+        assert!(call_time.contains(piece), "{piece} in {call_time}");
+    }
+
+    // The cards use general words: the multiplexer and harness names stay in the code.
+    let mut texts = Vec::new();
+    for name in AGENT_CARDS {
+        strings_in(card(name), &mut texts);
+    }
+    for file in [
+        "alert-multiplexer-calls-failing.json",
+        "webhook-multiplexer-calls-failing.json",
+    ] {
+        strings_in(&definition(file), &mut texts);
+    }
+    for text in texts {
+        let lower = text.to_lowercase();
+        for word in ["rex", "tmux", "claude"] {
+            assert!(!lower.contains(word), "{word} in {text}");
+        }
+    }
+}
+
+#[test]
+fn the_multiplexer_calls_failing_alert_sums_the_bad_outcomes_over_15_minutes() {
+    let alert = definition("alert-multiplexer-calls-failing.json");
+    assert_eq!(alert["name"], "multiplexer-calls-failing");
+    assert_eq!(alert["note"], "multiplexer-calls-failing");
+    assert_eq!(alert["source"], "inline");
+    assert_eq!(alert["threshold"].as_f64(), Some(300.0));
+    assert_eq!(alert["thresholdType"], "above_exclusive");
+    assert_eq!(alert["interval"], "15m");
+    assert!(alert.get("numConsecutiveWindows").is_none());
+    assert_eq!(alert["channel"]["type"], "webhook");
+    assert_eq!(alert["channel"]["webhookId"], "@WEBHOOK_ID@");
+    let config = &alert["chartConfig"];
+    assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@");
+    assert_eq!(metrics_read(config), ["harold.multiplexer.calls"]);
+    let select = config["select"].as_array().unwrap();
+    assert_eq!(select.len(), 1);
+    assert_eq!(select[0]["aggFn"], "sum");
+    assert_eq!(select[0]["metricType"], "sum");
+    assert_eq!(
+        select[0]["where"],
+        "Attributes['outcome'] IN ('failed', 'timeout', 'malformed')"
+    );
+    assert_eq!(
+        alert["message"],
+        "Multiplexer calls failed or timed out more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server."
+    );
+
+    let webhook = definition("webhook-multiplexer-calls-failing.json");
+    assert_eq!(webhook["name"], "harold-alerts-multiplexer-calls-failing");
+    assert_eq!(webhook["service"], "generic");
+    let body = webhook["body"].as_str().unwrap();
+    assert!(
+        body.starts_with(r#"{"alert": "multiplexer-calls-failing", "state": ""#),
+        "{body}"
     );
 }
