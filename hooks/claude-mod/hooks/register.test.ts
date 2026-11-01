@@ -58,6 +58,12 @@ test('a REX_BLOCK that is not a block id reports nothing', async ($, on) => {
   expect(calls).toEqual([])
 })
 
+test('a REX_BLOCK that names another host reports nothing', async ($, on) => {
+  const calls = bottom(on, { REX_BLOCK: 'rex:omarchy/block:abc' }, async () => ({ exitCode: 0 }))
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  expect(calls).toEqual([])
+})
+
 test('no TMUX_PANE reports nothing', async ($, on) => {
   const calls = bottom(on, {}, async () => ({ exitCode: 0 }))
   await $.turn.start({ text: 'hi', turnId: 't1' })

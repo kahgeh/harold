@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
@@ -588,6 +588,7 @@ impl AgentSettings {
         if Multiplexer::parse(&monitor.multiplexer).is_none() {
             errors.push("agent_monitor.multiplexer must be \"tmux\" or \"rex\"".into());
         }
+        errors.extend(rex_host_errors(monitor));
 
         let mut ids = std::collections::HashSet::new();
         for provider in &self.0 {
@@ -630,6 +631,36 @@ impl AgentSettings {
     }
 }
 
+fn rex_host_errors(monitor: &AgentMonitorSettings) -> Vec<String> {
+    let mut errors = Vec::new();
+    if !monitor.rex_hosts.is_empty() && monitor.multiplexer() != Multiplexer::Rex {
+        errors.push("rex_hosts needs multiplexer = \"rex\"".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for host in &monitor.rex_hosts {
+        if !crate::agent::pane_route::valid_host_label(host) {
+            errors.push(format!(
+                "agent_monitor.rex_hosts must be 1 to 32 letters, digits, . or -: {host}"
+            ));
+        } else if !seen.insert(host.as_str()) {
+            errors.push(format!("duplicate agent_monitor.rex_hosts: {host}"));
+        }
+    }
+    for (host, mark) in &monitor.rex_host_marks {
+        if !monitor.rex_hosts.contains(host) {
+            errors.push(format!(
+                "agent_monitor.rex_host_marks names a host that is not in rex_hosts: {host}"
+            ));
+        }
+        if !matches!(mark.as_str(), "arch" | "linux" | "mac") {
+            errors.push(format!(
+                "agent_monitor.rex_host_marks must be \"arch\", \"linux\" or \"mac\": {host} = {mark}"
+            ));
+        }
+    }
+    errors
+}
+
 fn valid_identifier(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=64).contains(&bytes.len())
@@ -666,6 +697,35 @@ pub(crate) struct AgentMonitorSettings {
     pub multiplexer: String,
     /// The path to the `rex` program, when it is not found by the usual search.
     pub rex: Option<String>,
+    /// The labels of other Rex hosts whose panes Harold also works with. Needs `multiplexer = "rex"`.
+    pub rex_hosts: Vec<String>,
+    /// A mark for a host in `rex_hosts`: `"arch"`, `"linux"` or `"mac"`. A host with no entry has none.
+    pub rex_host_marks: BTreeMap<String, String>,
+}
+
+/// The settings of the control-tower.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ControlTowerSettings {
+    /// How the control-tower marks a host: `"glyph"` (the default), `"emoji"` or `"text"`.
+    pub host_marker: String,
+}
+
+impl Default for ControlTowerSettings {
+    fn default() -> Self {
+        Self {
+            host_marker: "glyph".to_string(),
+        }
+    }
+}
+
+impl ControlTowerSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        match self.host_marker.as_str() {
+            "glyph" | "emoji" | "text" => Vec::new(),
+            _ => vec!["control_tower.host_marker must be \"glyph\", \"emoji\" or \"text\"".into()],
+        }
+    }
 }
 
 /// The multiplexer that holds the panes Harold works with.
@@ -703,6 +763,8 @@ impl Default for AgentMonitorSettings {
             report_grace_ms: 30_000,
             multiplexer: "tmux".to_string(),
             rex: None,
+            rex_hosts: Vec::new(),
+            rex_host_marks: BTreeMap::new(),
         }
     }
 }
@@ -1517,6 +1579,8 @@ pub struct Settings {
     pub(crate) agents: AgentSettings,
     #[serde(default)]
     pub(crate) agent_monitor: AgentMonitorSettings,
+    #[serde(default)]
+    pub(crate) control_tower: ControlTowerSettings,
     pub tts: TtsSettings,
     pub log: LogSettings,
     pub store: StoreSettings,
@@ -1541,6 +1605,7 @@ impl Settings {
         errors.extend(machine_name_error(&self.machine_name));
         errors.extend(machines_errors(&self.machine_name, &self.machines));
         errors.extend(self.agents.validate(&self.agent_monitor));
+        errors.extend(self.control_tower.validate());
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
         errors.extend(self.knowledge.validate());
@@ -1840,9 +1905,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings, TtsEngine,
-        TtsSettings, is_valid_machine_name, machine_name_error, machine_name_from_hostname,
-        migrate_tts, tts_errors, tts_models_path,
+        AgentMonitorSettings, AgentProviderSettings, AgentSettings, ControlTowerSettings, Settings,
+        TtsEngine, TtsSettings, is_valid_machine_name, machine_name_error,
+        machine_name_from_hostname, migrate_tts, tts_errors, tts_models_path,
     };
 
     fn grpc(host: &str) -> super::GrpcSettings {
@@ -2586,6 +2651,104 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert!(
             opencode.summary_line_prefixes.is_empty(),
             "OpenCode's prompt and user-message rows share the same visible prefix"
+        );
+    }
+
+    fn host_errors(overrides: &str) -> Vec<String> {
+        crate::settings::settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|e| e.contains("rex_host") || e.contains("host_marker"))
+            .collect()
+    }
+
+    #[test]
+    fn host_settings_default_to_no_hosts_no_marks_and_a_glyph_marker() {
+        let shipped = crate::settings::settings_with("");
+        assert!(shipped.agent_monitor.rex_hosts.is_empty());
+        assert!(shipped.agent_monitor.rex_host_marks.is_empty());
+        assert_eq!(shipped.control_tower.host_marker, "glyph");
+        assert!(AgentMonitorSettings::default().rex_hosts.is_empty());
+        assert_eq!(ControlTowerSettings::default().host_marker, "glyph");
+        assert!(host_errors("").is_empty());
+    }
+
+    #[test]
+    fn host_marker_accepts_glyph_emoji_and_text_and_refuses_the_rest() {
+        for ok in ["glyph", "emoji", "text"] {
+            let errors = host_errors(&format!("[control_tower]\nhost_marker = \"{ok}\""));
+            assert!(errors.is_empty(), "{ok}: {errors:?}");
+        }
+        let errors = host_errors("[control_tower]\nhost_marker = \"icons\"");
+        assert_eq!(
+            errors,
+            vec!["control_tower.host_marker must be \"glyph\", \"emoji\" or \"text\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn rex_hosts_accepts_good_labels_with_the_rex_multiplexer() {
+        let errors = host_errors(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\", \"nas.lan\", \"a-1\"]\n\
+             [agent_monitor.rex_host_marks]\nomarchy = \"arch\"\n\"nas.lan\" = \"linux\"\n\"a-1\" = \"mac\"",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn rex_hosts_refuses_a_bad_or_repeated_label() {
+        let long = "a".repeat(33);
+        for bad in ["a b", "a/b", "a:b", long.as_str(), "a_b", ""] {
+            let errors = host_errors(&format!(
+                "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"{bad}\"]"
+            ));
+            assert_eq!(errors.len(), 1, "{bad:?}: {errors:?}");
+            assert!(
+                errors[0].starts_with("agent_monitor.rex_hosts"),
+                "{errors:?}"
+            );
+        }
+        let errors = host_errors(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\", \"omarchy\"]",
+        );
+        assert_eq!(
+            errors,
+            vec!["duplicate agent_monitor.rex_hosts: omarchy".to_string()]
+        );
+    }
+
+    #[test]
+    fn rex_hosts_needs_the_rex_multiplexer() {
+        let errors = host_errors("[agent_monitor]\nrex_hosts = [\"omarchy\"]");
+        assert_eq!(
+            errors,
+            vec!["rex_hosts needs multiplexer = \"rex\"".to_string()]
+        );
+        let errors =
+            host_errors("[agent_monitor]\nmultiplexer = \"tmux\"\nrex_hosts = [\"omarchy\"]");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn rex_host_marks_need_a_listed_host_and_a_known_mark() {
+        let errors = host_errors(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]\n\
+             [agent_monitor.rex_host_marks]\nother = \"arch\"",
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "agent_monitor.rex_host_marks names a host that is not in rex_hosts: other"
+                    .to_string()
+            ]
+        );
+        let errors = host_errors(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]\n\
+             [agent_monitor.rex_host_marks]\nomarchy = \"windows\"",
+        );
+        assert_eq!(
+            errors,
+            vec!["agent_monitor.rex_host_marks must be \"arch\", \"linux\" or \"mac\": omarchy = windows".to_string()]
         );
     }
 

@@ -1218,7 +1218,10 @@ fn start_control_tower_runs_the_program_beside_harold_with_the_settings_endpoint
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        format!("--endpoint\n{}\n", grpc_endpoint(&fixture))
+        format!(
+            "--endpoint\n{}\n--host-marker\nglyph\n",
+            grpc_endpoint(&fixture)
+        )
     );
     std::fs::remove_dir_all(&folder).unwrap();
 }
@@ -1235,7 +1238,7 @@ fn start_control_tower_prefers_the_endpoint_the_user_gives() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "--endpoint\nhttp://127.0.0.1:9\n"
+        "--endpoint\nhttp://127.0.0.1:9\n--host-marker\nglyph\n"
     );
     std::fs::remove_dir_all(&folder).unwrap();
 }
@@ -1264,7 +1267,10 @@ fn start_control_tower_through_a_link_uses_the_control_tower_beside_the_real_har
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        format!("--endpoint\n{}\n", grpc_endpoint(&fixture))
+        format!(
+            "--endpoint\n{}\n--host-marker\nglyph\n",
+            grpc_endpoint(&fixture)
+        )
     );
     std::fs::remove_dir_all(&folder).unwrap();
     std::fs::remove_dir_all(&links).unwrap();

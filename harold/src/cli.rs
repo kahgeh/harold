@@ -113,6 +113,7 @@ fn control_tower_command(
     };
     let mut command = std::process::Command::new(program);
     command.args(["--endpoint", &endpoint]);
+    command.args(["--host-marker", &settings.control_tower.host_marker]);
     Ok(command)
 }
 
@@ -2717,7 +2718,41 @@ mod tests {
         assert_eq!(command.get_program(), folder.join("control-tower"));
         assert_eq!(
             command_args(&command),
-            ["--endpoint", "http://127.0.0.1:50060"]
+            [
+                "--endpoint",
+                "http://127.0.0.1:50060",
+                "--host-marker",
+                "glyph"
+            ]
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn control_tower_command_passes_the_host_marker() {
+        let folder = tower_folder(true);
+        let mut settings = settings_for("127.0.0.1:50060");
+        let args = StartControlTowerArgs { endpoint: None };
+        let command = control_tower_command(&folder, &settings, &args).unwrap();
+        assert_eq!(
+            command_args(&command),
+            [
+                "--endpoint",
+                "http://127.0.0.1:50060",
+                "--host-marker",
+                "glyph"
+            ]
+        );
+        settings.control_tower.host_marker = "emoji".into();
+        let command = control_tower_command(&folder, &settings, &args).unwrap();
+        assert_eq!(
+            command_args(&command),
+            [
+                "--endpoint",
+                "http://127.0.0.1:50060",
+                "--host-marker",
+                "emoji"
+            ]
         );
         std::fs::remove_dir_all(&folder).unwrap();
     }
@@ -2733,7 +2768,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(command_args(&command), ["--endpoint", "http://127.0.0.1:9"]);
+        assert_eq!(
+            command_args(&command),
+            ["--endpoint", "http://127.0.0.1:9", "--host-marker", "glyph"]
+        );
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

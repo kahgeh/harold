@@ -95,6 +95,15 @@ report_grace_ms = 30000
 # multiplexer = "tmux"
 # The path to the `rex` program, when Harold does not find it by itself.
 # rex = "/path/to/rex"
+# The labels of other Rex hosts whose panes Harold also works with. Needs multiplexer = "rex".
+rex_hosts = []
+# A mark for a host in rex_hosts: "arch", "linux" or "mac".
+# [agent_monitor.rex_host_marks]
+# omarchy = "arch"
+
+[control_tower]
+# How the control-tower marks a host: "glyph", "emoji" or "text".
+host_marker = "glyph"
 
 [[agents]]
 id = "codex"

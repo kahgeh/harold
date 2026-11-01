@@ -4,7 +4,7 @@ import { isPaneId, resolveProgram, buildArgv, hasWorking } from './accept'
 test('isPaneId accepts only % and digits', () => {
   expect(isPaneId('%4')).toBe(true)
   expect(isPaneId('%123')).toBe(true)
-  for (const bad of ['', '47', '%4x', '%', 'x%4', undefined]) {
+  for (const bad of ['', '47', '%4x', '%', 'x%4', 'rex:omarchy/block:abc', undefined]) {
     expect(isPaneId(bad)).toBe(false)
   }
 })
