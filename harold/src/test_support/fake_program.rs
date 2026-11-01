@@ -78,8 +78,11 @@ pub(crate) fn probe_until_it_starts(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::process::Stdio;
 
     fn folder() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -91,6 +94,9 @@ mod tests {
         path
     }
 
+    // Linux only: macOS does not refuse to start a script that another process holds open for
+    // writing (it has no "Text file busy"), so the probe works at once there and nothing waits.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_helper_waits_for_a_child_that_holds_a_write_handle_and_then_starts_the_script() {
         let folder = folder();
