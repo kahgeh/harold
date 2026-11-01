@@ -980,7 +980,7 @@ async fn resolved_completion_starts_an_idle_reconciliation_epoch() {
     fixture.store.project_unhandled_events(100).await.unwrap();
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes.len(), 1);
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Done);
     assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("fallback"));
     assert_eq!(
         snapshot.panes[0].explicit_work_summary_updated_at_ms,
@@ -3054,7 +3054,7 @@ async fn activity_summary_completion_uses_full_reply_and_projects_reported_outco
     fixture.wait_for_generated(1).await;
     fixture.store.project_unhandled_events(100).await.unwrap();
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Done);
     assert_eq!(
         snapshot.panes[0].work_summary.as_deref(),
         Some("Fixed parser; integration tests pending")
@@ -4145,6 +4145,26 @@ async fn an_idle_report_holds_until_the_screen_has_read_working_for_30_seconds()
 }
 
 #[tokio::test]
+async fn a_done_report_yields_to_a_working_or_blocked_screen_after_30_seconds() {
+    for (reading, expected) in [
+        (ObservedAgentState::Working, EffectiveAgentState::Working),
+        (ObservedAgentState::Blocked, EffectiveAgentState::Blocked),
+    ] {
+        let fixture = Fixture::with_default_graces().await;
+        report(&fixture, ObservedAgentState::Done, 100).await;
+
+        sample(&fixture, Some(reading), 40_000).await;
+        sample(&fixture, Some(reading), 69_000).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Done
+        );
+        sample(&fixture, Some(reading), 70_000).await;
+        assert_eq!(projected_state(&fixture.store).await, expected);
+    }
+}
+
+#[tokio::test]
 async fn a_break_in_the_working_reading_restarts_the_30_seconds() {
     for break_reading in [Some(ObservedAgentState::Idle), None] {
         let fixture = Fixture::with_default_graces().await;
@@ -4223,7 +4243,7 @@ async fn a_turn_complete_without_an_adapter_keeps_the_2_second_window_in_the_run
     sample(&fixture, Some(ObservedAgentState::Working), 2_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Idle
+        EffectiveAgentState::Done
     );
     sample(&fixture, Some(ObservedAgentState::Working), 2_100).await;
     assert_eq!(

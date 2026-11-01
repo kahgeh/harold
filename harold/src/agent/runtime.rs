@@ -1037,7 +1037,7 @@ impl AgentMonitorRuntime {
             tracked.explicit_summary = next_explicit_summary;
             // The Stop hook sets the state only for a pane no lifecycle adapter reports on.
             if tracked.lifecycle_adapter_id.is_none() {
-                tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
+                tracked.last_hook = Some((ObservedAgentState::Done, observed_at_ms));
                 tracked.screen_state = None;
             }
             let pane_id = tracked.pane.incarnation.pane_id.clone();

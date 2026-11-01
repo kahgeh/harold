@@ -1004,7 +1004,7 @@ fn a_turn_complete_leaves_the_state_of_a_pane_an_adapter_reports_on() {
 }
 
 #[test]
-fn a_turn_complete_sets_idle_for_a_pane_without_an_adapter() {
+fn a_turn_complete_sets_done_for_a_pane_without_an_adapter() {
     let initial = apply(
         None,
         AgentEvent::PaneObserved(AgentPaneObserved {
@@ -1022,10 +1022,44 @@ fn a_turn_complete_sets_idle_for_a_pane_without_an_adapter() {
         GraceWindows::default(),
     ));
 
-    assert_eq!(completed.effective_state, EffectiveAgentState::Idle);
-    assert_eq!(completed.hook_state, Some(ObservedAgentState::Idle));
+    assert_eq!(completed.effective_state, EffectiveAgentState::Done);
+    assert_eq!(completed.hook_state, Some(ObservedAgentState::Done));
     assert_eq!(completed.hook_observed_at_ms, Some(4_000));
     assert_eq!(completed.lifecycle_adapter_id, None);
+}
+
+#[test]
+fn a_blocked_screen_inside_the_working_grace_keeps_working() {
+    let reported = apply_default(
+        Some(observed_pane()),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let screen = apply_default(
+        Some(reported),
+        screen_reading(ObservedAgentState::Blocked, 11_000),
+        3,
+    );
+    assert_eq!(screen.effective_state, EffectiveAgentState::Working);
+}
+
+#[test]
+fn done_idle_and_error_records_lose_to_a_working_report_at_10_seconds_and_win_at_30() {
+    for (state, effective) in [
+        (ObservedAgentState::Done, EffectiveAgentState::Done),
+        (ObservedAgentState::Idle, EffectiveAgentState::Idle),
+        (ObservedAgentState::Error, EffectiveAgentState::Error),
+    ] {
+        let reported = apply_default(
+            Some(observed_pane()),
+            mod_report(ObservedAgentState::Working, 1_000),
+            2,
+        );
+        let early = apply_default(Some(reported.clone()), screen_reading(state, 11_000), 3);
+        assert_eq!(early.effective_state, EffectiveAgentState::Working);
+        let late = apply_default(Some(reported), screen_reading(state, 31_000), 3);
+        assert_eq!(late.effective_state, effective);
+    }
 }
 
 #[test]
@@ -1212,7 +1246,7 @@ fn a_turn_complete_without_an_adapter_keeps_the_2_second_window() {
         screen_reading(ObservedAgentState::Working, 2_999),
         3,
     );
-    assert_eq!(just_inside.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(just_inside.effective_state, EffectiveAgentState::Done);
     let at_2_s = apply_default(
         Some(just_inside),
         screen_reading(ObservedAgentState::Working, 3_000),

@@ -219,7 +219,7 @@ pub(crate) fn reduce_turn_completed(
 
     invalidate_generated(&mut projection, event_version);
     if projection.lifecycle_adapter_id.is_none() {
-        set_hook_state(&mut projection, ObservedAgentState::Idle, observed_at_ms);
+        set_hook_state(&mut projection, ObservedAgentState::Done, observed_at_ms);
     }
     apply_work_summary(&mut projection, work_summary, observed_at_ms);
     ProjectionChange::Upsert(reconcile(projection, observed_at_ms, event_version, graces))
