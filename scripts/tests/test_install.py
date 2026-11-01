@@ -264,6 +264,52 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
 
+    def test_a_failed_data_copy_raises_and_puts_everything_back(self):
+        bundle, stage = self.old_bundle_with_data()
+
+        def partial_then_full(source, target):
+            (target / 'store').mkdir(parents=True)
+            (target / 'store/state.db').write_bytes(b'part')
+            raise OSError(28, 'No space left on device')
+
+        with patch.object(self.install, 'copy_data_to_backup', partial_then_full):
+            with self.assertRaises(self.install.DataCopyFailed) as raised:
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual(raised.exception.reason, 'No space left on device')
+        self.assertEqual(str(raised.exception), 'No space left on device')
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertTrue(bundle.is_dir())
+        self.assertTrue(stage.exists())
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertEqual(list(bundle.glob('data-copy')), [])
+
+    def test_an_interrupt_right_after_the_failed_copy_keeps_the_live_data(self):
+        bundle, stage = self.old_bundle_with_data()
+        real_rmtree = shutil.rmtree
+        interrupts = []
+
+        def interrupt_once(path, *args, **kwargs):
+            if Path(path).name == 'data-copy' and not interrupts:
+                interrupts.append(path)
+                raise KeyboardInterrupt
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'full')), \
+                patch.object(self.install.shutil, 'rmtree', interrupt_once):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+
+    def test_a_reinstall_does_not_copy_and_does_not_stop(self):
+        bundle, stage = self.old_bundle_with_data()
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'full')):
+            backup = self.install.replace_bundle(stage, bundle, True)
+        self.assertTrue(backup.is_dir())
+
     def test_a_finished_install_leaves_no_copy_marker_and_counts_only_data_bytes(self):
         bundle, stage = self.old_bundle_with_data()
         info = {}

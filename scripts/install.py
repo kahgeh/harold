@@ -677,14 +677,22 @@ def restore_live_data(stage, backup, copy_folder):
             (stage / name).rename(backup / name)
 
 
+class DataCopyFailed(Exception):
+    """The data copy into the backup failed. The old bundle is back in place."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def replace_bundle(stage, bundle, reinstall, data_copy=None):
     """Move `bundle` to a backup folder, carry its data into `stage` and put `stage` in its place.
 
     Unless this is a reinstall, the data also goes into the backup as a copy. The copy is made
     while the live data is still in the backup, as backup/data-copy, and takes the name backup/data
     after the live data has moved out. `data_copy`, when given a dict, receives 'bytes' when the copy
-    was made, or 'error' when it failed. The install goes on. Any exception, including an interrupt,
-    removes the partial copy and puts the live data back. The undo reads the folders, not flags, so an interrupt
+    was made. A failed copy raises DataCopyFailed. Any exception, including an interrupt and
+    DataCopyFailed, removes the partial copy and puts the live data back. The undo reads the folders, not flags, so an interrupt
     between any two steps still leaves the live data in the backup."""
     backup = None
     copy_folder = None
@@ -701,8 +709,7 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
                 # A partial copy must not look like a full one after the backup moves back.
                 shutil.rmtree(copy_folder, ignore_errors=True)
                 copy_folder = None
-                if data_copy is not None:
-                    data_copy['error'] = error.strerror or str(error)
+                raise DataCopyFailed(error.strerror or str(error)) from error
             else:
                 # The marker proves a finished copy. The live data never carries it.
                 (copy_folder / COPY_MARKER).write_text(backup.name)
