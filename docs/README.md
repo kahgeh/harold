@@ -34,3 +34,4 @@
 - [2. Tool services trust local callers](adr/0002-tool-services-trust-local-callers.md)
 - [3. Pod merge counts save the counted tip before recording](adr/0003-pod-merge-counts-save-the-tip-first.md)
 - [24. Agents have six states, and Harold takes them from the terminal when the agent reports them](adr/0024-agents-have-six-states-and-harold-takes-them-from-the-terminal-when-it-reports-them.md)
+- [25. Harold keeps transcript text in memory and shows it only in the control-tower](adr/0025-harold-keeps-transcript-text-in-memory-and-shows-it-only-in-the-control-tower.md)
