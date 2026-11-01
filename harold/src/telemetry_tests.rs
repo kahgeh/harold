@@ -2573,7 +2573,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 9] = [
+const AGENT_CARDS: [&str; 10] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2583,6 +2583,7 @@ const AGENT_CARDS: [&str; 9] = [
     "Sessions and panes",
     "Share of state observations read from the screen, by provider and hour",
     "Recap reads, found and none, by day",
+    "Slow inventory scans against load, by hour",
 ];
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";

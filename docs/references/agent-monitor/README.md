@@ -327,7 +327,7 @@ Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 outp
 
 ### Rex
 
-With `multiplexer = "rex"`, each inventory tick runs `rex ls --json --autostart=false`, then `session.view` for each session, then `rex block call … process` for each terminal block (at most 8 at a time). The label is `<session label>:<window>.<pane>`, with both numbers counted from 1 in the order `session.view` lists them. Harold looks for the agent in the foreground program first, then in `ancestors` (nearest parent first), and stops at the block's first process (`child`). The program is the file name of `argv0`; when `argv0` is an interpreter, it is the file name of `script`. A new agent pid gets one `ps -o lstart= -p <pid>` read.
+With `multiplexer = "rex"`, each inventory tick runs `rex ls --json --autostart=false`, then `session.view` for each session, then `rex block call … process` for each terminal block. These calls run in a pool of at most 8. When a call ends, the next call starts at once, so a slow call holds only its own place. An inventory scan takes about the time of its slowest call. The label is `<session label>:<window>.<pane>`, with both numbers counted from 1 in the order `session.view` lists them. Harold looks for the agent in the foreground program first, then in `ancestors` (nearest parent first), and stops at the block's first process (`child`). The program is the file name of `argv0`; when `argv0` is an interpreter, it is the file name of `script`. A new agent pid gets one `ps -o lstart= -p <pid>` read. When more than one agent is new in a scan, these `ps` reads run in the same pool.
 
 A Rex screen read is a tail read: the block method `format` (with `max_bytes` = 1) gives the length of the output and an id, and `blob_read` with that id reads the last bytes (the screen's rows × columns × 4, at least 64 KiB) until `eof`. Harold drops the first line of a cut tail and keeps as many lines as the block has rows. The classifier id is `rex-visible-v1`. A read over 500 ms logs `agent screen read slow`.
 
@@ -384,7 +384,7 @@ The route runs before any lock, log line, `tmux` call or `rex` call. `rex::find_
 
 ### When a host is offline
 
-The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. One read of a host has a limit of 10 seconds. A read is a scan of the host, and a scan fails when a call to list the slots or to read a process fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan. After 3 failed reads in a row, Harold tries that host only every 30 seconds. While a host is offline, its agents stay in the control-tower with the state `unknown`. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one. Harold also reads the `host_id` of this Mac's own Rex server once, with `rex whoami --json`. A label that has this `host_id` is left out and logs a warning. If that read fails, Harold leaves out no label for this reason. Harold calls `whoami --json` on a host again only 30 seconds after a failed call, so an older Rex without it gets few calls.
+The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. The host's `session.view`, `process` and `program_status` calls run in the same pool of at most 8, so a slow call holds only its own place. One read of a host has a limit of 10 seconds. A read is a scan of the host, and a scan fails when a call to list the slots or to read a process fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan. After 3 failed reads in a row, Harold tries that host only every 30 seconds. While a host is offline, its agents stay in the control-tower with the state `unknown`. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one. Harold also reads the `host_id` of this Mac's own Rex server once, with `rex whoami --json`. A label that has this `host_id` is left out and logs a warning. If that read fails, Harold leaves out no label for this reason. Harold calls `whoami --json` on a host again only 30 seconds after a failed call, so an older Rex without it gets few calls.
 
 ### Grouping
 
@@ -407,8 +407,8 @@ The agent monitor sends eight metrics to the collector when export is on. The [t
 
 | Metric | What it shows | Attributes |
 |---|---|---|
-| `harold.multiplexer.calls` | The multiplexer calls, a count | `multiplexer`, `host`, `operation`, `outcome` |
-| `harold.multiplexer.call.duration` | The time of each multiplexer call, in ms | `multiplexer`, `host`, `operation`, `outcome` |
+| `harold.multiplexer.calls` | The multiplexer calls, a count | `multiplexer`, `host`, `operation`, `outcome`, `purpose` (on `screen_read` only) |
+| `harold.multiplexer.call.duration` | The time of each multiplexer call, in ms | `multiplexer`, `host`, `operation`, `outcome`, `purpose` (on `screen_read` only) |
 | `harold.agents` | The agents in the snapshot, read at each export | `state`, `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state.duration` | The time an agent spent in the state it left, in s | `state`, `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state_observed` | The state observations, a count. `source` is `program_status` (a running stream), `program_status_call` (a direct call) or `screen`. `state` is `unknown` when the observation has no state | `source`, `state`, `provider_id`, `multiplexer` |
@@ -430,6 +430,14 @@ A multiplexer call is one request to the multiplexer. Each call has one `operati
 | `key` | `send-key` | `send-keys` with a key |
 
 A call that this table does not name is recorded as `other`. The calls of the control-tower are not recorded.
+
+Each `screen_read` call also has a `purpose`, which tells why Harold reads the screen. No other operation has a `purpose`:
+
+- `state`: the state observer reads the visible screen of a pane, because the pane has no usable status record.
+- `prompt`: prompt recovery reads the history of a pane to find a submitted instruction that no hook reported.
+- `writer`: a writer reads a screen before it types, for example the timed prompts and the input box checks.
+
+Each screen read has exactly one `purpose`. `purpose` is a metric attribute only. No log line carries it. A host inventory makes no screen read, so `purpose` always goes with `host` empty.
 
 The `outcome` is one of five words:
 

@@ -1176,6 +1176,22 @@
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(TimeUnix) AS day, Attributes['result'] AS result, sum(rise) AS reads FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.agent.recap_read') AND Attributes['result'] IN ('found', 'none') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY day, result ORDER BY day, result"
       }
+    },
+    {
+      "id": "slow-scans-against-load",
+      "name": "Slow inventory scans against load, by hour",
+      "x": 12,
+      "y": 72,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ts, sum(slow_scans) AS slow_scans, avg(load_1m) AS load_1m FROM (SELECT toStartOfHour(Timestamp) AS ts, count() AS slow_scans, toFloat64(0) AS load_1m FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'agent inventory scan slow' AND Timestamp >= $__fromTime AND Timestamp <= $__toTime GROUP BY ts UNION ALL SELECT toStartOfHour(TimeUnix) AS ts, toUInt64(0) AS slow_scans, avg(Value) AS load_1m FROM $__sourceTable(gauge) WHERE MetricName = 'system.cpu.load_average.1m' AND $__timeFilter(TimeUnix) GROUP BY ts) GROUP BY ts ORDER BY ts"
+      }
     }
   ]
 }

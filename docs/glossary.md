@@ -98,6 +98,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | inventory, process inventory | The agent monitor's regular scan of the panes of Harold's multiplexer and the agent processes in them | — |
 | tty read | The inventory's read of only the processes on the tmux panes' ttys (`ps -t`). Only with tmux. With Rex, the agent comes from Rex's `process` reply | "partial scan", "fast scan" |
 | full read | The inventory's read of every process on the Mac (`ps -ax`), done only when a chain is broken | "full scan", because "scan" is the inventory's whole pass |
+| inventory scan | One pass of the inventory over the panes of Harold's multiplexer, or of one Rex host | "full scan", "fast scan", "partial scan" |
+| screen read | One read of a pane's screen text through the multiplexer | "capture" alone, "screen grab" |
+| prompt recovery | The agent monitor's read of a pane's history to find a submitted instruction that no hook reported | "prompt scan", "history scan" |
+| purpose (of a screen read) | Why Harold reads a screen: `state`, `prompt` or `writer`, an attribute of the multiplexer metrics | "reason", which names a failure elsewhere |
 | screen adapter | The per-provider reader of an agent's visible screen, such as `claude-v1` | — |
 | input box | The row where Claude Code shows the text the user types, between two rows of `─`. Harold types a line into it only when it is empty | "prompt box", "text box" |
 | suggested prompt | The dim text Claude Code draws in an empty input box after a turn. It is not typed text, and the input box still counts as empty | "grey suggestion", "autocomplete" |
