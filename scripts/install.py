@@ -842,7 +842,7 @@ def install(args, repo):
                     print('copied data to {} ({:.1f} MB)'.format(shown(backup / 'data'), data_copy['bytes'] / 1_000_000),
                           flush=True)
                 # Before haroldctl is overwritten below. Harold is stopped and the old bundle
-                # has moved, so a failed copy is reported and the install goes on.
+                # has moved, so a failed rollback copy is reported and the install goes on.
                 try:
                     keep_rollback_copy(prefix, backup, args.reinstall, metadata, 'bytes' in data_copy)
                 except Exception as error:

@@ -1281,8 +1281,8 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
         self.assertNotIn('Previous installation archived', output)
 
-    def old_install_with_store(self):
-        self.install_existing(saved='-')
+    def old_install_with_store(self, saved='-'):
+        self.install_existing(saved=saved)
         self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
         (self.bundle / 'data/store').mkdir(parents=True)
         (self.bundle / 'data/store/state.db').write_bytes(b'store-bytes' * 100)
@@ -1317,8 +1317,10 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertNotIn('Replies and events from after the install are lost.', note)
 
     def stopped_install(self, start_error=None):
-        """Run an install over an old bundle with a store, with the data copy failing. Returns the exit code."""
-        self.old_install_with_store()
+        """Run an install over an old bundle with a store, with the data copy failing. Returns the exit code.
+        The old service.json records another signing identity, so it differs from the new metadata."""
+        self.old_install_with_store(saved='old-identity')
+        self.old_service_json = (self.bundle / 'service.json').read_text()
         with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
             with self.assertRaises(SystemExit) as raised:
                 self.run_install('-', start_error=start_error)
@@ -1343,7 +1345,8 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertNotIn('Harold ready', output)
         self.assert_old_harold_untouched()
         self.start.assert_called_once()
-        self.assertEqual(self.start.call_args.args[0]['bundle'], str(self.bundle))
+        self.assertEqual(self.start.call_args.args[0], json.loads(self.old_service_json))
+        self.assertEqual(self.start.call_args.args[0]['signing_identity'], 'old-identity')
         self.assertEqual(self.order[-1], ('start', False))
         self.assertFalse(list(self.home.rglob('*.plist')))
         self.assertEqual(json.loads((self.bundle / 'service.json').read_text())['bundle'], str(self.bundle))
