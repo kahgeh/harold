@@ -29,15 +29,21 @@ impl PromptAcquisitionCheckpoint {
         if self.fingerprints.is_none() {
             return self.baseline_due(now);
         }
-        let busy_edge = state == Some(ObservedAgentState::Working)
-            && self.visible_state != Some(ObservedAgentState::Working);
-        let idle_retry = state == Some(ObservedAgentState::Idle)
-            && self.visible_state == Some(ObservedAgentState::Working)
+        let busy_edge = state.is_some_and(ObservedAgentState::is_working)
+            && !self
+                .visible_state
+                .is_some_and(ObservedAgentState::is_working);
+        let idle_retry = state.is_some_and(ObservedAgentState::is_at_rest)
+            && self
+                .visible_state
+                .is_some_and(ObservedAgentState::is_working)
             && self.busy_needs_idle_retry;
         busy_edge
             || idle_retry
             || (self.source_append_pending && self.retry_due(now))
-            || (state.or(self.visible_state) == Some(ObservedAgentState::Working)
+            || (state
+                .or(self.visible_state)
+                .is_some_and(ObservedAgentState::is_working)
                 && self.retry_due(now))
     }
 
@@ -52,7 +58,10 @@ impl PromptAcquisitionCheckpoint {
     }
 
     pub(super) fn capture_failed(&mut self, state: Option<ObservedAgentState>) {
-        if state.or(self.visible_state) == Some(ObservedAgentState::Working) {
+        if state
+            .or(self.visible_state)
+            .is_some_and(ObservedAgentState::is_working)
+        {
             self.busy_needs_idle_retry = true;
         }
     }
@@ -83,8 +92,9 @@ impl PromptAcquisitionCheckpoint {
             });
         self.fingerprints = Some(current);
         self.source_append_pending = false;
-        self.busy_needs_idle_retry = state.or(self.visible_state)
-            == Some(ObservedAgentState::Working)
+        self.busy_needs_idle_retry = state
+            .or(self.visible_state)
+            .is_some_and(ObservedAgentState::is_working)
             && candidate.is_none();
         candidate
     }

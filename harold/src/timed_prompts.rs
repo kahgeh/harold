@@ -532,12 +532,20 @@ pub(crate) fn pick_pane<'a>(
     if !pane.reads_as_claude {
         return Err(Reason::InputBoxUnreadable);
     }
-    match pane.state {
-        EffectiveAgentState::Working if busy_ok => Ok(pane),
-        EffectiveAgentState::Working => Err(Reason::AgentBusy),
-        EffectiveAgentState::Unknown => Err(Reason::AgentStateUnknown),
-        EffectiveAgentState::Idle if typed_into.contains(&pane.pane_id) => Err(Reason::AgentBusy),
-        EffectiveAgentState::Idle => Ok(pane),
+    if pane.state.is_working() {
+        if busy_ok {
+            Ok(pane)
+        } else {
+            Err(Reason::AgentBusy)
+        }
+    } else if pane.state.is_at_rest() {
+        if typed_into.contains(&pane.pane_id) {
+            Err(Reason::AgentBusy)
+        } else {
+            Ok(pane)
+        }
+    } else {
+        Err(Reason::AgentStateUnknown)
     }
 }
 
@@ -657,7 +665,7 @@ impl PaneLocks {
 fn reads_idle(view: &AgentsView, pane_id: &str) -> bool {
     view.panes
         .iter()
-        .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Idle)
+        .any(|pane| pane.pane_id == pane_id && pane.state.is_at_rest())
 }
 
 #[cfg(test)]
@@ -953,9 +961,10 @@ impl<P: Ports> TimedPrompts<P> {
         // has caught up or the pane is gone, and after `TYPED_PANE_HOLD_ROUNDS` rounds.
         let typed_panes = &mut self.typed_panes;
         typed_panes.retain_mut(|typed| {
-            let reads_idle = view.panes.iter().any(|pane| {
-                pane.pane_id == typed.pane_id && pane.state == EffectiveAgentState::Idle
-            });
+            let reads_idle = view
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == typed.pane_id && pane.state.is_at_rest());
             if !reads_idle || typed.rounds_left == 0 {
                 return false;
             }

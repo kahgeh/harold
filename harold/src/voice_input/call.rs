@@ -21,7 +21,6 @@ use super::{
     AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Said, Speaker,
     SpeechModels, TurnResult,
 };
-use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief, same_folder};
 use crate::telemetry::{self, StartedBy};
@@ -2021,11 +2020,11 @@ impl<P: CallPorts> Call<P> {
                 .find(|pane| pane.pane_id == awaiting.pane)
                 .map(|pane| pane.state);
             match state {
-                Some(EffectiveAgentState::Working) => {
+                Some(state) if state.is_working() => {
                     awaiting.seen_busy = true;
                     awaiting.idle_since = None;
                 }
-                Some(EffectiveAgentState::Idle) if awaiting.seen_busy => {
+                Some(state) if state.is_at_rest() && awaiting.seen_busy => {
                     awaiting.idle_since.get_or_insert(now);
                 }
                 _ => {}

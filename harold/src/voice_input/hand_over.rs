@@ -11,7 +11,6 @@
 
 use super::CallPorts;
 use super::call::{MARK, chief_pane};
-use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
 use crate::telemetry::{self, StartedBy};
 use crate::timed_prompts::{Attempt, Ports, Reason, Writer, type_when_ready};
@@ -122,7 +121,7 @@ async fn try_once<P: CallPorts>(ports: &P, line: &str) -> Try {
             let while_busy = view
                 .panes
                 .iter()
-                .any(|seen| seen.pane_id == pane && seen.state == EffectiveAgentState::Working);
+                .any(|seen| seen.pane_id == pane && seen.state.is_working());
             Try::Typed { pane, while_busy }
         }
         Attempt::Wait(reason) => Try::Wait(reason),

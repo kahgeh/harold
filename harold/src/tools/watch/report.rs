@@ -8,7 +8,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::obs::{ReportObs, Why};
-use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::left_out::same_folder;
 use crate::timed_prompts::InputBox;
 use crate::tools::{Agents, ChiefPane, PaneTyping, Typing};
@@ -60,10 +59,11 @@ impl Typist {
         if !agent.reads_as_claude {
             return Err("input_box_unreadable");
         }
-        match agent.state {
-            EffectiveAgentState::Working => return Err("agent_busy"),
-            EffectiveAgentState::Unknown => return Err("agent_state_unknown"),
-            EffectiveAgentState::Idle => {}
+        if agent.state.is_working() {
+            return Err("agent_busy");
+        }
+        if !agent.state.is_at_rest() {
+            return Err("agent_state_unknown");
         }
         match self.agents.input_box(&pane).await {
             // A box in Vim NORMAL mode is ready: the typing step presses `i`.

@@ -30,7 +30,6 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::{
     AgentsView, Attempt, Ports, ROUND_INTERVAL, Reason, TYPED_PANE_HOLD, TmuxPorts, Writer,
     type_when_ready,
@@ -315,7 +314,7 @@ fn held_panes(held: &mut Option<HeldPane>, view: &AgentsView) -> Vec<String> {
             && view
                 .panes
                 .iter()
-                .any(|pane| pane.pane_id == held.pane_id && pane.state == EffectiveAgentState::Idle)
+                .any(|pane| pane.pane_id == held.pane_id && pane.state.is_at_rest())
     });
     if !still_held {
         *held = None;

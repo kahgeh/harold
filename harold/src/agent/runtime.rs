@@ -934,7 +934,7 @@ impl AgentMonitorRuntime {
         tracked.screen_state = None;
         tracked.screen_busy_since_ms = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
-        if state == ObservedAgentState::Working {
+        if state.is_working() {
             crate::telemetry::pane_turned_working(&pane_id, observed_at_ms);
         }
         // A repeat starts no new work, so the summary in progress stands.
@@ -1670,8 +1670,8 @@ fn screen_state_delta(
 
     // An adapter's idle report has no repeats to keep it fresh. It stands until the screen
     // has read busy for the whole grace without a break; then the screen decides.
-    if has_adapter && hook_state == ObservedAgentState::Idle && tracked.screen_state.is_none() {
-        if observed != Some(ObservedAgentState::Working) {
+    if has_adapter && hook_state.is_at_rest() && tracked.screen_state.is_none() {
+        if !observed.is_some_and(ObservedAgentState::is_working) {
             tracked.screen_busy_since_ms = None;
             return None;
         }
@@ -1684,8 +1684,7 @@ fn screen_state_delta(
         let busy_since_ms = *tracked
             .screen_busy_since_ms
             .get_or_insert(observed_at_ms.max(hook_observed_at_ms));
-        return (observed_at_ms >= busy_since_ms.saturating_add(grace))
-            .then_some(ObservedAgentState::Working);
+        return observed.filter(|_| observed_at_ms >= busy_since_ms.saturating_add(grace));
     }
 
     let state = observed?;

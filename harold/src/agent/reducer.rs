@@ -367,6 +367,8 @@ pub(crate) fn screen_changes_activity(
             .fallback_summary
             .as_deref()
             .is_some_and(|summary| previous_summary != Some(summary))
-        || (screen.state == Some(super::domain::ObservedAgentState::Working)
-            && previous_state != EffectiveAgentState::Working)
+        || (screen
+            .state
+            .is_some_and(super::domain::ObservedAgentState::is_working)
+            && !previous_state.is_working())
 }

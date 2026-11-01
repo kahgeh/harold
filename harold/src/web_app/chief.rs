@@ -1,7 +1,7 @@
 //! Which agent pane is the chief's: the first agent pane of the chief's tmux session among
 //! the panes whose folder `[notify] chief` matches. The web app's thread belongs to it.
 
-use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
+use crate::agent::domain::AgentSnapshot;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::timed_prompts::{AgentPane, agents_view};
 
@@ -41,7 +41,7 @@ pub(crate) fn find_chief(
             let busy = view
                 .panes
                 .iter()
-                .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Working);
+                .any(|pane| pane.pane_id == pane_id && pane.state.is_working());
             ChiefPane::One { pane_id, busy }
         }
         ChiefLookup::Ambiguous { .. } => ChiefPane::NoChief,

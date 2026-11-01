@@ -9,7 +9,6 @@ use time::UtcOffset;
 use tokio::task::JoinSet;
 
 use super::clock::local_text;
-use crate::agent::domain::EffectiveAgentState;
 use crate::pod_stats::PodSnapshot;
 use crate::timed_prompts::InputBox;
 use crate::tools::{AgentFact, Agents, ChiefPane, Pods};
@@ -74,14 +73,6 @@ pub(super) struct Sources<'a> {
     pub offset: UtcOffset,
 }
 
-fn state_name(state: EffectiveAgentState) -> &'static str {
-    match state {
-        EffectiveAgentState::Working => "working",
-        EffectiveAgentState::Idle => "idle",
-        EffectiveAgentState::Unknown => "unknown",
-    }
-}
-
 fn box_name(reading: Option<InputBox>) -> &'static str {
     match reading {
         // A Vim box in NORMAL mode is empty here: the typing step presses `i`.
@@ -126,7 +117,7 @@ fn entry(fact: AgentFact, now_ms: i64, input_box: Option<&'static str>) -> Agent
         folder: fact.folder,
         pane: fact.tmux_target,
         provider: fact.provider_id,
-        state: state_name(fact.state),
+        state: fact.state.as_str(),
         seconds_in_state: seconds_since(now_ms, fact.state_since_ms),
         work_summary: fact.work_summary.as_deref().map(cut),
         input_box,

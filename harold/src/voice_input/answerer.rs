@@ -265,11 +265,7 @@ fn facts_json(
         .map(|fact| {
             json!({
                 "agent": folder_name(&fact.folder),
-                "state": match fact.state {
-                    crate::agent::domain::EffectiveAgentState::Working => "working",
-                    crate::agent::domain::EffectiveAgentState::Idle => "idle",
-                    crate::agent::domain::EffectiveAgentState::Unknown => "unknown",
-                },
+                "state": fact.state.as_str(),
                 "for_seconds": seconds_since(now_ms, fact.state_since_ms),
                 "work": fact.work_summary.as_deref().map(|text| cut(text, WORK_SUMMARY_CHARS)),
             })

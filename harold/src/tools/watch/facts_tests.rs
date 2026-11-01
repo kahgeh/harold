@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use crate::agent::domain::EffectiveAgentState;
 use crate::pod_stats::{SlotCounts, SpecFacts, SpecState};
 use crate::tools::watch::test_support::{FakeAgents, FakeChief, FakePods, agent};
 
