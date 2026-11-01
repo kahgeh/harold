@@ -326,6 +326,44 @@ The shipped named defaults cover Codex, Claude, and OpenCode state markers. Code
 
 See [provider screen adapters](screen-adapters.md) for capture timing, incarnation baselines, prompt selection, and provider limitations.
 
+## Metrics
+
+The agent monitor sends six metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
+
+| Metric | What it shows | Attributes |
+|---|---|---|
+| `harold.multiplexer.calls` | The multiplexer calls, a count | `multiplexer`, `host`, `operation`, `outcome` |
+| `harold.multiplexer.call.duration` | The time of each multiplexer call, in ms | `multiplexer`, `host`, `operation`, `outcome` |
+| `harold.agents` | The agents in the snapshot, read at each export | `state`, `provider_id`, `multiplexer`, `host` |
+| `harold.agent.state.duration` | The time an agent spent in the state it left, in s | `state`, `provider_id`, `multiplexer`, `host` |
+| `harold.multiplexer.sessions` | The sessions in the last inventory listing that worked | `multiplexer`, `host` |
+| `harold.multiplexer.panes` | The panes in the last inventory listing that worked, with or without an agent | `multiplexer`, `host` |
+
+A multiplexer call is one request to the multiplexer. Each call has one `operation`, the same word for Rex and tmux:
+
+| `operation` | Rex call | tmux call |
+|---|---|---|
+| `list` | `ls` | `list-panes -a` |
+| `layout` | `api call session.view` | none |
+| `process` | `block call process` | none |
+| `screen_size` | `block call size` | none |
+| `screen_read` | `block call format` and `blob_read` | `capture-pane` |
+| `status` | `block call program_status` | none |
+| `type` | `api call block.event` | `send-keys -l` |
+| `key` | `send-key` | `send-keys` with a key |
+
+A call that this table does not name is recorded as `other`. The calls of the control-tower are not recorded.
+
+The `outcome` is one of five words:
+
+- `ok`: the call worked.
+- `failed`: the program ran and failed.
+- `timeout`: Harold stopped the program at its limit.
+- `absent`: there is no program, or no server.
+- `malformed`: Harold cannot read the answer. A tmux call never gives this outcome.
+
+A listing that did not work is the operation `list` with the outcome `absent`, `failed` or `timeout`. The alert `multiplexer-calls-failing` reads the outcomes `failed`, `timeout` and `malformed`.
+
 ## Privacy and field bounds
 
 The capture port invokes `tmux capture-pane` for an already identified pane. Visible classification starts at row `0`; conditional recovery preserves styles and starts at the negative configured history depth. Raw captures remain within the capture and adapter boundary and are not stored or logged, including on failure. Adapters return typed state and ordered prompt fingerprints with optional normalized candidates. The runtime retains only fingerprints in its ephemeral acquisition checkpoint and forwards at most one eligible work summary through the existing screen event.
