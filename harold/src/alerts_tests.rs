@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_seven_alerts_are_the_ones_in_the_specs() {
+fn the_eight_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -113,7 +113,8 @@ fn the_seven_alerts_are_the_ones_in_the_specs() {
             "slot-idle",
             "watch-cost-high",
             "machine-past-normal",
-            "disk-low"
+            "disk-low",
+            "multiplexer-calls-failing"
         ]
     );
     // The local model is gone, and so is its alert.

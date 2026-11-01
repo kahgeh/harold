@@ -1,6 +1,6 @@
 //! The alert address. With `[telemetry] alert_listen` set, HyperDX's webhooks post
 //! `{"alert": "<name>", "state": "firing" | "cleared"}` to `POST /alert`. Harold accepts
-//! only the seven alerts in `ALERT_NAMES` and types `harold alert: <name> <state>` into the pane of
+//! only the eight alerts in `ALERT_NAMES` and types `harold alert: <name> <state>` into the pane of
 //! the agent running in the chief's folder, with the same checks and typing as timed
 //! prompts. The chief decides what to do with the line. Harold also queues lines of its
 //! own through `AlertQueue`: `harold alert: delivery-given-up firing`,
@@ -37,7 +37,7 @@ use crate::timed_prompts::{
 };
 
 /// The alerts HyperDX may post, as named in the definition files.
-pub(crate) const ALERT_NAMES: [&str; 7] = [
+pub(crate) const ALERT_NAMES: [&str; 8] = [
     "phone-request-unavailable",
     "phone-request-slow",
     "wrong-agent",
@@ -45,6 +45,7 @@ pub(crate) const ALERT_NAMES: [&str; 7] = [
     "watch-cost-high",
     "machine-past-normal",
     "disk-low",
+    "multiplexer-calls-failing",
 ];
 
 const ALERT_STATES: [&str; 2] = ["firing", "cleared"];

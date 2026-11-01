@@ -2936,6 +2936,15 @@ fn the_alert_files_carry_the_spec_thresholds() {
             "above",
             30,
         ),
+        (
+            "multiplexer-calls-failing",
+            METRICS_SOURCE,
+            "harold.multiplexer.calls",
+            "sum",
+            300.0,
+            "above_exclusive",
+            15,
+        ),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
