@@ -515,7 +515,7 @@ fn target_pane<'a>(
 /// `typed_into` counts as busy: Harold typed into it
 /// earlier in this round or in an earlier round, and the snapshot still says idle for a
 /// moment after Harold types. The round keeps a pane in `typed_into` until a round has
-/// seen it not idle, for at most a minute. A Claude Code pane that is `Busy` is picked only
+/// seen it not idle, for at most a minute. A pane whose agent is working is picked only
 /// when `busy_ok`, which only a hand-over from a call sets (`Writer::HandOver`).
 pub(crate) fn pick_pane<'a>(
     view: &'a AgentsView,
@@ -571,7 +571,7 @@ pub(crate) enum Writer {
     Voice,
     /// A hand-over: the call answerer's request for the chief. Like a spoken turn it is not
     /// held back by another writer's hold, and it is the one writer that may type into a
-    /// Claude Code pane that is `Busy`.
+    /// pane whose agent is working.
     HandOver,
     /// A tool typing a line, by the tool's name: the question tool types its batch of
     /// answers into the chief's pane as `Tool("questions")`.
