@@ -48,7 +48,7 @@ fn adapter_removes_the_note() {
 #[test]
 fn adapter_skips_a_user_line_that_quotes_away_summary() {
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "type": "user", "sessionId": "s1", "message": {"content": "what is away_summary?"},
+        "type": "user", "sessionId": "s1", "message": {"content": "what is \"away_summary\"?"},
         "timestamp": "2026-11-02T01:02:03Z",
     }))
     .unwrap();
@@ -57,7 +57,7 @@ fn adapter_skips_a_user_line_that_quotes_away_summary() {
 
 #[test]
 fn adapter_skips_a_line_that_is_not_json() {
-    assert_eq!(read(b"away_summary {not json\n", "s1"), None);
+    assert_eq!(read(b"\"away_summary\" {not json\n", "s1"), None);
 }
 
 #[test]
@@ -104,10 +104,24 @@ fn recap(text: &str) -> RecapLine {
 fn store_get_needs_the_same_agent_pid() {
     let store = Recaps::default();
     store.note_turn_end("p1", 10, "claude", "s1", "/t/a.jsonl");
-    store.update_read("p1", 10, Tail { offset: 5 }, Some(recap("x")));
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 5 },
+        Some(recap("x")),
+    );
     assert_eq!(store.get("p1", 10), Some(recap("x")));
     assert_eq!(store.get("p1", 11), None);
-    store.update_read("p1", 11, Tail { offset: 9 }, Some(recap("y")));
+    store.update_read(
+        "p1",
+        11,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 9 },
+        Some(recap("y")),
+    );
     assert_eq!(
         store.get("p1", 10),
         Some(recap("x")),
@@ -119,7 +133,14 @@ fn store_get_needs_the_same_agent_pid() {
 fn a_new_session_id_drops_the_old_recap() {
     let store = Recaps::default();
     store.note_turn_end("p1", 10, "claude", "s1", "/t/a.jsonl");
-    store.update_read("p1", 10, Tail { offset: 5 }, Some(recap("x")));
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 5 },
+        Some(recap("x")),
+    );
     store.note_turn_end("p1", 10, "claude", "s2", "/t/b.jsonl");
     assert_eq!(store.get("p1", 10), None);
     let targets = store.targets();
@@ -136,16 +157,83 @@ fn a_new_version_only_when_the_recap_changes() {
     let rx = store.subscribe();
     store.note_turn_end("p1", 10, "claude", "s1", "/t/a.jsonl");
     let v0 = *rx.borrow();
-    store.update_read("p1", 10, Tail { offset: 5 }, None);
+    store.update_read("p1", 10, "s1", "/t/a.jsonl", Tail { offset: 5 }, None);
     assert_eq!(*rx.borrow(), v0, "no recap, no change");
-    store.update_read("p1", 10, Tail { offset: 6 }, Some(recap("x")));
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 6 },
+        Some(recap("x")),
+    );
     assert_eq!(*rx.borrow(), v0 + 1);
-    store.update_read("p1", 10, Tail { offset: 7 }, Some(recap("x")));
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 7 },
+        Some(recap("x")),
+    );
     assert_eq!(*rx.borrow(), v0 + 1, "same recap, offset moves only");
-    store.update_read("p1", 10, Tail { offset: 8 }, None);
+    store.update_read("p1", 10, "s1", "/t/a.jsonl", Tail { offset: 8 }, None);
     assert_eq!(*rx.borrow(), v0 + 1, "no new recap keeps the old one");
     assert_eq!(store.get("p1", 10), Some(recap("x")));
     store.forget_missing(&[]);
     assert_eq!(*rx.borrow(), v0 + 2);
     assert_eq!(store.get("p1", 10), None);
+}
+
+#[test]
+fn a_stale_read_after_a_new_session_changes_nothing() {
+    let store = Recaps::default();
+    store.note_turn_end("p1", 10, "claude", "s1", "/t/a.jsonl");
+    store.note_turn_end("p1", 10, "claude", "s2", "/t/b.jsonl");
+    let rx = store.subscribe();
+    let v0 = *rx.borrow();
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 50 },
+        Some(recap("old")),
+    );
+    assert_eq!(*rx.borrow(), v0);
+    assert_eq!(store.get("p1", 10), None);
+    assert_eq!(store.targets()[0].tail, Tail { offset: 0 });
+    store.update_read(
+        "p1",
+        10,
+        "s2",
+        "/t/a.jsonl",
+        Tail { offset: 50 },
+        Some(recap("old")),
+    );
+    assert_eq!(store.get("p1", 10), None, "a stale path writes nothing");
+}
+
+#[test]
+fn a_changed_path_resets_the_tail_and_keeps_the_recap() {
+    let store = Recaps::default();
+    store.note_turn_end("p1", 10, "claude", "s1", "/t/a.jsonl");
+    store.update_read(
+        "p1",
+        10,
+        "s1",
+        "/t/a.jsonl",
+        Tail { offset: 5 },
+        Some(recap("x")),
+    );
+    store.note_turn_end("p1", 10, "claude", "s1", "/t/c.jsonl");
+    assert_eq!(store.get("p1", 10), Some(recap("x")));
+    let target = &store.targets()[0];
+    assert_eq!(target.tail, Tail { offset: 0 });
+    assert_eq!(target.transcript_path, "/t/c.jsonl");
+}
+
+#[test]
+fn a_recap_line_debug_omits_the_text() {
+    assert!(!format!("{:?}", recap("secret words")).contains("secret"));
 }

@@ -17,10 +17,18 @@ use super::summary::normalize_recap;
 use crate::settings::RecapAdapter;
 use crate::transcript::Tail;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RecapLine {
     pub(crate) text: String,
     pub(crate) at_ms: i64,
+}
+
+impl std::fmt::Debug for RecapLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecapLine")
+            .field("at_ms", &self.at_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Reads one transcript line with the adapter. Returns `None` for a line that is not a recap
@@ -112,11 +120,10 @@ impl Recaps {
     ) {
         let changed = {
             let mut entries = self.lock();
-            let same = entries.get(pane_id).is_some_and(|entry| {
-                entry.agent_pid == agent_pid && entry.session_id == session_id
-            });
-            if same {
-                let entry = entries.get_mut(pane_id).expect("entry checked above");
+            let kept = entries
+                .get_mut(pane_id)
+                .filter(|entry| entry.agent_pid == agent_pid && entry.session_id == session_id);
+            if let Some(entry) = kept {
                 if entry.transcript_path != transcript_path {
                     entry.transcript_path = transcript_path.to_string();
                     entry.tail = Tail::default();
@@ -187,20 +194,23 @@ impl Recaps {
     }
 
     /// Keeps the new read offset, and the new recap when there is one. A read for another
-    /// agent pid writes nothing. The version rises only when the recap changes.
+    /// agent pid, session id or path writes nothing. The version rises only when the recap changes.
     pub(crate) fn update_read(
         &self,
         pane_id: &str,
         agent_pid: u32,
+        session_id: &str,
+        transcript_path: &str,
         tail: Tail,
         recap: Option<RecapLine>,
     ) {
         let changed = {
             let mut entries = self.lock();
-            let Some(entry) = entries
-                .get_mut(pane_id)
-                .filter(|entry| entry.agent_pid == agent_pid)
-            else {
+            let Some(entry) = entries.get_mut(pane_id).filter(|entry| {
+                entry.agent_pid == agent_pid
+                    && entry.session_id == session_id
+                    && entry.transcript_path == transcript_path
+            }) else {
                 return;
             };
             entry.tail = tail;
