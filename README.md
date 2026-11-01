@@ -28,7 +28,7 @@ The web app's todo page: answer the chief's questions from your phone.
    curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
    ```
 3. Connect your agents with the [hook setup guide](docs/how-tos/setup-agent-monitor-hooks.md).
-4. In a terminal in Rex or in tmux, start the control-tower: `~/bin/harold/harold start-control-tower`. Pane navigation needs tmux.
+4. In a terminal in Rex or in tmux, start the control-tower: `~/bin/harold/harold start-control-tower`. Pane navigation for tmux agents needs tmux.
 
 ## Docs
 

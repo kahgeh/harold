@@ -197,7 +197,7 @@ Start the control-tower from a terminal in Rex or in tmux:
 ~/bin/harold/harold start-control-tower
 ```
 
-The command finds `control-tower` in the same folder as `harold`. It passes the gRPC address from the settings to the control-tower. To use a different address, add `--endpoint URI`, for example `--endpoint http://127.0.0.1:50061`. Pane navigation needs tmux.
+The command finds `control-tower` in the same folder as `harold`. It passes the gRPC address from the settings to the control-tower. To use a different address, add `--endpoint URI`, for example `--endpoint http://127.0.0.1:50061`. Pane navigation for tmux agents needs tmux.
 
 Service commands are:
 
