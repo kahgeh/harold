@@ -839,7 +839,9 @@ impl App {
     }
 
     pub fn apply_later_snapshot(&mut self, snapshot: Snapshot) -> Result<bool, SnapshotError> {
-        if snapshot.through_event_version == self.snapshot.through_event_version {
+        if snapshot.through_event_version == self.snapshot.through_event_version
+            && !self.current_step_changed_in(&snapshot)
+        {
             return Ok(false);
         }
         if snapshot.through_event_version < self.snapshot.through_event_version {
@@ -853,6 +855,19 @@ impl App {
         self.has_snapshot = true;
         self.connection = ConnectionState::Live;
         Ok(true)
+    }
+
+    /// A current-step change does not raise the event version, so a snapshot at the
+    /// same version still counts when a pane it shares with the current snapshot
+    /// (same pane id and agent pid) has another step.
+    fn current_step_changed_in(&self, snapshot: &Snapshot) -> bool {
+        snapshot.rows.iter().any(|new| {
+            self.snapshot.rows.iter().any(|old| {
+                old.incarnation.pane_id == new.incarnation.pane_id
+                    && old.incarnation.agent_pid == new.incarnation.agent_pid
+                    && old.current_step != new.current_step
+            })
+        })
     }
 
     pub fn mark_disconnected(&mut self) {
@@ -1490,6 +1505,77 @@ mod tests {
                 .is_err()
         );
         assert_eq!(app.snapshot, accepted);
+    }
+
+    fn app_with_step(step: Option<&str>) -> App {
+        let mut app = empty_app();
+        let mut agent = row(
+            incarnation("%1", 1, 2, 3, "codex"),
+            AgentState::Working,
+            "s",
+            0,
+            0,
+        );
+        agent.current_step = step.map(str::to_string);
+        app.apply_first_snapshot(snapshot(7, 700, vec![agent]))
+            .unwrap();
+        app
+    }
+
+    fn same_version_with_step(step: Option<&str>) -> Snapshot {
+        let mut agent = row(
+            incarnation("%1", 1, 2, 3, "codex"),
+            AgentState::Working,
+            "s",
+            0,
+            0,
+        );
+        agent.current_step = step.map(str::to_string);
+        snapshot(7, 701, vec![agent])
+    }
+
+    #[test]
+    fn a_snapshot_with_the_same_version_and_a_new_current_step_is_applied() {
+        let mut app = app_with_step(None);
+
+        assert!(
+            app.apply_later_snapshot(same_version_with_step(Some("Testing")))
+                .unwrap()
+        );
+
+        assert_eq!(
+            app.snapshot.rows[0].current_step.as_deref(),
+            Some("Testing")
+        );
+        assert_eq!(app.snapshot.server_time_ms, 701);
+        assert!(app.has_snapshot);
+        assert_eq!(app.connection, ConnectionState::Live);
+        assert_eq!(app.snapshot.through_event_version, 7);
+    }
+
+    #[test]
+    fn a_snapshot_with_the_same_version_and_the_same_steps_is_ignored() {
+        let mut app = app_with_step(Some("Testing"));
+        let accepted = app.snapshot.clone();
+
+        assert!(
+            !app.apply_later_snapshot(same_version_with_step(Some("Testing")))
+                .unwrap()
+        );
+
+        assert_eq!(app.snapshot, accepted);
+    }
+
+    #[test]
+    fn a_step_that_goes_away_at_the_same_version_is_applied() {
+        let mut app = app_with_step(Some("Testing"));
+
+        assert!(
+            app.apply_later_snapshot(same_version_with_step(None))
+                .unwrap()
+        );
+
+        assert_eq!(app.snapshot.rows[0].current_step, None);
     }
 
     #[test]

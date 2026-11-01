@@ -1608,6 +1608,23 @@ mod tests {
     }
 
     #[test]
+    fn a_new_current_step_at_the_same_version_reaches_the_row() {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(snapshot(2, MonitorHealthState::Healthy), 1_000);
+        let mut next = snapshot(2, MonitorHealthState::Healthy);
+        next.rows[0].current_step = Some("Running tests".into());
+
+        assert_eq!(core.accept_snapshot(next, 2_000), StreamControl::Continue);
+
+        assert_eq!(
+            core.app.snapshot.rows[0].current_step.as_deref(),
+            Some("Running tests")
+        );
+        assert_eq!(core.app.last_snapshot_received_at_ms(), Some(2_000));
+    }
+
+    #[test]
     fn first_snapshot_is_authoritative_records_local_time_and_resets_retry() {
         let mut core = RuntimeCore::new(Some("client-7".into()));
         assert_eq!(core.retry_after("unavailable"), Duration::from_millis(250));
