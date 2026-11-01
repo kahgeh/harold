@@ -6443,6 +6443,165 @@ async fn error_clears_the_blocked_timer_and_a_new_turn_starts_again() {
     assert_eq!(blocked_long_count(&provider_id), 0);
 }
 
+// The blocked timer counts from the record. The tests use a done report: its 30 s grace holds
+// a blocked record back from the shown state, until the record has read busy for 30 s.
+
+#[tokio::test]
+async fn the_blocked_timer_counts_from_the_record_not_the_shown_state() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+
+    // The record reads blocked from 5 s. The report holds it back for 30 s.
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 5_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Done
+    );
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 25_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Done
+    );
+    // The record has read blocked for the whole 30 s: BLOCKED shows now.
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 35_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Blocked
+    );
+
+    // 15 minutes after the shown state, not 15 minutes after the record: no line yet.
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        5_000 + BLOCKED_LONG_MS - 1,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    // 15 minutes after the record: the line comes, before 15 minutes after the shown state.
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        5_000 + BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn a_non_blocked_record_clears_the_blocked_timer() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+
+    // The first spell: blocked from 5 s, shown from 35 s, for 10 minutes.
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 5_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 35_000).await;
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        10 * MINUTE_MS,
+    )
+    .await;
+    // An idle record clears the timer.
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Idle,
+        10 * MINUTE_MS + 1_000,
+    )
+    .await;
+    // The second spell: the record reads blocked from `second`, and BLOCKED shows 40 s later.
+    let second = 10 * MINUTE_MS + 2_000;
+    for at in [second, second + 20_000, second + 40_000] {
+        sample_record(&fixture, &observed, ObservedAgentState::Blocked, at).await;
+    }
+
+    // 16 minutes after the first record, 6 after the second: no line.
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        second + 6 * MINUTE_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    // 15 minutes after the second record, before 15 minutes after the shown state.
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        second + BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn a_hook_report_alone_does_not_stop_the_blocked_timer() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+    report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 2_000).await;
+
+    // A working report arrives every 10 s. The record keeps the state at BLOCKED.
+    let mut at = 12_000;
+    while at < 2_000 + BLOCKED_LONG_MS {
+        report_on(&fixture, &observed, ObservedAgentState::Working, at).await;
+        at += 60_000;
+    }
+    sample_record(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        2_000 + BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn no_blocked_line_comes_while_the_reducer_shows_working() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+
+    // The record reads blocked, but a working report 20 s later takes the state to WORKING.
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 5_000).await;
+    report_on(&fixture, &observed, ObservedAgentState::Working, 6_000).await;
+    sample_screen(
+        &fixture,
+        &observed,
+        ObservedAgentState::Working,
+        5_000 + BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+}
+
 // ---------------------------------------------------------------------------
 // A record refines a hook report of the same kind, and one reduction feeds every reader.
 //

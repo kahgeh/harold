@@ -214,7 +214,8 @@ struct TrackedPane {
     summary_basis_version: EventVersion,
     /// Whether `agent monitor pane gone` has been logged for this incarnation.
     pane_gone_logged: bool,
-    /// When the first sample of the current blocked spell was taken. `None` outside a spell.
+    /// When the current blocked spell started: the first blocked record's `observed_at_ms`, or the
+    /// first sample that shows `Blocked` when the agent has no record. `None` outside a spell.
     blocked_since_ms: Option<i64>,
     /// Whether `agent blocked long` has been logged for the current blocked spell.
     blocked_long_logged: bool,
@@ -244,20 +245,45 @@ impl TrackedPane {
         }
     }
 
-    /// Follows the blocked spell with one sample whose effective state is `effective`. The
-    /// timer starts at the first sample that shows `Blocked` and clears at any other state.
-    /// Returns true once per spell, when the sample is 15 minutes or more after the start.
+    /// Follows the blocked spell with one sample. `record` is the sample's own reading when it
+    /// is the agent's record, as its state and `observed_at_ms`, and `None` for a screen
+    /// reading.
+    ///
+    /// A record that reads `Blocked` starts the timer at its own `observed_at_ms`, even when
+    /// the grace window still holds it back from the shown state. A record that reads any
+    /// other state clears the timer. A hook report alone changes nothing. A sample that is not
+    /// a record keeps the old rule: the timer starts at the first sample where `effective` is
+    /// `Blocked` and clears at any other state.
+    /// Returns true once per spell, when `effective` is `Blocked` and the sample is 15 minutes
+    /// or more after the start.
     fn blocked_long_due(
         &mut self,
         effective: super::domain::EffectiveAgentState,
+        record: Option<(ObservedAgentState, i64)>,
         observed_at_ms: i64,
     ) -> bool {
+        match record {
+            Some((ObservedAgentState::Blocked, record_at_ms)) => {
+                self.blocked_since_ms.get_or_insert(record_at_ms);
+            }
+            Some(_) => {
+                self.blocked_since_ms = None;
+                self.blocked_long_logged = false;
+            }
+            None if effective == super::domain::EffectiveAgentState::Blocked => {
+                self.blocked_since_ms.get_or_insert(observed_at_ms);
+            }
+            None => {
+                self.blocked_since_ms = None;
+                self.blocked_long_logged = false;
+            }
+        }
         if effective != super::domain::EffectiveAgentState::Blocked {
-            self.blocked_since_ms = None;
-            self.blocked_long_logged = false;
             return false;
         }
-        let since = *self.blocked_since_ms.get_or_insert(observed_at_ms);
+        let Some(since) = self.blocked_since_ms else {
+            return false;
+        };
         if self.blocked_long_logged || observed_at_ms < since.saturating_add(BLOCKED_LONG_MS) {
             return false;
         }
@@ -1448,7 +1474,10 @@ impl AgentMonitorRuntime {
                 ))
             });
             let effective = tracked.reduced_state(screen_after, self.graces);
-            if tracked.blocked_long_due(effective, observation.observed_at_ms) {
+            let record = observed
+                .filter(|screen| screen.is_record)
+                .map(|screen| (screen.state, screen.observed_at_ms));
+            if tracked.blocked_long_due(effective, record, observation.observed_at_ms) {
                 let provider_id = tracked.pane.incarnation.provider_id.as_str();
                 tracing::warn!(
                     pane_id = tracked.pane.incarnation.pane_id.as_str(),

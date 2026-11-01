@@ -171,7 +171,7 @@ Harold keeps these facts about the state words:
 - An old `Busy` event still reads as `Working`. Harold writes `Working` from now on.
 - Stage 3 writes the event words `Blocked`, `Done` and `Error`. A Harold of stage 1 or 2 reads each of them as `Unknown` for a state, and as no observation for a screen read.
 - The turn end from the hooks (`TurnComplete`) gives `Done`. It gave `Idle` before stage 3.
-- A pane that stays `Blocked` for 15 minutes gives one log line, `agent blocked long` (`pane_id`, `provider_id`), for each blocked spell. The timer starts at the first sample that shows `Blocked` and restarts after a restart of Harold. The timer clears at any sample whose state is not `Blocked`. The alert `agent-blocked-long` reads this line.
+- A pane that stays `Blocked` for 15 minutes gives one log line, `agent blocked long` (`pane_id`, `provider_id`), for each blocked spell. The timer starts at the `observed_at_ms` of the first `blocked` record and restarts after a restart of Harold. A record that reads any other state clears the timer. A hook report does not clear it. The line comes only while the state is `Blocked`. An agent without a record keeps the old rule: the timer starts at the first sample that shows `Blocked` and clears at any sample that does not. The alert `agent-blocked-long` reads this line.
 - An unknown state word in an event reads as `Unknown` for a state and as no observation for a screen read.
 - An installed OpenCode plugin may send the old name `AGENT_STATE_BUSY`. The proto keeps it as an alias of `AGENT_STATE_WORKING`, so both names mean number 1.
 - An older Harold cannot read the events that this Harold writes.
