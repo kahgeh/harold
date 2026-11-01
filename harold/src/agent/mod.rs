@@ -47,3 +47,9 @@ pub(crate) mod rex_hosts;
 #[cfg(test)]
 #[path = "rex_hosts_tests.rs"]
 mod rex_hosts_tests;
+
+pub(crate) mod rex_host_runner;
+
+#[cfg(test)]
+#[path = "rex_host_runner_tests.rs"]
+mod rex_host_runner_tests;

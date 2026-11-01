@@ -84,6 +84,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "tmux_ms",
     "rex_ms",
     "multiplexer",
+    "host",
     "rex_version",
     "scrollback_bytes",
     "provider_id",

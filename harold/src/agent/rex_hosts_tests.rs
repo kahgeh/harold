@@ -323,3 +323,46 @@ fn a_failed_listing_gives_an_error_and_no_agents() {
     assert!(scan.outcome.is_err());
     assert!(scan.agents.is_empty());
 }
+
+#[test]
+fn a_failed_status_call_gives_that_agent_unknown_and_keeps_the_others() {
+    let fake = Fake::new("statusfail");
+    // The fake answers no program_status call for b2, so that one call fails.
+    fake.put(
+        "process-b2.json",
+        r#"{"child":{"pid":101,"name":"bash","argv0":"bash","cwd":"/home"},"foreground":{"pid":300,"name":"alpha-agent","argv0":"alpha-agent","cwd":"/work/two"},"ancestors":[]}"#,
+    );
+    let scan = fake.inventory("omarchy", None, clock(1)).scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents.len(), 2);
+    let first = &scan.agents[0];
+    assert_eq!(first.host_pane_id, "rex:omarchy/block:b1");
+    assert_eq!(
+        first.state,
+        HostAgentState::Observed(ObservedAgentState::Working)
+    );
+    let second = &scan.agents[1];
+    assert_eq!(second.host_pane_id, "rex:omarchy/block:b2");
+    assert_eq!(second.state, HostAgentState::Unknown);
+    assert_eq!(second.current_step, None);
+}
+
+#[test]
+fn the_host_list_tells_whether_rex_knows_the_label() {
+    let fake = Fake::new("listed");
+    assert_eq!(
+        fake.inventory("omarchy", None, clock(0)).listed(),
+        Some(true)
+    );
+    assert_eq!(
+        fake.inventory("nosuch", None, clock(0)).listed(),
+        Some(false)
+    );
+    // A mark override does not stop the check.
+    assert_eq!(
+        fake.inventory("nosuch", Some("arch"), clock(0)).listed(),
+        Some(false)
+    );
+    fake.remove_hosts();
+    assert_eq!(fake.inventory("omarchy", None, clock(0)).listed(), None);
+}

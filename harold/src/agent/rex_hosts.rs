@@ -3,9 +3,6 @@
 //! `RexHostInventory` reads one host through `rex -S <label>`. It has read calls only: no
 //! paste, no key and no screen read exists for a host. It keeps its result in memory.
 
-// Only the tests call parts of this module until the runtime thread for each host uses it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -76,6 +73,9 @@ struct IconState {
     value: String,
     /// When the last read started. `None` before the first read.
     last_read_ms: Option<i64>,
+    /// Whether the last host list that Harold could read names the label. `None` before
+    /// the first read that works.
+    listed: Option<bool>,
 }
 
 pub(crate) struct RexHostInventory {
@@ -124,6 +124,10 @@ impl RexHostInventory {
             host_id: Mutex::new(None),
             icon: Mutex::new(IconState::default()),
         }
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
     }
 
     /// Runs `rex` with the label and the limit, and counts the call under `operation`.
@@ -235,7 +239,13 @@ impl RexHostInventory {
             let Some((agent, program)) = find_agent(&process, &self.settings) else {
                 continue;
             };
-            let record = self.record(slot)?.filter(|record| record.pid == agent.pid);
+            // A failed status call gives this agent no record, so its state is unknown.
+            // The other agents keep theirs.
+            let record = self
+                .record(slot)
+                .ok()
+                .flatten()
+                .filter(|record| record.pid == agent.pid);
             let (provider_id, provider_display_name) =
                 match resolve_provider(&self.settings, &program) {
                     ProviderResolution::Matched {
@@ -318,31 +328,46 @@ impl RexHostInventory {
         if let Some(mark) = &self.mark_override {
             return mark.clone();
         }
-        let now = (self.clock)();
         let mut state = self.icon.lock().unwrap_or_else(PoisonError::into_inner);
+        self.read_host_list(&mut state);
+        state.value.clone()
+    }
+
+    /// Whether `rex hosts list` names the label: `Some(false)` when Rex does not know the
+    /// host, `None` when no read of the list worked. It shares the icon's once-a-minute read.
+    pub(crate) fn listed(&self) -> Option<bool> {
+        let mut state = self.icon.lock().unwrap_or_else(PoisonError::into_inner);
+        self.read_host_list(&mut state);
+        state.listed
+    }
+
+    /// Reads the host list when the last read is a minute old or more.
+    fn read_host_list(&self, state: &mut IconState) {
+        let now = (self.clock)();
         let due = state
             .last_read_ms
             .is_none_or(|last| now.saturating_sub(last) >= ICON_INTERVAL_MS);
-        if due {
-            state.last_read_ms = Some(now);
-            let read = self
-                .call(
-                    MultiplexerOperation::Other,
-                    false,
-                    &["hosts", "list", "--json"],
-                )
-                .and_then(|text| parse_icon(&text, &self.label));
-            if let Ok(icon) = read {
-                state.value = icon;
-            }
+        if !due {
+            return;
         }
-        state.value.clone()
+        state.last_read_ms = Some(now);
+        let read = self
+            .call(
+                MultiplexerOperation::Other,
+                false,
+                &["hosts", "list", "--json"],
+            )
+            .and_then(|text| parse_icon(&text, &self.label));
+        if let Ok(entry) = read {
+            state.listed = Some(entry.is_some());
+            state.value = entry.unwrap_or_default();
+        }
     }
 }
 
 /// The icon of the host `label` in the output of `rex hosts list --json`. A host with no
-/// icon, or no entry, gives an empty icon.
-fn parse_icon(text: &str, label: &str) -> Result<String, RexError> {
+/// icon gives an empty icon, and a label with no entry gives `None`.
+fn parse_icon(text: &str, label: &str) -> Result<Option<String>, RexError> {
     let value = parse_json(text)?;
     let hosts = value
         .get("hosts")
@@ -352,7 +377,10 @@ fn parse_icon(text: &str, label: &str) -> Result<String, RexError> {
         .iter()
         .filter_map(|entry| entry.get("host"))
         .find(|host| host.get("label").and_then(Value::as_str) == Some(label))
-        .and_then(|host| host.get("icon").and_then(Value::as_str))
-        .unwrap_or_default()
-        .to_string())
+        .map(|host| {
+            host.get("icon")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        }))
 }

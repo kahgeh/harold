@@ -1519,6 +1519,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         restart_reminder: None,
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
+        host_agents: crate::agent::rex_host_runner::HostAgents::default(),
     };
     crate::test_logs::keep_second_dispatcher();
     let captured_logs = Arc::new(Mutex::new(Vec::new()));
@@ -1605,6 +1606,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         stored_snapshot,
         &crate::agent::rex::CurrentSteps::default(),
         &crate::agent::recap::Recaps::default(),
+        &crate::agent::rex_host_runner::HostAgents::default(),
     );
     assert!(!format!("{protobuf:?}").contains(&sentinel));
     assert!(
@@ -1661,6 +1663,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         restart_reminder: None,
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
+        host_agents: crate::agent::rex_host_runner::HostAgents::default(),
     };
 
     fixture.handle.inventory_tick().await.unwrap();
@@ -5408,6 +5411,7 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the
         restart_reminder: None,
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
+        host_agents: crate::agent::rex_host_runner::HostAgents::default(),
     };
 
     // The first scan runs until its 1.5 s deadline stops it; both calls queue behind it.
@@ -5931,4 +5935,126 @@ async fn a_resolve_sent_during_a_tick_waits_at_least_the_rest_of_that_tick() {
     assert_eq!(logs.matches("agent pane resolve slow").count(), 1, "{logs}");
     assert!(wait_ms.unwrap() >= 1_000, "{logs}");
     assert!(elapsed_ms.unwrap() >= wait_ms.unwrap(), "{logs}");
+}
+
+/// A Rex host that answers once with one agent, and then never answers until the test ends.
+#[derive(Default)]
+struct StuckHost {
+    reads: AtomicUsize,
+    stuck: tokio::sync::Notify,
+    released: (Mutex<bool>, std::sync::Condvar),
+}
+
+impl super::rex_host_runner::HostSource for StuckHost {
+    fn label(&self) -> &str {
+        "omarchy"
+    }
+
+    fn scan(&self) -> super::rex_hosts::HostScan {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return super::rex_hosts::HostScan {
+                agents: vec![super::rex_hosts::RexHostAgent {
+                    host: "omarchy".into(),
+                    host_pane_id: "rex:omarchy/block:b1".into(),
+                    pid: 4_200,
+                    first_seen_ms: 0,
+                    state: super::rex_hosts::HostAgentState::Observed(ObservedAgentState::Idle),
+                    current_step: None,
+                    provider_id: "codex".into(),
+                    provider_display_name: "Codex".into(),
+                    session_name: "harold".into(),
+                    window_index: 0,
+                    pane_index: 0,
+                    working_directory: "/home/harold".into(),
+                }],
+                host_id: Some("host-o".into()),
+                outcome: Ok(()),
+            };
+        }
+        self.stuck.notify_one();
+        let (lock, ready) = &self.released;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = ready.wait(released).unwrap();
+        }
+        super::rex_hosts::HostScan {
+            agents: Vec::new(),
+            host_id: None,
+            outcome: Err(super::rex::RexError::Failed),
+        }
+    }
+
+    fn icon(&self) -> String {
+        String::new()
+    }
+
+    fn listed(&self) -> Option<bool> {
+        None
+    }
+}
+
+/// Lets the stuck read go when the test ends, so the runtime can stop.
+struct ReleaseStuckHost(Arc<StuckHost>);
+
+impl Drop for ReleaseStuckHost {
+    fn drop(&mut self) {
+        *self.0.released.0.lock().unwrap() = true;
+        self.0.released.1.notify_all();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_macs_agents_keep_their_states_while_a_rex_host_times_out() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![observation.clone()]); 4]));
+    inventory.push_resolution(Ok(Some(observation.clone())));
+    let (_shutdown, shutdown_rx) = watch::channel(());
+    let (handle, _task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        2_000,
+        shutdown_rx.clone(),
+    );
+    let host = Arc::new(StuckHost::default());
+    let _release = ReleaseStuckHost(Arc::clone(&host));
+    let (hosts, _tasks) = super::rex_host_runner::spawn_hosts(
+        vec![Arc::clone(&host) as Arc<dyn super::rex_host_runner::HostSource>],
+        Duration::from_secs(1),
+        Arc::new(|| 0),
+        shutdown_rx,
+    );
+    let mut versions = hosts.subscribe();
+    versions.changed().await.unwrap();
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Working,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    // The host's second read is stuck. The Mac's scans do not wait for it.
+    host.stuck.notified().await;
+    handle.inventory_tick().await.unwrap();
+    tokio::time::advance(super::rex_host_runner::SCAN_BUDGET).await;
+    versions.changed().await.unwrap();
+    handle.inventory_tick().await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
+    let rows = hosts.snapshot();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].agent.state,
+        super::rex_hosts::HostAgentState::Unknown
+    );
 }

@@ -12,6 +12,8 @@ use super::agent::domain::{
 use super::agent::inventory::{AgentInventoryPort, InventoryError};
 use super::agent::recap::Recaps;
 use super::agent::rex::CurrentSteps;
+use super::agent::rex_host_runner::{HostAgents, HostReport};
+use super::agent::rex_hosts::{HostAgentState, RexHostAgent};
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
@@ -96,6 +98,7 @@ where
             restart_reminder: None,
             current_steps: crate::agent::rex::CurrentSteps::default(),
             recaps: crate::agent::recap::Recaps::default(),
+            host_agents: HostAgents::default(),
         },
         shutdown,
         task,
@@ -1043,7 +1046,8 @@ fn snapshot_mapping_carries_the_harold_version() {
         map_agent_snapshot(
             empty_snapshot(),
             &CurrentSteps::default(),
-            &Recaps::default()
+            &Recaps::default(),
+            &HostAgents::default()
         )
         .harold_version,
         HAROLD_VERSION
@@ -1063,7 +1067,15 @@ fn an_unset_or_empty_release_version_is_source() {
 fn snapshot_mapping_carries_tts_muted() {
     let mut snapshot = empty_snapshot();
     snapshot.tts_muted = true;
-    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default(), &Recaps::default()).tts_muted);
+    assert!(
+        map_agent_snapshot(
+            snapshot,
+            &CurrentSteps::default(),
+            &Recaps::default(),
+            &HostAgents::default(),
+        )
+        .tts_muted
+    );
 }
 
 #[tokio::test]
@@ -1119,7 +1131,13 @@ fn snapshot_mapping_carries_messaging_paused() {
     let mut snapshot = empty_snapshot();
     snapshot.messaging_paused = true;
     assert!(
-        map_agent_snapshot(snapshot, &CurrentSteps::default(), &Recaps::default()).messaging_paused
+        map_agent_snapshot(
+            snapshot,
+            &CurrentSteps::default(),
+            &Recaps::default(),
+            &HostAgents::default(),
+        )
+        .messaging_paused
     );
 }
 
@@ -2442,6 +2460,7 @@ fn recap_stream(
         hub.subscribe(),
         steps.clone(),
         recaps.clone(),
+        HostAgents::default(),
         sender,
         shutdown_rx,
     ));
@@ -2486,7 +2505,7 @@ async fn a_working_record_gives_current_step_on_the_stream() {
 async fn a_blocked_record_gives_its_step() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, Some("Allow Bash?".into()));
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
 }
 
@@ -2497,12 +2516,12 @@ async fn a_blocked_record_gives_its_step() {
 fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
     assert_eq!(step_of(&mapped), None);
     // A step that is removed goes from the next snapshot too.
     steps.set(STEP_PANE, STEP_PID, Some("Run".into()));
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
     assert_eq!(step_of(&mapped), None);
 }
 
@@ -2849,3 +2868,127 @@ async fn the_recap_is_not_in_the_captured_logs_spans_or_stored_rows() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+fn host_agent(state: ObservedAgentState) -> RexHostAgent {
+    RexHostAgent {
+        host: "omarchy".into(),
+        host_pane_id: "rex:omarchy/block:b1".into(),
+        pid: 4_200,
+        first_seen_ms: 7_000,
+        state: HostAgentState::Observed(state),
+        current_step: Some("Edit files".into()),
+        provider_id: "claude".into(),
+        provider_display_name: "Claude".into(),
+        session_name: "harold".into(),
+        window_index: 2,
+        pane_index: 3,
+        working_directory: "/home/u/harold".into(),
+    }
+}
+
+fn reached(state: ObservedAgentState) -> HostReport {
+    HostReport::Reached {
+        agents: vec![host_agent(state)],
+        host_id: Some("host-o".into()),
+        icon: "server.rack".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_host_agent_is_in_the_watch_stream_and_not_in_the_snapshot_events_or_panes() {
+    let directory = std::env::temp_dir().join(format!("harold-host-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (mut service, _shutdown, _task) =
+        test_service(Arc::clone(&store), populated_snapshot(1, None));
+    service.host_agents = HostAgents::new(vec!["omarchy".into()]);
+    service
+        .host_agents
+        .record("omarchy", reached(ObservedAgentState::Working), 9_000);
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let item = stream.next().await.expect("an item").unwrap();
+    assert_eq!(item.panes.len(), 2);
+    assert_eq!(item.panes[0].pane_id, STEP_PANE);
+    assert_eq!(item.panes[0].host, "");
+    let host = &item.panes[1];
+    assert_eq!(host.pane_id, "rex:omarchy/block:b1");
+    assert_eq!(host.host, "omarchy");
+    assert_eq!(host.host_icon, "server.rack");
+    assert_eq!(host.tmux_target, "harold");
+    assert_eq!(host.session_name, "harold");
+    assert_eq!(host.working_directory, "");
+    assert_eq!((host.window_index, host.pane_index), (2, 3));
+    assert_eq!((host.pane_pid, host.agent_pid), (0, 4_200));
+    assert_eq!(host.agent_started_at_ms, 7_000);
+    assert_eq!(host.last_transition_at_ms, 7_000);
+    assert_eq!(host.provider_id, "claude");
+    assert_eq!(host.provider_display_name, "Claude");
+    assert_eq!(host.state, i32::from(AgentState::Working));
+    assert_eq!(host.current_step.as_deref(), Some("Edit files"));
+    assert_eq!(host.work_summary, None);
+
+    // A change on the host sends a new item.
+    service
+        .host_agents
+        .record("omarchy", reached(ObservedAgentState::Idle), 9_500);
+    let item = stream.next().await.expect("a second item").unwrap();
+    assert_eq!(item.panes[1].state, i32::from(AgentState::Idle));
+    assert_eq!(item.panes[1].last_transition_at_ms, 9_500);
+
+    // Memory only: not in AgentSnapshot, the event log or agent_panes.
+    let is_host = |pane_id: &str| pane_id.starts_with("rex:");
+    assert!(
+        !service
+            .snapshots
+            .current()
+            .panes
+            .iter()
+            .any(|pane| is_host(&pane.pane.incarnation.pane_id))
+    );
+    let stored = store.load_agent_snapshot().await.unwrap();
+    assert!(
+        !stored
+            .panes
+            .iter()
+            .any(|pane| is_host(&pane.pane.incarnation.pane_id))
+    );
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 1_000)
+        .await
+        .unwrap();
+    assert!(!format!("{events:?}").contains("rex:omarchy"));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn an_unreachable_host_shows_its_last_agents_as_unknown() {
+    let hosts = HostAgents::new(vec!["omarchy".into()]);
+    hosts.record("omarchy", reached(ObservedAgentState::Working), 9_000);
+    hosts.record(
+        "omarchy",
+        HostReport::Unreached {
+            reason: super::agent::rex_host_runner::Unreached::Timeout,
+            host_id: None,
+        },
+        9_900,
+    );
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &hosts,
+    );
+    assert_eq!(mapped.panes[0].state, i32::from(AgentState::Working));
+    assert_eq!(mapped.panes[1].state, i32::from(AgentState::Unknown));
+    assert_eq!(mapped.panes[1].last_transition_at_ms, 9_900);
+    assert_eq!(mapped.panes[1].current_step, None);
+}
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
