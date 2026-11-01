@@ -3333,6 +3333,74 @@ fn start_records_zero_on_the_32_failure_series() {
 }
 
 #[test]
+fn start_records_zero_on_the_list_failure_series_of_each_rex_host_and_no_other() {
+    test_support::install();
+    let hosts = vec!["zero_host_a".to_owned(), "zero_host_b".to_owned()];
+    register_host_counters("rex", &hosts);
+    let read = |host: &str, operation: &str, outcome: &str| {
+        test_support::exact_counter_value(
+            "harold.multiplexer.calls",
+            &[
+                ("multiplexer", "rex"),
+                ("host", host),
+                ("operation", operation),
+                ("outcome", outcome),
+            ],
+        )
+    };
+    for host in ["zero_host_a", "zero_host_b"] {
+        for outcome in MultiplexerOutcome::FAILURES {
+            assert_eq!(read(host, "list", outcome.as_str()), Some(0), "{host}");
+            assert_eq!(read(host, "key", outcome.as_str()), None, "{host}");
+        }
+        assert_eq!(read(host, "list", "ok"), None, "{host}");
+    }
+    assert_eq!(read("zero_host_c", "list", "failed"), None);
+}
+
+#[test]
+fn no_host_series_start_with_tmux_or_an_empty_list() {
+    test_support::install();
+    register_host_counters("tmux", &["zero_tmux_host".to_owned()]);
+    register_host_counters("rex", &[]);
+    let found =
+        test_support::counter_attributes("harold.multiplexer.calls", &[("host", "zero_tmux_host")]);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn the_agents_gauge_carries_the_host_of_a_host_agent_and_the_empty_host_for_the_mac() {
+    let row = |state, count| AgentCount {
+        state,
+        provider_id: "host_gauge_probe".to_owned(),
+        count,
+    };
+    note_agent_counts_for("rex", vec![row("idle", 1)]);
+    note_host_agent_counts(
+        "gauge_host",
+        vec![row("working", 2), row("idle", 0), row("unknown", 1)],
+    );
+    let read = |state, host| {
+        test_support::gauge_value(
+            "harold.agents",
+            &[
+                ("state", state),
+                ("provider_id", "host_gauge_probe"),
+                ("multiplexer", "rex"),
+                ("host", host),
+            ],
+        )
+    };
+    assert_eq!(read("working", "gauge_host"), Some(2));
+    assert_eq!(read("idle", "gauge_host"), Some(0));
+    assert_eq!(read("unknown", "gauge_host"), Some(1));
+    assert_eq!(read("idle", ""), Some(1));
+    assert_eq!(read("working", ""), None);
+    note_host_agent_counts("gauge_host", Vec::new());
+    assert_eq!(read("working", "gauge_host"), None);
+}
+
+#[test]
 fn no_metric_name_holds_rex_or_tmux() {
     for name in MULTIPLEXER_METRIC_NAMES {
         for word in ["rex", "tmux", "claude"] {

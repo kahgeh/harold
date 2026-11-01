@@ -324,9 +324,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`) |
 | `watch.cost_usd` | counter, `USD` | `folder` |
-| `harold.multiplexer.calls` | counter, `{call}` | `multiplexer` (`rex` or `tmux`), `host` (the empty string for Harold's own machine), `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`, `other`), `outcome` (`ok`, `failed`, `timeout`, `absent`, `malformed`) |
+| `harold.multiplexer.calls` | counter, `{call}` | `multiplexer` (`rex` or `tmux`), `host` (the empty string for Harold's own machine, or the label of a Rex host in `rex_hosts`), `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`, `other`), `outcome` (`ok`, `failed`, `timeout`, `absent`, `malformed`) |
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome` |
-| `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` |
+| `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` (the empty string for Harold's own machine, or the label of a Rex host) |
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `idle`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |

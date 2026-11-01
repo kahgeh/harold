@@ -395,7 +395,7 @@ The chief's tools carry its lines with `rex send` and `pod say`. Typing into a R
 
 ## Metrics
 
-The agent monitor sends eight metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
+The agent monitor sends eight metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine. For an agent on a Rex host, and for the calls to that host, `host` is the host label from `rex_hosts`. At start, Harold records 0 on the `list` failure series (`failed`, `timeout`, `absent` and `malformed`) for each label. The metrics hold no screen, no transcript and no text of a line.
 
 | Metric | What it shows | Attributes |
 |---|---|---|

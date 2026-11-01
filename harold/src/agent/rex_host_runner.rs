@@ -5,7 +5,7 @@
 //! the task reads the host only every 30 seconds. The agents go to `HostAgents` only: not
 //! to the reducer, the event log or `agent_panes`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,9 +13,11 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
+use super::domain::ObservedAgentState;
 use super::rex::RexError;
 use super::rex_hosts::{HostAgentState, HostClock, HostScan, RexHostAgent, RexHostInventory};
 use crate::settings::{Multiplexer, Settings};
+use crate::telemetry::AgentCount;
 
 /// The longest time one read of a host can take. The calls run one after another, so a
 /// host with many blocks on a slow link can need more than one call's limit.
@@ -223,9 +225,50 @@ impl HostAgents {
             rows(&self.inner.labels, &hosts) != before
         };
         if changed {
+            self.note_counts();
             self.inner.version.send_modify(|version| *version += 1);
         }
     }
+
+    /// Gives `harold.agents` the count of the agents on each host, by state and provider.
+    fn note_counts(&self) {
+        let rows = self.snapshot();
+        for label in &self.inner.labels {
+            let own = rows.iter().filter(|row| row.agent.host == *label);
+            crate::telemetry::note_host_agent_counts(label, host_agent_counts(own));
+        }
+    }
+}
+
+/// The agents in each state for each provider. A state with no agent counts 0, as for the
+/// Mac's agents. An agent whose state is unknown counts as `unknown`.
+fn host_agent_counts<'a>(rows: impl Iterator<Item = &'a HostAgentRow> + Clone) -> Vec<AgentCount> {
+    let mut counts: BTreeMap<(&'static str, &str), u64> = BTreeMap::new();
+    for row in rows.clone() {
+        for state in ["working", "idle", "unknown"] {
+            counts
+                .entry((state, row.agent.provider_id.as_str()))
+                .or_default();
+        }
+    }
+    for row in rows {
+        let state = match row.agent.state {
+            HostAgentState::Observed(ObservedAgentState::Working) => "working",
+            HostAgentState::Observed(ObservedAgentState::Idle) => "idle",
+            HostAgentState::Unknown => "unknown",
+        };
+        *counts
+            .entry((state, row.agent.provider_id.as_str()))
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|((state, provider_id), count)| AgentCount {
+            state,
+            provider_id: provider_id.to_owned(),
+            count,
+        })
+        .collect()
 }
 
 fn rows(labels: &[String], hosts: &HashMap<String, Host>) -> Vec<HostAgentRow> {

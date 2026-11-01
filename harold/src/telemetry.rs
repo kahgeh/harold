@@ -689,6 +689,8 @@ pub(crate) struct AgentCount {
 #[derive(Default)]
 struct AgentGaugeState {
     counts: BTreeMap<String, Vec<AgentCount>>,
+    /// The counts of the agents on each Rex host, by host label.
+    host_counts: BTreeMap<String, Vec<AgentCount>>,
     /// The sessions and panes of the last listing that worked.
     listings: BTreeMap<String, (u64, u64)>,
 }
@@ -717,6 +719,19 @@ fn agent_gauge_state() -> &'static Arc<Mutex<AgentGaugeState>> {
                                     KeyValue::new("provider_id", row.provider_id.clone()),
                                     KeyValue::new("multiplexer", multiplexer.clone()),
                                     KeyValue::new("host", HOST_OWN_MACHINE),
+                                ],
+                            );
+                        }
+                    }
+                    for (host, rows) in &state.host_counts {
+                        for row in rows {
+                            observer.observe(
+                                row.count,
+                                &[
+                                    KeyValue::new("state", row.state),
+                                    KeyValue::new("provider_id", row.provider_id.clone()),
+                                    KeyValue::new("multiplexer", REX_HOST_MULTIPLEXER),
+                                    KeyValue::new("host", host.clone()),
                                 ],
                             );
                         }
@@ -767,6 +782,44 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
     #[cfg(test)]
     COUNTS_NOTED.with(|noted| noted.borrow_mut().push(counts.clone()));
     note_agent_counts_for(configured_multiplexer(), counts);
+}
+
+/// The multiplexer of every Rex host: hosts exist only with Rex.
+const REX_HOST_MULTIPLEXER: &str = "rex";
+
+/// Replaces the counts of the agents on the Rex host `host`. An empty list removes them.
+pub(crate) fn note_host_agent_counts(host: &str, counts: Vec<AgentCount>) {
+    let mut state = agent_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if counts.is_empty() {
+        state.host_counts.remove(host);
+    } else {
+        state.host_counts.insert(host.to_owned(), counts);
+    }
+}
+
+/// Records 0 once on the failure series of `list` calls for each Rex host in `hosts`, as
+/// `register_multiplexer_counters` does for the Mac. It does nothing unless the multiplexer
+/// is Rex and `hosts` is not empty. `main` calls it once when export is on.
+pub(crate) fn register_host_counters(multiplexer: &str, hosts: &[String]) {
+    if multiplexer != REX_HOST_MULTIPLEXER {
+        return;
+    }
+    let instruments = instruments();
+    for host in hosts {
+        for outcome in MultiplexerOutcome::FAILURES {
+            instruments.multiplexer_calls.add(
+                0,
+                &[
+                    KeyValue::new("multiplexer", REX_HOST_MULTIPLEXER),
+                    KeyValue::new("host", host.clone()),
+                    KeyValue::new("operation", MultiplexerOperation::List.as_str()),
+                    KeyValue::new("outcome", outcome.as_str()),
+                ],
+            );
+        }
+    }
 }
 
 /// Records the seconds an agent spent in `left_state` on `harold.agent.state.duration`.

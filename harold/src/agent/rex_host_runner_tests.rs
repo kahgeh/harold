@@ -348,3 +348,104 @@ fn rows_follow_the_order_of_rex_hosts() {
         .collect();
     assert_eq!(hosts, ["b-host", "a-host"]);
 }
+
+fn gauge(host: &str, provider: &str, state: &str) -> Option<u64> {
+    crate::telemetry::test_support::gauge_value(
+        "harold.agents",
+        &[
+            ("state", state),
+            ("provider_id", provider),
+            ("multiplexer", "rex"),
+            ("host", host),
+        ],
+    )
+}
+
+#[test]
+fn host_agents_are_counted_by_state_and_an_unreached_host_counts_unknown() {
+    crate::telemetry::test_support::install();
+    let agents = HostAgents::new(vec!["count_host".into()]);
+    let mut first = agent("count_host", "b1", 200, 1, WORKING);
+    let mut second = agent("count_host", "b2", 201, 1, IDLE);
+    first.provider_id = "count_provider".into();
+    second.provider_id = "count_provider".into();
+    agents.record(
+        "count_host",
+        HostReport::Reached {
+            agents: vec![first, second],
+            host_id: Some("id".into()),
+            icon: String::new(),
+        },
+        10,
+    );
+    assert_eq!(gauge("count_host", "count_provider", "working"), Some(1));
+    assert_eq!(gauge("count_host", "count_provider", "idle"), Some(1));
+    assert_eq!(gauge("count_host", "count_provider", "unknown"), Some(0));
+    agents.record(
+        "count_host",
+        HostReport::Unreached {
+            reason: Unreached::Failed,
+            host_id: None,
+        },
+        20,
+    );
+    assert_eq!(gauge("count_host", "count_provider", "working"), Some(0));
+    assert_eq!(gauge("count_host", "count_provider", "unknown"), Some(2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_stops_the_host_tasks() {
+    let host = FakeHost::new("omarchy", vec![Step::Good(vec![])]);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (_agents, tasks) = spawn_hosts(
+        vec![Arc::clone(&host) as Arc<dyn HostSource>],
+        INTERVAL,
+        virtual_clock(),
+        shutdown_rx,
+    );
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    shutdown.send(()).unwrap();
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the task stops")
+            .expect("the task does not panic");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_host_that_fails_and_recovers_moves_the_transition_time_and_logs_the_pair() {
+    let logs = CapturedLogs::start();
+    let good = || Step::Good(vec![agent("omarchy", "b1", 200, 5, WORKING)]);
+    let host = FakeHost::new(
+        "omarchy",
+        vec![good(), Step::Fail(RexError::Failed), good()],
+    );
+    let (agents, _shutdown) = spawn(&[Arc::clone(&host)]);
+    // Scans at 0, 1 and 2 s.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(agents.snapshot()[0].last_transition_at_ms, 5);
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let rows = agents.snapshot();
+    assert_eq!(rows[0].agent.state, HostAgentState::Unknown);
+    assert_eq!(rows[0].last_transition_at_ms, 1_001_000);
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let rows = agents.snapshot();
+    assert_eq!(rows[0].agent.state, WORKING);
+    assert_eq!(rows[0].last_transition_at_ms, 1_002_000);
+    let lines = host_lines(&logs);
+    let states: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            ["reachable", "unreachable"]
+                .into_iter()
+                .find(|state| line.contains(&format!(r#"state="{state}""#)))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        ["reachable", "unreachable", "reachable"],
+        "{lines:?}"
+    );
+}

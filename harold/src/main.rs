@@ -1260,6 +1260,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             &settings.agents.0,
         ));
         crate::telemetry::register_multiplexer_counters(&settings.agent_monitor.multiplexer);
+        crate::telemetry::register_host_counters(
+            &settings.agent_monitor.multiplexer,
+            &settings.agent_monitor.rex_hosts,
+        );
     }
     if settings.notify.old_key_applied {
         tracing::warn!(
