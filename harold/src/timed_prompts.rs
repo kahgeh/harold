@@ -1372,13 +1372,13 @@ async fn bounded_run(
 /// Reads the pane with `program` and counts the call as a `screen_read` call. Only the
 /// tmux read comes here: `bounded_stdout` also runs `/bin/date`, which is not counted.
 async fn read_tmux_screen(program: &str, pane_id: &str, timeout: Duration) -> Option<String> {
-    use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_multiplexer_call};
+    use crate::telemetry::{MultiplexerOutcome, ScreenPurpose, record_screen_read};
     let started = std::time::Instant::now();
     let result = bounded_run(program, &capture_args(pane_id), timeout).await;
     let outcome = result
         .as_ref()
         .map_or_else(|o| *o, |_| MultiplexerOutcome::Ok);
-    record_multiplexer_call(MultiplexerOperation::ScreenRead, outcome, started.elapsed());
+    record_screen_read(ScreenPurpose::Writer, outcome, started.elapsed());
     result.ok()
 }
 

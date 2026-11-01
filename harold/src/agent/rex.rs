@@ -16,7 +16,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::settings::AgentSettings;
-use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_multiplexer_call};
+use crate::telemetry::{
+    MultiplexerOperation, MultiplexerOutcome, ScreenPurpose, record_multiplexer_call,
+    record_screen_read,
+};
 
 use super::domain::{AgentIncarnation, AgentPaneObservation};
 use super::inventory::{
@@ -144,6 +147,18 @@ pub(crate) trait RexApi: Send + Sync {
         method: &str,
         args: &Value,
     ) -> Result<Value, RexError>;
+    /// A block method call that reads the screen (`format` or `blob_read`), for `purpose`.
+    /// The default is `block_call`, which records no purpose.
+    fn read_call(
+        &self,
+        session_id: &str,
+        block_id: &str,
+        method: &str,
+        args: &Value,
+        _purpose: ScreenPurpose,
+    ) -> Result<Value, RexError> {
+        self.block_call(session_id, block_id, method, args)
+    }
     /// A paste event.
     fn paste(&self, session_id: &str, block_id: &str, text: &str) -> Result<(), RexError>;
     fn send_key(&self, session_id: &str, block_id: &str, key: &str) -> Result<(), RexError>;
@@ -417,12 +432,14 @@ pub(crate) fn tail_read(
     block_id: &str,
     format: &str,
     bytes: usize,
+    purpose: ScreenPurpose,
 ) -> Result<Tail, RexError> {
-    let header = api.block_call(
+    let header = api.read_call(
         session_id,
         block_id,
         "format",
         &json!({"format": format, "trim": true, "max_bytes": 1}),
+        purpose,
     )?;
     let total = header
         .get("total")
@@ -437,11 +454,12 @@ pub(crate) fn tail_read(
     let mut offset = start;
     let mut text = String::new();
     for _ in 0..MAX_BLOB_READS {
-        let reply = api.block_call(
+        let reply = api.read_call(
             session_id,
             block_id,
             "blob_read",
             &json!({"id": id, "offset": offset, "max_bytes": bytes}),
+            purpose,
         )?;
         let data = reply
             .get("data")
@@ -513,6 +531,7 @@ pub(crate) fn read_screen_text(
     block_id: &str,
     styled: bool,
     keep: Keep,
+    purpose: ScreenPurpose,
 ) -> Result<String, RexError> {
     let started = Instant::now();
     let session_id = session_of(api, block_id)?;
@@ -529,6 +548,7 @@ pub(crate) fn read_screen_text(
         block_id,
         if styled { "vt" } else { "text" },
         bytes,
+        purpose,
     )?;
     if started.elapsed() > SLOW_READ {
         tracing::warn!(
@@ -687,7 +707,12 @@ pub(crate) fn press_key_with(api: &dyn RexApi, block_id: &str, key: &str) -> Res
 
 /// The styled visible screen of a block, or `None` when the read fails.
 pub(crate) fn read_screen_styled(block_id: &str) -> Option<String> {
-    read_screen_text(&*system(), block_id, true, Keep::Visible).ok()
+    read_screen_styled_through(&*system(), block_id)
+}
+
+/// The styled visible screen of a block through `api`, read for a writer.
+fn read_screen_styled_through(api: &dyn RexApi, block_id: &str) -> Option<String> {
+    read_screen_text(api, block_id, true, Keep::Visible, ScreenPurpose::Writer).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,6 +1120,27 @@ fn recorded<T>(
     operation: MultiplexerOperation,
     call: impl FnOnce() -> Result<T, RexError>,
 ) -> Result<T, RexError> {
+    timed(call, |outcome, elapsed| {
+        record_multiplexer_call(operation, outcome, elapsed);
+    })
+}
+
+/// Times `call` and counts it as a screen read for `purpose`. The result passes through
+/// unchanged.
+fn recorded_screen_read<T>(
+    purpose: ScreenPurpose,
+    call: impl FnOnce() -> Result<T, RexError>,
+) -> Result<T, RexError> {
+    timed(call, |outcome, elapsed| {
+        record_screen_read(purpose, outcome, elapsed);
+    })
+}
+
+/// Runs `call`, gives its outcome and time to `record` and returns the result.
+fn timed<T>(
+    call: impl FnOnce() -> Result<T, RexError>,
+    record: impl FnOnce(MultiplexerOutcome, Duration),
+) -> Result<T, RexError> {
     let started = Instant::now();
     let result = call();
     let outcome = match &result {
@@ -1107,7 +1153,7 @@ fn recorded<T>(
         Err(RexError::Failed) => MultiplexerOutcome::Failed,
         Err(RexError::Malformed) => MultiplexerOutcome::Malformed,
     };
-    record_multiplexer_call(operation, outcome, started.elapsed());
+    record(outcome, started.elapsed());
     result
 }
 
@@ -1115,7 +1161,6 @@ fn recorded<T>(
 fn block_call_operation(method: &str) -> MultiplexerOperation {
     match method {
         "size" => MultiplexerOperation::ScreenSize,
-        "format" | "blob_read" => MultiplexerOperation::ScreenRead,
         "program_status" => MultiplexerOperation::Status,
         _ => MultiplexerOperation::Other,
     }
@@ -1219,6 +1264,22 @@ impl RexApi for SystemRex {
     ) -> Result<Value, RexError> {
         let args = args.to_string();
         recorded(block_call_operation(method), || {
+            parse_json(&self.run(&[
+                "block", "call", "-s", session_id, "-b", block_id, method, &args,
+            ])?)
+        })
+    }
+
+    fn read_call(
+        &self,
+        session_id: &str,
+        block_id: &str,
+        method: &str,
+        args: &Value,
+        purpose: ScreenPurpose,
+    ) -> Result<Value, RexError> {
+        let args = args.to_string();
+        recorded_screen_read(purpose, || {
             parse_json(&self.run(&[
                 "block", "call", "-s", session_id, "-b", block_id, method, &args,
             ])?)

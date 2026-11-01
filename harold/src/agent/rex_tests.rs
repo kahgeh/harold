@@ -242,6 +242,8 @@ struct FakeRex {
     status_calls: Mutex<HashMap<String, usize>>,
     /// Holds the first `program_status` call until the test opens the gate.
     gate: Option<Arc<Gate>>,
+    /// The purpose of each `read_call`, in order.
+    purposes: Mutex<Vec<&'static str>>,
 }
 
 /// The first `program_status` call for `block` waits and answers `first`. Later calls for
@@ -396,6 +398,17 @@ impl RexApi for FakeRex {
             }
             _ => Err(RexError::Failed),
         }
+    }
+    fn read_call(
+        &self,
+        session_id: &str,
+        block_id: &str,
+        method: &str,
+        args: &Value,
+        purpose: crate::telemetry::ScreenPurpose,
+    ) -> Result<Value, RexError> {
+        self.purposes.lock().unwrap().push(purpose.as_str());
+        self.block_call(session_id, block_id, method, args)
     }
     fn paste(&self, session: &str, block: &str, text: &str) -> Result<(), RexError> {
         self.pastes
@@ -624,7 +637,15 @@ fn the_tail_read_calls_blob_read_with_the_id_until_eof() {
     let mut api = fake(&[]);
     api.blob = (0..400).map(|n| format!("line {n}\n")).collect();
     api.chunk = 1000;
-    let tail = tail_read(&api, "session:1", "block:a", "text", 2500).unwrap();
+    let tail = tail_read(
+        &api,
+        "session:1",
+        "block:a",
+        "text",
+        2500,
+        crate::telemetry::ScreenPurpose::State,
+    )
+    .unwrap();
     let calls = api.calls.lock().unwrap();
     let reads: Vec<&Value> = calls
         .iter()
@@ -648,11 +669,30 @@ fn the_tail_read_calls_blob_read_with_the_id_until_eof() {
 }
 
 #[test]
+fn the_styled_read_of_a_writer_passes_the_purpose_writer() {
+    let mut api = fake(&[("block:a", Err(RexError::Failed))]);
+    api.blob = "first\nsecond\n".into();
+    api.chunk = 1 << 20;
+    let text = read_screen_styled_through(&api, "block:a");
+    assert_eq!(text.as_deref(), Some("first\nsecond"));
+    let purposes = api.purposes.lock().unwrap().clone();
+    assert_eq!(purposes, vec!["writer", "writer"]);
+}
+
+#[test]
 fn a_short_output_starts_at_zero_and_keeps_its_first_line() {
     let mut api = fake(&[]);
     api.blob = "first\nsecond\nthird\n".into();
     api.chunk = 1 << 20;
-    let tail = tail_read(&api, "session:1", "block:a", "text", 65536).unwrap();
+    let tail = tail_read(
+        &api,
+        "session:1",
+        "block:a",
+        "text",
+        65536,
+        crate::telemetry::ScreenPurpose::State,
+    )
+    .unwrap();
     assert!(!tail.cut);
     assert_eq!(last_lines(&tail, 24), "first\nsecond\nthird");
     assert_eq!(last_lines(&tail, 2), "second\nthird");
@@ -811,8 +851,8 @@ fn each_rex_call_is_counted_as_ok_under_its_operation() {
     assert_eq!(risen, 1);
     for (method, operation) in [
         ("size", "screen_size"),
-        ("format", "screen_read"),
-        ("blob_read", "screen_read"),
+        ("format", "other"),
+        ("blob_read", "other"),
         ("program_status", "status"),
         ("frobnicate", "other"),
     ] {
@@ -826,6 +866,31 @@ fn each_rex_call_is_counted_as_ok_under_its_operation() {
     let (ok, risen) = rise("key", "ok", || rex.send_key("s", "b", "enter").is_ok());
     assert!(ok);
     assert_eq!(risen, 1);
+}
+
+#[test]
+fn a_read_call_records_its_purpose_and_a_process_call_records_none() {
+    use crate::telemetry::{ScreenPurpose, take_noted_calls};
+    let rex = fake_rex("purpose", "");
+    let args = json!({});
+    for purpose in [
+        ScreenPurpose::State,
+        ScreenPurpose::Prompt,
+        ScreenPurpose::Writer,
+    ] {
+        for method in ["format", "blob_read"] {
+            take_noted_calls();
+            assert!(rex.read_call("s", "b", method, &args, purpose).is_ok());
+            assert_eq!(
+                take_noted_calls(),
+                vec![("screen_read", "ok", Some(purpose.as_str()))],
+                "{method}"
+            );
+        }
+    }
+    take_noted_calls();
+    assert!(rex.process("s", "b").is_ok());
+    assert_eq!(take_noted_calls(), vec![("process", "ok", None)]);
 }
 
 #[test]

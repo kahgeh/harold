@@ -26,7 +26,7 @@ use capture::{
 
 use super::domain::{AgentPaneObservation, ObservedAgentState, ScreenObservation};
 use super::summary::{normalize_visible_grid, normalize_work_summary};
-use crate::telemetry::{StateSource, record_state_observed};
+use crate::telemetry::{ScreenPurpose, StateSource, record_state_observed};
 
 const CLASSIFIER_ID: &str = "tmux-visible-v1";
 const REX_CLASSIFIER_ID: &str = "rex-visible-v1";
@@ -201,6 +201,7 @@ fn observe_through(
         CaptureRequest {
             scope: CaptureScope::Visible,
             preserve_styles: false,
+            purpose: ScreenPurpose::State,
         },
     )?;
     Ok(ScreenObservation {
@@ -230,6 +231,7 @@ fn scan_prompts_through(
                 lines: provider.screen_history_lines,
             },
             preserve_styles: true,
+            purpose: ScreenPurpose::Prompt,
         },
     )?;
     Ok(adapter(provider).scan_prompts(&captured))
@@ -432,6 +434,7 @@ pub(super) fn observe_visible_text(
         request: CaptureRequest {
             scope: CaptureScope::Visible,
             preserve_styles: false,
+            purpose: ScreenPurpose::State,
         },
     };
     let adapter = GenericAdapter(provider);

@@ -794,6 +794,35 @@ fn a_tmux_capture_is_counted_under_screen_read_with_its_outcome() {
     assert_eq!(screen_calls("screen_read", "timeout", timeout, "%7"), 1);
 }
 
+/// The purposes of the screen reads this thread recorded during `call`.
+fn purposes_of<T>(call: impl FnOnce() -> T) -> Vec<Option<&'static str>> {
+    crate::telemetry::take_noted_calls();
+    let _ = call();
+    crate::telemetry::take_noted_calls()
+        .into_iter()
+        .filter(|(operation, _, _)| *operation == "screen_read")
+        .map(|(_, _, purpose)| purpose)
+        .collect()
+}
+
+#[test]
+fn a_tmux_state_capture_records_the_purpose_state() {
+    let purposes = purposes_of(|| {
+        TmuxVisibleScreen::with_runner(FakeRunner::output(true, "Ready\n"), || 99)
+            .observe(&pane("%7"), &provider())
+    });
+    assert_eq!(purposes, vec![Some("state")]);
+}
+
+#[test]
+fn a_tmux_prompt_scan_records_the_purpose_prompt() {
+    let purposes = purposes_of(|| {
+        TmuxVisibleScreen::with_runner(FakeRunner::output(true, "Ready\n"), || 99)
+            .scan_prompts(&pane("%7"), &provider())
+    });
+    assert_eq!(purposes, vec![Some("prompt")]);
+}
+
 #[test]
 fn the_tmux_check_after_a_failed_capture_is_counted_under_list() {
     let ok = FakeRunner::output(false, "").then_output(true, "%7\n");
@@ -829,6 +858,8 @@ mod rex_observer {
         /// The first calls to `program_status` that fail, before the replies above apply.
         fail_first: std::sync::atomic::AtomicUsize,
         calls: Mutex<Vec<String>>,
+        /// The purpose of each `read_call`, in order.
+        purposes: Mutex<Vec<&'static str>>,
     }
 
     impl CountingRex {
@@ -890,6 +921,17 @@ mod rex_observer {
                 }
                 _ => Err(RexError::Failed),
             }
+        }
+        fn read_call(
+            &self,
+            session_id: &str,
+            block_id: &str,
+            method: &str,
+            args: &Value,
+            purpose: crate::telemetry::ScreenPurpose,
+        ) -> Result<Value, RexError> {
+            self.purposes.lock().unwrap().push(purpose.as_str());
+            self.block_call(session_id, block_id, method, args)
         }
         fn paste(&self, _: &str, _: &str, _: &str) -> Result<(), RexError> {
             Ok(())
@@ -988,6 +1030,36 @@ mod rex_observer {
         }
         let screen = RexVisibleScreen::with_status(api.clone(), status.clone());
         (screen, status)
+    }
+
+    #[test]
+    fn a_rex_state_read_passes_the_purpose_state() {
+        let block = "block:purpose-state";
+        // No status record, so the observer reads the screen.
+        let api = api_with(block, None);
+        let screen = no_stream_screen(&api);
+        observe(&screen, block);
+        let purposes = api.purposes.lock().unwrap().clone();
+        assert!(!purposes.is_empty());
+        assert!(
+            purposes.iter().all(|purpose| *purpose == "state"),
+            "{purposes:?}"
+        );
+    }
+
+    #[test]
+    fn a_rex_prompt_scan_passes_the_purpose_prompt() {
+        let block = "block:purpose-prompt";
+        let api = api_with(block, None);
+        let screen = no_stream_screen(&api);
+        let _one_at_a_time = crate::agent::rex::directory_test_lock();
+        screen.scan_prompts(&pane(block), &provider()).unwrap();
+        let purposes = api.purposes.lock().unwrap().clone();
+        assert!(!purposes.is_empty());
+        assert!(
+            purposes.iter().all(|purpose| *purpose == "prompt"),
+            "{purposes:?}"
+        );
     }
 
     fn api_failing_first(block: &str, status: Option<Value>, failing: usize) -> Arc<CountingRex> {

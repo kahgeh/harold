@@ -2924,11 +2924,19 @@ async fn timed_prompt_tmux_calls_are_counted_as_screen_read_and_key() {
         let taken = crate::telemetry::take_noted_calls();
         taken
             .into_iter()
-            .filter(|(op, out)| *op == operation && *out == outcome)
+            .filter(|(op, out, _)| *op == operation && *out == outcome)
             .count()
     };
 
     crate::telemetry::take_noted_calls();
+    assert_eq!(
+        read_tmux_screen(&good, "%1", second).await,
+        Some("screen".to_string())
+    );
+    assert_eq!(
+        crate::telemetry::take_noted_calls(),
+        vec![("screen_read", "ok", Some("writer"))]
+    );
     assert_eq!(
         read_tmux_screen(&good, "%1", second).await,
         Some("screen".to_string())

@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::runtime::valid_pane_id;
 use crate::telemetry::{
-    MultiplexerOperation, MultiplexerOutcome, outcome_of_io, record_multiplexer_call,
+    MultiplexerOperation, MultiplexerOutcome, ScreenPurpose, outcome_of_io,
+    record_multiplexer_call, record_screen_read,
 };
 
 use super::{CommandOutput, CommandRunner, ScreenError, stop_requested};
@@ -24,6 +25,8 @@ pub(super) enum CaptureScope {
 pub(super) struct CaptureRequest {
     pub(super) scope: CaptureScope,
     pub(super) preserve_styles: bool,
+    /// Why the screen is read, as the `purpose` of the call.
+    pub(super) purpose: ScreenPurpose,
 }
 
 // Raw terminal text deliberately has no Debug implementation.
@@ -101,7 +104,7 @@ impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
             Ok(_) => MultiplexerOutcome::Failed,
             Err(error) => outcome_of_io(error),
         };
-        record_multiplexer_call(MultiplexerOperation::ScreenRead, outcome, started.elapsed());
+        record_screen_read(request.purpose, outcome, started.elapsed());
         let output = result.map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ScreenError::CaptureUnavailable
@@ -139,7 +142,13 @@ impl PaneCapturePort for RexPaneCapture {
             }
             CaptureScope::RecentHistory { .. } => return Err(ScreenError::CaptureFailed),
         };
-        match rex::read_screen_text(&*self.api, pane_id, request.preserve_styles, keep) {
+        match rex::read_screen_text(
+            &*self.api,
+            pane_id,
+            request.preserve_styles,
+            keep,
+            request.purpose,
+        ) {
             Ok(text) if text.len() <= MAX_CAPTURE_BYTES => Ok(StyledPaneCapture { text, request }),
             Ok(_) => Err(ScreenError::CaptureFailed),
             Err(RexError::Absent) => Err(ScreenError::CaptureUnavailable),
@@ -251,6 +260,7 @@ mod tests {
         let request = CaptureRequest {
             scope: CaptureScope::Visible,
             preserve_styles: false,
+            purpose: ScreenPurpose::State,
         };
         for id in ["rex:omarchy/block:cap1", "main:0.1", "block:abc"] {
             assert!(capture.capture(id, request).is_err(), "{id}");

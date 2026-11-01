@@ -3338,6 +3338,50 @@ fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
 }
 
 #[test]
+fn a_screen_read_records_its_purpose() {
+    for purpose in [
+        ScreenPurpose::State,
+        ScreenPurpose::Prompt,
+        ScreenPurpose::Writer,
+    ] {
+        take_noted_calls();
+        record_screen_read(purpose, MultiplexerOutcome::Ok, Duration::from_millis(30));
+        assert_eq!(
+            take_noted_calls(),
+            vec![("screen_read", "ok", Some(purpose.as_str()))]
+        );
+        let set = [
+            ("host", ""),
+            ("operation", "screen_read"),
+            ("outcome", "ok"),
+            ("purpose", purpose.as_str()),
+        ];
+        assert!(test_support::counter_value("harold.multiplexer.calls", &set).is_some());
+        assert!(test_support::histogram_sum("harold.multiplexer.call.duration", &set).is_some());
+    }
+    assert_eq!(ScreenPurpose::State.as_str(), "state");
+    assert_eq!(ScreenPurpose::Prompt.as_str(), "prompt");
+    assert_eq!(ScreenPurpose::Writer.as_str(), "writer");
+}
+
+#[test]
+fn a_list_or_process_call_records_no_purpose() {
+    take_noted_calls();
+    for operation in [MultiplexerOperation::List, MultiplexerOperation::Process] {
+        record_multiplexer_call(operation, MultiplexerOutcome::Ok, Duration::ZERO);
+    }
+    assert_eq!(
+        take_noted_calls(),
+        vec![("list", "ok", None), ("process", "ok", None)]
+    );
+    let with_purpose = [("operation", "list"), ("purpose", "state")];
+    assert_eq!(
+        test_support::counter_value("harold.multiplexer.calls", &with_purpose),
+        None
+    );
+}
+
+#[test]
 fn record_call_adds_one_and_records_the_time() {
     record_call(
         "rex",

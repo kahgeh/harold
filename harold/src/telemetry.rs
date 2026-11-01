@@ -634,6 +634,27 @@ impl MultiplexerOutcome {
     }
 }
 
+/// Why a screen read happens, as the `purpose` attribute. Only a `screen_read` call has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScreenPurpose {
+    /// The state observer reads the visible screen of a pane.
+    State,
+    /// Prompt recovery reads the history of a pane.
+    Prompt,
+    /// A writer reads a screen before it types.
+    Writer,
+}
+
+impl ScreenPurpose {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::Prompt => "prompt",
+            Self::Writer => "writer",
+        }
+    }
+}
+
 /// The outcome of a call whose program could not run or answer: a missing program is
 /// `absent`, a call that ran out of time is `timeout`, any other error is `failed`.
 pub(crate) fn outcome_of_io(error: &std::io::Error) -> MultiplexerOutcome {
@@ -666,10 +687,28 @@ pub(crate) fn record_multiplexer_call(
     outcome: MultiplexerOutcome,
     elapsed: Duration,
 ) {
-    record_call(
+    record_call_with(
         configured_multiplexer(),
         HOST_OWN_MACHINE,
         operation,
+        None,
+        outcome,
+        elapsed,
+    );
+}
+
+/// Counts one screen read and records its time, with the `purpose` attribute. The
+/// multiplexer comes from the settings. The host is Harold's own machine.
+pub(crate) fn record_screen_read(
+    purpose: ScreenPurpose,
+    outcome: MultiplexerOutcome,
+    elapsed: Duration,
+) {
+    record_call_with(
+        configured_multiplexer(),
+        HOST_OWN_MACHINE,
+        MultiplexerOperation::ScreenRead,
+        Some(purpose),
         outcome,
         elapsed,
     );
@@ -684,19 +723,37 @@ pub(crate) fn record_call(
     outcome: MultiplexerOutcome,
     elapsed: Duration,
 ) {
+    record_call_with(multiplexer, host, operation, None, outcome, elapsed);
+}
+
+/// `record_call` with the `purpose` of a screen read. The attribute goes on only when
+/// `purpose` is `Some`.
+fn record_call_with(
+    multiplexer: &str,
+    host: &str,
+    operation: MultiplexerOperation,
+    purpose: Option<ScreenPurpose>,
+    outcome: MultiplexerOutcome,
+    elapsed: Duration,
+) {
     #[cfg(test)]
     CALLS_NOTED.with(|noted| {
-        noted
-            .borrow_mut()
-            .push((operation.as_str(), outcome.as_str()));
+        noted.borrow_mut().push((
+            operation.as_str(),
+            outcome.as_str(),
+            purpose.map(ScreenPurpose::as_str),
+        ));
     });
     let instruments = instruments();
-    let attributes = [
+    let mut attributes = vec![
         KeyValue::new("multiplexer", multiplexer.to_owned()),
         KeyValue::new("host", host.to_owned()),
         KeyValue::new("operation", operation.as_str()),
         KeyValue::new("outcome", outcome.as_str()),
     ];
+    if let Some(purpose) = purpose {
+        attributes.push(KeyValue::new("purpose", purpose.as_str()));
+    }
     instruments.multiplexer_calls.add(1, &attributes);
     instruments
         .multiplexer_call_duration
@@ -959,18 +1016,22 @@ fn note_listing_for(multiplexer: &str, sessions: u64, panes: u64) {
         .insert(multiplexer.to_owned(), (sessions, panes));
 }
 
+/// One noted call: (operation, outcome, purpose).
+#[cfg(test)]
+pub(crate) type NotedCall = (&'static str, &'static str, Option<&'static str>);
+
 #[cfg(test)]
 thread_local! {
-    /// The multiplexer calls this thread recorded, as (operation, outcome), so a test sees its
+    /// The multiplexer calls this thread recorded, as (operation, outcome, purpose), so a test sees its
     /// own calls beside other tests. The shared counter holds the calls of every test.
-    static CALLS_NOTED: std::cell::RefCell<Vec<(&'static str, &'static str)>> =
+    static CALLS_NOTED: std::cell::RefCell<Vec<NotedCall>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The multiplexer calls the current thread recorded since the last call, as
-/// (operation, outcome).
+/// (operation, outcome, purpose).
 #[cfg(test)]
-pub(crate) fn take_noted_calls() -> Vec<(&'static str, &'static str)> {
+pub(crate) fn take_noted_calls() -> Vec<NotedCall> {
     CALLS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
 }
 
@@ -2755,7 +2816,7 @@ pub(crate) mod test_support {
         let result = call();
         let count = super::take_noted_calls()
             .into_iter()
-            .filter(|(op, out)| *op == operation && *out == outcome)
+            .filter(|(op, out, _)| *op == operation && *out == outcome)
             .count();
         (result, count)
     }
