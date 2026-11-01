@@ -1479,22 +1479,14 @@ fn render_detail<'a>(frame: &mut Frame<'_>, area: Rect, lines: Option<Vec<Line<'
         frame.render_widget(
             Paragraph::new("No visible agent selected")
                 .style(Style::default().fg(MUTED))
-                .block(
-                    board_block()
-                        .title(" SELECTED SIGNAL ")
-                        .borders(Borders::ALL),
-                ),
+                .block(board_block().title(" AGENT DETAILS ").borders(Borders::ALL)),
             area,
         );
         return;
     };
 
     frame.render_widget(
-        detail_paragraph(lines).block(
-            board_block()
-                .title(" SELECTED SIGNAL ")
-                .borders(Borders::ALL),
-        ),
+        detail_paragraph(lines).block(board_block().title(" AGENT DETAILS ").borders(Borders::ALL)),
         area,
     );
 }
@@ -2197,7 +2189,7 @@ mod tests {
             assert!(!content.contains(forbidden), "found {forbidden:?}");
         }
         // The panel shows at this size: the column title and the panel title.
-        assert!(content.contains("SELECTED SIGNAL"));
+        assert!(content.contains("AGENT DETAILS"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 2);
     }
 
@@ -2348,7 +2340,7 @@ mod tests {
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
         }
-        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("AGENT DETAILS"));
         assert!(!content.contains("CURRENT WORK"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 1);
     }
@@ -2958,7 +2950,7 @@ mod tests {
 
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("Build responsive dashboard"));
-        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("AGENT DETAILS"));
         assert!(!content.contains("CURRENT WORK"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(!content.contains("/Users/you/code/Codex"));
@@ -3150,7 +3142,7 @@ mod tests {
         let content = rendered(&app, 140, 27, 100_000);
 
         assert!(content.contains(&summary));
-        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("AGENT DETAILS"));
         assert!(!content.contains("CURRENT WORK"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(!content.contains(&directory));
@@ -3162,7 +3154,7 @@ mod tests {
 
         let content = rendered(&app, 140, 44, 100_000);
 
-        assert!(content.contains("SELECTED SIGNAL"));
+        assert!(content.contains("AGENT DETAILS"));
         // One in the list header, one in the detail panel.
         assert_eq!(content.matches("WORK SUMMARY").count(), 2);
         assert!(content.contains("/Users/you/code/control-tower"));
@@ -3189,7 +3181,7 @@ mod tests {
 
         let content = rendered(&app, 140, 29, 100_000);
 
-        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("AGENT DETAILS"));
         assert!(!content.contains("CURRENT WORK"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
@@ -3483,9 +3475,19 @@ mod tests {
     fn the_work_summary_label_is_work_summary() {
         let content = rendered(&step_app(None), 140, 44, 100_000);
 
-        assert!(content.contains("SELECTED SIGNAL"));
+        assert!(content.contains("AGENT DETAILS"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 2);
         assert!(!content.contains("CURRENT WORK"));
+    }
+
+    #[test]
+    fn the_old_detail_title_shows_nowhere() {
+        let wide = rendered(&step_app(None), 140, 44, 100_000);
+        let narrow = rendered(&step_app(None), 80, 24, 100_000);
+
+        assert!(!wide.contains("SELECTED SIGNAL"));
+        assert!(!narrow.contains("SELECTED SIGNAL"));
+        assert!(wide.contains("AGENT DETAILS"));
     }
 
     const LONG_STEP: &str = "Reading the long failing test output and then comparing it with the last green run to find the change";
@@ -3496,7 +3498,7 @@ mod tests {
             // At 28 rows the panel fits without the step and not with the full step lines.
             let content = rendered(&step_app(Some("Running the tests")), width, 28, 100_000);
 
-            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert!(content.contains("AGENT DETAILS"), "width {width}");
             assert!(content.contains("Running the tests"), "width {width}");
             assert!(!content.contains("CURRENT STEP"), "width {width}");
             assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
@@ -3513,7 +3515,7 @@ mod tests {
                 for height in 16..=60 {
                     let content = rendered(&step_app(Some(step)), width, height, 100_000);
 
-                    if content.contains("SELECTED SIGNAL") {
+                    if content.contains("AGENT DETAILS") {
                         assert!(
                             content.contains(start),
                             "width {width} height {height} step {step}"
@@ -3529,7 +3531,7 @@ mod tests {
         for width in [120, 140] {
             let content = rendered(&step_app(Some(LONG_STEP)), width, 28, 100_000);
 
-            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert!(content.contains("AGENT DETAILS"), "width {width}");
             assert!(
                 content.contains("Reading the long failing"),
                 "width {width}"
@@ -3549,8 +3551,8 @@ mod tests {
                 let without = rendered(&step_app(None), width, height, 100_000);
 
                 assert_eq!(
-                    with.contains("SELECTED SIGNAL"),
-                    without.contains("SELECTED SIGNAL"),
+                    with.contains("AGENT DETAILS"),
+                    without.contains("AGENT DETAILS"),
                     "width {width} height {height}"
                 );
             }
@@ -3596,8 +3598,8 @@ mod tests {
                 let without = rendered(&step_app(None), width, height, 100_000);
 
                 assert_eq!(
-                    with.contains("SELECTED SIGNAL"),
-                    without.contains("SELECTED SIGNAL"),
+                    with.contains("AGENT DETAILS"),
+                    without.contains("AGENT DETAILS"),
                     "width {width} height {height}"
                 );
             }
@@ -3608,7 +3610,7 @@ mod tests {
     fn a_panel_that_does_not_fit_even_without_the_step_is_hidden_whole() {
         let content = rendered(&step_app(Some("Running the tests")), 140, 20, 100_000);
 
-        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("AGENT DETAILS"));
         assert!(!content.contains("CURRENT STEP"));
         assert!(!content.contains("Running the tests"));
         assert!(!content.contains("CURRENT WORK"));
@@ -3699,7 +3701,7 @@ mod tests {
             app.snapshot.rows[0].work_summary = Some("w".repeat(160));
             let content = rendered(&app, width, height, 100_000);
 
-            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert!(content.contains("AGENT DETAILS"), "width {width}");
             assert_eq!(content.matches("RECAP").count(), 1, "width {width}");
             assert_eq!(content.matches("CURRENT STEP").count(), 1, "width {width}");
             assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
@@ -5812,7 +5814,7 @@ mod tests {
         let mut app = open_chief_question();
         keys(&mut app, "jj");
         let screen = rendered_lines(&app, 140, 40, 100_000);
-        assert!(screen.contains("SELECTED SIGNAL"), "{screen}");
+        assert!(screen.contains("AGENT DETAILS"), "{screen}");
         assert!(screen.contains("home:0.3"), "{screen}");
     }
 
