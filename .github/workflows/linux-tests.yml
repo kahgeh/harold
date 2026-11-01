@@ -1,0 +1,53 @@
+name: Linux tests
+
+# Runs on each push to main. The release command publishes only a commit whose run of this
+# workflow passed, so a Linux failure stops a release before anything is public.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: linux-tests-${{ github.sha }}
+      cancel-in-progress: false
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler build-essential perl
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Check no local paths are tracked
+        run: ./scripts/check_local_paths.sh
+
+      - name: Check the macOS guard stops a build with the defaults
+        shell: bash
+        run: |
+          set -uo pipefail
+          if cargo check --locked -p harold >guard.log 2>&1; then
+            echo "the default features built on Linux; the guard must stop them" >&2
+            exit 1
+          fi
+          grep -q "needs macOS" guard.log || { cat guard.log >&2; echo "the build failed, but not with 'needs macOS'" >&2; exit 1; }
+
+      - name: Test
+        run: |
+          cargo test --locked --workspace --no-default-features --features harold/linux-defaults
+          python3 -m unittest discover -s scripts/tests
+          python3 -m unittest hooks.shared.harold_turn_complete_test
+          python3 -m unittest hooks.providers.test_turn_complete
+          python3 -I harold/src/tts/test_tts_workers.py

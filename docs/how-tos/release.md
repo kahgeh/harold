@@ -11,6 +11,8 @@ Re-running a release workflow replaces its matching assets.
 
 The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job only tests Harold on Linux with `linux-defaults`, and uploads nothing. If the `linux` job fails, the run fails, and `make release` does not mark the release latest.
 
+The **Linux tests** workflow (`linux-tests.yml`) runs the same Linux tests on each push to `main`. `make release` makes a release only when that workflow passed on the commit it releases ([ADR 0025](../adr/0025-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a Linux failure stops a release before anything is public.
+
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The
 bootstrap ([install or reinstall Harold](setup.md)) installs these together without Rust or a source checkout. Linux
@@ -18,7 +20,7 @@ builds are not provided. A published release containing the installer is require
 
 ### Cut a release
 
-Run `make release` in this checkout to publish the pushed `main` as the next release and install it on this Mac. It first checks that the checkout is on `main`, that no tracked file has uncommitted changes, that `main` matches `origin/main`, that `gh` is signed in, that the new tag is free, and that the tests of the `build` job pass. It does not run the `linux` job's tests. When a check fails it prints why and publishes nothing.
+Run `make release` in this checkout to publish the pushed `main` as the next release and install it on this Mac. It first checks that the checkout is on `main`, that no tracked file has uncommitted changes, that `main` matches `origin/main`, that `gh` is signed in, that the new tag is free, that the Linux tests workflow passed on the commit, and that the tests of the `build` job pass. It does not run the Linux tests itself. If the Linux run is still running, failed or missing, it prints the run to wait for. When a check fails it prints why and publishes nothing.
 
 It then creates the release as a pre-release, which GitHub's latest-release link skips, so the bootstrap on another Mac keeps installing the previous release until this one has a build. It prints each build step as it finishes, marks the release latest when the build succeeds, downloads the archive, checks it against its checksum and runs its installer. The last line names the version, its commit and the running Harold's process ID:
 

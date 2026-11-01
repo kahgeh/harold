@@ -84,12 +84,20 @@ class FakeGitHub:
         self.events = []
         self.created = None
         self.listings = self.views = 0
+        # The runs of the Linux tests workflow for the commit that is asked about, newest first.
+        self.linux_runs = [self.linux_run('completed', 'success')]
+        self.linux_listings = []
 
     @staticmethod
     def release(tag, latest=False, prerelease=False, assets=()):
         return {'tagName': tag, 'isLatest': latest, 'isPrerelease': prerelease,
                 'assets': [{'name': name} for name in assets], 'publishedAt': PUBLISHED,
                 'url': 'https://github.com/kahgeh/harold/releases/tag/' + tag}
+
+    @staticmethod
+    def linux_run(status, conclusion):
+        return {'status': status, 'conclusion': conclusion,
+                'url': 'https://github.com/kahgeh/harold/actions/runs/7'}
 
     @staticmethod
     def printed(argv, value):
@@ -125,6 +133,11 @@ class FakeGitHub:
             return done(argv, 0, self.releases[tag]['url'] + '\n')
         if verb == ('release', 'download'):
             return self.download(argv, args)
+        if verb == ('run', 'list') and option(args, '--workflow') == 'linux-tests.yml':
+            assert option(args, '--event') == 'push', argv
+            self.linux_listings.append(option(args, '--commit'))
+            fields = option(args, '--json').split(',')
+            return self.printed(argv, [{field: item[field] for field in fields} for item in self.linux_runs])
         if verb == ('run', 'list'):
             assert (option(args, '--workflow'), option(args, '--event')) == ('build.yml', 'release'), argv
             self.listings += 1
@@ -354,6 +367,38 @@ class CheckTests(ReleaseTestCase):
         commit(other, 'Side', 'side.txt')
         git(other, 'push', '-q', 'origin', 'HEAD:refs/tags/v0.6.0')
         self.assert_refused('Not released: v0.6.0 already exists.')
+
+    def short(self):
+        return git(self.work, 'rev-parse', 'HEAD')[:7]
+
+    def test_the_linux_tests_are_asked_about_the_commit_that_is_released(self):
+        release.checks(self.work, None, None)
+        self.assertEqual(self.github.linux_listings, [git(self.work, 'rev-parse', 'HEAD').strip()])
+
+    def test_a_failed_linux_run_stops_the_release_with_no_release_made(self):
+        self.github.linux_runs = [FakeGitHub.linux_run('completed', 'failure')]
+        self.assert_refused('Not released: the Linux tests of {} ended in failure: '
+                            'https://github.com/kahgeh/harold/actions/runs/7\n'
+                            'Fix them and push, then run make release again.'.format(self.short()))
+        self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
+
+    def test_a_running_linux_run_names_the_run_to_wait_for_and_makes_nothing(self):
+        self.github.linux_runs = [FakeGitHub.linux_run('in_progress', '')]
+        self.assert_refused('Not released: the Linux tests of {} are still running: '
+                            'https://github.com/kahgeh/harold/actions/runs/7\n'
+                            'Wait for them, then run make release again.'.format(self.short()))
+
+    def test_no_linux_run_for_the_commit_makes_nothing(self):
+        self.github.linux_runs = []
+        self.assert_refused('Not released: no run of the Linux tests exists for {}. Push it to main and '
+                            'wait for the run of linux-tests.yml, then run make release again.'.format(
+                                self.short()))
+
+    def test_a_passed_run_after_a_failed_run_of_the_same_commit_lets_the_release_go_on(self):
+        self.github.linux_runs = [FakeGitHub.linux_run('completed', 'success'),
+                                  FakeGitHub.linux_run('completed', 'failure')]
+        tag, latest = release.checks(self.work, None, None)
+        self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
 
     def test_a_failing_test_is_refused_with_its_output(self):
         self.failing = ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests')

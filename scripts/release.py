@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cut a Harold release on GitHub and install it on this Mac, or install a release that exists.
 
-`release` checks this checkout, publishes HEAD as a pre-release, follows the build that starts,
+`release` checks this checkout and that the Linux tests passed on its commit, publishes HEAD as a pre-release, follows the build that starts,
 marks the release latest and installs it. `install` installs a release that already exists.
 """
 
@@ -22,6 +22,7 @@ REPO = 'kahgeh/harold'
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PREFIX = Path.home() / 'bin'
 WORKFLOW = 'build.yml'
+LINUX_WORKFLOW = 'linux-tests.yml'
 PACKAGE = 'harold-aarch64-apple-darwin'
 ARCHIVE = PACKAGE + '.tar.gz'
 CHECKSUM = ARCHIVE + '.sha256'
@@ -145,6 +146,31 @@ def signed_in_check(cwd):
     return None
 
 
+def linux_tests_check(cwd):
+    """Refuses a commit whose Linux tests have not passed on GitHub.
+
+    The Build workflow runs on a published release, so its Linux job runs after the release is
+    public. The Linux tests workflow runs on each push to main instead. A passing run for the
+    commit lets the release go on. A running, failed or missing run stops it before anything is
+    public, and the message names the run to wait for.
+    """
+    sha = git(cwd, 'rev-parse', 'HEAD').strip()
+    runs = gh_json(cwd, 'run', 'list', '--workflow', LINUX_WORKFLOW, '--event', 'push', '--commit', sha,
+                   '--limit', '20', '--json', 'status,conclusion,url')
+    if any(item['status'] == 'completed' and item['conclusion'] == 'success' for item in runs):
+        return None
+    waiting = [item for item in runs if item['status'] != 'completed']
+    if waiting:
+        return ('Not released: the Linux tests of {} are still running: {}\n'
+                'Wait for them, then run make release again.'.format(sha[:7], waiting[0]['url']))
+    if runs:
+        return ('Not released: the Linux tests of {} ended in {}: {}\n'
+                'Fix them and push, then run make release again.'.format(
+                    sha[:7], runs[0]['conclusion'], runs[0]['url']))
+    return ('Not released: no run of the Linux tests exists for {}. Push it to main and wait for the '
+            'run of {}, then run make release again.'.format(sha[:7], LINUX_WORKFLOW))
+
+
 def tag_check(cwd, tag):
     """Refuses a tag that exists in this checkout or on GitHub."""
     local = run(('git', 'rev-parse', '--quiet', '--verify', 'refs/tags/' + tag), cwd).returncode == 0
@@ -190,6 +216,8 @@ def checks(cwd, version, notes):
         passes(origin_check)
     tag = latest = None
     if passes(signed_in_check):
+        if on_main:
+            passes(linux_tests_check)
         try:
             latest = latest_release(cwd)
         except Stopped as error:
