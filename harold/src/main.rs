@@ -86,6 +86,7 @@ struct HaroldService {
 const CLAUDE_PROVIDER_ID: &str = "claude";
 
 /// The service Harold serves.
+#[allow(clippy::too_many_arguments)]
 fn harold_service(
     monitor: agent::runtime::AgentMonitorHandle,
     store: Arc<store::HaroldStore>,
@@ -619,7 +620,12 @@ async fn forward_agent_snapshots(
     recap_versions.borrow_and_update();
     let mut host_versions = hosts.subscribe();
     host_versions.borrow_and_update();
-    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts);
+    let initial = map_agent_snapshot(
+        snapshots.borrow_and_update().clone(),
+        &steps,
+        &recaps,
+        &hosts,
+    );
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }

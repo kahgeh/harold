@@ -303,7 +303,7 @@ pub struct App {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchableRow {
-    fields: [String; 6],
+    fields: [String; 7],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

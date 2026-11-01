@@ -2546,7 +2546,12 @@ async fn a_working_record_gives_current_step_on_the_stream() {
 async fn a_blocked_record_gives_its_step() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, Some("Allow Bash?".into()));
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &steps,
+        &Recaps::default(),
+        &HostAgents::default(),
+    );
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
 }
 
@@ -2557,12 +2562,22 @@ async fn a_blocked_record_gives_its_step() {
 fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &steps,
+        &Recaps::default(),
+        &HostAgents::default(),
+    );
     assert_eq!(step_of(&mapped), None);
     // A step that is removed goes from the next snapshot too.
     steps.set(STEP_PANE, STEP_PID, Some("Run".into()));
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default(), &HostAgents::default());
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &steps,
+        &Recaps::default(),
+        &HostAgents::default(),
+    );
     assert_eq!(step_of(&mapped), None);
 }
 
@@ -2792,6 +2807,7 @@ async fn a_recap_reaches_the_stream_with_its_time() {
         populated_snapshot(1, None),
         &CurrentSteps::default(),
         &other,
+        &HostAgents::default(),
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -2802,6 +2818,7 @@ fn a_pane_without_a_recap_has_none_and_zero() {
         populated_snapshot(1, None),
         &CurrentSteps::default(),
         &Recaps::default(),
+        &HostAgents::default(),
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -3021,6 +3038,7 @@ fn an_unreachable_host_shows_its_last_agents_as_unknown() {
     let mapped = map_agent_snapshot(
         populated_snapshot(1, None),
         &CurrentSteps::default(),
+        &Recaps::default(),
         &hosts,
     );
     assert_eq!(mapped.panes[0].state, i32::from(AgentState::Working));

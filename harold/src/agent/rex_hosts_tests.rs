@@ -19,6 +19,7 @@ fn settings() -> AgentSettings {
         summary_line_prefixes: Vec::new(),
         screen_adapter: ScreenAdapter::GenericV1,
         screen_history_lines: 2000,
+        recap_adapter: crate::settings::RecapAdapter::None,
     }])
 }
 
