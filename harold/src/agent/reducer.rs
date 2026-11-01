@@ -79,7 +79,8 @@ pub(crate) fn reduce_agent_event(
 
             // The same adapter repeating the pane's state, with no summary, says only that
             // it is still there. It restarts the grace and is not new work.
-            let is_repeat = projection.hook_state == Some(lifecycle.state)
+            let is_repeat = lifecycle.state.is_some()
+                && projection.hook_state == lifecycle.state
                 && projection.lifecycle_adapter_id.as_deref()
                     == Some(lifecycle.adapter_id.as_str())
                 && lifecycle.work_summary == WorkSummaryUpdate::Unchanged;
@@ -87,7 +88,10 @@ pub(crate) fn reduce_agent_event(
                 invalidate_generated(&mut projection, event_version);
             }
             projection.lifecycle_adapter_id = Some(lifecycle.adapter_id.clone());
-            set_hook_state(&mut projection, lifecycle.state, lifecycle.observed_at_ms);
+            // No state means the event changes no hook state.
+            if let Some(state) = lifecycle.state {
+                set_hook_state(&mut projection, state, lifecycle.observed_at_ms);
+            }
             apply_work_summary(
                 &mut projection,
                 &lifecycle.work_summary,
@@ -341,7 +345,7 @@ fn effective_state(projection: &AgentPaneProjection, graces: GraceWindows) -> Ef
 
 fn observed_to_effective(state: super::domain::ObservedAgentState) -> EffectiveAgentState {
     match state {
-        super::domain::ObservedAgentState::Busy => EffectiveAgentState::Busy,
+        super::domain::ObservedAgentState::Working => EffectiveAgentState::Working,
         super::domain::ObservedAgentState::Idle => EffectiveAgentState::Idle,
     }
 }
@@ -352,7 +356,7 @@ fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: Eve
     projection.generated_summary_basis_version = None;
 }
 
-/// A corroborating Busy observation does not denote another submitted turn.
+/// A corroborating Working observation does not denote another submitted turn.
 pub(crate) fn screen_changes_activity(
     previous_state: EffectiveAgentState,
     previous_summary: Option<&str>,
@@ -363,6 +367,6 @@ pub(crate) fn screen_changes_activity(
             .fallback_summary
             .as_deref()
             .is_some_and(|summary| previous_summary != Some(summary))
-        || (screen.state == Some(super::domain::ObservedAgentState::Busy)
-            && previous_state != EffectiveAgentState::Busy)
+        || (screen.state == Some(super::domain::ObservedAgentState::Working)
+            && previous_state != EffectiveAgentState::Working)
 }

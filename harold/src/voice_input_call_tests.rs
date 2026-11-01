@@ -181,7 +181,7 @@ async fn a_turn_before_bye_waits_for_a_busy_chief_after_the_call_ends() {
     let h = Harness::new();
     h.script([text("approve q19, bye")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.speak().await;
 
@@ -206,7 +206,7 @@ async fn a_turn_before_bye_for_a_chief_busy_past_2_minutes_is_dropped() {
     let h = Harness::new();
     h.script([text("approve q19, bye")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     assert_eq!(h.state(), CallState::Off);
 
@@ -228,7 +228,7 @@ async fn a_held_turn_joined_to_a_turn_before_bye_keeps_its_first_2_minutes() {
     let h = Harness::new();
     h.script([text("approve q19"), text("and q20, bye")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     sleep(Duration::from_secs(60)).await;
     h.speak().await;
@@ -283,7 +283,7 @@ async fn talk_now_while_transcribing_still_plays_the_answer_to_the_typed_turn() 
 async fn talk_now_while_a_turn_waits_for_a_busy_chief_still_plays_the_answer() {
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     assert_eq!(h.played(), [CHIEF_BUSY]);
 
@@ -664,7 +664,7 @@ async fn the_turn_end_update_is_the_answer_and_a_tick_is_no_first_sound() {
     settle().await;
 
     // A busy chief: the tick plays at 3 s, then the update at the end of the turn.
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     sleep(Duration::from_millis(3500)).await;
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_millis(2700)).await;
@@ -793,7 +793,7 @@ async fn a_kept_phrase_on_disk_has_a_play_span_and_no_voice_span() {
     std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
     std::fs::write(&kept, CHIEF_BUSY).unwrap();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.feed(loud(1440));
     h.feed(quiet(1200));
@@ -954,7 +954,7 @@ async fn a_busy_chief_logs_why_the_turn_is_held() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.speak().await;
 
@@ -990,7 +990,7 @@ async fn a_turn_before_bye_held_for_a_busy_chief_logs_why() {
     let h = Harness::new();
     h.script([text("approve q19, bye")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.speak().await;
 
@@ -1006,7 +1006,7 @@ async fn a_turn_dropped_after_2_minutes_logs_the_last_busy_reason() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     // The reason changes while the turn waits: the newest one is the one logged.
     sleep(Duration::from_secs(30)).await;
@@ -1029,7 +1029,7 @@ async fn a_turn_passed_on_after_the_call_and_dropped_logs_the_busy_reason() {
     let h = Harness::new();
     h.script([text("approve q19, bye")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
 
     sleep(Duration::from_secs(125)).await;
@@ -1217,7 +1217,7 @@ async fn a_request_for_work_is_passed_on_typed_into_a_busy_chief_and_the_next_tu
         text("ask the chief to rerun the harold build"),
         text("did the chief get it"),
     ]);
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.start().await;
 
     h.speak().await;
@@ -1354,7 +1354,7 @@ async fn a_failed_run_sends_the_turn_to_the_chief_and_the_next_turn_tries_the_an
 async fn a_failed_turn_for_a_busy_chief_is_held_as_before() {
     let (h, answerer, _) = answering_harness();
     script_runs(&answerer, [run_now(Answer::Failed(Failure::Exited))]);
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.start().await;
 
     h.speak().await;

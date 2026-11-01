@@ -49,13 +49,13 @@ fn state_and_fallback_summary_are_independent_optional_facts() {
     let cases = [
         (
             "Working\nesc to interrupt\nReady",
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             None,
         ),
         ("Ready", Some(ObservedAgentState::Idle), None),
         (
             "Working\nesc to interrupt",
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             None,
         ),
         (
@@ -65,7 +65,7 @@ fn state_and_fallback_summary_are_independent_optional_facts() {
         ),
         (
             "Working\nesc to interrupt\n› Implement stream",
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             Some("Implement stream"),
         ),
         ("status unknown", None, None),
@@ -91,7 +91,7 @@ fn extractor_uses_sanitized_bottom_most_non_empty_prefixed_line() {
 
     let observation = observe_visible_text(&pane("%7"), &provider(), visible, 99);
 
-    assert_eq!(observation.state, Some(ObservedAgentState::Busy));
+    assert_eq!(observation.state, Some(ObservedAgentState::Working));
     assert_eq!(
         observation.fallback_summary.as_deref(),
         Some("Unicode 🦀 task")
@@ -659,7 +659,7 @@ fn claude_state(transcript: &str) -> Option<ObservedAgentState> {
 }
 
 #[test]
-fn claude_spinner_status_above_the_input_box_is_busy() {
+fn claude_spinner_status_above_the_input_box_is_working() {
     // Claude Code 2.1.295 in vim mode: the busy footer no longer says "esc to interrupt".
     for status in [
         "✽ Synthesizing… (13m 18s · ↓ 72.3k tokens)",
@@ -670,14 +670,14 @@ fn claude_spinner_status_above_the_input_box_is_busy() {
         let transcript = format!("⏺ Reading the reducer\n  ⎿  Read 273 lines\n\n{status}");
         assert_eq!(
             claude_state(&transcript),
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             "{status}"
         );
     }
 }
 
 #[test]
-fn claude_spinner_status_stays_busy_with_indented_rows_beneath_it() {
+fn claude_spinner_status_stays_working_with_indented_rows_beneath_it() {
     let transcript = concat!(
         "✢ Envisioning… (1m 57s · ↓ 9.6k tokens)\n",
         "  ⎿  ☐ Write the failing test\n",
@@ -685,7 +685,7 @@ fn claude_spinner_status_stays_busy_with_indented_rows_beneath_it() {
         "\n",
         "  Tip: Use /memory to edit project memory",
     );
-    assert_eq!(claude_state(transcript), Some(ObservedAgentState::Busy));
+    assert_eq!(claude_state(transcript), Some(ObservedAgentState::Working));
 }
 
 #[test]
@@ -703,10 +703,10 @@ fn claude_finished_turn_and_spinner_text_in_output_are_idle() {
 }
 
 #[test]
-fn claude_keeps_configured_busy_markers_and_prompt_prefixes() {
+fn claude_keeps_configured_working_markers_and_prompt_prefixes() {
     assert_eq!(
         claude_state("✻ Thinking (esc to interrupt)"),
-        Some(ObservedAgentState::Busy)
+        Some(ObservedAgentState::Working)
     );
     let scan = TmuxVisibleScreen::with_runner(
         FakeRunner::output(true, "❯ Review the reducer\n\n⏺ Reviewed.\n"),

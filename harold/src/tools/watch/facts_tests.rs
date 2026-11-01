@@ -23,7 +23,7 @@ async fn the_facts_hold_every_field_the_spec_names() {
     let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Idle);
     worker.state_since_ms = now_ms - 1_250_000;
     worker.work_summary = Some("é".repeat(300));
-    let mut other = agent("%4", "/work/other", EffectiveAgentState::Busy);
+    let mut other = agent("%4", "/work/other", EffectiveAgentState::Working);
     other.reads_as_claude = false;
     other.provider_id = "codex".into();
     other.state_since_ms = now_ms + 5_000;

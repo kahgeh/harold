@@ -91,7 +91,7 @@ fn apply_default(
 fn mod_report(state: ObservedAgentState, observed_at_ms: i64) -> AgentEvent {
     AgentEvent::LifecycleObserved(AgentLifecycleObserved {
         incarnation: incarnation(1_000),
-        state,
+        state: Some(state),
         adapter_id: "claude.lifecycle".into(),
         work_summary: WorkSummaryUpdate::Unchanged,
         observed_at_ms,
@@ -148,7 +148,7 @@ fn hook_grace_allows_one_post_grace_screen_repair_then_ignores_duplicates() {
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 200,
@@ -189,9 +189,9 @@ fn hook_grace_allows_one_post_grace_screen_repair_then_ignores_duplicates() {
         5,
     );
 
-    assert_eq!(during_grace.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(during_grace.effective_state, EffectiveAgentState::Working);
     assert_eq!(during_grace.screen_observed_at_ms, Some(201));
-    assert_eq!(repaired.hook_state, Some(ObservedAgentState::Busy));
+    assert_eq!(repaired.hook_state, Some(ObservedAgentState::Working));
     assert_eq!(repaired.effective_state, EffectiveAgentState::Idle);
     assert_eq!(repaired.screen_observed_at_ms, Some(2_200));
     assert_eq!(repaired.last_transition_at_ms, 2_200);
@@ -213,7 +213,7 @@ fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
         Some(initial),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: None,
             observed_at_ms: 100,
@@ -224,7 +224,7 @@ fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
         Some(pre_hook_screen),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 200,
@@ -235,7 +235,7 @@ fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
         Some(hooked),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: None,
             observed_at_ms: 2_200,
@@ -246,7 +246,7 @@ fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
         Some(revalidated.clone()),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: None,
             observed_at_ms: 2_300,
@@ -284,7 +284,7 @@ fn later_same_millisecond_lifecycle_invalidates_screen_epoch_at_zero_grace() {
         Some(screen),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 100,
@@ -293,7 +293,7 @@ fn later_same_millisecond_lifecycle_invalidates_screen_epoch_at_zero_grace() {
         0,
     );
 
-    assert_eq!(hooked.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(hooked.effective_state, EffectiveAgentState::Working);
     assert_eq!(hooked.screen_state, None);
     assert_eq!(hooked.screen_classifier_id, None);
     assert_eq!(hooked.screen_observed_at_ms, None);
@@ -353,7 +353,7 @@ fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
         Some(fallback),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 120,
@@ -364,7 +364,7 @@ fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
         Some(unchanged.clone()),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Fix projector".into()),
             observed_at_ms: 130,
@@ -375,7 +375,7 @@ fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
         Some(explicit.clone()),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Idle,
+            state: Some(ObservedAgentState::Idle),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Clear,
             observed_at_ms: 140,
@@ -392,7 +392,7 @@ fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
 }
 
 #[test]
-fn later_busy_screen_summary_replaces_completed_explicit_and_survives_idle_without_summary() {
+fn later_working_screen_summary_replaces_completed_explicit_and_survives_idle_without_summary() {
     let initial = apply(
         None,
         AgentEvent::PaneObserved(AgentPaneObserved {
@@ -404,7 +404,7 @@ fn later_busy_screen_summary_replaces_completed_explicit_and_survives_idle_witho
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Idle,
+            state: Some(ObservedAgentState::Idle),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Completed task".into()),
             observed_at_ms: 120,
@@ -415,7 +415,7 @@ fn later_busy_screen_summary_replaces_completed_explicit_and_survives_idle_witho
         Some(completed),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: Some("Current task".into()),
             observed_at_ms: 130,
@@ -463,7 +463,7 @@ fn explicit_summary_wins_when_candidate_timestamps_are_equal() {
         Some(screen),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Explicit task".into()),
             observed_at_ms: 120,
@@ -487,7 +487,7 @@ fn clear_without_a_fallback_makes_the_effective_summary_absent() {
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Fix projector".into()),
             observed_at_ms: 120,
@@ -498,7 +498,7 @@ fn clear_without_a_fallback_makes_the_effective_summary_absent() {
         Some(explicit),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Idle,
+            state: Some(ObservedAgentState::Idle),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Clear,
             observed_at_ms: 130,
@@ -544,7 +544,7 @@ fn screen_facts_update_independently_and_absence_preserves_candidates() {
         Some(state_only.clone()),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v2".into(),
             fallback_summary: Some("Ship release".into()),
             observed_at_ms: 130,
@@ -558,7 +558,7 @@ fn screen_facts_update_independently_and_absence_preserves_candidates() {
         Some("Review tests")
     );
     assert_eq!(state_only.effective_state, EffectiveAgentState::Idle);
-    assert_eq!(both.screen_state, Some(ObservedAgentState::Busy));
+    assert_eq!(both.screen_state, Some(ObservedAgentState::Working));
     assert_eq!(both.screen_work_summary.as_deref(), Some("Ship release"));
     assert_eq!(
         reduce_agent_event(
@@ -590,7 +590,7 @@ fn repeated_screen_candidate_does_not_refresh_its_timestamp_or_transition() {
         Some(initial),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: Some("Review tests".into()),
             observed_at_ms: 110,
@@ -601,7 +601,7 @@ fn repeated_screen_candidate_does_not_refresh_its_timestamp_or_transition() {
         Some(observed),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v1".into(),
             fallback_summary: Some("Review tests".into()),
             observed_at_ms: 120,
@@ -627,7 +627,7 @@ fn replacement_clears_evidence_and_delayed_old_incarnation_events_are_ignored() 
         Some(original),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Old work".into()),
             observed_at_ms: 110,
@@ -649,7 +649,7 @@ fn replacement_clears_evidence_and_delayed_old_incarnation_events_are_ignored() 
             Some(replacement),
             &AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: incarnation(1_000),
-                state: ObservedAgentState::Idle,
+                state: Some(ObservedAgentState::Idle),
                 adapter_id: "hook-v1".into(),
                 work_summary: WorkSummaryUpdate::Set("Stale work".into()),
                 observed_at_ms: 130,
@@ -709,7 +709,7 @@ fn generated_activity_requires_current_basis_and_preserves_source() {
     );
     let lifecycle = AgentEvent::LifecycleObserved(AgentLifecycleObserved {
         incarnation: incarnation(1_000),
-        state: ObservedAgentState::Busy,
+        state: Some(ObservedAgentState::Working),
         adapter_id: "codex".into(),
         work_summary: WorkSummaryUpdate::Set("Fix authentication".into()),
         observed_at_ms: 110,
@@ -771,7 +771,7 @@ fn generated_activity_requires_current_basis_and_preserves_source() {
 }
 
 #[test]
-fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalidates() {
+fn corroborating_working_and_metadata_keep_generated_activity_but_new_work_invalidates() {
     use super::domain::AgentActivitySummaryGenerated;
     let initial = apply(
         None,
@@ -784,7 +784,7 @@ fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalida
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "codex".into(),
             work_summary: WorkSummaryUpdate::Set("Fix tests".into()),
             observed_at_ms: 110,
@@ -805,7 +805,7 @@ fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalida
         Some(generated),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "codex".into(),
             fallback_summary: None,
             observed_at_ms: 3_000,
@@ -841,7 +841,7 @@ fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalida
 }
 
 #[test]
-fn new_busy_boundary_invalidates_generated_activity() {
+fn new_working_boundary_invalidates_generated_activity() {
     use super::domain::AgentActivitySummaryGenerated;
     let initial = apply(
         None,
@@ -854,7 +854,7 @@ fn new_busy_boundary_invalidates_generated_activity() {
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Idle,
+            state: Some(ObservedAgentState::Idle),
             adapter_id: "codex".into(),
             work_summary: WorkSummaryUpdate::Set("Fix parser".into()),
             observed_at_ms: 110,
@@ -875,7 +875,7 @@ fn new_busy_boundary_invalidates_generated_activity() {
         Some(generated),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "codex".into(),
             fallback_summary: None,
             observed_at_ms: 3_000,
@@ -910,7 +910,7 @@ fn proven_repeated_submission_refreshes_recency_and_generation_basis() {
         Some(projection),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "codex-hook".into(),
             work_summary: WorkSummaryUpdate::Set("Another task".into()),
             observed_at_ms: 300,
@@ -940,7 +940,7 @@ fn a_new_agent_process_in_the_pane_starts_without_an_adapter() {
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "claude.lifecycle".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 200,
@@ -975,7 +975,7 @@ fn a_turn_complete_leaves_the_state_of_a_pane_an_adapter_reports_on() {
         Some(initial),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "claude.lifecycle".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 1_000,
@@ -992,8 +992,8 @@ fn a_turn_complete_leaves_the_state_of_a_pane_an_adapter_reports_on() {
         GraceWindows::default(),
     ));
 
-    assert_eq!(completed.effective_state, EffectiveAgentState::Busy);
-    assert_eq!(completed.hook_state, Some(ObservedAgentState::Busy));
+    assert_eq!(completed.effective_state, EffectiveAgentState::Working);
+    assert_eq!(completed.hook_state, Some(ObservedAgentState::Working));
     assert_eq!(completed.hook_observed_at_ms, Some(1_000));
     assert_eq!(completed.last_transition_at_ms, 1_000);
     assert_eq!(
@@ -1052,10 +1052,10 @@ fn a_turn_complete_for_another_agent_process_is_ignored() {
 }
 
 #[test]
-fn a_busy_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
+fn a_working_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
     let reported = apply_default(
         Some(observed_pane()),
-        mod_report(ObservedAgentState::Busy, 1_000),
+        mod_report(ObservedAgentState::Working, 1_000),
         2,
     );
 
@@ -1064,7 +1064,7 @@ fn a_busy_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
         screen_reading(ObservedAgentState::Idle, 30_000),
         3,
     );
-    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Working);
 
     let at_30_s = apply_default(
         Some(at_29_s),
@@ -1085,17 +1085,17 @@ fn an_idle_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
 
     let at_29_s = apply_default(
         Some(reported),
-        screen_reading(ObservedAgentState::Busy, 30_000),
+        screen_reading(ObservedAgentState::Working, 30_000),
         3,
     );
     assert_eq!(at_29_s.effective_state, EffectiveAgentState::Idle);
 
     let at_30_s = apply_default(
         Some(at_29_s),
-        screen_reading(ObservedAgentState::Busy, 31_000),
+        screen_reading(ObservedAgentState::Working, 31_000),
         4,
     );
-    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Working);
 
     // The mod reports again: its report stands and the screen reading is dropped.
     let reported_again = apply_default(
@@ -1108,15 +1108,15 @@ fn an_idle_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
 }
 
 #[test]
-fn a_repeated_busy_report_restarts_the_30_seconds() {
+fn a_repeated_working_report_restarts_the_30_seconds() {
     let reported = apply_default(
         Some(observed_pane()),
-        mod_report(ObservedAgentState::Busy, 1_000),
+        mod_report(ObservedAgentState::Working, 1_000),
         2,
     );
     let repeated = apply_default(
         Some(reported),
-        mod_report(ObservedAgentState::Busy, 11_000),
+        mod_report(ObservedAgentState::Working, 11_000),
         3,
     );
     assert_eq!(repeated.hook_observed_at_ms, Some(11_000));
@@ -1127,7 +1127,7 @@ fn a_repeated_busy_report_restarts_the_30_seconds() {
         screen_reading(ObservedAgentState::Idle, 40_000),
         4,
     );
-    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Working);
     let at_30_s = apply_default(
         Some(at_29_s),
         screen_reading(ObservedAgentState::Idle, 41_000),
@@ -1138,17 +1138,17 @@ fn a_repeated_busy_report_restarts_the_30_seconds() {
     // A report after the screen took over puts the mod's state back.
     let back = apply_default(
         Some(at_30_s),
-        mod_report(ObservedAgentState::Busy, 45_000),
+        mod_report(ObservedAgentState::Working, 45_000),
         6,
     );
-    assert_eq!(back.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(back.effective_state, EffectiveAgentState::Working);
 }
 
 #[test]
 fn a_repeated_report_keeps_the_generated_summary_and_a_changed_one_drops_it() {
     let reported = apply_default(
         Some(observed_pane()),
-        mod_report(ObservedAgentState::Busy, 1_000),
+        mod_report(ObservedAgentState::Working, 1_000),
         2,
     );
     let generated = apply_default(
@@ -1165,7 +1165,7 @@ fn a_repeated_report_keeps_the_generated_summary_and_a_changed_one_drops_it() {
 
     let repeated = apply_default(
         Some(generated.clone()),
-        mod_report(ObservedAgentState::Busy, 11_000),
+        mod_report(ObservedAgentState::Working, 11_000),
         4,
     );
     assert_eq!(repeated.work_summary.as_deref(), Some("Fixing the parser"));
@@ -1178,7 +1178,7 @@ fn a_repeated_report_keeps_the_generated_summary_and_a_changed_one_drops_it() {
         Some(repeated.clone()),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(1_000),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "opencode.lifecycle".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 12_000,
@@ -1209,14 +1209,14 @@ fn a_turn_complete_without_an_adapter_keeps_the_2_second_window() {
 
     let just_inside = apply_default(
         Some(completed),
-        screen_reading(ObservedAgentState::Busy, 2_999),
+        screen_reading(ObservedAgentState::Working, 2_999),
         3,
     );
     assert_eq!(just_inside.effective_state, EffectiveAgentState::Idle);
     let at_2_s = apply_default(
         Some(just_inside),
-        screen_reading(ObservedAgentState::Busy, 3_000),
+        screen_reading(ObservedAgentState::Working, 3_000),
         4,
     );
-    assert_eq!(at_2_s.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(at_2_s.effective_state, EffectiveAgentState::Working);
 }

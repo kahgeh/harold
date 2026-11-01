@@ -35,7 +35,7 @@ fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             screen_state: None,
             screen_classifier_id: None,
             screen_observed_at_ms: None,
-            effective_state: EffectiveAgentState::Busy,
+            effective_state: EffectiveAgentState::Working,
             explicit_work_summary: summary.map(str::to_string),
             explicit_work_summary_updated_at_ms: summary.map(|_| 9_600),
             screen_work_summary: None,

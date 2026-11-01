@@ -363,7 +363,7 @@ async fn a_busy_pane_is_pane_busy_at_once() {
     let fake = Fake::at(DAY, "09:00:00");
     fake.set(|state| {
         state.view = panes(vec![AgentPane {
-            state: EffectiveAgentState::Busy,
+            state: EffectiveAgentState::Working,
             ..pane("%2", CHIEF)
         }])
     });
@@ -1023,7 +1023,7 @@ fn the_agents_port_copies_each_pane_with_its_state_time_and_work_summary() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
-    let mut pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Busy);
+    let mut pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     pane.last_transition_at_ms = 9_000;
     pane.work_summary = Some("Writing the watch tool".into());
     let hub = AgentSnapshotHub::new(snapshot(None, vec![pane]));
@@ -1042,7 +1042,7 @@ fn the_agents_port_copies_each_pane_with_its_state_time_and_work_summary() {
             folder: "/work/harold".into(),
             provider_id: "claude".into(),
             reads_as_claude: true,
-            state: EffectiveAgentState::Busy,
+            state: EffectiveAgentState::Working,
             state_since_ms: 9_000,
             work_summary: Some("Writing the watch tool".into()),
         }]

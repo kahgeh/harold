@@ -532,8 +532,8 @@ pub(crate) fn pick_pane<'a>(
         return Err(Reason::InputBoxUnreadable);
     }
     match pane.state {
-        EffectiveAgentState::Busy if busy_ok => Ok(pane),
-        EffectiveAgentState::Busy => Err(Reason::AgentBusy),
+        EffectiveAgentState::Working if busy_ok => Ok(pane),
+        EffectiveAgentState::Working => Err(Reason::AgentBusy),
         EffectiveAgentState::Unknown => Err(Reason::AgentStateUnknown),
         EffectiveAgentState::Idle if typed_into.contains(&pane.pane_id) => Err(Reason::AgentBusy),
         EffectiveAgentState::Idle => Ok(pane),

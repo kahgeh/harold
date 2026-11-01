@@ -1099,7 +1099,7 @@ async fn a_busy_chief_hears_the_phrase_and_gets_the_turn_once_free() {
     let h = Harness::new();
     h.script([text("approve q19")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.speak().await;
 
@@ -1121,7 +1121,7 @@ async fn a_chief_busy_past_2_minutes_drops_the_turn() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
 
     sleep(Duration::from_secs(121)).await;
@@ -1171,7 +1171,7 @@ async fn a_turn_that_ends_without_harold_speak_gets_the_turn_end_update() {
     h.start().await;
     h.speak().await;
 
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     sleep(Duration::from_millis(1000)).await;
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_millis(1900)).await;
@@ -1239,7 +1239,7 @@ async fn the_update_is_asked_with_the_turns_span_and_the_span_ends_when_the_line
     h.speak().await;
     assert!(call_turns_on(&pane).is_empty(), "the turn is still open");
 
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     sleep(Duration::from_millis(1000)).await;
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_millis(2600)).await;
@@ -1693,7 +1693,7 @@ async fn a_second_turn_while_the_first_waits_is_joined() {
     let h = Harness::new();
     h.script([text("first"), text("second")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
 
     h.speak().await;
     past_the_tail().await;
@@ -1713,7 +1713,7 @@ async fn stop_passes_on_a_turn_held_for_a_busy_chief() {
     let h = Harness::new();
     h.script([text("approve q19")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     assert_eq!(h.played(), [CHIEF_BUSY]);
 
@@ -1738,7 +1738,7 @@ async fn a_bye_passes_on_a_turn_held_for_a_busy_chief() {
     let h = Harness::new();
     h.script([text("approve q19"), text("Bye.")]);
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     past_the_tail().await;
 
@@ -1757,7 +1757,7 @@ async fn a_held_turn_passed_on_is_dropped_2_minutes_after_it_was_first_held() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
     sleep(Duration::from_secs(60)).await;
     h.calls.stop().await;
@@ -1781,7 +1781,7 @@ async fn shutdown_drops_a_turn_held_for_a_busy_chief() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    h.set_chief(EffectiveAgentState::Busy);
+    h.set_chief(EffectiveAgentState::Working);
     h.speak().await;
 
     h.calls.shutdown().await;

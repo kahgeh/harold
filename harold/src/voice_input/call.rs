@@ -2021,7 +2021,7 @@ impl<P: CallPorts> Call<P> {
                 .find(|pane| pane.pane_id == awaiting.pane)
                 .map(|pane| pane.state);
             match state {
-                Some(EffectiveAgentState::Busy) => {
+                Some(EffectiveAgentState::Working) => {
                     awaiting.seen_busy = true;
                     awaiting.idle_since = None;
                 }

@@ -344,7 +344,7 @@ fn prompt_block(text: &str, placeholders: &[String]) -> PromptBlock {
 fn classify_state(text: &str, provider: &AgentProviderSettings) -> Option<ObservedAgentState> {
     let visible_grid = normalize_visible_grid(text);
     if clause_matches(&visible_grid, &provider.busy_all) {
-        return Some(ObservedAgentState::Busy);
+        return Some(ObservedAgentState::Working);
     }
     clause_matches(&visible_grid, &provider.idle_all).then_some(ObservedAgentState::Idle)
 }

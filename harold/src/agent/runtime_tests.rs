@@ -323,7 +323,7 @@ async fn lifecycle_resolves_full_incarnation_and_appends_one_contiguous_batch() 
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set("  refresh\n events  ".into()),
         )
@@ -355,7 +355,7 @@ async fn lifecycle_rejects_invalid_or_unresolved_input_without_appending() {
             .handle
             .report_lifecycle(
                 "8".into(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "codex-hook".into(),
                 WorkSummaryUpdate::Unchanged,
             )
@@ -369,7 +369,7 @@ async fn lifecycle_rejects_invalid_or_unresolved_input_without_appending() {
             .handle
             .report_lifecycle(
                 "%8".into(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "codex-hook".into(),
                 WorkSummaryUpdate::Unchanged,
             )
@@ -394,7 +394,7 @@ async fn failed_lifecycle_append_does_not_advance_runtime_dedupe() {
             .handle
             .report_lifecycle(
                 "%8".into(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "codex-hook".into(),
                 WorkSummaryUpdate::Unchanged,
             )
@@ -405,7 +405,7 @@ async fn failed_lifecycle_append_does_not_advance_runtime_dedupe() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -486,7 +486,7 @@ async fn later_explicit_ingress_rejects_exact_placeholders_and_preserves_update_
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(PLACEHOLDER.into()),
         )
@@ -501,7 +501,7 @@ async fn later_explicit_ingress_rejects_exact_placeholders_and_preserves_update_
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -510,7 +510,7 @@ async fn later_explicit_ingress_rejects_exact_placeholders_and_preserves_update_
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(LEGITIMATE.into()),
         )
@@ -613,7 +613,7 @@ async fn configured_placeholder_ingress_is_rejected_before_every_event_payload()
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(RETAINED.into()),
         )
@@ -622,7 +622,7 @@ async fn configured_placeholder_ingress_is_rejected_before_every_event_payload()
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(PLACEHOLDER.into()),
         )
@@ -707,7 +707,7 @@ async fn resolved_unknown_provider_lifecycle_rejects_every_configured_exact_plac
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "unknown-hook".into(),
             WorkSummaryUpdate::Set(PLACEHOLDER.into()),
         )
@@ -820,7 +820,7 @@ async fn known_provider_does_not_reject_another_providers_exact_placeholder() {
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(CLAUDE_PLACEHOLDER.into()),
         )
@@ -866,7 +866,7 @@ async fn lifecycle_placeholder_cannot_leak_at_a_projection_page_boundary() {
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set(PLACEHOLDER.into()),
         )
@@ -961,7 +961,7 @@ async fn resolved_completion_starts_an_idle_reconciliation_epoch() {
         .unwrap();
     fixture.screen.push(Ok(screen(
         &observation,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         Some("fallback"),
         1_500,
     )));
@@ -1006,7 +1006,7 @@ async fn resolved_completion_projection_uses_the_runtime_grace_epoch() {
         .unwrap();
     fixture.screen.push(Ok(screen(
         &observation,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         2_100,
     )));
@@ -1014,7 +1014,10 @@ async fn resolved_completion_projection_uses_the_runtime_grace_epoch() {
 
     fixture.store.project_unhandled_events(100).await.unwrap();
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
 }
 
 #[tokio::test]
@@ -1099,7 +1102,7 @@ async fn lifecycle_and_departure_orders_converge_on_exact_liveness() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -1134,7 +1137,7 @@ async fn lifecycle_and_departure_orders_converge_on_exact_liveness() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -1148,7 +1151,10 @@ async fn lifecycle_and_departure_orders_converge_on_exact_liveness() {
     let snapshot = departure_first.store.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes.len(), 1);
     assert_eq!(snapshot.panes[0].pane.incarnation, replacement.incarnation);
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
 }
 
 #[tokio::test]
@@ -1159,7 +1165,7 @@ async fn changed_screen_facts_append_independently_and_only_advance_after_succes
 
     fixture.screen.push(Ok(screen(
         &observation,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         1_000,
     )));
@@ -1170,7 +1176,7 @@ async fn changed_screen_facts_append_independently_and_only_advance_after_succes
     fixture.handle.screen_tick().await.unwrap();
     fixture.screen.push(Ok(screen(
         &observation,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         Some("task a"),
         1_200,
     )));
@@ -1216,7 +1222,7 @@ async fn changed_screen_facts_append_independently_and_only_advance_after_succes
             screen_events[0].state,
             screen_events[0].fallback_summary.as_deref()
         ),
-        (Some(ObservedAgentState::Busy), None)
+        (Some(ObservedAgentState::Working), None)
     );
     assert_eq!(
         (
@@ -1243,7 +1249,7 @@ async fn configured_idle_placeholder_never_replaces_a_durable_screen_summary() {
     let screen_port = Arc::new(FakeScreen::default());
     screen_port.push(Ok(screen(
         &observation,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         Some("Review durable state"),
         200,
     )));
@@ -1360,7 +1366,7 @@ async fn lifecycle_epoch_holds_conflicting_screen_state_but_allows_summary_then_
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -1424,7 +1430,7 @@ async fn metadata_refresh_preserves_the_incarnations_reconciliation_epoch() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -1550,7 +1556,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     );
     let screen_event: super::domain::AgentScreenObserved =
         serde_json::from_value(events[1].payload.clone()).unwrap();
-    assert_eq!(screen_event.state, Some(ObservedAgentState::Busy));
+    assert_eq!(screen_event.state, Some(ObservedAgentState::Working));
     assert_eq!(
         screen_event.fallback_summary.as_deref(),
         Some("Review tests")
@@ -1672,7 +1678,10 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         .unwrap();
     fixture.store.project_unhandled_events(100).await.unwrap();
     let explicit = fixture.store.load_agent_snapshot().await.unwrap();
-    assert_eq!(explicit.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        explicit.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
     assert_eq!(
         explicit.panes[0].work_summary.as_deref(),
         Some("Fix projector")
@@ -1706,7 +1715,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
     // The adapter reported busy, so the turn-complete leaves the state alone.
     assert_eq!(
         preserved.panes[0].effective_state,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
     assert_eq!(
         preserved.panes[0].work_summary.as_deref(),
@@ -1757,7 +1766,7 @@ async fn restart_seed_departure_requires_two_new_successful_absence_scans() {
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "codex-hook".into(),
                 work_summary: WorkSummaryUpdate::Set("restart task".into()),
                 observed_at_ms: 100,
@@ -1822,7 +1831,7 @@ async fn restart_seed_retains_screen_dedupe_for_a_live_incarnation() {
             }),
             AgentEvent::ScreenObserved(super::domain::AgentScreenObserved {
                 incarnation: observed.incarnation.clone(),
-                state: Some(ObservedAgentState::Busy),
+                state: Some(ObservedAgentState::Working),
                 classifier_id: "tmux-visible-v1".into(),
                 fallback_summary: Some("seeded task".into()),
                 observed_at_ms: 200,
@@ -1837,7 +1846,7 @@ async fn restart_seed_retains_screen_dedupe_for_a_live_incarnation() {
     let screen_port = Arc::new(FakeScreen::default());
     screen_port.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         Some("seeded task"),
         300,
     )));
@@ -1880,7 +1889,7 @@ async fn restart_seed_preserves_a_legitimate_summary_containing_the_placeholder(
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "codex-hook".into(),
                 work_summary: WorkSummaryUpdate::Set(LEGITIMATE.into()),
                 observed_at_ms: 110,
@@ -1948,14 +1957,14 @@ async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecy
             }),
             AgentEvent::ScreenObserved(super::domain::AgentScreenObserved {
                 incarnation: observed.incarnation.clone(),
-                state: Some(ObservedAgentState::Busy),
+                state: Some(ObservedAgentState::Working),
                 classifier_id: "tmux-visible-v1".into(),
                 fallback_summary: None,
                 observed_at_ms: 100,
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "codex-hook".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 200,
@@ -1969,13 +1978,13 @@ async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecy
     let screen_port = Arc::new(FakeScreen::default());
     screen_port.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         2_200,
     )));
     screen_port.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         2_300,
     )));
@@ -2005,7 +2014,7 @@ async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecy
     let screen_port = Arc::new(FakeScreen::default());
     screen_port.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         2_400,
     )));
@@ -2052,7 +2061,7 @@ async fn zero_grace_same_millisecond_lifecycle_revalidates_once_across_two_resta
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "codex-hook".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 100,
@@ -2063,7 +2072,10 @@ async fn zero_grace_same_millisecond_lifecycle_revalidates_once_across_two_resta
     .unwrap();
     store.project_unhandled_events(100).await.unwrap();
     let snapshot = store.load_agent_snapshot().await.unwrap();
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
     assert_eq!(snapshot.panes[0].screen_state, None);
     assert_eq!(
         snapshot.panes[0].screen_work_summary.as_deref(),
@@ -2176,7 +2188,7 @@ async fn restart_seed_preserves_one_pending_post_grace_screen_repair() {
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "codex-hook".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 100,
@@ -2194,7 +2206,10 @@ async fn restart_seed_preserves_one_pending_post_grace_screen_repair() {
     .unwrap();
     store.project_unhandled_events(100).await.unwrap();
     let snapshot = store.load_agent_snapshot().await.unwrap();
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
     let screen_port = Arc::new(FakeScreen::default());
     screen_port.push(Ok(screen(
         &observed,
@@ -2393,7 +2408,7 @@ impl VisibleScreenPort for SlowScreen {
         _provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
         std::thread::sleep(Duration::from_millis(80));
-        Ok(screen(pane, Some(ObservedAgentState::Busy), None, 200))
+        Ok(screen(pane, Some(ObservedAgentState::Working), None, 200))
     }
 }
 
@@ -2559,7 +2574,7 @@ async fn screen_health_degrades_recovers_and_deduplicates_without_raw_errors() {
     }
     fixture.screen.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -2653,7 +2668,7 @@ async fn unprojected_page_boundary_store(
         }),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: observation.incarnation.clone(),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "codex-hook".into(),
             work_summary: WorkSummaryUpdate::Set(retained_summary.into()),
             observed_at_ms: 101,
@@ -2837,7 +2852,7 @@ impl Fixture {
             Duration::from_secs(10),
             self.handle.report_lifecycle(
                 "%8".into(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "codex-hook".into(),
                 WorkSummaryUpdate::Set(prompt.into()),
             ),
@@ -3035,7 +3050,7 @@ async fn activity_summary_completion_uses_full_reply_and_projects_reported_outco
 }
 
 #[tokio::test]
-async fn activity_summary_screen_duplicates_and_busy_corroboration_do_not_regenerate() {
+async fn activity_summary_screen_duplicates_and_working_corroboration_do_not_regenerate() {
     let (fixture, mut requests) = Fixture::with_summaries().await;
     fixture.submit_summary_task("Fix parser", 1_000).await;
     let request = next_request(&mut requests).await;
@@ -3046,7 +3061,7 @@ async fn activity_summary_screen_duplicates_and_busy_corroboration_do_not_regene
     fixture.wait_for_generated(1).await;
     let observation = ScreenObservation {
         incarnation: pane("%8", 80, 800, 1_000, 100).incarnation,
-        state: Some(ObservedAgentState::Busy),
+        state: Some(ObservedAgentState::Working),
         fallback_summary: None,
         classifier_id: "codex-v1".into(),
         observed_at_ms: 3_000,
@@ -3162,7 +3177,7 @@ async fn activity_summary_failed_source_append_keeps_prior_result_eligible() {
             .handle
             .report_lifecycle(
                 "%8".into(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "codex-hook".into(),
                 WorkSummaryUpdate::Set("Undurable task".into())
             )
@@ -3239,7 +3254,7 @@ async fn activity_summary_reply_only_completion_generates_outcome_and_empty_comp
     // The adapter reported busy, so the turn-complete leaves the state alone.
     assert_eq!(
         completed.panes[0].effective_state,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 
     fixture
@@ -3374,7 +3389,7 @@ exec /bin/sleep 60
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set("Fix parser".into()),
         )
@@ -3436,7 +3451,7 @@ exec /bin/sleep 60
 }
 
 #[tokio::test]
-async fn submitted_prompt_recovery_baselines_then_recovers_new_busy_work_inside_hook_grace() {
+async fn submitted_prompt_recovery_baselines_then_recovers_new_working_work_inside_hook_grace() {
     let source = pane("%8", 80, 800, 1000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
     fixture.screen.prompts(&[1]);
@@ -3451,7 +3466,7 @@ async fn submitted_prompt_recovery_baselines_then_recovers_new_busy_work_inside_
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Set("Earlier explicit".into()),
         )
@@ -3460,7 +3475,7 @@ async fn submitted_prompt_recovery_baselines_then_recovers_new_busy_work_inside_
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3468,7 +3483,10 @@ async fn submitted_prompt_recovery_baselines_then_recovers_new_busy_work_inside_
     fixture.store.project_unhandled_events(100).await.unwrap();
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
     assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 2);
 }
 
@@ -3481,7 +3499,7 @@ async fn submitted_prompt_recovery_retries_idle_once_and_refreshes_identical_new
     fixture.screen.prompts(&[1]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3505,7 +3523,7 @@ async fn submitted_prompt_recovery_retries_idle_once_and_refreshes_identical_new
     fixture.screen.prompts(&[1, 2, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         500,
     )));
@@ -3536,7 +3554,7 @@ async fn submitted_prompt_recovery_preserves_checkpoint_after_source_append_fail
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3545,12 +3563,12 @@ async fn submitted_prompt_recovery_preserves_checkpoint_after_source_append_fail
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         300,
     )));
     fixture.handle.screen_tick().await.unwrap();
-    // A repeated Busy poll is not a new edge; retain the 30-second history bound.
+    // A repeated Working poll is not a new edge; retain the 30-second history bound.
     assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 2);
     fixture.screen.push(Ok(screen(
         &source,
@@ -3579,7 +3597,7 @@ async fn submitted_prompt_recovery_baselines_lifecycle_completion_and_replacemen
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -3587,9 +3605,12 @@ async fn submitted_prompt_recovery_baselines_lifecycle_completion_and_replacemen
         .unwrap();
     assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 1);
     fixture.screen.prompts(&[1, 2]);
-    fixture
-        .screen
-        .push(Ok(screen(&old, Some(ObservedAgentState::Busy), None, 200)));
+    fixture.screen.push(Ok(screen(
+        &old,
+        Some(ObservedAgentState::Working),
+        None,
+        200,
+    )));
     fixture.handle.screen_tick().await.unwrap();
     fixture.screen.prompts(&[1, 2, 3]);
     fixture
@@ -3600,7 +3621,7 @@ async fn submitted_prompt_recovery_baselines_lifecycle_completion_and_replacemen
     fixture.screen.prompts(&[1, 2, 3]);
     fixture.screen.push(Ok(screen(
         &replacement,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         400,
     )));
@@ -3644,7 +3665,7 @@ async fn submitted_prompt_recovery_capture_failure_allows_one_idle_retry_and_kee
         .push_back(Err(ScreenError::CaptureFailed));
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3678,7 +3699,7 @@ async fn submitted_prompt_recovery_feeds_sonnet_and_identical_repeat_invalidates
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3698,7 +3719,7 @@ async fn submitted_prompt_recovery_feeds_sonnet_and_identical_repeat_invalidates
     fixture.screen.prompts(&[1, 2, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         400,
     )));
@@ -3743,7 +3764,7 @@ async fn submitted_prompt_recovery_departure_discards_checkpoint_even_if_identit
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3755,7 +3776,7 @@ async fn submitted_prompt_recovery_departure_discards_checkpoint_even_if_identit
     fixture.screen.prompts(&[1, 2, 3]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         300,
     )));
@@ -3787,7 +3808,7 @@ async fn submitted_prompt_recovery_seeded_restart_baselines_before_first_command
     screen_port.prompts(&[1, 2]);
     screen_port.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3816,7 +3837,7 @@ async fn submitted_prompt_recovery_seeded_restart_baselines_before_first_command
 }
 
 #[tokio::test]
-async fn submitted_prompt_recovery_failed_baseline_does_not_retry_on_busy_or_idle_ticks() {
+async fn submitted_prompt_recovery_failed_baseline_does_not_retry_on_working_or_idle_ticks() {
     let source = pane("%8", 80, 800, 1000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
     fixture
@@ -3828,7 +3849,7 @@ async fn submitted_prompt_recovery_failed_baseline_does_not_retry_on_busy_or_idl
     fixture.handle.inventory_tick().await.unwrap();
     for (state, timestamp) in [
         (ObservedAgentState::Idle, 200),
-        (ObservedAgentState::Busy, 300),
+        (ObservedAgentState::Working, 300),
         (ObservedAgentState::Idle, 400),
     ] {
         fixture
@@ -3849,7 +3870,7 @@ async fn submitted_prompt_recovery_failed_baseline_does_not_retry_on_busy_or_idl
 }
 
 #[tokio::test]
-async fn submitted_prompt_recovery_retries_failed_busy_source_append_after_becoming_idle() {
+async fn submitted_prompt_recovery_retries_failed_working_source_append_after_becoming_idle() {
     let source = pane("%8", 80, 800, 1000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
     fixture.screen.prompts(&[1]);
@@ -3857,7 +3878,7 @@ async fn submitted_prompt_recovery_retries_failed_busy_source_append_after_becom
     fixture.screen.prompts(&[1, 2]);
     fixture.screen.push(Ok(screen(
         &source,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -3919,7 +3940,7 @@ async fn sample(fixture: &Fixture, state: Option<ObservedAgentState>, observed_a
 #[tokio::test]
 async fn a_turn_complete_leaves_the_state_of_a_pane_the_mod_reports_on() {
     let fixture = Fixture::new(FakeInventory::default()).await;
-    report(&fixture, ObservedAgentState::Busy, 100).await;
+    report(&fixture, ObservedAgentState::Working, 100).await;
 
     fixture
         .inventory
@@ -3932,7 +3953,7 @@ async fn a_turn_complete_leaves_the_state_of_a_pane_the_mod_reports_on() {
 
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
     // The notification is still staged.
     let delivery = fixture
@@ -3970,7 +3991,7 @@ async fn restart_keeps_the_adapter_so_a_turn_complete_still_leaves_the_state() {
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: observed.incarnation.clone(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "claude.lifecycle".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 100,
@@ -3999,7 +4020,7 @@ async fn restart_keeps_the_adapter_so_a_turn_complete_still_leaves_the_state() {
     );
 
     handle.turn_completed(turn("current task")).await.unwrap();
-    assert_eq!(projected_state(&store).await, EffectiveAgentState::Busy);
+    assert_eq!(projected_state(&store).await, EffectiveAgentState::Working);
 
     // The restarted runtime still counts the mod's report at 100 as the pane's last report.
     screen_port.push(Ok(screen(
@@ -4015,14 +4036,14 @@ async fn restart_keeps_the_adapter_so_a_turn_complete_still_leaves_the_state() {
 }
 
 #[tokio::test]
-async fn a_busy_report_holds_at_29_seconds_and_the_screen_decides_at_30() {
+async fn a_working_report_holds_at_29_seconds_and_the_screen_decides_at_30() {
     let fixture = Fixture::with_default_graces().await;
-    report(&fixture, ObservedAgentState::Busy, 100).await;
+    report(&fixture, ObservedAgentState::Working, 100).await;
 
     sample(&fixture, Some(ObservedAgentState::Idle), 29_100).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 
     sample(&fixture, Some(ObservedAgentState::Idle), 30_100).await;
@@ -4032,24 +4053,24 @@ async fn a_busy_report_holds_at_29_seconds_and_the_screen_decides_at_30() {
     );
 
     // The screen decides until the mod reports again.
-    sample(&fixture, Some(ObservedAgentState::Busy), 30_600).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 30_600).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 }
 
 #[tokio::test]
-async fn a_repeated_busy_report_restarts_the_30_seconds_in_the_runtime() {
+async fn a_repeated_working_report_restarts_the_30_seconds_in_the_runtime() {
     let fixture = Fixture::with_default_graces().await;
-    report(&fixture, ObservedAgentState::Busy, 100).await;
-    report(&fixture, ObservedAgentState::Busy, 10_100).await;
-    report(&fixture, ObservedAgentState::Busy, 20_100).await;
+    report(&fixture, ObservedAgentState::Working, 100).await;
+    report(&fixture, ObservedAgentState::Working, 10_100).await;
+    report(&fixture, ObservedAgentState::Working, 20_100).await;
 
     sample(&fixture, Some(ObservedAgentState::Idle), 49_100).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 
     // The mod has missed three reports in a row.
@@ -4060,36 +4081,36 @@ async fn a_repeated_busy_report_restarts_the_30_seconds_in_the_runtime() {
     );
 
     // The next report puts the mod's state back, and the screen is held back again.
-    report(&fixture, ObservedAgentState::Busy, 60_100).await;
+    report(&fixture, ObservedAgentState::Working, 60_100).await;
     sample(&fixture, Some(ObservedAgentState::Idle), 60_600).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 }
 
 #[tokio::test]
-async fn an_idle_report_holds_until_the_screen_has_read_busy_for_30_seconds() {
+async fn an_idle_report_holds_until_the_screen_has_read_working_for_30_seconds() {
     let fixture = Fixture::with_default_graces().await;
     report(&fixture, ObservedAgentState::Idle, 100).await;
 
     // The busy reading starts 40 seconds after the report: the report's age does not count.
-    sample(&fixture, Some(ObservedAgentState::Busy), 40_000).await;
-    sample(&fixture, Some(ObservedAgentState::Busy), 50_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 40_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 50_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
         EffectiveAgentState::Idle
     );
-    sample(&fixture, Some(ObservedAgentState::Busy), 69_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 69_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
         EffectiveAgentState::Idle
     );
 
-    sample(&fixture, Some(ObservedAgentState::Busy), 70_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 70_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 
     // The screen decides until the mod reports again.
@@ -4098,13 +4119,13 @@ async fn an_idle_report_holds_until_the_screen_has_read_busy_for_30_seconds() {
         projected_state(&fixture.store).await,
         EffectiveAgentState::Idle
     );
-    sample(&fixture, Some(ObservedAgentState::Busy), 71_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 71_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
     report(&fixture, ObservedAgentState::Idle, 80_000).await;
-    sample(&fixture, Some(ObservedAgentState::Busy), 80_500).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 80_500).await;
     assert_eq!(
         projected_state(&fixture.store).await,
         EffectiveAgentState::Idle
@@ -4112,51 +4133,51 @@ async fn an_idle_report_holds_until_the_screen_has_read_busy_for_30_seconds() {
 }
 
 #[tokio::test]
-async fn a_break_in_the_busy_reading_restarts_the_30_seconds() {
+async fn a_break_in_the_working_reading_restarts_the_30_seconds() {
     for break_reading in [Some(ObservedAgentState::Idle), None] {
         let fixture = Fixture::with_default_graces().await;
         report(&fixture, ObservedAgentState::Idle, 100).await;
 
-        sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
+        sample(&fixture, Some(ObservedAgentState::Working), 5_000).await;
         sample(&fixture, break_reading, 20_000).await;
-        sample(&fixture, Some(ObservedAgentState::Busy), 21_000).await;
+        sample(&fixture, Some(ObservedAgentState::Working), 21_000).await;
         // 30 seconds after the first busy reading, 14 after the run restarted.
-        sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+        sample(&fixture, Some(ObservedAgentState::Working), 35_000).await;
         assert_eq!(
             projected_state(&fixture.store).await,
             EffectiveAgentState::Idle,
             "break: {break_reading:?}"
         );
 
-        sample(&fixture, Some(ObservedAgentState::Busy), 51_000).await;
+        sample(&fixture, Some(ObservedAgentState::Working), 51_000).await;
         assert_eq!(
             projected_state(&fixture.store).await,
-            EffectiveAgentState::Busy,
+            EffectiveAgentState::Working,
             "break: {break_reading:?}"
         );
     }
 }
 
 #[tokio::test]
-async fn a_failed_capture_does_not_break_the_busy_reading() {
+async fn a_failed_capture_does_not_break_the_working_reading() {
     let fixture = Fixture::with_default_graces().await;
     report(&fixture, ObservedAgentState::Idle, 100).await;
 
-    sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 5_000).await;
     fixture.screen.push(Err(ScreenError::CaptureFailed));
     fixture.handle.screen_tick().await.unwrap();
-    sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 35_000).await;
 
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 }
 
 #[tokio::test]
 async fn a_turn_complete_does_not_hand_a_reported_pane_to_the_2_second_window() {
     let fixture = Fixture::with_default_graces().await;
-    report(&fixture, ObservedAgentState::Busy, 100).await;
+    report(&fixture, ObservedAgentState::Working, 100).await;
     fixture
         .inventory
         .push_resolution(Ok(Some(reported_pane(4_000))));
@@ -4171,7 +4192,7 @@ async fn a_turn_complete_does_not_hand_a_reported_pane_to_the_2_second_window() 
 
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 }
 
@@ -4187,20 +4208,20 @@ async fn a_turn_complete_without_an_adapter_keeps_the_2_second_window_in_the_run
         .await
         .unwrap();
 
-    sample(&fixture, Some(ObservedAgentState::Busy), 2_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 2_000).await;
     assert_eq!(
         projected_state(&fixture.store).await,
         EffectiveAgentState::Idle
     );
-    sample(&fixture, Some(ObservedAgentState::Busy), 2_100).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 2_100).await;
     assert_eq!(
         projected_state(&fixture.store).await,
-        EffectiveAgentState::Busy
+        EffectiveAgentState::Working
     );
 }
 
 #[tokio::test]
-async fn a_repeated_busy_report_does_not_cancel_a_summary_in_progress() {
+async fn a_repeated_working_report_does_not_cancel_a_summary_in_progress() {
     let (fixture, mut requests) = Fixture::with_summaries().await;
     fixture.submit_summary_task("fix the parser", 1_000).await;
     let pending = next_request(&mut requests).await;
@@ -4213,7 +4234,7 @@ async fn a_repeated_busy_report_does_not_cancel_a_summary_in_progress() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "codex-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -4267,7 +4288,7 @@ async fn the_daemon_config_reaches_the_runtime_as_two_windows() {
     handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "claude.lifecycle".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -4307,19 +4328,19 @@ async fn the_daemon_config_reaches_the_runtime_as_two_windows() {
 }
 
 #[tokio::test]
-async fn a_second_idle_report_restarts_the_busy_run() {
+async fn a_second_idle_report_restarts_the_working_run() {
     let fixture = Fixture::with_default_graces().await;
     report(&fixture, ObservedAgentState::Idle, 100).await;
-    sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
-    sample(&fixture, Some(ObservedAgentState::Busy), 20_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 5_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 20_000).await;
 
     report(&fixture, ObservedAgentState::Idle, 25_000).await;
-    sample(&fixture, Some(ObservedAgentState::Busy), 26_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 26_000).await;
     // 30 seconds after the first busy reading, 9 after the run restarted.
-    sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 35_000).await;
     assert_eq!(screen_events(&fixture).await, 0);
 
-    sample(&fixture, Some(ObservedAgentState::Busy), 56_000).await;
+    sample(&fixture, Some(ObservedAgentState::Working), 56_000).await;
     assert_eq!(screen_events(&fixture).await, 1);
 }
 
@@ -4338,7 +4359,7 @@ fn ms(at_ms: i64) -> time::OffsetDateTime {
 }
 
 #[tokio::test]
-async fn a_pane_whose_screen_turns_busy_reports_the_first_busy_reading() {
+async fn a_pane_whose_screen_turns_working_reports_the_first_working_reading() {
     let fixture = Fixture::with_default_graces().await;
     let pane_id = unique_numeric_pane();
     let observed = pane(&pane_id, 80, 800, 1_000, 100);
@@ -4360,7 +4381,7 @@ async fn a_pane_whose_screen_turns_busy_reports_the_first_busy_reading() {
     for observed_at_ms in [5_000, 6_000] {
         fixture.screen.push(Ok(screen(
             &observed,
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             None,
             observed_at_ms,
         )));
@@ -4376,7 +4397,7 @@ async fn a_pane_whose_screen_turns_busy_reports_the_first_busy_reading() {
 }
 
 #[tokio::test]
-async fn a_busy_report_from_the_hook_reports_the_pane_busy() {
+async fn a_working_report_from_the_hook_reports_the_pane_working() {
     let fixture = Fixture::with_default_graces().await;
     let pane_id = unique_numeric_pane();
     for observed_at_ms in [2_000, 3_000] {
@@ -4387,7 +4408,7 @@ async fn a_busy_report_from_the_hook_reports_the_pane_busy() {
             .handle
             .report_lifecycle(
                 pane_id.clone(),
-                ObservedAgentState::Busy,
+                ObservedAgentState::Working,
                 "claude.lifecycle".into(),
                 WorkSummaryUpdate::Unchanged,
             )
@@ -4572,7 +4593,7 @@ async fn a_hook_that_tracks_the_incarnation_first_logs_pane_found_once() {
         .handle
         .report_lifecycle(
             "%8".into(),
-            ObservedAgentState::Busy,
+            ObservedAgentState::Working,
             "claude-hook".into(),
             WorkSummaryUpdate::Unchanged,
         )
@@ -4699,7 +4720,7 @@ async fn screen_read_that_fails_once_logs_retried_and_stays_healthy() {
     fixture.screen.push(Err(ScreenError::CaptureFailed));
     fixture.screen.push(Ok(screen(
         &observed,
-        Some(ObservedAgentState::Busy),
+        Some(ObservedAgentState::Working),
         None,
         200,
     )));
@@ -4718,7 +4739,7 @@ async fn screen_read_that_fails_once_logs_retried_and_stays_healthy() {
     assert!(health_events(&events).is_empty());
     let observed_screen: super::domain::AgentScreenObserved =
         serde_json::from_value(events.last().unwrap().payload.clone()).unwrap();
-    assert_eq!(observed_screen.state, Some(ObservedAgentState::Busy));
+    assert_eq!(observed_screen.state, Some(ObservedAgentState::Working));
 }
 
 #[tokio::test]
@@ -4910,7 +4931,7 @@ async fn screen_retry_names_only_the_retried_pane() {
 }
 
 fn screen_observation(observed: &AgentPaneObservation) -> ScreenObservation {
-    screen(observed, Some(ObservedAgentState::Busy), None, 200)
+    screen(observed, Some(ObservedAgentState::Working), None, 200)
 }
 
 /// Its first scan runs until the monitor asks it to stop; the retry checks that it did.
@@ -5517,7 +5538,7 @@ impl VisibleScreenPort for TimingScreen {
         if slow {
             std::thread::sleep(SLOW_READ);
         }
-        Ok(screen(pane, Some(ObservedAgentState::Busy), None, 200))
+        Ok(screen(pane, Some(ObservedAgentState::Working), None, 200))
     }
 
     fn scan_prompts(

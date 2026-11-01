@@ -99,7 +99,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
         AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: agent_incarnation(),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("  Fix\u{1b}[31m tests\n".into()),
             observed_at_ms: 101,
@@ -120,7 +120,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
         }),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: agent_incarnation(),
-            state: Some(ObservedAgentState::Busy),
+            state: Some(ObservedAgentState::Working),
             classifier_id: "screen-v2".into(),
             fallback_summary: Some("Ship release".into()),
             observed_at_ms: 104,
@@ -182,7 +182,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
     );
     assert_full_incarnation(&summary_only.incarnation);
     let both: AgentScreenObserved = serde_json::from_value(stored[4].payload.clone()).unwrap();
-    assert_eq!(both.state, Some(ObservedAgentState::Busy));
+    assert_eq!(both.state, Some(ObservedAgentState::Working));
     assert_eq!(both.fallback_summary.as_deref(), Some("Ship release"));
     assert_full_incarnation(&both.incarnation);
     assert_eq!(stored[5].r#type, "AgentPaneDeparted");
@@ -208,7 +208,7 @@ async fn pane_and_lifecycle_are_one_contiguous_agent_append_batch() {
             AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: agent_incarnation(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "hook-v1".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 101,
@@ -756,7 +756,7 @@ async fn projection_stages_only_deliveries_and_projects_agent_events_in_one_batc
         &store,
         vec![AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: agent_incarnation(),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "hook-v1".into(),
             work_summary: WorkSummaryUpdate::Set("Fix the projector".into()),
             observed_at_ms: 101,
@@ -801,7 +801,10 @@ async fn projection_stages_only_deliveries_and_projects_agent_events_in_one_batc
     assert_eq!(snapshot.monitor_health[0].last_event_version.get(), 5);
     assert_eq!(snapshot.panes.len(), 1);
     assert_eq!(snapshot.panes[0].pane, agent_pane());
-    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Working
+    );
     assert_eq!(
         snapshot.panes[0].work_summary.as_deref(),
         Some("Fix the projector")
@@ -902,7 +905,7 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: agent_incarnation(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "hook-v1".into(),
                 work_summary: WorkSummaryUpdate::Set(format!(
                     "  Fix projection {}  ",
@@ -912,7 +915,7 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: agent_incarnation(),
-                state: ObservedAgentState::Idle,
+                state: Some(ObservedAgentState::Idle),
                 adapter_id: "hook-v1".into(),
                 work_summary: WorkSummaryUpdate::Clear,
                 observed_at_ms: 140,
@@ -1031,7 +1034,7 @@ async fn configured_hook_grace_governs_replay_after_restart() {
             AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
                 incarnation: agent_incarnation(),
-                state: ObservedAgentState::Busy,
+                state: Some(ObservedAgentState::Working),
                 adapter_id: "hook-v1".into(),
                 work_summary: WorkSummaryUpdate::Unchanged,
                 observed_at_ms: 100,
@@ -1439,7 +1442,7 @@ async fn the_reporting_adapter_is_stored_with_the_pane_and_survives_reopen() {
         &store,
         vec![AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: agent_incarnation(),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "claude.lifecycle".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: 100,
@@ -2795,5 +2798,179 @@ async fn the_tts_default_is_one_row_that_survives_a_reopen() {
             .unwrap()
             .as_integer(),
         Some(&1)
+    );
+}
+
+fn pane_observed_event() -> NewEvent {
+    NewEvent::new(
+        "AgentPaneObserved",
+        serde_json::to_value(AgentPaneObserved { pane: agent_pane() }).unwrap(),
+    )
+}
+
+fn lifecycle_json(state: serde_json::Value) -> NewEvent {
+    NewEvent::new(
+        "AgentLifecycleObserved",
+        json!({
+            "incarnation": agent_incarnation(),
+            "state": state,
+            "adapter_id": "hook-v1",
+            "work_summary": "Unchanged",
+            "observed_at_ms": 101,
+        }),
+    )
+}
+
+fn screen_json(state: serde_json::Value) -> NewEvent {
+    NewEvent::new(
+        "AgentScreenObserved",
+        json!({
+            "incarnation": agent_incarnation(),
+            "state": state,
+            "classifier_id": "screen-v1",
+            "fallback_summary": null,
+            "observed_at_ms": 102,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn old_busy_and_idle_events_replay_to_the_same_projection() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .append([
+            pane_observed_event(),
+            lifecycle_json(json!("Busy")),
+            screen_json(json!("Idle")),
+        ])
+        .await
+        .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].hook_state,
+        Some(ObservedAgentState::Working)
+    );
+    // The screen event came after the hook event and so agrees with the old behaviour.
+    assert_eq!(
+        snapshot.panes[0].screen_state,
+        Some(ObservedAgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn old_idle_lifecycle_and_busy_screen_events_replay_as_before() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .append([
+            pane_observed_event(),
+            lifecycle_json(json!("Idle")),
+            screen_json(json!("Busy")),
+        ])
+        .await
+        .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].hook_state, Some(ObservedAgentState::Idle));
+    assert_eq!(
+        snapshot.panes[0].screen_state,
+        Some(ObservedAgentState::Working)
+    );
+}
+
+#[tokio::test]
+async fn a_new_event_is_written_with_working() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: agent_incarnation(),
+            state: Some(ObservedAgentState::Working),
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 101,
+        })],
+    )
+    .await
+    .unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    let stored = events[0].payload.to_string();
+    assert!(stored.contains("\"Working\""), "{stored}");
+    assert!(!stored.contains("Busy"), "{stored}");
+}
+
+#[tokio::test]
+async fn an_event_with_a_stage_3_word_reads_as_unknown_without_error() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .append([
+            pane_observed_event(),
+            lifecycle_json(json!("Done")),
+            screen_json(json!("Done")),
+        ])
+        .await
+        .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].hook_state, None);
+    assert_eq!(snapshot.panes[0].screen_state, None);
+    assert_eq!(
+        snapshot.panes[0].effective_state,
+        EffectiveAgentState::Unknown
+    );
+}
+
+#[tokio::test]
+async fn a_lifecycle_event_with_no_state_leaves_the_hook_state_as_it_was() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .append([
+            pane_observed_event(),
+            lifecycle_json(json!("Working")),
+            lifecycle_json(json!("Done")),
+        ])
+        .await
+        .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].hook_state,
+        Some(ObservedAgentState::Working)
+    );
+    assert_eq!(snapshot.panes[0].hook_observed_at_ms, Some(101));
+}
+
+#[test]
+fn an_unknown_effective_state_word_reads_as_unknown_and_busy_reads_as_working() {
+    let busy: EffectiveAgentState = serde_json::from_value(json!("Busy")).unwrap();
+    let done: EffectiveAgentState = serde_json::from_value(json!("Done")).unwrap();
+    assert_eq!(busy, EffectiveAgentState::Working);
+    assert_eq!(done, EffectiveAgentState::Unknown);
+    assert_eq!(
+        super::parse_effective_state("busy").unwrap(),
+        EffectiveAgentState::Working
+    );
+    assert_eq!(
+        super::parse_effective_state("done").unwrap(),
+        EffectiveAgentState::Unknown
+    );
+    assert_eq!(super::parse_observed_state("done".into()).unwrap(), None);
+    assert_eq!(
+        super::parse_observed_state("working".into()).unwrap(),
+        Some(ObservedAgentState::Working)
     );
 }

@@ -61,7 +61,7 @@ impl Typist {
             return Err("input_box_unreadable");
         }
         match agent.state {
-            EffectiveAgentState::Busy => return Err("agent_busy"),
+            EffectiveAgentState::Working => return Err("agent_busy"),
             EffectiveAgentState::Unknown => return Err("agent_state_unknown"),
             EffectiveAgentState::Idle => {}
         }

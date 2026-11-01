@@ -277,7 +277,7 @@ fn deliver_from_queue(fake: &Fake) -> (AlertQueue, watch::Sender<()>, JoinHandle
 
 /// Shows the chief busy and then idle again, so a pane held after typing is let go.
 async fn busy_then_idle(fake: &Fake) {
-    set_chief_state(fake, EffectiveAgentState::Busy);
+    set_chief_state(fake, EffectiveAgentState::Working);
     tokio::time::sleep(Duration::from_secs(6)).await;
     set_chief_state(fake, EffectiveAgentState::Idle);
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -312,7 +312,7 @@ async fn three_firings_in_a_row_type_one_line() {
 async fn a_chief_busy_for_thirty_minutes_gets_the_alert_once_when_idle() {
     let logs = CapturedLogs::start();
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
@@ -339,7 +339,7 @@ async fn a_chief_busy_for_thirty_minutes_gets_the_alert_once_when_idle() {
 async fn a_changed_refusal_reason_logs_waiting_only_once() {
     let logs = CapturedLogs::start();
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
@@ -397,7 +397,7 @@ async fn a_cleared_never_fired_types_nothing() {
     assert!(fake.keys().is_empty());
 
     // A firing and its cleared, both while the chief is busy.
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
     tokio::time::sleep(Duration::from_secs(60)).await;
     queue.send(SLOT_IDLE_CLEARED.into()).await.unwrap();
@@ -483,7 +483,7 @@ async fn delivery_given_up_is_typed_each_time_and_merged_while_busy() {
     tokio::time::sleep(Duration::from_secs(70)).await;
     assert_eq!(texts(&fake), [line, line]);
 
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     tokio::time::sleep(Duration::from_secs(6)).await;
     queue.firing(DELIVERY_GIVEN_UP);
     queue.firing(DELIVERY_GIVEN_UP);
@@ -517,7 +517,7 @@ async fn store_failing_then_cleared_type_two_lines() {
 async fn a_hundred_repeats_while_busy_do_not_fill_the_queue() {
     let logs = CapturedLogs::start();
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, _handle) = deliver_from_queue(&fake);
 
     for _ in 0..100 {
@@ -551,7 +551,7 @@ async fn a_new_deliver_starts_with_nothing_told() {
 #[tokio::test(start_paused = true)]
 async fn waiting_lines_for_different_alerts_are_typed_oldest_first() {
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
@@ -591,7 +591,7 @@ async fn a_failed_enter_is_not_typed_again_by_a_repeat() {
 #[tokio::test(start_paused = true)]
 async fn a_line_waiting_when_the_queue_closes_is_still_typed() {
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, handle) = deliver_to(&fake, Some(CHIEF));
 
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
@@ -612,7 +612,7 @@ async fn a_line_waiting_when_the_queue_closes_is_still_typed() {
 #[tokio::test(start_paused = true)]
 async fn a_chief_busy_for_a_while_gets_the_alert_when_it_is_idle() {
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
@@ -660,7 +660,7 @@ async fn the_next_alert_waits_until_the_pane_has_been_seen_busy() {
     tokio::time::sleep(Duration::from_secs(20)).await;
     assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
 
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     tokio::time::sleep(Duration::from_secs(6)).await;
     set_chief_state(&fake, EffectiveAgentState::Idle);
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -673,7 +673,7 @@ async fn the_next_alert_waits_until_the_pane_has_been_seen_busy() {
 #[tokio::test(start_paused = true)]
 async fn shutdown_abandons_an_alert_waiting_for_the_chief() {
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let (queue, shutdown_tx, handle) = deliver_to(&fake, Some(CHIEF));
     queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
     tokio::time::sleep(Duration::from_secs(30)).await;
@@ -705,7 +705,7 @@ async fn an_alert_and_a_timed_prompt_at_once_type_two_whole_lines() {
     assert!(matches!(prompt, Attempt::Wait(Reason::AgentBusy)));
 
     // Once the pane has been seen busy and is idle again, the second types its whole line.
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let busy = type_when_ready(
         &fake,
         Writer::TimedPrompt,
@@ -754,7 +754,7 @@ async fn an_alert_posted_as_a_timed_prompt_is_typed_waits_and_follows_it_whole()
     // The snapshot still reads idle, and the pane counts as busy for the alert.
     assert_eq!(fake.keys(), typed("digest"));
 
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     tokio::time::sleep(Duration::from_secs(6)).await;
     set_chief_state(&fake, EffectiveAgentState::Idle);
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -816,7 +816,7 @@ async fn a_phone_reply_and_an_alert_at_once_type_two_whole_lines() {
     assert!(matches!(alert, Attempt::Wait(Reason::AgentBusy)));
 
     // Once the pane has been seen busy and is idle again, the alert types its whole line.
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     let view = fake.agents();
     let busy = type_when_ready(&fake, Writer::Alert, CHIEF, SLOT_IDLE_FIRING, &view, &[]).await;
     assert!(matches!(busy, Attempt::Wait(Reason::AgentBusy)));
@@ -1029,7 +1029,7 @@ async fn chief_message_held_back_is_typed_each_time_and_merged_while_busy() {
     tokio::time::sleep(Duration::from_secs(70)).await;
     assert_eq!(texts(&fake), [line, line]);
 
-    set_chief_state(&fake, EffectiveAgentState::Busy);
+    set_chief_state(&fake, EffectiveAgentState::Working);
     tokio::time::sleep(Duration::from_secs(6)).await;
     queue.firing(CHIEF_MESSAGE_HELD_BACK);
     queue.firing(CHIEF_MESSAGE_HELD_BACK);

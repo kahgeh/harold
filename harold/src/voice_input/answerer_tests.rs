@@ -129,7 +129,7 @@ fn sources() -> FakeSources {
         agents: vec![
             agent(
                 "/Users/me/code/chief-of-pods/",
-                EffectiveAgentState::Busy,
+                EffectiveAgentState::Working,
                 Some(&"x".repeat(300)),
             ),
             agent("/Users/me/code/harold", EffectiveAgentState::Idle, None),

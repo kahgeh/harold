@@ -223,7 +223,7 @@ async fn a_report_for_a_busy_chief_is_replaced_by_the_next_and_one_line_reaches_
         ],
     )
     .await;
-    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Busy);
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
     h.start("w", 10, 25).await;
 
     pass(12 * MINUTE).await;
@@ -257,7 +257,7 @@ async fn half_a_sentence_in_the_box_keeps_the_report_waiting() {
 #[tokio::test(start_paused = true)]
 async fn a_waiting_report_is_dropped_when_the_watch_ends_and_only_the_closing_line_is_typed() {
     let h = harness(settings(), vec![answer("REPORT x", 0.01)]).await;
-    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Busy);
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
     h.start("w", 10, 10).await;
 
     pass(11 * MINUTE).await;

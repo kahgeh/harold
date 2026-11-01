@@ -76,7 +76,7 @@ pub(super) struct Sources<'a> {
 
 fn state_name(state: EffectiveAgentState) -> &'static str {
     match state {
-        EffectiveAgentState::Busy => "busy",
+        EffectiveAgentState::Working => "busy",
         EffectiveAgentState::Idle => "idle",
         EffectiveAgentState::Unknown => "unknown",
     }

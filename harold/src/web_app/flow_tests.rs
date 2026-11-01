@@ -1086,7 +1086,7 @@ async fn the_responding_dots_follow_the_chief_while_a_typed_reply_is_the_newest_
     updates.next().await.expect("the whole thread");
     updates.expect_quiet(Duration::from_millis(200)).await;
 
-    publish_chief(&hub, 1, EffectiveAgentState::Busy);
+    publish_chief(&hub, 1, EffectiveAgentState::Working);
     let on = next_responding(&mut updates).await;
     assert!(on.contains("dots"), "{on}");
 
@@ -1101,7 +1101,7 @@ async fn the_responding_dots_follow_the_chief_while_a_typed_reply_is_the_newest_
 
     // The chief row is the newest now, so a busy chief shows nothing.
     publish_chief(&hub, 2, EffectiveAgentState::Idle);
-    publish_chief(&hub, 3, EffectiveAgentState::Busy);
+    publish_chief(&hub, 3, EffectiveAgentState::Working);
     updates.expect_quiet(Duration::from_millis(300)).await;
 }
 
@@ -1112,7 +1112,7 @@ async fn the_dots_go_when_the_chief_turns_idle_with_no_message() {
     typed_reply(&store).await;
     let hub = AgentSnapshotHub::new(snapshot(
         Some(true),
-        vec![chief_pane(EffectiveAgentState::Busy)],
+        vec![chief_pane(EffectiveAgentState::Working)],
     ));
     let server = TestServer::serve_with(store, hub.subscribe(), Some(CHIEF_FOLDER)).await;
     let mut updates = server.updates().await;
@@ -1138,7 +1138,7 @@ async fn no_dots_for_a_reply_not_sent_or_without_a_chief() {
         .unwrap();
     let hub = AgentSnapshotHub::new(snapshot(
         Some(true),
-        vec![chief_pane(EffectiveAgentState::Busy)],
+        vec![chief_pane(EffectiveAgentState::Working)],
     ));
     let server = TestServer::serve_with(store.clone(), hub.subscribe(), Some(CHIEF_FOLDER)).await;
     let mut updates = server.updates().await;
@@ -1157,7 +1157,7 @@ async fn no_dots_for_a_reply_not_sent_or_without_a_chief() {
     assert!(!page.contains("class=\"dots\""), "{page}");
     let failed = AgentSnapshotHub::new(snapshot(
         Some(false),
-        vec![chief_pane(EffectiveAgentState::Busy)],
+        vec![chief_pane(EffectiveAgentState::Working)],
     ));
     let listing = TestServer::serve_with(store, failed.subscribe(), Some(CHIEF_FOLDER)).await;
     let page = listing.get("/").await.text().await.unwrap();
@@ -1171,7 +1171,7 @@ async fn the_page_draws_the_dots_when_it_loads_into_a_typed_reply_and_a_busy_chi
     typed_reply(&store).await;
     let hub = AgentSnapshotHub::new(snapshot(
         Some(true),
-        vec![chief_pane(EffectiveAgentState::Busy)],
+        vec![chief_pane(EffectiveAgentState::Working)],
     ));
     let server = TestServer::serve_with(store, hub.subscribe(), Some(CHIEF_FOLDER)).await;
 

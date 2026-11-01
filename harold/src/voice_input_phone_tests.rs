@@ -819,7 +819,7 @@ async fn a_busy_chief_gets_the_busy_phrase_on_the_phone() {
     phone.script([text("approve q19")]);
     phone.auto_play(Duration::from_secs(1));
     phone.start().await;
-    phone.set_chief(EffectiveAgentState::Busy);
+    phone.set_chief(EffectiveAgentState::Working);
 
     phone.speak().await;
     sleep(Duration::from_secs(2)).await;
@@ -864,7 +864,7 @@ async fn a_turn_without_harold_speak_plays_the_turn_end_update_on_the_phone() {
     phone.start().await;
     phone.speak().await;
 
-    phone.set_chief(EffectiveAgentState::Busy);
+    phone.set_chief(EffectiveAgentState::Working);
     sleep(Duration::from_millis(1000)).await;
     phone.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_secs(4)).await;

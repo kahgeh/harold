@@ -307,11 +307,11 @@ fn the_one_idle_claude_pane_in_the_folder_is_picked() {
 fn each_of_checks_1_to_5_gives_its_reason_in_order() {
     let codex = AgentPane {
         reads_as_claude: false,
-        state: EffectiveAgentState::Busy,
+        state: EffectiveAgentState::Working,
         ..chief("%2")
     };
     let busy = AgentPane {
-        state: EffectiveAgentState::Busy,
+        state: EffectiveAgentState::Working,
         ..chief("%2")
     };
     let unknown = AgentPane {
@@ -464,7 +464,7 @@ fn agents_view_gives_each_pane_its_folder_state_and_whether_it_is_claude() {
         None,
         vec![
             projection("%2", "claude", CHIEF, EffectiveAgentState::Idle),
-            projection("%3", "codex", "/work/harold", EffectiveAgentState::Busy),
+            projection("%3", "codex", "/work/harold", EffectiveAgentState::Working),
             projection("%4", "opencode", "/work/x", EffectiveAgentState::Unknown),
             projection(
                 "%5",
@@ -485,7 +485,7 @@ fn agents_view_gives_each_pane_its_folder_state_and_whether_it_is_claude() {
             pane_id: "%3".into(),
             folder: "/work/harold".into(),
             reads_as_claude: false,
-            state: EffectiveAgentState::Busy,
+            state: EffectiveAgentState::Working,
             session: "pods".into(),
             window_index: 0,
             pane_index: 1,
@@ -837,7 +837,7 @@ async fn each_failing_check_types_nothing_and_gives_its_reason() {
             0,
         ),
         case(
-            |state| state.view.panes[0].state = EffectiveAgentState::Busy,
+            |state| state.view.panes[0].state = EffectiveAgentState::Working,
             Reason::AgentBusy,
             0,
         ),
@@ -872,7 +872,7 @@ async fn each_failing_check_types_nothing_and_gives_its_reason() {
 async fn waiting_is_reported_once_for_each_reason() {
     let store = TestStore::new().await;
     let fake = Fake::at(DAY, "09:00:00");
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
 
     let mut reports = Vec::new();
@@ -892,7 +892,7 @@ async fn waiting_is_reported_once_for_each_reason() {
     assert_eq!(reports, [delayed("digest", Reason::InputBoxHoldsText)]);
 
     // Going back to an earlier reason is a change, and is reported.
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     assert_eq!(
         prompts.round().await,
         [delayed("digest", Reason::AgentBusy)]
@@ -923,7 +923,7 @@ async fn a_changed_count_of_agents_is_not_a_changed_reason() {
 async fn waiting_prompt_is_typed_once_the_checks_pass() {
     let store = TestStore::new().await;
     let fake = Fake::at(DAY, "09:00:00");
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
     prompts.round().await;
 
@@ -946,7 +946,7 @@ async fn waiting_prompt_is_typed_once_the_checks_pass() {
 async fn prompt_still_waiting_when_its_window_ends_is_skipped_with_its_last_reason() {
     let store = TestStore::new().await;
     let fake = Fake::at(DAY, "09:00:00");
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
     prompts.round().await;
     fake.clock(DAY, "10:59:55");
@@ -1212,7 +1212,7 @@ async fn two_entries_for_one_folder_and_time_are_typed_in_list_order() {
     assert_eq!(fake.keys().len(), 2);
 
     // The agent is working on the first text.
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     fake.clock(DAY, "09:00:10");
     assert!(prompts.round().await.is_empty());
     assert_eq!(fake.keys().len(), 2);
@@ -1424,7 +1424,7 @@ async fn task_types_a_due_prompt_and_stops_at_once_on_shutdown() {
 async fn task_stops_at_once_while_a_prompt_is_waiting() {
     let store = TestStore::new().await;
     let fake = Fake::at(DAY, "09:00:00");
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let task = tokio::spawn(run(
         prompts(&fake, &store, &[entry("digest", "09:00")]),
@@ -1716,7 +1716,7 @@ async fn voice_is_not_held_by_another_writers_typing() {
 
 fn busy_view() -> AgentsView {
     view(vec![AgentPane {
-        state: EffectiveAgentState::Busy,
+        state: EffectiveAgentState::Working,
         ..chief("%2")
     }])
 }
@@ -1810,7 +1810,7 @@ async fn a_hand_over_still_waits_for_what_every_writer_waits_for() {
     fake.set(|state| {
         state.view = view(vec![AgentPane {
             reads_as_claude: false,
-            state: EffectiveAgentState::Busy,
+            state: EffectiveAgentState::Working,
             ..chief("%2")
         }])
     });
@@ -1882,7 +1882,7 @@ async fn a_spoken_prompt_and_an_alert_released_at_once_give_two_whole_lines() {
         // The pane shows busy once, which ends the voice's hold, then idle again.
         fake.set(|state| {
             state.view = view(vec![AgentPane {
-                state: EffectiveAgentState::Busy,
+                state: EffectiveAgentState::Working,
                 ..chief("%2")
             }])
         });
@@ -1931,7 +1931,7 @@ async fn a_spoken_prompt_and_an_alert_released_at_once_give_two_whole_lines() {
 
 fn busy_chief(pane_id: &str) -> AgentPane {
     AgentPane {
-        state: EffectiveAgentState::Busy,
+        state: EffectiveAgentState::Working,
         ..chief(pane_id)
     }
 }

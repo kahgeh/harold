@@ -29,15 +29,15 @@ impl PromptAcquisitionCheckpoint {
         if self.fingerprints.is_none() {
             return self.baseline_due(now);
         }
-        let busy_edge = state == Some(ObservedAgentState::Busy)
-            && self.visible_state != Some(ObservedAgentState::Busy);
+        let busy_edge = state == Some(ObservedAgentState::Working)
+            && self.visible_state != Some(ObservedAgentState::Working);
         let idle_retry = state == Some(ObservedAgentState::Idle)
-            && self.visible_state == Some(ObservedAgentState::Busy)
+            && self.visible_state == Some(ObservedAgentState::Working)
             && self.busy_needs_idle_retry;
         busy_edge
             || idle_retry
             || (self.source_append_pending && self.retry_due(now))
-            || (state.or(self.visible_state) == Some(ObservedAgentState::Busy)
+            || (state.or(self.visible_state) == Some(ObservedAgentState::Working)
                 && self.retry_due(now))
     }
 
@@ -52,7 +52,7 @@ impl PromptAcquisitionCheckpoint {
     }
 
     pub(super) fn capture_failed(&mut self, state: Option<ObservedAgentState>) {
-        if state.or(self.visible_state) == Some(ObservedAgentState::Busy) {
+        if state.or(self.visible_state) == Some(ObservedAgentState::Working) {
             self.busy_needs_idle_retry = true;
         }
     }
@@ -83,8 +83,9 @@ impl PromptAcquisitionCheckpoint {
             });
         self.fingerprints = Some(current);
         self.source_append_pending = false;
-        self.busy_needs_idle_retry =
-            state.or(self.visible_state) == Some(ObservedAgentState::Busy) && candidate.is_none();
+        self.busy_needs_idle_retry = state.or(self.visible_state)
+            == Some(ObservedAgentState::Working)
+            && candidate.is_none();
         candidate
     }
 }
@@ -176,7 +177,7 @@ mod tests {
         assert!(checkpoint.should_scan(Some(ObservedAgentState::Idle), start));
         checkpoint.attempted(start);
         assert!(!checkpoint.should_scan(
-            Some(ObservedAgentState::Busy),
+            Some(ObservedAgentState::Working),
             start + Duration::from_secs(29)
         ));
         assert!(checkpoint.should_scan(
@@ -195,10 +196,10 @@ mod tests {
         let mut checkpoint = PromptAcquisitionCheckpoint::default();
         let start = Instant::now();
         checkpoint.acquire(scan(&[1]), None);
-        assert!(checkpoint.should_scan(Some(ObservedAgentState::Busy), start));
+        assert!(checkpoint.should_scan(Some(ObservedAgentState::Working), start));
         checkpoint.attempted(start);
-        checkpoint.acquire(scan(&[1]), Some(ObservedAgentState::Busy));
-        checkpoint.observe_state(Some(ObservedAgentState::Busy));
+        checkpoint.acquire(scan(&[1]), Some(ObservedAgentState::Working));
+        checkpoint.observe_state(Some(ObservedAgentState::Working));
         assert!(!checkpoint.should_scan(None, start + Duration::from_secs(29)));
         assert!(checkpoint.should_scan(None, start + Duration::from_secs(30)));
         assert!(checkpoint.should_scan(
@@ -242,8 +243,8 @@ mod tests {
         let start = Instant::now();
         checkpoint.acquire(scan(&[1]), None);
         checkpoint.attempted(start);
-        checkpoint.acquire(scan(&[1]), Some(ObservedAgentState::Busy));
-        checkpoint.observe_state(Some(ObservedAgentState::Busy));
+        checkpoint.acquire(scan(&[1]), Some(ObservedAgentState::Working));
+        checkpoint.observe_state(Some(ObservedAgentState::Working));
         assert!(checkpoint.should_scan(Some(ObservedAgentState::Idle), start));
         let mut tentative = checkpoint.clone();
         assert_eq!(

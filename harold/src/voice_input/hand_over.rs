@@ -122,7 +122,7 @@ async fn try_once<P: CallPorts>(ports: &P, line: &str) -> Try {
             let while_busy = view
                 .panes
                 .iter()
-                .any(|seen| seen.pane_id == pane && seen.state == EffectiveAgentState::Busy);
+                .any(|seen| seen.pane_id == pane && seen.state == EffectiveAgentState::Working);
             Try::Typed { pane, while_busy }
         }
         Attempt::Wait(reason) => Try::Wait(reason),

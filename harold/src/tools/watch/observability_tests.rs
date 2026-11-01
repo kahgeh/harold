@@ -261,7 +261,7 @@ async fn every_log_line_of_the_table_is_written_with_its_fields() {
     )
     .await;
     h.agents
-        .set_state("%1", crate::agent::domain::EffectiveAgentState::Busy);
+        .set_state("%1", crate::agent::domain::EffectiveAgentState::Working);
     let name = unique("lines");
     h.start(&name, 10, 120).await;
     pass(Duration::from_secs(15 * 60)).await;

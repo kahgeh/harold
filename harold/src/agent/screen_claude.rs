@@ -10,7 +10,7 @@ pub(super) struct ClaudeAdapter<'a>(pub(super) &'a AgentProviderSettings);
 impl ProviderScreenAdapter for ClaudeAdapter<'_> {
     fn classify_visible(&self, capture: &StyledPaneCapture) -> Option<ObservedAgentState> {
         if spinner_is_running(&capture.text) {
-            return Some(ObservedAgentState::Busy);
+            return Some(ObservedAgentState::Working);
         }
         GenericAdapter(self.0).classify_visible(capture)
     }

@@ -1050,7 +1050,7 @@ mod tests {
                     screen_state: None,
                     screen_classifier_id: None,
                     screen_observed_at_ms: None,
-                    effective_state: EffectiveAgentState::Busy,
+                    effective_state: EffectiveAgentState::Working,
                     explicit_work_summary: None,
                     explicit_work_summary_updated_at_ms: None,
                     screen_work_summary: None,

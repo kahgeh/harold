@@ -368,7 +368,7 @@ async fn a_pane_that_reads_idle_a_moment_after_the_turn_end_is_typed_into() {
     let scratch = Scratch::new();
     scratch.append(&[user_line(hours_ago(30))]);
     let fake = chief_fake();
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let idle = fake.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
@@ -388,7 +388,7 @@ async fn a_busy_pane_logs_once_and_types_at_the_next_idle_turn_end() {
     let scratch = Scratch::new();
     scratch.append(&[user_line(hours_ago(30))]);
     let fake = chief_fake();
-    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
     let reminder = reminder(&scratch, &fake);
 
     for _ in 0..3 {

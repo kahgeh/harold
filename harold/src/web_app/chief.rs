@@ -41,7 +41,7 @@ pub(crate) fn find_chief(
             let busy = view
                 .panes
                 .iter()
-                .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Busy);
+                .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Working);
             ChiefPane::One { pane_id, busy }
         }
         ChiefLookup::Ambiguous { .. } => ChiefPane::NoChief,

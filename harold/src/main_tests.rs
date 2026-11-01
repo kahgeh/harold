@@ -190,7 +190,7 @@ fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             screen_state: None,
             screen_classifier_id: None,
             screen_observed_at_ms: None,
-            effective_state: EffectiveAgentState::Busy,
+            effective_state: EffectiveAgentState::Working,
             explicit_work_summary: summary.map(str::to_string),
             explicit_work_summary_updated_at_ms: summary.map(|_| 8_600),
             screen_work_summary: None,
@@ -453,8 +453,8 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
         assert_eq!(
             lifecycle.state,
             match state {
-                AgentState::Busy => ObservedAgentState::Busy,
-                AgentState::Idle => ObservedAgentState::Idle,
+                AgentState::Busy => Some(ObservedAgentState::Working),
+                AgentState::Idle => Some(ObservedAgentState::Idle),
                 _ => unreachable!("test table contains only actionable states"),
             }
         );
@@ -625,7 +625,7 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
         serde_json::from_value(events[1].payload.clone()).unwrap();
     assert_eq!(observed.pane.incarnation, expected_pane.incarnation);
     assert_eq!(lifecycle.incarnation, expected_pane.incarnation);
-    assert_eq!(lifecycle.state, ObservedAgentState::Busy);
+    assert_eq!(lifecycle.state, Some(ObservedAgentState::Working));
     assert_eq!(
         lifecycle.work_summary,
         WorkSummaryUpdate::Set("Implement projector".into())
@@ -860,7 +860,7 @@ async fn startup_projects_every_page_before_the_first_watch_snapshot_without_app
     events.extend((1..=501).map(|index| {
         AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: pane.incarnation.clone(),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "codex-hook".into(),
             work_summary: WorkSummaryUpdate::Set(format!("Task {index}")),
             observed_at_ms: pane.observed_at_ms + index,

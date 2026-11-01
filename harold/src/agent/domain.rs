@@ -23,14 +23,33 @@ pub(crate) enum CompletionSummaryUpdate {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ObservedAgentState {
-    Busy,
+    #[serde(alias = "Busy")]
+    Working,
     Idle,
+}
+
+/// Reads an observed state from an event. A word that is not `Working`, the old `Busy` or
+/// `Idle` (for example a later stage's word) reads as no observation.
+pub(crate) fn lenient_observed_state<'de, D>(
+    deserializer: D,
+) -> Result<Option<ObservedAgentState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let word = Option::<String>::deserialize(deserializer)?;
+    Ok(match word.as_deref() {
+        Some("Working" | "Busy") => Some(ObservedAgentState::Working),
+        Some("Idle") => Some(ObservedAgentState::Idle),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum EffectiveAgentState {
-    Busy,
+    #[serde(alias = "Busy")]
+    Working,
     Idle,
+    #[serde(other)]
     Unknown,
 }
 
@@ -91,7 +110,9 @@ pub(crate) struct AgentPaneDeparted {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentLifecycleObserved {
     pub incarnation: AgentIncarnation,
-    pub state: ObservedAgentState,
+    /// None means the event changes no hook state (an unknown word reads as none).
+    #[serde(default, deserialize_with = "lenient_observed_state")]
+    pub state: Option<ObservedAgentState>,
     pub adapter_id: String,
     pub work_summary: WorkSummaryUpdate,
     pub observed_at_ms: i64,
@@ -100,6 +121,7 @@ pub(crate) struct AgentLifecycleObserved {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentScreenObserved {
     pub incarnation: AgentIncarnation,
+    #[serde(default, deserialize_with = "lenient_observed_state")]
     pub state: Option<ObservedAgentState>,
     pub classifier_id: String,
     pub fallback_summary: Option<String>,

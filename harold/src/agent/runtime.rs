@@ -905,7 +905,7 @@ impl AgentMonitorRuntime {
         };
         let lifecycle = AgentLifecycleObserved {
             incarnation: pane.incarnation.clone(),
-            state,
+            state: Some(state),
             adapter_id: adapter_id.clone(),
             work_summary: work_summary.clone(),
             observed_at_ms,
@@ -934,7 +934,7 @@ impl AgentMonitorRuntime {
         tracked.screen_state = None;
         tracked.screen_busy_since_ms = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
-        if state == ObservedAgentState::Busy {
+        if state == ObservedAgentState::Working {
             crate::telemetry::pane_turned_busy(&pane_id, observed_at_ms);
         }
         // A repeat starts no new work, so the summary in progress stands.
@@ -1410,7 +1410,7 @@ impl AgentMonitorRuntime {
                 .screen_state
                 .or(tracked.last_hook.map(|(state, _)| state))
             {
-                Some(ObservedAgentState::Busy) => super::domain::EffectiveAgentState::Busy,
+                Some(ObservedAgentState::Working) => super::domain::EffectiveAgentState::Working,
                 Some(ObservedAgentState::Idle) => super::domain::EffectiveAgentState::Idle,
                 None => super::domain::EffectiveAgentState::Unknown,
             };
@@ -1671,7 +1671,7 @@ fn screen_state_delta(
     // An adapter's idle report has no repeats to keep it fresh. It stands until the screen
     // has read busy for the whole grace without a break; then the screen decides.
     if has_adapter && hook_state == ObservedAgentState::Idle && tracked.screen_state.is_none() {
-        if observed != Some(ObservedAgentState::Busy) {
+        if observed != Some(ObservedAgentState::Working) {
             tracked.screen_busy_since_ms = None;
             return None;
         }
@@ -1682,7 +1682,7 @@ fn screen_state_delta(
             .screen_busy_since_ms
             .get_or_insert(observed_at_ms.max(hook_observed_at_ms));
         return (observed_at_ms >= busy_since_ms.saturating_add(grace))
-            .then_some(ObservedAgentState::Busy);
+            .then_some(ObservedAgentState::Working);
     }
 
     let state = observed?;

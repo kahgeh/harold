@@ -1880,11 +1880,13 @@ fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> Result<AgentPanePr
         },
         hook_state: optional_text(row, offset + 12)?
             .map(parse_observed_state)
-            .transpose()?,
+            .transpose()?
+            .flatten(),
         hook_observed_at_ms: optional_integer(row, offset + 13)?,
         screen_state: optional_text(row, offset + 14)?
             .map(parse_observed_state)
-            .transpose()?,
+            .transpose()?
+            .flatten(),
         screen_classifier_id: optional_text(row, offset + 15)?,
         screen_observed_at_ms: optional_integer(row, offset + 16)?,
         effective_state: parse_effective_state(&required_text(row, offset + 17)?)?,
@@ -1955,40 +1957,38 @@ async fn pause_snapshot_read_after_query(gate: &std::sync::Mutex<Option<Snapshot
     }
 }
 
+// TODO(task 2): write "working" once migration 007 widens the CHECK rules; 001 allows only 'busy'.
 fn observed_state_text(state: ObservedAgentState) -> &'static str {
     match state {
-        ObservedAgentState::Busy => "busy",
+        ObservedAgentState::Working => "busy",
         ObservedAgentState::Idle => "idle",
     }
 }
 
-fn parse_observed_state(value: String) -> Result<ObservedAgentState> {
-    match value.as_str() {
-        "busy" => Ok(ObservedAgentState::Busy),
-        "idle" => Ok(ObservedAgentState::Idle),
-        _ => Err(StoreError::Data(format!(
-            "invalid observed agent state: {value}"
-        ))),
-    }
+/// Reads `working`, the old `busy` and `idle`. Any other word reads as no observation.
+fn parse_observed_state(value: String) -> Result<Option<ObservedAgentState>> {
+    Ok(match value.as_str() {
+        "working" | "busy" => Some(ObservedAgentState::Working),
+        "idle" => Some(ObservedAgentState::Idle),
+        _ => None,
+    })
 }
 
 fn effective_state_text(state: EffectiveAgentState) -> &'static str {
     match state {
-        EffectiveAgentState::Busy => "busy",
+        EffectiveAgentState::Working => "busy",
         EffectiveAgentState::Idle => "idle",
         EffectiveAgentState::Unknown => "unknown",
     }
 }
 
+/// Reads `working`, the old `busy` and `idle`. Any other word reads as unknown.
 fn parse_effective_state(value: &str) -> Result<EffectiveAgentState> {
-    match value {
-        "busy" => Ok(EffectiveAgentState::Busy),
-        "idle" => Ok(EffectiveAgentState::Idle),
-        "unknown" => Ok(EffectiveAgentState::Unknown),
-        _ => Err(StoreError::Data(format!(
-            "invalid effective agent state: {value}"
-        ))),
-    }
+    Ok(match value {
+        "working" | "busy" => EffectiveAgentState::Working,
+        "idle" => EffectiveAgentState::Idle,
+        _ => EffectiveAgentState::Unknown,
+    })
 }
 
 fn now_ms() -> i64 {

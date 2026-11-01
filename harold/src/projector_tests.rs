@@ -4160,7 +4160,7 @@ async fn each_app_reply_state_is_logged_with_the_event_id() {
         let mut events = chief_in(pane);
         events.push(AgentEvent::LifecycleObserved(AgentLifecycleObserved {
             incarnation: incarnation(pane, 10),
-            state: ObservedAgentState::Busy,
+            state: Some(ObservedAgentState::Working),
             adapter_id: "claude.lifecycle".into(),
             work_summary: WorkSummaryUpdate::Unchanged,
             observed_at_ms: i64::MAX / 2,

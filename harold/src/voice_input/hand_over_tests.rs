@@ -32,7 +32,7 @@ async fn a_hand_over_is_typed_at_once_into_a_busy_chief_and_numbered() {
     let (ports, _) = ports_with_thread();
     ports
         .fake_panes()
-        .set(|s| s.view.panes[0].state = EffectiveAgentState::Busy);
+        .set(|s| s.view.panes[0].state = EffectiveAgentState::Working);
     let hand_overs = HandOvers::default();
 
     let first = hand_overs.start(Arc::clone(&ports), "rerun the\nharold build", None);
@@ -172,7 +172,7 @@ async fn a_hand_over_waits_for_a_chief_whose_state_is_unknown_and_for_a_pane_lis
     assert!(keys_of(&ports).is_empty());
 
     ports.fake_panes().set(|s| {
-        s.view.panes[0].state = EffectiveAgentState::Busy;
+        s.view.panes[0].state = EffectiveAgentState::Working;
         s.view.listing_failed = true;
     });
     sleep(Duration::from_secs(11)).await;

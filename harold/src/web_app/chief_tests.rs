@@ -51,7 +51,7 @@ fn chief_and_pod(chief_state: EffectiveAgentState) -> AgentSnapshot {
         Some(true),
         vec![
             pane_in("%1", CHIEF, chief_state),
-            pane_in("%2", "/a/harold", EffectiveAgentState::Busy),
+            pane_in("%2", "/a/harold", EffectiveAgentState::Working),
         ],
     )
 }
@@ -60,7 +60,7 @@ fn chief_and_pod(chief_state: EffectiveAgentState) -> AgentSnapshot {
 fn find_chief_names_the_one_agent_in_the_folder_and_whether_it_is_busy() {
     for (state, busy) in [
         (EffectiveAgentState::Idle, false),
-        (EffectiveAgentState::Busy, true),
+        (EffectiveAgentState::Working, true),
         (EffectiveAgentState::Unknown, false),
     ] {
         assert_eq!(
@@ -174,7 +174,7 @@ fn is_chief_pane_is_false_while_the_listing_fails_or_without_a_folder() {
         Some(true),
         vec![
             pane_in("%1", CHIEF, EffectiveAgentState::Idle),
-            pane_in("%3", CHIEF, EffectiveAgentState::Busy),
+            pane_in("%3", CHIEF, EffectiveAgentState::Working),
         ],
     );
     assert!(is_chief_pane(&two_chiefs, Some(CHIEF), None, "%1"));
