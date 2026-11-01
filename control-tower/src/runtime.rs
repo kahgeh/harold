@@ -2341,7 +2341,10 @@ mod tests {
         core.handle_key(KeyCode::Enter, &navigator);
         next_notes_event(&mut core, &navigator).await;
         assert_eq!(*opened.borrow(), vec!["/vault/found-abc.md".to_owned()]);
-        assert!(core.app.notes.is_some(), "the control-tower stays on the list");
+        assert!(
+            core.app.notes.is_some(),
+            "the control-tower stays on the list"
+        );
     }
 
     #[tokio::test]

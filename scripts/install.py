@@ -604,7 +604,7 @@ def keep_rollback_copy(prefix, backup, reinstall, metadata):
 
 
 def remove_old_program(prefix):
-    """Delete the old tmx-agent-dash from `prefix`. The control tower now lives in the bundle."""
+    """Delete the old tmx-agent-dash from `prefix`. The control-tower now lives in the bundle."""
     old = prefix / OLD_PROGRAM
     if old.is_file():
         old.unlink()

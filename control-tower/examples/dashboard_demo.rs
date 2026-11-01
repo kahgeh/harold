@@ -1,6 +1,11 @@
 use std::io::{self, stdout};
 use std::time::Duration;
 
+use control_tower::app::{
+    AgentIncarnation, AgentRow, AgentState, App, ConnectionState, Effect, MonitorHealth,
+    MonitorHealthState, SearchState, Snapshot,
+};
+use control_tower::ui;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
@@ -9,11 +14,6 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use control_tower::app::{
-    AgentIncarnation, AgentRow, AgentState, App, ConnectionState, Effect, MonitorHealth,
-    MonitorHealthState, SearchState, Snapshot,
-};
-use control_tower::ui;
 
 const NOW_MS: i64 = 1_777_000_000_000;
 
