@@ -1508,8 +1508,8 @@ fn detail_paragraph<'a>(lines: Vec<Line<'a>>) -> Paragraph<'a> {
 enum StepMode {
     /// The step in full, wrapped over as many lines as it needs.
     Full,
-    /// One step line with no heading and no blank line, cut by width and ended with `…`
-    /// when it is longer.
+    /// One step line with no heading, in place of the blank line before `WORK SUMMARY`,
+    /// cut by width and ended with `…` when it is longer.
     OneLine,
     /// No step lines.
     None,
@@ -1569,10 +1569,15 @@ fn detail_lines<'a>(
                 lines.push(Line::styled(step, Style::default().fg(INK)));
                 lines.push(Line::raw(""));
             }
-            StepMode::OneLine => lines.push(Line::styled(
-                cut_to_width(step, usize::from(inner_width)),
-                Style::default().fg(INK),
-            )),
+            StepMode::OneLine => {
+                // The step takes the place of the blank line before `WORK SUMMARY`, so
+                // this tier is as high as the tier with no step.
+                lines.pop();
+                lines.push(Line::styled(
+                    cut_to_width(step, usize::from(inner_width)),
+                    Style::default().fg(INK),
+                ));
+            }
             StepMode::None => {}
         }
     }
@@ -3495,6 +3500,27 @@ mod tests {
             assert!(content.contains("Running the tests"), "width {width}");
             assert!(!content.contains("CURRENT STEP"), "width {width}");
             assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_step_shows_at_every_height_where_the_panel_shows() {
+        for (step, start) in [
+            ("Running the tests", "Running the tests"),
+            (LONG_STEP, "Reading the long failing"),
+        ] {
+            for width in [120, 140] {
+                for height in 16..=60 {
+                    let content = rendered(&step_app(Some(step)), width, height, 100_000);
+
+                    if content.contains("SELECTED SIGNAL") {
+                        assert!(
+                            content.contains(start),
+                            "width {width} height {height} step {step}"
+                        );
+                    }
+                }
+            }
         }
     }
 

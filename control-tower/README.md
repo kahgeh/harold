@@ -390,10 +390,12 @@ status. Harold cuts it to 160 characters and removes control characters, as it d
 summary. Harold cuts the recap to 400 characters.
 
 When the panel does not fit with the full `CURRENT STEP` lines, it shows the step as one line
-instead. That line has no `CURRENT STEP` heading and no blank line after it. It sits above
-`WORK SUMMARY`, and the control-tower cuts it by width and ends it with `…` when it is longer. The panel hides
-only when it does not fit even without the step, so a step that comes and goes does not make the
-panel come and go.
+instead. That line has no `CURRENT STEP` heading. It takes the place of the blank line above
+`WORK SUMMARY`, so this tier is as high as the tier with no step. The control-tower cuts the line by
+width and ends it with `…` when it is longer. So the step shows wherever the panel fits. The panel
+hides only when it does not fit even without the step, so a step that comes and goes does not make
+the panel come and go. While the panel is hidden, the step shows nowhere, because the row does not
+show the step.
 
 The work summary column of an agent row shows the recap, cut to the column, when the agent has a
 recap. Otherwise it shows the work summary. The row does not show the step. The filter `f`
