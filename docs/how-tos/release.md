@@ -5,7 +5,7 @@
 Publishing a GitHub release triggers the **Build macOS ARM64** workflow. After
 its tests and build succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
 and its `.sha256` checksum to that release. The archive contains `harold`,
-`tmx-agent-dash`, configuration templates, the gRPC schema, the source
+`control-tower`, configuration templates, the gRPC schema, the source
 revision and the release version. Draft releases, pushes, and pull requests do not trigger builds.
 Re-running a release workflow replaces its matching assets.
 
@@ -35,4 +35,6 @@ Both commands take these options on the `make` command line:
 | `PREFIX=<folder>` | Install under that folder instead of `~/bin`. |
 | `SIGNING_IDENTITY="<certificate>"` | Sign with that certificate. Needed once per Mac, on the first install that should use it; the installer saves the name for later installs. |
 
-Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When it prints steps for macOS permissions instead of saying they carry over, follow them; [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
+Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and, when it exists, `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When it prints steps for macOS permissions instead of saying they carry over, follow them; [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
+
+A rollback across stage 1 returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before stage 1. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.

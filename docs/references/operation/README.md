@@ -36,7 +36,7 @@ The runtime components share Harold's store and shutdown signal. See [Architectu
 
 ## macOS permissions
 
-Harold with the iMessage channel needs two macOS permissions: Full Disk Access, to read `~/Library/Messages/chat.db`, and control of Messages, to send. macOS charges a permission to the program launchd started, which is `harold`. It stores each grant with `harold`'s designated requirement, the rule `codesign -dr -` prints. The installer signs `harold` and `tmx-agent-dash` with the fixed identifiers `harold` and `tmx-agent-dash`, so a build signed with the same certificate keeps both grants; an ad-hoc build does not. [Keep permissions across installs](../../how-tos/setup.md#keep-permissions-across-installs) has the steps.
+Harold with the iMessage channel needs two macOS permissions: Full Disk Access, to read `~/Library/Messages/chat.db`, and control of Messages, to send. macOS charges a permission to the program launchd started, which is `harold`. It stores each grant with `harold`'s designated requirement, the rule `codesign -dr -` prints. The installer signs `harold` and `control-tower` with the fixed identifiers `harold` and `control-tower`, so a build signed with the same certificate keeps both grants; an ad-hoc build does not. [Keep permissions across installs](../../how-tos/setup.md#keep-permissions-across-installs) has the steps.
 
 `haroldctl` stays a Python script and needs neither permission: `start`, `stop`, `restart`, `status` and `ensure` do not read the Messages database or send to Messages.
 
@@ -243,7 +243,7 @@ Harold has a messaging pause for the away channel. While messaging is paused the
 
 Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. Pausing keeps the agent monitor, the dash stream and at-desk TTS running, which `haroldctl stop` turns off with the rest of Harold. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
 
-From `tmx-agent-dash`: press `/`, type `messaging`, and run `Messaging: pause`. The masthead of every connected dash then shows `■ MSG PAUSED`. `Messaging: resume` turns messaging back on.
+From the control-tower: press `/`, type `messaging`, and run `Messaging: pause`. The masthead of every connected dash then shows `■ MSG PAUSED`. `Messaging: resume` turns messaging back on.
 
 Without a dash, call the RPC with `grpcurl` from the repository's `harold-api/proto` directory:
 

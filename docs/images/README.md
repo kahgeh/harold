@@ -22,7 +22,7 @@ Pictures used by the front page [README](../../README.md). They show a demo Haro
 3. Run every command with `env -i HOME=<temp home> PATH=<PATH> HAROLD_CONFIG_DIR=<config> TMUX_TMPDIR=<tmux folder>` in front, so nothing reaches your own Harold or tmux server. Start `target/debug/harold`.
 4. In that tmux server, start one pane for each agent in `<temp home>/Dev/<name>`. Each runs a stub that prints a Busy screen (`esc to interrupt`) or an Idle one (`❯`). A work summary appears only for a prompt submitted after Harold first sees the pane, so the stub starts idle, then prints a prompt line.
 5. From the chief's folder, put the questions and instructions with `harold tool questions put < file.json`.
-6. Dash: run `target/debug/tmx-agent-dash --endpoint http://127.0.0.1:50160` in a 120 by 24 window, capture it with `tmux capture-pane -e -p`, turn the capture into HTML and shoot that page with headless Chrome at 1060 by 470.
+6. Dash: run `target/debug/control-tower --endpoint http://127.0.0.1:50160` in a 120 by 24 window, capture it with `tmux capture-pane -e -p`, turn the capture into HTML and shoot that page with headless Chrome at 1060 by 470.
 7. Web app: send `http://127.0.0.1:4430/#todos` through a loopback proxy that adds the `Tailscale-User-Login: demo@example.com` header, and capture it from Chrome over the DevTools protocol with a 390 by 844 phone screen at scale 3.
 8. Before committing, get each search term at search time and write them, one per line, to a file in the temporary folder (never into the repo):
 

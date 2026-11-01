@@ -1,6 +1,6 @@
 # Install or Reinstall Harold
 
-Install Harold and the dash from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
+Install Harold and the control-tower from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
 
 The installer starts Harold to verify installation, and launchd starts it again at every login; `haroldctl stop` keeps it off until `haroldctl start`. The first install shows a macOS "Background Items Added" notice naming `harold`: that is Harold starting at login.
 
@@ -47,6 +47,7 @@ The default layout is:
 ```text
 ~/bin/harold/
   harold
+  control-tower
   harold.proto
   service.py
   service.json
@@ -62,8 +63,9 @@ The default layout is:
   data/events/     kept from an earlier install, if present
   harold.log (the last 24 hours)
 ~/bin/haroldctl
-~/bin/tmx-agent-dash
 ```
+
+An install from before stage 1 leaves `~/bin/tmx-agent-dash`. The installer copies it into the backup, then removes it. If the copy fails, the installer keeps the old file.
 
 `local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the seven variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG`, `LC_ALL` and `HAROLD_LAUNCHD`) win on a clash.
 
@@ -78,7 +80,7 @@ launchd starts `~/bin/harold/harold` itself, so macOS charges Full Disk Access a
 | No certificate (ad-hoc, `-`) | `cdhash H"…"`: a fingerprint of this exact file | The fingerprint differs, so both permissions must be granted again |
 | A certificate | `identifier harold and certificate leaf = H"…"` | The name and certificate are the same, so both permissions carry over |
 
-The installer always signs with the identifiers `harold` and `tmx-agent-dash`, so only the certificate decides.
+The installer always signs with the identifiers `harold` and `control-tower`, so only the certificate decides.
 
 #### Create a self-signed certificate
 
@@ -189,10 +191,10 @@ Five wrong codes in all lock pairing for good. Unlock it by changing the code in
 
 Success requires both the managed process owning the listening socket and Harold returning a current agent-state snapshot. The installer performs this same check before reporting success. It does not send a test phone notification.
 
-Start the dash from inside tmux:
+Start the control-tower from inside tmux:
 
 ```sh
-~/bin/tmx-agent-dash
+~/bin/harold/control-tower
 ```
 
 If you configure a different gRPC endpoint, pass it explicitly, for example `--endpoint http://127.0.0.1:50061`.
@@ -228,7 +230,7 @@ Reinstall archives the previous installation, including its data, and prints the
 A normal install (without `--reinstall`) whose bundle has `data/events/` and no `data/store/` starts Harold on an empty store in `data/store/` and leaves `data/events/` as it is. `--reinstall` moves the whole bundle, `data/events/` included, to the `harold.backup-*` folder it prints. [Starting fresh](../references/operation/README.md#starting-fresh) lists what the empty store does not carry over. Two steps keep the loss small:
 
 1. Install when nothing is waiting to be delivered. Messages still waiting in the delivery outbox of `data/events/` are not sent; the outbox normally empties within seconds of a message arriving.
-2. After the install, set mute or pause again in `tmx-agent-dash` if you want them. Both start off.
+2. After the install, set mute or pause again in the control-tower if you want them. Both start off.
 
 To go back, install the earlier build again with a normal install. It opens `data/events/`, which holds no event recorded only in `data/store/`. After a `--reinstall`, `data/events/` is in the backup folder, not in the bundle.
 
@@ -317,7 +319,7 @@ The Codex adapter parses Codex transcript events and supports both `event_msg` u
 
 ## 6. Test turn-end updates when ready
 
-The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the dash and the expected turn-end update.
+The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the control-tower and the expected turn-end update.
 
 The daemon also provides an explicit diagnostic command that can speak or send an away-channel message. Run it only when you intend to test those effects:
 
