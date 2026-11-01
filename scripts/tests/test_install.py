@@ -1055,9 +1055,10 @@ class InstalledServiceTests(unittest.TestCase):
         self.run_install('-')
         _, note, commands = self.rollback()
         lines = commands.splitlines()
-        data_back, = [i for i, line in enumerate(lines)
-                      if line.startswith('mv harold.replaced-') and line.endswith('/data harold/data')]
-        self.assertGreater(lines.index(self.TIPS_STEP), data_back)
+        # The backup holds a copy of the data, so the log is the last thing that moves back.
+        log_back, = [i for i, line in enumerate(lines)
+                     if line.startswith('mv harold.replaced-') and line.endswith('/harold.log harold/harold.log')]
+        self.assertGreater(lines.index(self.TIPS_STEP), log_back)
         self.assertLess(lines.index(self.TIPS_STEP), lines.index('./haroldctl start'))
         self.assertIn(self.TIPS_SENTENCE, note)
 
@@ -1090,6 +1091,53 @@ class InstalledServiceTests(unittest.TestCase):
         output = self.run_install('-')
         self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
         self.assertNotIn('Previous installation archived', output)
+
+    def old_install_with_store(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        (self.bundle / 'data/store').mkdir(parents=True)
+        (self.bundle / 'data/store/state.db').write_bytes(b'store-bytes' * 100)
+
+    def test_an_install_over_an_old_bundle_copies_the_data_into_the_backup(self):
+        self.old_install_with_store()
+        output = self.run_install('-')
+        backup, note, commands = self.rollback()
+        self.assertEqual((backup / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+        self.assertEqual((backup / 'data/events/marker').read_text(), 'history')
+        self.assertEqual((backup / 'data/events/harold/main/catalog.db').read_bytes(), bytes(range(256)) * 64)
+        self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+        self.assertIn('copied data to {}/data (0.0 MB)\n'.format(self.install.shown(backup)), output)
+        self.assertIn('{}/data'.format(backup.name.replace('harold.backup-', 'harold.replaced-')), note)
+        self.assertIn('Replies and events from after the install are lost.', note)
+        self.assertNotIn('/data harold/data', commands)
+        self.assertIn('/harold.log harold/harold.log', commands)
+
+    def test_a_first_install_copies_no_data(self):
+        output = self.run_install('-')
+        self.assertNotIn('copied data', output)
+        self.assertNotIn('data copy', output)
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+
+    def test_a_reinstall_copies_no_data_and_keeps_the_old_note(self):
+        self.old_install_with_store()
+        output = self.run_install('-', reinstall=True)
+        backup, note, _ = self.rollback()
+        self.assertNotIn('copied data', output)
+        self.assertEqual((backup / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+        self.assertIn('data from before the reinstall', note)
+        self.assertNotIn('Replies and events from after the install are lost.', note)
+
+    def test_a_failed_data_copy_is_reported_and_the_note_keeps_the_move_back_command(self):
+        self.old_install_with_store()
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
+            output = self.run_install('-')
+        backup, note, commands = self.rollback()
+        self.assertIn('No data copy exists in the backup (No space left on device). '
+                      'A rollback would lose the data written since the install.', output)
+        self.assertNotIn('copied data to', output)
+        self.assertFalse((backup / 'data').exists())
+        self.assertIn('mv {}/data harold/data'.format(backup.name.replace('harold.backup-', 'harold.replaced-')), commands)
+        self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
 
     def test_an_install_from_before_versions_says_they_were_not_recorded(self):
         self.install_existing(saved='-')
