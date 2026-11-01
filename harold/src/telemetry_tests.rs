@@ -3288,6 +3288,53 @@ fn the_helper_names_the_multiplexer_tmux_when_settings_are_unset() {
     assert_eq!(MultiplexerOutcome::Malformed.as_str(), "malformed");
 }
 
+#[test]
+fn agent_counts_give_the_agents_gauge() {
+    let row = |state, count| AgentCount {
+        state,
+        provider_id: "gauge_probe_agents".to_owned(),
+        count,
+    };
+    note_agent_counts_for(
+        "gauge_probe_agents",
+        vec![row("working", 2), row("idle", 1), row("unknown", 1)],
+    );
+    let read = |state| {
+        test_support::gauge_value(
+            "harold.agents",
+            &[
+                ("state", state),
+                ("provider_id", "gauge_probe_agents"),
+                ("multiplexer", "gauge_probe_agents"),
+                ("host", ""),
+            ],
+        )
+    };
+    assert_eq!(read("working"), Some(2));
+    assert_eq!(read("idle"), Some(1));
+    assert_eq!(read("unknown"), Some(1));
+    note_agent_counts_for("gauge_probe_agents", vec![row("idle", 5)]);
+    assert_eq!(read("idle"), Some(5));
+    assert_eq!(read("working"), None);
+}
+
+#[test]
+fn a_listing_gives_the_sessions_and_panes_gauges_and_stays() {
+    let read = |name| {
+        test_support::gauge_value(
+            name,
+            &[("multiplexer", "gauge_probe_listing"), ("host", "")],
+        )
+    };
+    assert_eq!(read("harold.multiplexer.sessions"), None);
+    note_listing_for("gauge_probe_listing", 3, 14);
+    assert_eq!(read("harold.multiplexer.sessions"), Some(3));
+    assert_eq!(read("harold.multiplexer.panes"), Some(14));
+    // A failed listing never calls the note, so a later read gives the same numbers.
+    assert_eq!(read("harold.multiplexer.sessions"), Some(3));
+    assert_eq!(read("harold.multiplexer.panes"), Some(14));
+}
+
 /// The first `sh` block after the paragraph starting `after` in the README's "Creating the
 /// definitions" section.
 fn readme_block(after: &str) -> String {

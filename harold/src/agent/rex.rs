@@ -567,12 +567,18 @@ fn directory_get(block_id: &str) -> Option<String> {
 
 /// All terminal blocks of all sessions, in the order Rex lists them.
 fn list_slots(api: &dyn RexApi) -> Result<Vec<RexBlockSlot>, RexError> {
+    list_slots_counted(api).map(|(_, slots)| slots)
+}
+
+/// The number of sessions and all terminal blocks of all sessions.
+fn list_slots_counted(api: &dyn RexApi) -> Result<(usize, Vec<RexBlockSlot>), RexError> {
     let mut slots = Vec::new();
-    for session in api.sessions()? {
+    let sessions = api.sessions()?;
+    for session in &sessions {
         let windows = api.session_view(&session.id)?;
-        slots.extend(slots_of(&session, &windows));
+        slots.extend(slots_of(session, &windows));
     }
-    Ok(slots)
+    Ok((sessions.len(), slots))
 }
 
 /// The session that holds the block: the last scan knows it, and a new listing finds it.
@@ -684,8 +690,12 @@ impl RexAgentInventory {
         ps_ms: &mut u64,
     ) -> Result<Vec<AgentPaneObservation>, InventoryError> {
         let started = Instant::now();
-        let listed = list_slots(&*self.api);
-        let slots = listed?;
+        let listed = list_slots_counted(&*self.api);
+        let (sessions, slots) = listed?;
+        crate::telemetry::note_multiplexer_listing(
+            u64::try_from(sessions).unwrap_or(u64::MAX),
+            u64::try_from(slots.len()).unwrap_or(u64::MAX),
+        );
         directory_set(&slots);
         let signal = current_stop();
         let processes = parallel_map(&slots, PROCESS_WIDTH, signal, |slot| {

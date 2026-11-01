@@ -892,3 +892,30 @@ fn a_tmux_listing_is_counted_under_list_with_its_outcome() {
     assert!(listing_rise(&garbled, "malformed") >= 1);
     assert!(listing_rise("/nonexistent/harold-test-tmux", "absent") >= 1);
 }
+
+#[test]
+fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() {
+    crate::telemetry::take_noted_listings();
+    let panes: Vec<TmuxPaneInfo> = (0..14)
+        .map(|n| TmuxPaneInfo {
+            pane_id: format!("%{n}"),
+            session_name: format!("session-{}", n % 3),
+            ..pane()
+        })
+        .collect();
+    let inventory = TmuxAgentInventory::new(named_settings());
+    let scanned = inventory.scan_with(
+        || Ok(panes),
+        |_| Ok(Vec::new()),
+        std::time::Duration::from_secs(5),
+    );
+    assert!(scanned.is_ok());
+    assert_eq!(crate::telemetry::take_noted_listings(), vec![(3, 14)]);
+    let failed = inventory.scan_with(
+        || Err(InventoryError::CommandFailed),
+        |_| Ok(Vec::new()),
+        std::time::Duration::from_secs(5),
+    );
+    assert!(failed.is_err());
+    assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
+}

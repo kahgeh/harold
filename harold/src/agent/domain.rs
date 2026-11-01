@@ -53,6 +53,18 @@ pub(crate) enum EffectiveAgentState {
     Unknown,
 }
 
+impl EffectiveAgentState {
+    /// The `state` attribute word of the agent metrics.
+    #[allow(dead_code, reason = "Task 5 uses this to build agent counts")]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 pub(crate) const UNKNOWN_PROVIDER_ID: &str = "unknown";
 pub(crate) const UNKNOWN_PROVIDER_DISPLAY_NAME: &str = "Unknown";
 

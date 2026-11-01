@@ -230,6 +230,8 @@ struct FakeRex {
     chunk: usize,
     pastes: Mutex<Vec<(String, String, String)>>,
     keys: Mutex<Vec<(String, String)>>,
+    /// The windows of a session, when they differ from `windows`.
+    views: HashMap<String, Vec<Vec<String>>>,
 }
 
 impl RexApi for FakeRex {
@@ -239,8 +241,8 @@ impl RexApi for FakeRex {
             None => Ok(self.sessions.clone()),
         }
     }
-    fn session_view(&self, _: &str) -> Result<Vec<Vec<String>>, RexError> {
-        Ok(self.windows.clone())
+    fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+        Ok(self.views.get(session).unwrap_or(&self.windows).clone())
     }
     fn process(&self, _: &str, block: &str) -> Result<RexProcess, RexError> {
         self.processes
@@ -745,4 +747,45 @@ fn a_failed_ls_is_list_absent() {
     let (result, risen) = rise("list", "absent", || rex.sessions());
     assert_eq!(result.err(), Some(RexError::Absent));
     assert_eq!(risen, 1);
+}
+
+/// A fake of 3 sessions that hold 14 blocks, none of them an agent.
+fn fake_of_3_sessions_and_14_blocks() -> FakeRex {
+    let mut fake = FakeRex::default();
+    for (index, blocks) in [5, 5, 4].into_iter().enumerate() {
+        let session = format!("session:{index}");
+        fake.sessions.push(RexSession {
+            id: session.clone(),
+            label: format!("label-{index}"),
+        });
+        let ids: Vec<String> = (0..blocks).map(|n| format!("block:{index}-{n}")).collect();
+        for id in &ids {
+            fake.processes.lock().unwrap().insert(
+                id.clone(),
+                Ok(process(
+                    8,
+                    Some(proc(9, "zsh", None)),
+                    vec![proc(8, "login", None)],
+                )),
+            );
+        }
+        fake.views.insert(session, vec![ids]);
+    }
+    fake
+}
+
+#[test]
+fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() {
+    crate::telemetry::take_noted_listings();
+    let inventory =
+        RexAgentInventory::new(Arc::new(fake_of_3_sessions_and_14_blocks()), settings());
+    assert_eq!(inventory.scan().unwrap().len(), 0);
+    assert_eq!(crate::telemetry::take_noted_listings(), vec![(3, 14)]);
+    let failing = FakeRex {
+        list_error: Some(RexError::Failed),
+        ..FakeRex::default()
+    };
+    let inventory = RexAgentInventory::new(Arc::new(failing), settings());
+    assert!(inventory.scan().is_err());
+    assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
 }

@@ -648,6 +648,135 @@ pub(crate) fn record_call(
         .record(elapsed.as_secs_f64() * 1000.0, &attributes);
 }
 
+#[allow(dead_code, reason = "Task 5 builds these rows")]
+/// One row of `harold.agents`: how many agents are in `state` for `provider_id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentCount {
+    pub(crate) state: &'static str,
+    pub(crate) provider_id: String,
+    pub(crate) count: u64,
+}
+
+/// What the three gauges read, by multiplexer name.
+#[derive(Default)]
+struct AgentGaugeState {
+    counts: BTreeMap<String, Vec<AgentCount>>,
+    /// The sessions and panes of the last listing that worked.
+    listings: BTreeMap<String, (u64, u64)>,
+}
+
+fn agent_gauge_state() -> &'static Arc<Mutex<AgentGaugeState>> {
+    static STATE: OnceLock<Arc<Mutex<AgentGaugeState>>> = OnceLock::new();
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<u64>; 3]> = OnceLock::new();
+    let state = STATE.get_or_init(|| Arc::new(Mutex::new(AgentGaugeState::default())));
+    GAUGES.get_or_init(|| {
+        let meter = meter();
+        let counts = Arc::clone(state);
+        let sessions = Arc::clone(state);
+        let panes = Arc::clone(state);
+        [
+            meter
+                .u64_observable_gauge("harold.agents")
+                .with_unit("{agent}")
+                .with_callback(move |observer| {
+                    let state = counts.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (multiplexer, rows) in &state.counts {
+                        for row in rows {
+                            observer.observe(
+                                row.count,
+                                &[
+                                    KeyValue::new("state", row.state),
+                                    KeyValue::new("provider_id", row.provider_id.clone()),
+                                    KeyValue::new("multiplexer", multiplexer.clone()),
+                                    KeyValue::new("host", HOST_OWN_MACHINE),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
+            listing_gauge(
+                &meter,
+                "harold.multiplexer.sessions",
+                "{session}",
+                sessions,
+                |l| l.0,
+            ),
+            listing_gauge(&meter, "harold.multiplexer.panes", "{pane}", panes, |l| l.1),
+        ]
+    });
+    state
+}
+
+/// A gauge that reads one number of each multiplexer's last good listing.
+fn listing_gauge(
+    meter: &Meter,
+    name: &'static str,
+    unit: &'static str,
+    state: Arc<Mutex<AgentGaugeState>>,
+    pick: fn(&(u64, u64)) -> u64,
+) -> opentelemetry::metrics::ObservableGauge<u64> {
+    meter
+        .u64_observable_gauge(name)
+        .with_unit(unit)
+        .with_callback(move |observer| {
+            let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            for (multiplexer, listing) in &state.listings {
+                observer.observe(
+                    pick(listing),
+                    &[
+                        KeyValue::new("multiplexer", multiplexer.clone()),
+                        KeyValue::new("host", HOST_OWN_MACHINE),
+                    ],
+                );
+            }
+        })
+        .build()
+}
+
+/// Replaces the counts `harold.agents` reads. The multiplexer comes from the settings.
+#[allow(dead_code, reason = "Task 5 calls this from the agent state recorder")]
+pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
+    note_agent_counts_for(configured_multiplexer(), counts);
+}
+
+fn note_agent_counts_for(multiplexer: &str, counts: Vec<AgentCount>) {
+    agent_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .counts
+        .insert(multiplexer.to_owned(), counts);
+}
+
+/// Stores the sessions and panes of a listing that worked. A failed listing never calls it,
+/// so the gauges keep the last good counts. Panes are every pane, with or without an agent.
+pub(crate) fn note_multiplexer_listing(sessions: u64, panes: u64) {
+    #[cfg(test)]
+    LISTINGS_NOTED.with(|noted| noted.borrow_mut().push((sessions, panes)));
+    note_listing_for(configured_multiplexer(), sessions, panes);
+}
+
+fn note_listing_for(multiplexer: &str, sessions: u64, panes: u64) {
+    agent_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .listings
+        .insert(multiplexer.to_owned(), (sessions, panes));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The listings this thread noted, so a test sees its own calls beside other tests.
+    static LISTINGS_NOTED: std::cell::RefCell<Vec<(u64, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The listings the current thread noted since the last call.
+#[cfg(test)]
+pub(crate) fn take_noted_listings() -> Vec<(u64, u64)> {
+    LISTINGS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
+}
+
 /// Records 0 once on the 32 failure series of `harold.multiplexer.calls`: 8 operations
 /// (not `other`) times 4 outcomes (not `ok`). `main` calls it once when export is on.
 pub(crate) fn register_multiplexer_counters(multiplexer: &str) {

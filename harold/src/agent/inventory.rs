@@ -153,6 +153,7 @@ impl TmuxAgentInventory {
         let panes = read_panes();
         *tmux_ms = Some(elapsed_ms(part_started));
         let panes = panes?;
+        note_listing(&panes);
         if panes.is_empty() {
             self.programs
                 .lock()
@@ -264,6 +265,18 @@ fn broken_chain_candidates(
                 .map(move |process| (pane.pane_id.clone(), process.pid))
         })
         .collect()
+}
+
+/// Notes the sessions and panes of a listing that worked. Every pane counts.
+fn note_listing(panes: &[TmuxPaneInfo]) {
+    let sessions: HashSet<&str> = panes
+        .iter()
+        .map(|pane| pane.session_name.as_str())
+        .collect();
+    crate::telemetry::note_multiplexer_listing(
+        u64::try_from(sessions.len()).unwrap_or(u64::MAX),
+        u64::try_from(panes.len()).unwrap_or(u64::MAX),
+    );
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
