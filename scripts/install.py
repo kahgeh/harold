@@ -543,7 +543,7 @@ def starts_at_login(bundle):
         return False
 
 
-def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False):
+def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False, copy_failed=False):
     """ROLLBACK.md for `backup`: what it holds and the commands that put it back.
 
     `copied` names the files from `prefix` kept in `backup`. The commands set the new bundle
@@ -552,7 +552,8 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     does not start at login, and enable the label, which the new `haroldctl stop` disabled.
     They also delete the counted-tip file, which an older Harold would leave stale.
     When `data_copied` is true, `backup` holds a copy of the store and events, so the commands move back
-    only the other entries of the new data folder.
+    only the other entries of the new data folder. When `copy_failed` is true, the note also warns that the
+    new store cannot go back to the old Harold and that the backup holds no old data.
     """
     aside = 'harold.replaced-' + backup.name[len('harold.backup-'):]
     commands = ['cd ' + shlex.quote(str(prefix)), './haroldctl stop',
@@ -573,6 +574,10 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     else:
         holds = ('It holds the programs, configuration and scripts. The data and log moved to the new '
                  'install, and the commands move them back.')
+        if copy_failed:
+            holds += (' The data copy failed. The old Harold refuses the migrated store with '
+                      '`incompatible state schema`. The old data is not in the backup. '
+                      'The commands below move the migrated store back, so the old Harold cannot start with it.')
         commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
     if copied:
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
@@ -602,7 +607,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     return '\n'.join(lines) + '\n'
 
 
-def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False):
+def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False, copy_failed=False):
     """Copy haroldctl and, when it is there, tmx-agent-dash into `backup`, which holds the old
     bundle, and write ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
     copied = []
@@ -612,7 +617,7 @@ def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False):
         if (prefix / name).is_file():
             shutil.copy2(prefix / name, backup / name)
             copied.append(name)
-    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata, data_copied))
+    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata, data_copied, copy_failed))
 
 
 def remove_old_program(prefix):
@@ -641,6 +646,25 @@ def copy_data_to_backup(source_data, target):
     return total
 
 
+def restore_live_data(stage, backup, copy_folder):
+    """Undo a failed replace_bundle step by step, deciding from the folders and not from flags.
+
+    `copy_folder` is backup/data-copy when a copy started, else None. The copy is removed only
+    after the live data is back in `backup`, so the live data is never the only thing deleted."""
+    if copy_folder is not None:
+        if not copy_folder.exists() and (backup / 'data').exists() and (stage / 'data').exists():
+            # The copy took the name backup/data and the live data sits in the stage.
+            discard = backup / 'data-discard'
+            (backup / 'data').rename(discard)
+            (stage / 'data').rename(backup / 'data')
+            shutil.rmtree(discard, ignore_errors=True)
+        else:
+            shutil.rmtree(copy_folder, ignore_errors=True)
+    for name in ('data', 'harold.log'):
+        if not (backup / name).exists() and (stage / name).exists():
+            (stage / name).rename(backup / name)
+
+
 def replace_bundle(stage, bundle, reinstall, data_copy=None):
     """Move `bundle` to a backup folder, carry its data into `stage` and put `stage` in its place.
 
@@ -648,11 +672,10 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
     while the live data is still in the backup, as backup/data-copy, and takes the name backup/data
     after the live data has moved out. `data_copy`, when given a dict, receives 'bytes' when the copy
     was made, or 'error' when it failed. The install goes on. Any exception, including an interrupt,
-    removes the partial copy and puts the live data back."""
+    removes the partial copy and puts the live data back. The undo reads the folders, not flags, so an interrupt
+    between any two steps still leaves the live data in the backup."""
     backup = None
-    moved = []
     copy_folder = None
-    copy_in_place = False
     if bundle.exists():
         suffix = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
         backup = bundle.with_name('harold.backup-' + suffix)
@@ -679,19 +702,12 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
                     if destination.is_dir():
                         shutil.rmtree(destination)
                     source.rename(destination)
-                    moved.append(name)
         if copy_folder is not None:
             copy_folder.rename(backup / 'data')
-            copy_in_place = True
         stage.rename(bundle)
     except BaseException:
         if backup:
-            if copy_in_place:
-                shutil.rmtree(backup / 'data', ignore_errors=True)
-            elif copy_folder is not None:
-                shutil.rmtree(copy_folder, ignore_errors=True)
-            for name in reversed(moved):
-                (stage / name).rename(backup / name)
+            restore_live_data(stage, backup, copy_folder)
             backup.rename(bundle)
         if data_copy is not None:
             data_copy.clear()
@@ -801,7 +817,8 @@ def install(args, repo):
                 # Before haroldctl is overwritten below. Harold is stopped and the old bundle
                 # has moved, so a failed copy is reported and the install goes on.
                 try:
-                    keep_rollback_copy(prefix, backup, args.reinstall, metadata, 'bytes' in data_copy)
+                    keep_rollback_copy(prefix, backup, args.reinstall, metadata, 'bytes' in data_copy,
+                                         'error' in data_copy)
                 except Exception as error:
                     copy_kept = False
                     old_stays = ('the old {} stays in place; '.format(OLD_PROGRAM)

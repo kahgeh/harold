@@ -182,6 +182,42 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
         self.assertEqual(list(bundle.glob('data-copy')), [])
 
+    def test_an_interrupt_right_after_the_copy_rename_keeps_the_live_data(self):
+        bundle, stage = self.old_bundle_with_data()
+        (bundle / 'data/events/marker').write_text('unique-live-marker')
+        rename = Path.rename
+
+        def interrupted_after_copy_rename(source, destination):
+            result = rename(source, destination)
+            if source.name == 'data-copy':
+                raise KeyboardInterrupt
+            return result
+
+        with patch.object(Path, 'rename', interrupted_after_copy_rename):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'unique-live-marker')
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual(list(bundle.glob('data-*')), [])
+
+    def test_an_interrupt_right_after_the_live_data_moved_keeps_the_live_data(self):
+        bundle, stage = self.old_bundle_with_data()
+        (bundle / 'data/events/marker').write_text('unique-live-marker')
+        rename = Path.rename
+
+        def interrupted_after_data_move(source, destination):
+            result = rename(source, destination)
+            if destination == stage / 'data':
+                raise KeyboardInterrupt
+            return result
+
+        with patch.object(Path, 'rename', interrupted_after_data_move):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'unique-live-marker')
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual(list(bundle.glob('data-*')), [])
+
     def test_a_copy_with_no_store_or_events_copies_nothing(self):
         bundle = self.prefix / 'harold'
         (bundle / 'data/pod').mkdir(parents=True)
@@ -1192,6 +1228,14 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertFalse((backup / 'data').exists())
         self.assertIn('mv {}/data harold/data'.format(backup.name.replace('harold.backup-', 'harold.replaced-')), commands)
         self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+
+    def test_the_note_for_a_failed_data_copy_says_the_new_store_cannot_go_back(self):
+        self.old_install_with_store()
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
+            self.run_install('-')
+        _, note, _ = self.rollback()
+        self.assertIn('incompatible state schema', note)
+        self.assertIn('The old data is not in the backup.', note)
 
     def test_the_rollback_note_moves_the_other_data_entries_back(self):
         self.old_install_with_store()
