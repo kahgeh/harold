@@ -577,7 +577,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
         if copy_failed:
             holds += (' The data copy failed. The old Harold refuses the migrated store with '
                       '`incompatible state schema`. The old data is not in the backup. '
-                      'The commands below move the migrated store back, so the old Harold cannot start with it.')
+                      'The commands below move back the migrated store. The old Harold cannot start with that store.')
         commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
     if copied:
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
@@ -633,6 +633,9 @@ def remove_old_program(prefix):
         print('removed ~/bin/tmx-agent-dash (now harold start-control-tower)', flush=True)
 
 
+COPY_MARKER = '.harold-data-copy'
+
+
 def copy_data_to_backup(source_data, target):
     """Copy `source_data`/store and `source_data`/events, whichever exist, into `target`.
 
@@ -652,8 +655,8 @@ def restore_live_data(stage, backup, copy_folder):
     `copy_folder` is backup/data-copy when a copy started, else None. The copy is removed only
     after the live data is back in `backup`, so the live data is never the only thing deleted."""
     if copy_folder is not None:
-        if not copy_folder.exists() and (backup / 'data').exists() and (stage / 'data').exists():
-            # The copy took the name backup/data and the live data sits in the stage.
+        if (backup / 'data' / COPY_MARKER).exists() and (stage / 'data').exists():
+            # The marked copy took the name backup/data and the live data sits in the stage.
             discard = backup / 'data-discard'
             (backup / 'data').rename(discard)
             (stage / 'data').rename(backup / 'data')
@@ -692,6 +695,8 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
                 if data_copy is not None:
                     data_copy['error'] = error.strerror or str(error)
             else:
+                # The marker proves a finished copy. The live data never carries it.
+                (copy_folder / COPY_MARKER).write_bytes(b'')
                 if data_copy is not None:
                     data_copy['bytes'] = copied_bytes
         if backup and not reinstall:
@@ -712,6 +717,8 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
         if data_copy is not None:
             data_copy.clear()
         raise
+    if copy_folder is not None:
+        (backup / 'data' / COPY_MARKER).unlink(missing_ok=True)
     return backup
 
 

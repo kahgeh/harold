@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shutil
 import shlex
 import argparse
 import plistlib
@@ -217,6 +218,44 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'unique-live-marker')
         self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
         self.assertEqual(list(bundle.glob('data-*')), [])
+
+    def test_an_interrupt_at_the_start_of_the_copy_keeps_the_live_store(self):
+        bundle, stage = self.old_bundle_with_data()
+
+        def interrupted(source, target):
+            raise KeyboardInterrupt
+
+        with patch.object(self.install, 'copy_data_to_backup', interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(bundle.glob('data-*')), [])
+
+    def test_an_interrupt_after_a_failed_copy_cleanup_keeps_the_live_store(self):
+        bundle, stage = self.old_bundle_with_data()
+        real_rmtree = shutil.rmtree
+        interrupts = []
+
+        def rmtree_then_interrupt(path, *args, **kwargs):
+            real_rmtree(path, *args, **kwargs)
+            if Path(path).name == 'data-copy' and not interrupts:
+                interrupts.append(path)
+                raise KeyboardInterrupt
+
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'full')), \
+                patch.object(self.install.shutil, 'rmtree', rmtree_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+
+    def test_a_finished_install_leaves_no_copy_marker_and_counts_only_data_bytes(self):
+        bundle, stage = self.old_bundle_with_data()
+        info = {}
+        backup = self.install.replace_bundle(stage, bundle, False, info)
+        self.assertFalse((backup / 'data' / self.install.COPY_MARKER).exists())
+        self.assertEqual(info['bytes'], len(b'live') + len('history'))
 
     def test_a_copy_with_no_store_or_events_copies_nothing(self):
         bundle = self.prefix / 'harold'
