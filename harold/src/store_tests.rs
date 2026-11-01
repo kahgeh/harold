@@ -3159,3 +3159,72 @@ async fn a_failing_statement_in_the_006_sql_leaves_agent_panes_as_it_was() {
         ("busy".to_string(), "-".to_string(), "busy".to_string())
     );
 }
+
+/// A row from a later build holds a state word this build cannot read. The next event for the
+/// pane must still project, so the paired columns of an unknown word read as no observation.
+#[tokio::test]
+async fn a_stored_stage_three_state_reads_as_no_observation_with_its_paired_columns() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = store.state.connect().unwrap();
+    for (pane, hook, screen) in [("%7", "'done'", "NULL"), ("%8", "NULL", "'done'")] {
+        conn.execute(&agent_pane_row_sql(pane, hook, screen, "unknown"), ())
+            .await
+            .unwrap();
+        conn.execute(
+            "UPDATE agent_panes SET last_event_version = 0 WHERE pane_id = ?1",
+            (pane,),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    let incarnation = |pane: &str| AgentIncarnation {
+        pane_id: pane.into(),
+        pane_pid: 1,
+        agent_pid: 2,
+        agent_started_at_ms: 3,
+        provider_id: "claude-code".into(),
+    };
+    append_agent_events(
+        &store,
+        vec![
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: incarnation("%7"),
+                state: Some(ObservedAgentState::Working),
+                classifier_id: "screen-v1".into(),
+                fallback_summary: None,
+                observed_at_ms: 200,
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: incarnation("%8"),
+                state: Some(ObservedAgentState::Idle),
+                adapter_id: "hook-v1".into(),
+                work_summary: WorkSummaryUpdate::Unchanged,
+                observed_at_ms: 201,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let pane = |id: &str| {
+        snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane.incarnation.pane_id == id)
+            .unwrap_or_else(|| panic!("{id} projects"))
+    };
+    let hook_row = pane("%7");
+    assert_eq!(hook_row.hook_state, None);
+    assert_eq!(hook_row.hook_observed_at_ms, None);
+    assert_eq!(hook_row.screen_state, Some(ObservedAgentState::Working));
+    assert_eq!(hook_row.effective_state, EffectiveAgentState::Working);
+    let screen_row = pane("%8");
+    assert_eq!(screen_row.hook_state, Some(ObservedAgentState::Idle));
+    assert_eq!(screen_row.screen_state, None);
+    assert_eq!(screen_row.screen_classifier_id, None);
+    assert_eq!(screen_row.screen_observed_at_ms, None);
+    assert_eq!(screen_row.effective_state, EffectiveAgentState::Idle);
+}

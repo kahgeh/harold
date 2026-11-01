@@ -1865,6 +1865,16 @@ fn agent_pane_from_row(row: &turso::Row) -> Result<AgentPaneProjection> {
 }
 
 fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> Result<AgentPaneProjection> {
+    // A state word this build cannot read (a later build wrote it) reads as no observation. Its
+    // paired columns read as none too, so the next write keeps the CHECK pairs of the table.
+    let hook_state = optional_text(row, offset + 12)?
+        .map(parse_observed_state)
+        .transpose()?
+        .flatten();
+    let screen_state = optional_text(row, offset + 14)?
+        .map(parse_observed_state)
+        .transpose()?
+        .flatten();
     Ok(AgentPaneProjection {
         pane: crate::agent::domain::AgentPaneObservation {
             incarnation: crate::agent::domain::AgentIncarnation {
@@ -1882,17 +1892,11 @@ fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> Result<AgentPanePr
             provider_display_name: required_text(row, offset + 10)?,
             observed_at_ms: required_integer(row, offset + 11)?,
         },
-        hook_state: optional_text(row, offset + 12)?
-            .map(parse_observed_state)
-            .transpose()?
-            .flatten(),
-        hook_observed_at_ms: optional_integer(row, offset + 13)?,
-        screen_state: optional_text(row, offset + 14)?
-            .map(parse_observed_state)
-            .transpose()?
-            .flatten(),
-        screen_classifier_id: optional_text(row, offset + 15)?,
-        screen_observed_at_ms: optional_integer(row, offset + 16)?,
+        hook_state,
+        hook_observed_at_ms: hook_state.and(optional_integer(row, offset + 13)?),
+        screen_state,
+        screen_classifier_id: screen_state.and(optional_text(row, offset + 15)?),
+        screen_observed_at_ms: screen_state.and(optional_integer(row, offset + 16)?),
         effective_state: parse_effective_state(&required_text(row, offset + 17)?)?,
         explicit_work_summary: optional_text(row, offset + 18)?,
         explicit_work_summary_updated_at_ms: optional_integer(row, offset + 19)?,
