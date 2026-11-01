@@ -1,10 +1,9 @@
+use std::collections::{BTreeMap, HashMap};
+
 use tokio::sync::watch;
 
 use crate::store::EventVersion;
-
-use std::collections::{BTreeMap, HashMap};
-
-use crate::telemetry::{AgentCount, record_agent_state_duration};
+use crate::telemetry::{AgentCount, note_agent_counts, record_agent_state_duration};
 
 use super::domain::AgentSnapshot;
 
@@ -16,6 +15,7 @@ pub(crate) struct AgentSnapshotHub {
 
 impl AgentSnapshotHub {
     pub(crate) fn new(initial: AgentSnapshot) -> Self {
+        note_agent_counts(agent_counts(&initial));
         let (sender, receiver) = watch::channel(initial);
         Self {
             sender,
@@ -50,7 +50,7 @@ impl AgentSnapshotHub {
                 return false;
             }
             record_state_changes(current, &snapshot);
-            crate::telemetry::note_agent_counts(agent_counts(&snapshot));
+            note_agent_counts(agent_counts(&snapshot));
             *current = snapshot;
             true
         });
@@ -81,7 +81,7 @@ fn record_state_changes(old: &AgentSnapshot, new: &AgentSnapshot) {
 }
 
 /// The number of panes in each state, for each provider.
-fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
+pub(super) fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
     let mut counts: BTreeMap<(&'static str, &str), u64> = BTreeMap::new();
     for pane in &snapshot.panes {
         *counts

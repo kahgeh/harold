@@ -4405,3 +4405,19 @@ fn the_dashboard_id_check_fails_when_tiles_is_missing() {
 fn the_dashboard_id_check_fails_when_tiles_is_empty() {
     check_dashboard_ids("x.json", &serde_json::json!({ "tiles": [] }));
 }
+
+#[test]
+fn record_agent_state_duration_writes_the_multiplexer_and_an_empty_host() {
+    record_agent_state_duration_for("rex", "working", "attribute-provider", 12.5);
+
+    let set = [
+        ("state", "working"),
+        ("provider_id", "attribute-provider"),
+        ("multiplexer", "rex"),
+        ("host", ""),
+    ];
+    assert_eq!(
+        test_support::histogram_sum("harold.agent.state.duration", &set),
+        Some(12.5)
+    );
+}

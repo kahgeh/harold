@@ -4,6 +4,7 @@ use super::domain::{
     AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot, EffectiveAgentState,
 };
 use super::snapshot::AgentSnapshotHub;
+use crate::telemetry::{AgentCount, take_noted_agent_counts};
 
 fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
@@ -175,4 +176,70 @@ fn a_rejected_stale_snapshot_records_nothing() {
     ));
 
     assert_eq!(seconds_in(provider, "working"), None);
+}
+
+fn mixed_snapshot(revision: i64) -> AgentSnapshot {
+    use EffectiveAgentState::{Idle, Unknown, Working};
+    let mut base = timed_snapshot(
+        revision,
+        "provider-a",
+        &[("%1", Working, 1), ("%2", Working, 1), ("%3", Idle, 1)],
+    );
+    let template = base.panes[0].clone();
+    for (pane_id, provider, state) in [("%4", "provider-b", Working), ("%5", "provider-b", Unknown)]
+    {
+        let mut pane = template.clone();
+        pane.pane.incarnation.pane_id = pane_id.into();
+        pane.pane.incarnation.provider_id = provider.into();
+        pane.effective_state = state;
+        base.panes.push(pane);
+    }
+    base
+}
+
+fn row(state: &'static str, provider_id: &str, count: u64) -> AgentCount {
+    AgentCount {
+        state,
+        provider_id: provider_id.into(),
+        count,
+    }
+}
+
+fn mixed_rows() -> Vec<AgentCount> {
+    vec![
+        row("idle", "provider-a", 1),
+        row("unknown", "provider-b", 1),
+        row("working", "provider-a", 2),
+        row("working", "provider-b", 1),
+    ]
+}
+
+#[test]
+fn agent_counts_group_panes_by_state_and_provider() {
+    assert_eq!(
+        super::snapshot::agent_counts(&mixed_snapshot(1)),
+        mixed_rows()
+    );
+}
+
+#[test]
+fn an_accepted_publish_notes_the_counts_and_a_stale_one_does_not() {
+    let hub = AgentSnapshotHub::new(snapshot(1, None));
+    take_noted_agent_counts();
+
+    hub.publish_committed(mixed_snapshot(2));
+    assert_eq!(take_noted_agent_counts(), vec![mixed_rows()]);
+
+    hub.publish_committed(timed_snapshot(2, "provider-c", &[]));
+    hub.publish_committed(timed_snapshot(1, "provider-c", &[]));
+    assert!(take_noted_agent_counts().is_empty());
+}
+
+#[test]
+fn a_new_hub_notes_the_counts_of_its_first_snapshot() {
+    take_noted_agent_counts();
+
+    let _hub = AgentSnapshotHub::new(mixed_snapshot(1));
+
+    assert_eq!(take_noted_agent_counts(), vec![mixed_rows()]);
 }

@@ -734,6 +734,8 @@ fn listing_gauge(
 
 /// Replaces the counts `harold.agents` reads. The multiplexer comes from the settings.
 pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
+    #[cfg(test)]
+    COUNTS_NOTED.with(|noted| noted.borrow_mut().push(counts.clone()));
     note_agent_counts_for(configured_multiplexer(), counts);
 }
 
@@ -793,6 +795,19 @@ thread_local! {
     /// The listings this thread noted, so a test sees its own calls beside other tests.
     static LISTINGS_NOTED: std::cell::RefCell<Vec<(u64, u64)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The agent counts this thread noted, so a test sees its own calls beside other tests.
+    static COUNTS_NOTED: std::cell::RefCell<Vec<Vec<AgentCount>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The agent counts the current thread noted since the last call.
+#[cfg(test)]
+pub(crate) fn take_noted_agent_counts() -> Vec<Vec<AgentCount>> {
+    COUNTS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
 }
 
 /// The listings the current thread noted since the last call.
