@@ -40,6 +40,11 @@ pub(crate) enum HostAgentState {
     Unknown,
 }
 
+/// The host a call records. A call with no server flag goes to this Mac: its host is empty.
+pub(super) fn recorded_host(with_server: bool, label: &str) -> &str {
+    if with_server { label } else { "" }
+}
+
 impl HostAgentState {
     /// The effective state of a host agent. A host agent with no record is `Unknown`.
     pub(crate) fn effective(self) -> EffectiveAgentState {
@@ -173,9 +178,13 @@ impl RexHostInventory {
             Err(RexError::Failed) => MultiplexerOutcome::Failed,
             Err(RexError::Malformed) => MultiplexerOutcome::Malformed,
         };
-        // A call with no server flag goes to this Mac: its host is the empty value.
-        let host = if with_server { self.label.as_str() } else { "" };
-        record_call("rex", host, operation, outcome, started.elapsed());
+        record_call(
+            "rex",
+            recorded_host(with_server, &self.label),
+            operation,
+            outcome,
+            started.elapsed(),
+        );
         result
     }
 

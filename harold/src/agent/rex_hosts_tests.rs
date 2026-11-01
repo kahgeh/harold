@@ -445,6 +445,14 @@ fn the_local_host_id_comes_from_whoami_with_no_server_flag() {
 }
 
 #[test]
+fn a_local_call_records_an_empty_host_and_a_remote_call_the_label() {
+    assert_eq!(recorded_host(false, "omarchy"), "");
+    assert_eq!(recorded_host(true, "omarchy"), "omarchy");
+}
+
+/// End-to-end check. The empty host can only be checked as "rises": other tests also record
+/// local calls, and the thread-local call log holds no host. The exact check is the test above.
+#[test]
 fn the_local_whoami_call_records_an_empty_host() {
     let fake = Fake::new("whoami-metric");
     let count = |host: &str| {
