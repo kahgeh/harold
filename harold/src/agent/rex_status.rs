@@ -590,6 +590,16 @@ impl RexStatus {
         Lookup::Stream(record)
     }
 
+    /// The generation of each session's stream. Tests use it to see a restart.
+    #[cfg(test)]
+    pub(crate) fn generations(&self) -> HashMap<String, u64> {
+        lock(&self.registry)
+            .streams
+            .iter()
+            .map(|(session, stream)| (session.clone(), stream.generation))
+            .collect()
+    }
+
     /// Kills and reaps every child. A `sync` after this call starts no stream.
     pub(crate) fn stop_all(&self) {
         let mut registry = lock(&self.registry);

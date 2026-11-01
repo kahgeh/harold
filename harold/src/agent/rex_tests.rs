@@ -1828,8 +1828,38 @@ fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
         status.lookup("block:a") != Lookup::NoStream && status.lookup("block:b") != Lookup::NoStream
     });
     // A second scan of the same sessions starts no second stream.
+    let before = status.generations();
+    assert_eq!(before.len(), 2);
     inventory.scan().unwrap();
-    assert_eq!(program.runs(), 2);
+    assert_eq!(status.generations(), before);
+    status.stop_all();
+}
+
+#[test]
+fn a_scan_after_a_stream_ended_and_the_gap_passed_changes_the_generation() {
+    let program = FakeProgram::new("scan-restarts", &[], false);
+    let base = Instant::now();
+    let offset = Arc::new(Mutex::new(Duration::ZERO));
+    let clock: Clock = {
+        let offset = Arc::clone(&offset);
+        Arc::new(move || base + *offset.lock().unwrap())
+    };
+    let (status, _) = status_with(fake_of_two_sessions(1), &program, clock);
+    let status = Arc::new(status);
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake_of_two_sessions(1)),
+        settings(),
+        Arc::clone(&status),
+    );
+    inventory.scan().unwrap();
+    let before = status.generations();
+    wait_until("the stream ends", || {
+        program.runs() == 1 && status.lookup("block:a") == Lookup::NoStream
+    });
+    *offset.lock().unwrap() = RESTART_GAP;
+    inventory.scan().unwrap();
+    let after = status.generations();
+    assert_ne!(after["session:1"], before["session:1"]);
     status.stop_all();
 }
 
