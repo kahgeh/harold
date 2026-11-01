@@ -661,6 +661,18 @@ fn host_marks_errors(monitor: &AgentMonitorSettings, machine_name: &str) -> Vec<
             ));
         }
     }
+    // Two keys that differ only in case would both name this machine, so Harold would pick
+    // one by map order. Refuse every key after the first.
+    for host in monitor
+        .rex_host_marks
+        .keys()
+        .filter(|key| key.to_lowercase() == machine_name.to_lowercase())
+        .skip(1)
+    {
+        errors.push(format!(
+            "agent_monitor.rex_host_marks names the same host twice: {host}"
+        ));
+    }
     for (host, mark) in &monitor.rex_host_marks {
         if !monitor.rex_hosts.contains(host) && host.to_lowercase() != machine_name.to_lowercase() {
             errors.push(format!(
@@ -2832,6 +2844,17 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             vec![
                 "agent_monitor.rex_hosts names this machine's machine_name: laptop-mac".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn two_keys_that_differ_only_in_case_are_refused() {
+        let errors = host_errors(
+            "machine_name = \"Laptop-Mac\"\n[agent_monitor.rex_host_marks]\nLaptop-Mac = \"mac\"\nlaptop-mac = \"mac\"",
+        );
+        assert_eq!(
+            errors,
+            vec!["agent_monitor.rex_host_marks names the same host twice: laptop-mac".to_string()]
         );
     }
 

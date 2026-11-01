@@ -653,6 +653,13 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     if !chief_shown {
         push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
     }
+    // One decision for all groups, so the session names of every row start in one column.
+    let pad = app.host_marker != HostMarker::Text
+        && groups.iter().any(|(_, agents)| {
+            agents
+                .iter()
+                .any(|agent| !host_mark(&agent.host_icon, app.host_marker, &agent.host).is_empty())
+        });
     for (group, agents) in groups {
         let mut header = Row::new(vec![
             Cell::from(""),
@@ -667,10 +674,6 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         }
         rows.push(header);
         heights.push(1 + u16::from(margin));
-        let pad = app.host_marker != HostMarker::Text
-            && agents
-                .iter()
-                .any(|agent| !host_mark(&agent.host_icon, app.host_marker, &agent.host).is_empty());
         for agent in agents {
             // The cursor is on the chief's row only when it is not on a question row.
             let selected = app.selected.as_ref() == Some(&agent.incarnation);
@@ -4208,6 +4211,55 @@ mod tests {
                     cell_column(&local, "main") + 3,
                     cell_column(&marked_local, "main"),
                     "{marker:?} {width}: {local:?} {marked_local:?}"
+                );
+            }
+        }
+    }
+
+    /// Like `marked_app`, with the row on the host in a second group.
+    fn two_group_app(marker: HostMarker, local_icon: &str, remote_icon: &str) -> App {
+        let mut app = marked_app(marker, local_icon, remote_icon);
+        for row in &mut app.snapshot.rows {
+            if row.is_on_host() {
+                row.session_name = "other".into();
+            }
+        }
+        assert_eq!(app.visible_groups().len(), 2);
+        app
+    }
+
+    #[test]
+    fn rows_of_two_groups_start_their_sessions_in_one_column() {
+        for marker in [HostMarker::Glyph, HostMarker::Emoji] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let app = two_group_app(marker, "mac", "");
+                let (local, host) = local_and_host_rows(&app, width, height);
+                assert_eq!(
+                    cell_column(&host, "harold"),
+                    cell_column(&local, "main"),
+                    "{marker:?} {width}: {local:?} {host:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_row_of_two_groups_is_padded_when_no_row_has_a_mark() {
+        for marker in [HostMarker::Glyph, HostMarker::Emoji] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let (marked_local, _) =
+                    local_and_host_rows(&two_group_app(marker, "mac", ""), width, height);
+                let (local, host) =
+                    local_and_host_rows(&two_group_app(marker, "", ""), width, height);
+                assert_eq!(
+                    cell_column(&host, "harold"),
+                    cell_column(&local, "main"),
+                    "{marker:?} {width}"
+                );
+                assert_eq!(
+                    cell_column(&local, "main") + 3,
+                    cell_column(&marked_local, "main"),
+                    "{marker:?} {width}"
                 );
             }
         }
