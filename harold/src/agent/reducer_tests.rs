@@ -1220,3 +1220,197 @@ fn a_turn_complete_without_an_adapter_keeps_the_2_second_window() {
     );
     assert_eq!(at_2_s.effective_state, EffectiveAgentState::Working);
 }
+
+const REPORT_30_S: GraceWindows = GraceWindows {
+    hook_ms: 2_000,
+    report_ms: 30_000,
+};
+
+/// A reading from the Rex program status record. It never carries a summary.
+fn record_reading(state: ObservedAgentState, observed_at_ms: i64) -> AgentEvent {
+    AgentEvent::ScreenObserved(AgentScreenObserved {
+        incarnation: incarnation(1_000),
+        state: Some(state),
+        classifier_id: "program_status".into(),
+        fallback_summary: None,
+        observed_at_ms,
+    })
+}
+
+fn apply_report_30_s(
+    current: super::domain::AgentPaneProjection,
+    event: AgentEvent,
+    event_version: u64,
+) -> super::domain::AgentPaneProjection {
+    apply_with_graces(Some(current), event, event_version, REPORT_30_S)
+}
+
+#[test]
+fn a_program_status_observation_changes_no_work_summary_and_keeps_the_generated_summary() {
+    use super::domain::AgentActivitySummaryGenerated;
+    let source = apply_report_30_s(
+        observed_pane(),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Working),
+            adapter_id: "codex".into(),
+            work_summary: WorkSummaryUpdate::Set("Fix tests".into()),
+            observed_at_ms: 110,
+        }),
+        2,
+    );
+    let generated = apply_report_30_s(
+        source,
+        AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+            incarnation: incarnation(1_000),
+            basis_version: version(2),
+            description: "Investigating test failures".into(),
+            generated_at_ms: 120,
+        }),
+        3,
+    );
+
+    // The agent is already working, so a working record is not new work.
+    let working = apply_report_30_s(
+        generated.clone(),
+        record_reading(ObservedAgentState::Working, 5_000),
+        4,
+    );
+    assert_eq!(
+        working.work_summary.as_deref(),
+        Some("Investigating test failures")
+    );
+    assert_eq!(
+        working.explicit_work_summary,
+        generated.explicit_work_summary
+    );
+    assert_eq!(working.screen_work_summary, None);
+    assert_eq!(working.summary_basis_version, version(2));
+    assert_eq!(
+        working.generated_work_summary,
+        generated.generated_work_summary
+    );
+
+    // An idle record, even after the hook window, changes no summary either.
+    let idle = apply_report_30_s(
+        working,
+        record_reading(ObservedAgentState::Idle, 200_000),
+        5,
+    );
+    assert_eq!(idle.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(
+        idle.work_summary.as_deref(),
+        Some("Investigating test failures")
+    );
+    assert_eq!(idle.screen_work_summary, None);
+    assert_eq!(idle.summary_basis_version, version(2));
+}
+
+#[test]
+fn a_hook_report_ten_seconds_old_wins_over_a_record_saying_idle() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let repeated = apply_report_30_s(reported, mod_report(ObservedAgentState::Working, 11_000), 3);
+    let ten_seconds_old = apply_report_30_s(
+        repeated,
+        record_reading(ObservedAgentState::Idle, 21_000),
+        4,
+    );
+    assert_eq!(
+        ten_seconds_old.effective_state,
+        EffectiveAgentState::Working
+    );
+    assert_eq!(ten_seconds_old.screen_state, Some(ObservedAgentState::Idle));
+}
+
+#[test]
+fn at_thirty_seconds_the_record_decides() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let at_29_999_ms = apply_report_30_s(
+        reported,
+        record_reading(ObservedAgentState::Idle, 30_999),
+        3,
+    );
+    assert_eq!(at_29_999_ms.effective_state, EffectiveAgentState::Working);
+
+    let at_30_s = apply_report_30_s(
+        at_29_999_ms,
+        record_reading(ObservedAgentState::Idle, 31_000),
+        4,
+    );
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(at_30_s.last_transition_at_ms, 31_000);
+}
+
+#[test]
+fn a_hook_idle_wins_over_a_record_saying_working_until_thirty_seconds_of_working() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Idle, 1_000),
+        2,
+    );
+    let first = apply_report_30_s(
+        reported,
+        record_reading(ObservedAgentState::Working, 2_000),
+        3,
+    );
+    assert_eq!(first.effective_state, EffectiveAgentState::Idle);
+    let unbroken = apply_report_30_s(
+        first,
+        record_reading(ObservedAgentState::Working, 30_999),
+        4,
+    );
+    assert_eq!(unbroken.effective_state, EffectiveAgentState::Idle);
+
+    let at_30_s = apply_report_30_s(
+        unbroken,
+        record_reading(ObservedAgentState::Working, 31_000),
+        5,
+    );
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Working);
+}
+
+#[test]
+fn a_change_to_working_from_a_record_still_counts_as_new_activity() {
+    use super::domain::AgentActivitySummaryGenerated;
+    let source = apply_report_30_s(
+        observed_pane(),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            adapter_id: "codex".into(),
+            work_summary: WorkSummaryUpdate::Set("Fix parser".into()),
+            observed_at_ms: 110,
+        }),
+        2,
+    );
+    let generated = apply_report_30_s(
+        source,
+        AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+            incarnation: incarnation(1_000),
+            basis_version: version(2),
+            description: "Fixed parser; tests pending".into(),
+            generated_at_ms: 120,
+        }),
+        3,
+    );
+    assert!(generated.generated_work_summary.is_some());
+
+    // The hook window has passed, so the record decides: idle to working is new work.
+    let new_work = apply_report_30_s(
+        generated,
+        record_reading(ObservedAgentState::Working, 40_000),
+        4,
+    );
+    assert_eq!(new_work.effective_state, EffectiveAgentState::Working);
+    assert_eq!(new_work.summary_basis_version, version(4));
+    assert!(new_work.generated_work_summary.is_none());
+    assert_eq!(new_work.work_summary.as_deref(), Some("Fix parser"));
+}
