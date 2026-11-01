@@ -414,7 +414,7 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
     );
     let incarnation = incarnation_for(&first, "block:ic3");
     // The listing no longer holds the block, and its process call fails.
-    let mut api = fake(&[("block:ic3other", Ok(claude_process()))]);
+    let api = fake(&[("block:ic3other", Ok(claude_process()))]);
     api.processes
         .lock()
         .unwrap()
