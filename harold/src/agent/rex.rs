@@ -581,11 +581,13 @@ fn list_slots(api: &dyn RexApi) -> Result<Vec<RexBlockSlot>, RexError> {
 
 /// The number of sessions and all terminal blocks of all sessions.
 fn list_slots_counted(api: &dyn RexApi) -> Result<(usize, Vec<RexBlockSlot>), RexError> {
-    let mut slots = Vec::new();
     let sessions = api.sessions()?;
-    for session in &sessions {
-        let windows = api.session_view(&session.id)?;
-        slots.extend(slots_of(session, &windows));
+    let views = parallel_map(&sessions, PROCESS_WIDTH, current_stop(), |session| {
+        api.session_view(&session.id)
+    });
+    let mut slots = Vec::new();
+    for (session, windows) in sessions.iter().zip(views) {
+        slots.extend(slots_of(session, &windows?));
     }
     Ok((sessions.len(), slots))
 }
@@ -739,12 +741,13 @@ impl RexAgentInventory {
         *rex_ms = elapsed_ms(started);
         let started = Instant::now();
         let observed_at_ms = now_ms()?;
+        let processes = processes.into_iter().collect::<Result<Vec<_>, _>>()?;
+        self.read_new_start_times(&processes);
         let mut observed = Vec::new();
         let mut programs = HashMap::new();
         let mut seen = HashSet::new();
-        for (slot, process) in slots.iter().zip(processes) {
-            let process = process?;
-            let result = observe_block(slot, &process, &self.settings, observed_at_ms, |pid| {
+        for (slot, process) in slots.iter().zip(&processes) {
+            let result = observe_block(slot, process, &self.settings, observed_at_ms, |pid| {
                 seen.insert(pid);
                 self.start_time(pid)
             })?;
@@ -766,6 +769,41 @@ impl RexAgentInventory {
             .retain(|pid, _| seen.contains(pid));
         *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
         Ok(observed)
+    }
+
+    /// Reads the start times of the new agents in the pool and fills the cache. A single new
+    /// agent is left to `start_time`, which reads it on the scan thread.
+    fn read_new_start_times(&self, processes: &[RexProcess]) {
+        let mut missing = Vec::new();
+        {
+            let cache = self
+                .start_times
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for process in processes {
+                let Some((agent, _)) = find_agent(process, &self.settings) else {
+                    continue;
+                };
+                if !cache.contains_key(&agent.pid) && !missing.contains(&agent.pid) {
+                    missing.push(agent.pid);
+                }
+            }
+        }
+        if missing.len() < 2 {
+            return;
+        }
+        let times = parallel_map(&missing, PROCESS_WIDTH, current_stop(), |pid| {
+            self.api.start_time_ms(*pid)
+        });
+        let mut cache = self
+            .start_times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (pid, time) in missing.into_iter().zip(times) {
+            if let Some(time) = time {
+                cache.insert(pid, time);
+            }
+        }
     }
 
     /// A start time from the cache, or one `ps` read for a new pid.

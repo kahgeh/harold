@@ -2278,7 +2278,7 @@ fn a_pool_never_runs_more_than_width_calls() {
     parallel_map(&items, 8, None, |_| {
         let now = running.fetch_add(1, Ordering::SeqCst) + 1;
         peak.fetch_max(now, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
         running.fetch_sub(1, Ordering::SeqCst);
     });
     assert_eq!(peak.load(Ordering::SeqCst), 8);
@@ -2330,4 +2330,169 @@ fn a_stop_during_the_pool_ends_the_calls() {
         assert_eq!(results.len(), 16);
         assert!(started.elapsed() < Duration::from_secs(10));
     });
+}
+
+// -- sessions and `ps` in the pool -------------------------------------------------------------
+
+/// A fake whose `session_view` and `start_time_ms` calls take time. A session can also fail.
+struct SlowRex {
+    inner: FakeRex,
+    view_delay: HashMap<String, Duration>,
+    view_errors: HashMap<String, RexError>,
+    ps_delay: Duration,
+    ps_threads: Mutex<Vec<std::thread::ThreadId>>,
+}
+
+impl SlowRex {
+    fn new(inner: FakeRex) -> Self {
+        Self {
+            inner,
+            view_delay: HashMap::new(),
+            view_errors: HashMap::new(),
+            ps_delay: Duration::ZERO,
+            ps_threads: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl RexApi for SlowRex {
+    fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
+        self.inner.sessions()
+    }
+    fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+        if let Some(delay) = self.view_delay.get(session) {
+            std::thread::sleep(*delay);
+        }
+        if let Some(error) = self.view_errors.get(session) {
+            return Err(*error);
+        }
+        self.inner.session_view(session)
+    }
+    fn process(&self, s: &str, b: &str) -> Result<RexProcess, RexError> {
+        self.inner.process(s, b)
+    }
+    fn start_time_ms(&self, pid: u32) -> Option<i64> {
+        self.ps_threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        std::thread::sleep(self.ps_delay);
+        self.inner.start_time_ms(pid)
+    }
+    fn block_call(&self, s: &str, b: &str, m: &str, a: &Value) -> Result<Value, RexError> {
+        self.inner.block_call(s, b, m, a)
+    }
+    fn paste(&self, s: &str, b: &str, t: &str) -> Result<(), RexError> {
+        self.inner.paste(s, b, t)
+    }
+    fn send_key(&self, s: &str, b: &str, k: &str) -> Result<(), RexError> {
+        self.inner.send_key(s, b, k)
+    }
+}
+
+/// A fake of `count` sessions with one block each. Block `n` runs an agent with pid `10 + n`.
+fn slow_rex_of(count: usize) -> SlowRex {
+    let names: Vec<(String, String)> = (0..count)
+        .map(|n| (format!("session:{n}"), format!("block:{n}")))
+        .collect();
+    let processes: Vec<(String, RexProcess)> = names
+        .iter()
+        .enumerate()
+        .map(|(n, (_, block))| {
+            let pid = 10 + u32::try_from(n).unwrap();
+            let process = process(
+                1,
+                Some(proc(pid, "claude", None)),
+                vec![proc(1, "login", None)],
+            );
+            (block.clone(), process)
+        })
+        .collect();
+    let refs: Vec<(&str, Result<RexProcess, RexError>)> = processes
+        .iter()
+        .map(|(block, process)| (block.as_str(), Ok(process.clone())))
+        .collect();
+    let mut inner = fake(&refs);
+    inner.sessions = names
+        .iter()
+        .map(|(session, _)| RexSession {
+            id: session.clone(),
+            label: session.clone(),
+        })
+        .collect();
+    for (session, block) in &names {
+        inner
+            .views
+            .insert(session.clone(), vec![vec![block.clone()]]);
+    }
+    for n in 0..count {
+        inner.starts.lock().unwrap().insert(
+            10 + u32::try_from(n).unwrap(),
+            1_000 + i64::try_from(n).unwrap(),
+        );
+    }
+    SlowRex::new(inner)
+}
+
+#[test]
+fn four_sessions_of_100_ms_take_about_100_ms() {
+    let mut api = slow_rex_of(4);
+    for n in 0..4 {
+        api.view_delay
+            .insert(format!("session:{n}"), Duration::from_millis(100));
+    }
+    let started = Instant::now();
+    let (sessions, slots) = list_slots_counted(&api).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(sessions, 4);
+    let blocks: Vec<&str> = slots.iter().map(|slot| slot.block_id.as_str()).collect();
+    assert_eq!(blocks, ["block:0", "block:1", "block:2", "block:3"]);
+    assert!(elapsed < Duration::from_millis(250), "took {elapsed:?}");
+}
+
+#[test]
+fn the_first_failing_session_gives_the_error() {
+    let mut api = slow_rex_of(4);
+    // Session 1 fails late with `Failed`. Session 3 fails at once with `Absent`.
+    api.view_delay
+        .insert("session:1".into(), Duration::from_millis(80));
+    api.view_errors.insert("session:1".into(), RexError::Failed);
+    api.view_errors.insert("session:3".into(), RexError::Absent);
+    assert_eq!(list_slots_counted(&api), Err(RexError::Failed));
+}
+
+#[test]
+fn new_agents_start_times_are_read_in_parallel() {
+    let _directory = directory_test_lock();
+    let mut api = slow_rex_of(4);
+    api.ps_delay = Duration::from_millis(100);
+    let api = Arc::new(api);
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let started = Instant::now();
+    let observed = inventory.scan().unwrap();
+    let elapsed = started.elapsed();
+    let starts: Vec<i64> = observed
+        .iter()
+        .map(|pane| pane.incarnation.agent_started_at_ms)
+        .collect();
+    assert_eq!(starts, [1_000, 1_001, 1_002, 1_003]);
+    assert!(elapsed < Duration::from_millis(250), "took {elapsed:?}");
+    // The cache serves the next scan.
+    let reads = api.ps_threads.lock().unwrap().len();
+    inventory.scan().unwrap();
+    assert_eq!(api.ps_threads.lock().unwrap().len(), reads);
+}
+
+#[test]
+fn one_new_agent_reads_its_start_time_on_the_scan_thread() {
+    let _directory = directory_test_lock();
+    let api = Arc::new(slow_rex_of(1));
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let observed = inventory.scan().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].incarnation.agent_started_at_ms, 1_000);
+    assert_eq!(
+        *api.ps_threads.lock().unwrap(),
+        vec![std::thread::current().id()]
+    );
 }
