@@ -797,6 +797,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "control-tower"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "harold-api",
+ "ratatui",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5655,18 +5667,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "control-tower"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "crossterm",
- "harold-api",
- "ratatui",
- "tokio",
- "tonic",
-]
 
 [[package]]
 name = "tokio"
