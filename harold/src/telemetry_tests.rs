@@ -3308,6 +3308,22 @@ fn no_metric_name_holds_rex_or_tmux() {
 }
 
 #[test]
+fn recap_read_counter_has_result_and_provider_id() {
+    test_support::install();
+    for result in ["found", "none", "failed"] {
+        record_recap_read("recap_probe", result);
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.agent.recap_read",
+                &[("result", result), ("provider_id", "recap_probe")]
+            ),
+            Some(1),
+            "{result}"
+        );
+    }
+}
+
+#[test]
 fn a_state_observation_counts_with_its_source_state_provider_and_multiplexer() {
     for (source, word, state) in [
         (

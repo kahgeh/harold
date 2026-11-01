@@ -7,7 +7,6 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 /// The most a first read takes from the end of a file, for a reader that needs a limit.
-#[allow(dead_code)] // The recap reader uses it.
 pub(crate) const FIRST_READ_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// How far a reader has read in one file.

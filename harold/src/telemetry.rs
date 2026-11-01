@@ -346,6 +346,8 @@ pub(crate) struct Instruments {
     pub agent_state_duration: Histogram<f64>,
     /// `harold.agent.state_observed`, `{observation}`, by `source`, `state`, `provider_id`, `multiplexer`.
     pub agent_state_observed: Counter<u64>,
+    /// `harold.agent.recap_read`, `{read}`, by `result` and `provider_id`.
+    pub agent_recap_read: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -423,6 +425,7 @@ pub(crate) fn instruments() -> &'static Instruments {
                 ],
             ),
             agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
+            agent_recap_read: counter("harold.agent.recap_read", "{read}"),
         }
     })
 }
@@ -786,6 +789,17 @@ pub(crate) fn record_state_observed(
     provider_id: &str,
 ) {
     record_state_observed_for(configured_multiplexer(), source, state, provider_id);
+}
+
+/// Counts one transcript read of a recap check. `result` is `found`, `none` or `failed`.
+pub(crate) fn record_recap_read(provider_id: &str, result: &'static str) {
+    instruments().agent_recap_read.add(
+        1,
+        &[
+            KeyValue::new("result", result),
+            KeyValue::new("provider_id", provider_id.to_owned()),
+        ],
+    );
 }
 
 fn record_state_observed_for(

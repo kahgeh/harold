@@ -76,6 +76,8 @@ struct HaroldService {
     restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
     /// The current steps from the Rex status records. Empty for tmux.
     current_steps: agent::rex::CurrentSteps,
+    /// The recap of each agent, read from its transcript.
+    recaps: agent::recap::Recaps,
 }
 
 /// The provider id of Claude Code panes.
@@ -89,6 +91,7 @@ fn harold_service(
     shutdown: watch::Receiver<()>,
     restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
     current_steps: agent::rex::CurrentSteps,
+    recaps: agent::recap::Recaps,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -99,6 +102,7 @@ fn harold_service(
         shutdown,
         restart_reminder,
         current_steps,
+        recaps,
     }
 }
 
@@ -141,6 +145,29 @@ where
 }
 
 impl HaroldService {
+    /// Keeps the session and transcript of the pane's agent for the recap reader.
+    fn note_recap_turn_end(&self, pane_id: &str, session_id: &str, transcript_path: &str) {
+        if session_id.is_empty() || transcript_path.is_empty() {
+            return;
+        }
+        let snapshot = self.snapshots.current();
+        let Some(pane) = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane.incarnation.pane_id == pane_id)
+        else {
+            return;
+        };
+        let incarnation = &pane.pane.incarnation;
+        self.recaps.note_turn_end(
+            pane_id,
+            incarnation.agent_pid,
+            &incarnation.provider_id,
+            session_id,
+            transcript_path,
+        );
+    }
+
     /// Warns once for each pane when a Claude turn end carries no session id: the Stop hook
     /// in `~/.claude/settings.json` is not Harold's `claude_turn_complete.py`.
     fn warn_when_claude_sends_no_session_id(&self, pane_id: &str, pane_id_log: &str) {
@@ -311,6 +338,7 @@ impl Harold for HaroldService {
             if let Some(reminder) = &self.restart_reminder {
                 reminder.turn_ended(&turn_end.0, &turn_end.1, &turn_end.2);
             }
+            self.note_recap_turn_end(&turn_end.0, &turn_end.1, &turn_end.2);
 
             Ok(Response::new(TurnCompleteResponse { accepted: true }))
         }
@@ -1304,6 +1332,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         agent::rex::CurrentSteps::default()
     };
+    let recaps = agent::recap::Recaps::default();
+    agent::recap::spawn_recap_reader(
+        recaps.clone(),
+        snapshots.subscribe(),
+        cfg.agents.0.clone(),
+        Duration::from_secs(10),
+        shutdown_rx.clone(),
+    );
     let service = harold_service(
         monitor,
         Arc::clone(&store),
@@ -1311,6 +1347,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
         restart_reminder,
         current_steps,
+        recaps,
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())

@@ -94,6 +94,7 @@ where
             shutdown: shutdown_rx,
             restart_reminder: None,
             current_steps: crate::agent::rex::CurrentSteps::default(),
+            recaps: crate::agent::recap::Recaps::default(),
         },
         shutdown,
         task,
