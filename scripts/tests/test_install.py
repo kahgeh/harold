@@ -1495,7 +1495,7 @@ class SkillTests(unittest.TestCase):
     def test_the_repository_skill_names_the_binary_by_its_placeholder(self):
         text = (SCRIPTS.parent / SKILL_FILE).read_text(encoding='utf-8')
         self.assertTrue(text.startswith('---\nname: send-message-to-away-device\ndescription: '))
-        self.assertIn('{{HAROLD_BIN}} send-message-to-away-device --src-id "$TMUX_PANE" \'', text)
+        self.assertIn('{{HAROLD_BIN}} send-message-to-away-device --src-id "${TMUX_PANE:-$REX_BLOCK}" \'', text)
         self.assertNotIn('~/bin/harold/harold', text)
 
     def test_write_replaces_every_placeholder_with_the_quoted_binary(self):
