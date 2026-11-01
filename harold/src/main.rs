@@ -366,7 +366,10 @@ impl Harold for HaroldService {
         let req = request.into_inner();
         let state = match AgentState::try_from(req.state) {
             Ok(AgentState::Working) => agent::domain::ObservedAgentState::Working,
+            Ok(AgentState::Blocked) => agent::domain::ObservedAgentState::Blocked,
+            Ok(AgentState::Done) => agent::domain::ObservedAgentState::Done,
             Ok(AgentState::Idle) => agent::domain::ObservedAgentState::Idle,
+            Ok(AgentState::Error) => agent::domain::ObservedAgentState::Error,
             Ok(AgentState::Unspecified | AgentState::Unknown) | Err(_) => {
                 return Err(Status::invalid_argument("invalid agent state report"));
             }

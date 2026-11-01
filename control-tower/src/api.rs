@@ -704,7 +704,15 @@ fn map_agent_state(state: i32) -> AgentState {
     match ProtoAgentState::try_from(state) {
         Ok(ProtoAgentState::Working) => AgentState::Working,
         Ok(ProtoAgentState::Idle) => AgentState::Idle,
-        Ok(ProtoAgentState::Unspecified | ProtoAgentState::Unknown) | Err(_) => AgentState::Unknown,
+        // Task 6 maps blocked, done and error. Until then they read as unknown.
+        Ok(
+            ProtoAgentState::Unspecified
+            | ProtoAgentState::Unknown
+            | ProtoAgentState::Blocked
+            | ProtoAgentState::Done
+            | ProtoAgentState::Error,
+        )
+        | Err(_) => AgentState::Unknown,
     }
 }
 
