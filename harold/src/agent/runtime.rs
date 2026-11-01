@@ -1751,18 +1751,42 @@ fn screen_state_delta(
     if let Some(screen) = observed
         && screen.refines(hook_state)
     {
+        tracked.screen_busy_since_ms = None;
         let is_new = tracked
             .screen
             .is_none_or(|previous| previous.state != screen.state || !previous.is_record);
         return is_new.then_some(screen.state);
     }
-    // The record no longer refines the report: send the new reading, so that the reducer
-    // replaces the refining record and the hook report decides again.
-    if let (Some(screen), Some(previous)) = (observed, tracked.screen)
+    // The record no longer refines a working report: send the new reading, so that the
+    // reducer replaces the refining record and the hook report decides again.
+    if !hook_state.is_at_rest()
+        && let (Some(screen), Some(previous)) = (observed, tracked.screen)
         && previous.refines(hook_state)
         && previous.state != screen.state
     {
         tracked.screen = None;
+        return Some(screen.state);
+    }
+    // The record no longer refines a done or idle report: the record stays until the new
+    // reading has been working for the whole grace without a break (rule 5).
+    if hook_state.is_at_rest()
+        && tracked
+            .screen
+            .is_some_and(|previous| previous.refines(hook_state))
+    {
+        let working = observed.filter(|screen| screen.state.is_working());
+        let Some(screen) = working else {
+            // A break: the count starts again. Another reading goes on to the grace check.
+            tracked.screen_busy_since_ms = None;
+            return screen_after_grace(observed, hook_observed_at_ms, grace, stored);
+        };
+        let busy_since_ms = *tracked
+            .screen_busy_since_ms
+            .get_or_insert(screen.observed_at_ms);
+        if screen.observed_at_ms < busy_since_ms.saturating_add(grace) {
+            return None;
+        }
+        tracked.screen_busy_since_ms = None;
         return Some(screen.state);
     }
     let observed_at_ms = observed.map(|screen| screen.observed_at_ms);
@@ -1795,6 +1819,19 @@ fn screen_state_delta(
         return None;
     }
     (stored != Some(state)).then_some(state)
+}
+
+/// The reading to send once the grace after the hook report has ended.
+fn screen_after_grace(
+    observed: Option<ScreenEvidence>,
+    hook_observed_at_ms: i64,
+    grace: i64,
+    stored: Option<ObservedAgentState>,
+) -> Option<ObservedAgentState> {
+    let screen = observed?;
+    (screen.observed_at_ms >= hook_observed_at_ms.saturating_add(grace)
+        && stored != Some(screen.state))
+    .then_some(screen.state)
 }
 
 fn same_pane_metadata(left: &AgentPaneObservation, right: &AgentPaneObservation) -> bool {

@@ -6569,6 +6569,79 @@ async fn an_error_record_refines_a_done_report_and_a_later_done_report_keeps_it(
 }
 
 #[tokio::test]
+async fn an_error_record_that_changes_to_working_follows_the_30_second_rule() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Error, 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Error
+    );
+    // The record reads working from 10 s. The state stays ERROR for 29 s of working records.
+    for at in [10_000, 20_000, 30_000, 39_000] {
+        sample_record(&fixture, &observed, ObservedAgentState::Working, at).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Error,
+            "after the working record at {at}"
+        );
+    }
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 40_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+}
+
+#[tokio::test]
+async fn a_break_in_the_working_records_restarts_the_30_seconds() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Error, 2_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 10_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 20_000).await;
+    // A break at 30 s (10 s into the working spell): the count starts again.
+    sample_record(&fixture, &observed, ObservedAgentState::Error, 30_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 31_000).await;
+    for at in [45_000, 60_000, 60_999] {
+        sample_record(&fixture, &observed, ObservedAgentState::Working, at).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Error,
+            "after the working record at {at}"
+        );
+    }
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 61_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_record_that_changes_to_working_returns_to_a_working_report_at_once() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Blocked
+    );
+    // A working hook has no 30 s wait: the first working record shows at once.
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 3_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+}
+
+#[tokio::test]
 async fn a_blocked_screen_reading_does_not_refine_a_working_report() {
     let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
     let observed = blocked_pane(&provider_id, 800);
