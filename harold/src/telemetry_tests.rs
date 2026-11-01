@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use opentelemetry::trace::{Status, TraceContextExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
@@ -3419,13 +3418,51 @@ fn the_agents_gauge_carries_the_host_of_a_host_agent_and_the_empty_host_for_the_
 }
 
 #[test]
-fn no_metric_name_holds_rex_or_tmux() {
-    for name in MULTIPLEXER_METRIC_NAMES {
+fn no_multiplexer_or_agent_metric_name_holds_rex_tmux_or_claude() {
+    // Make every one of the six metrics once, with the functions the code calls. Then read the
+    // names the exporter holds, so a renamed or a new instrument is seen.
+    record_call(
+        "names_probe",
+        "",
+        MultiplexerOperation::List,
+        MultiplexerOutcome::Ok,
+        Duration::ZERO,
+    );
+    record_agent_state_duration_for("names_probe", "working", "names_probe", 1.0);
+    note_agent_counts_for(
+        "names_probe",
+        vec![AgentCount {
+            state: "working",
+            provider_id: "names_probe".to_owned(),
+            count: 1,
+        }],
+    );
+    note_listing_for("names_probe", 1, 1);
+    let names: std::collections::BTreeSet<String> = test_support::metrics()
+        .iter()
+        .flat_map(|resource| resource.scope_metrics())
+        .flat_map(|scope| scope.metrics())
+        .map(|metric| metric.name().to_owned())
+        .filter(|name| name.starts_with("harold.multiplexer") || name.starts_with("harold.agent"))
+        .collect();
+    for expected in [
+        "harold.multiplexer.calls",
+        "harold.multiplexer.call.duration",
+        "harold.agents",
+        "harold.agent.state.duration",
+        "harold.multiplexer.sessions",
+        "harold.multiplexer.panes",
+    ] {
+        assert!(
+            names.contains(expected),
+            "{expected} is missing in {names:?}"
+        );
+    }
+    for name in &names {
         for word in ["rex", "tmux", "claude"] {
             assert!(!name.contains(word), "{name} holds {word}");
         }
     }
-    assert_eq!(MULTIPLEXER_METRIC_NAMES.len(), 6);
 }
 
 #[test]
@@ -3498,20 +3535,67 @@ fn the_counter_name_and_attributes_hold_no_multiplexer_name_except_the_multiplex
 }
 
 #[test]
-fn multiplexer_metrics_are_missing_and_harmless_with_export_off() {
-    // Export off leaves the global meter as the no-op meter, which takes any record.
-    record_call(
-        "tmux",
-        "",
-        MultiplexerOperation::Key,
-        MultiplexerOutcome::Ok,
-        Duration::ZERO,
+fn with_export_off_no_multiplexer_or_phone_instrument_records_anything() {
+    use opentelemetry::metrics::MeterProvider as _;
+    // Export off leaves the global meter with no reader, as a provider with no reader is. The
+    // instruments made from it take every record and keep none.
+    let off = build_instruments(
+        &opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .build()
+            .meter("export_off"),
     );
-    register_multiplexer_counters("tmux");
+    let multiplexer = [
+        KeyValue::new("multiplexer", "export_off_probe"),
+        KeyValue::new("host", "export_off_probe"),
+        KeyValue::new("operation", "list"),
+        KeyValue::new("outcome", "ok"),
+    ];
+    let phone = [
+        KeyValue::new("channel", "export_off_probe"),
+        KeyValue::new("resolved_by", "export_off_probe"),
+    ];
+    let record = |instruments: &Instruments| {
+        instruments.multiplexer_calls.add(1, &multiplexer);
+        instruments
+            .multiplexer_call_duration
+            .record(5.0, &multiplexer);
+        instruments.agent_state_duration.record(5.0, &multiplexer);
+        instruments.phone_requests.add(1, &phone);
+        instruments.phone_requests_wrong.add(1, &phone);
+    };
+    let read = || {
+        [
+            test_support::counter_value(
+                "harold.multiplexer.calls",
+                &[("host", "export_off_probe")],
+            ),
+            test_support::counter_value(
+                "harold.phone_requests",
+                &[("channel", "export_off_probe")],
+            ),
+            test_support::counter_value(
+                "harold.phone_requests.wrong",
+                &[("channel", "export_off_probe")],
+            ),
+        ]
+    };
+    record(&off);
+    assert_eq!(read(), [None, None, None]);
+    // The same records through the instruments of the test meter are read back, so the probe
+    // attributes would show if the off instruments kept anything.
+    record(instruments());
+    assert_eq!(read(), [Some(1), Some(1), Some(1)]);
+    // The start-up call that makes the failure series of the multiplexer counters is made
+    // only when export is on: `main` calls it behind `telemetry.exporting()`.
 }
 
 #[test]
-fn the_helper_names_the_multiplexer_tmux_when_settings_are_unset() {
+fn without_settings_the_multiplexer_is_named_tmux() {
+    assert_eq!(multiplexer_name(None), "tmux");
+}
+
+#[test]
+fn the_multiplexer_operation_and_outcome_words_are_the_wire_words() {
     assert_eq!(HOST_OWN_MACHINE, "");
     assert_eq!(MultiplexerOperation::ScreenRead.as_str(), "screen_read");
     assert_eq!(MultiplexerOutcome::Malformed.as_str(), "malformed");

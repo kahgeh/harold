@@ -110,10 +110,9 @@ fn each_typing_step_reports_a_command_that_cannot_start() {
     );
 }
 
-fn relay_rise(operation: &str, outcome: &str, call: impl FnOnce()) -> u64 {
-    let before = crate::telemetry::test_support::multiplexer_calls(operation, outcome);
-    call();
-    crate::telemetry::test_support::multiplexer_calls(operation, outcome) - before
+/// How many calls with this operation and outcome this thread recorded during `call`.
+fn relay_calls(operation: &str, outcome: &str, call: impl FnOnce()) -> usize {
+    crate::telemetry::test_support::noted_calls(operation, outcome, call).1
 }
 
 #[test]
@@ -122,16 +121,32 @@ fn typed_text_and_enter_are_counted_as_type_and_key_calls() {
     let good = fake_program("relay-ok", "exit 0");
     let bad = fake_program("relay-bad", "exit 1");
     let missing = "/nonexistent/harold-test-tmux";
-    assert!(relay_rise("type", "ok", || drop(type_text_with(&good, "%1", "hi"))) >= 1);
-    assert!(relay_rise("type", "failed", || drop(type_text_with(&bad, "%1", "hi"))) >= 1);
-    assert!(
-        relay_rise("type", "absent", || drop(type_text_with(
-            missing, "%1", "hi"
-        ))) >= 1
+    assert_eq!(
+        relay_calls("type", "ok", || drop(type_text_with(&good, "%1", "hi"))),
+        1
     );
-    assert!(relay_rise("key", "ok", || drop(press_enter_with(&good, "%1"))) >= 1);
-    assert!(relay_rise("key", "failed", || drop(press_enter_with(&bad, "%1"))) >= 1);
-    assert!(relay_rise("key", "absent", || drop(press_enter_with(missing, "%1"))) >= 1);
+    assert_eq!(
+        relay_calls("type", "failed", || drop(type_text_with(&bad, "%1", "hi"))),
+        1
+    );
+    assert_eq!(
+        relay_calls("type", "absent", || drop(type_text_with(
+            missing, "%1", "hi"
+        ))),
+        1
+    );
+    assert_eq!(
+        relay_calls("key", "ok", || drop(press_enter_with(&good, "%1"))),
+        1
+    );
+    assert_eq!(
+        relay_calls("key", "failed", || drop(press_enter_with(&bad, "%1"))),
+        1
+    );
+    assert_eq!(
+        relay_calls("key", "absent", || drop(press_enter_with(missing, "%1"))),
+        1
+    );
 }
 
 // -- a pane id on another Rex host reaches no writer ---------------------------------------

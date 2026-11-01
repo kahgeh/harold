@@ -2914,43 +2914,50 @@ async fn a_lone_i_in_the_same_try_is_removed_with_bspace_without_the_footer() {
 
 #[tokio::test]
 async fn timed_prompt_tmux_calls_are_counted_as_screen_read_and_key() {
-    use crate::telemetry::test_support::{fake_program, multiplexer_calls};
+    use crate::telemetry::test_support::{fake_program, noted_calls};
     let good = fake_program("timed-ok", "printf screen");
     let bad = fake_program("timed-bad", "exit 1");
     let slow = fake_program("timed-slow", "sleep 5");
     let second = Duration::from_secs(1);
+    // The test runs on one thread, so the calls of this thread are the calls of this test.
+    let counted = |operation: &'static str, outcome: &'static str| {
+        let taken = crate::telemetry::take_noted_calls();
+        taken
+            .into_iter()
+            .filter(|(op, out)| *op == operation && *out == outcome)
+            .count()
+    };
 
-    let before = multiplexer_calls("screen_read", "ok");
+    crate::telemetry::take_noted_calls();
     assert_eq!(
         read_tmux_screen(&good, "%1", second).await,
         Some("screen".to_string())
     );
-    assert!(multiplexer_calls("screen_read", "ok") - before >= 1);
-    let before = multiplexer_calls("screen_read", "failed");
+    assert_eq!(counted("screen_read", "ok"), 1);
     assert_eq!(read_tmux_screen(&bad, "%1", second).await, None);
-    assert!(multiplexer_calls("screen_read", "failed") - before >= 1);
-    let before = multiplexer_calls("screen_read", "timeout");
+    assert_eq!(counted("screen_read", "failed"), 1);
     assert_eq!(
         read_tmux_screen(&slow, "%1", Duration::from_millis(50)).await,
         None
     );
-    assert!(multiplexer_calls("screen_read", "timeout") - before >= 1);
-    let before = multiplexer_calls("screen_read", "absent");
+    assert_eq!(counted("screen_read", "timeout"), 1);
     assert_eq!(
         read_tmux_screen("/nonexistent/harold-test-tmux", "%1", second).await,
         None
     );
-    assert!(multiplexer_calls("screen_read", "absent") - before >= 1);
+    assert_eq!(counted("screen_read", "absent"), 1);
 
-    let before = multiplexer_calls("key", "ok");
-    assert!(press_key_with(&good, "%1", "Up").is_ok());
-    assert!(multiplexer_calls("key", "ok") - before >= 1);
-    let before = multiplexer_calls("key", "failed");
-    assert!(press_key_with(&bad, "%1", "Up").is_err());
-    assert!(multiplexer_calls("key", "failed") - before >= 1);
-    let before = multiplexer_calls("key", "absent");
-    assert!(press_key_with("/nonexistent/harold-test-tmux", "%1", "Up").is_err());
-    assert!(multiplexer_calls("key", "absent") - before >= 1);
+    let (result, count) = noted_calls("key", "ok", || press_key_with(&good, "%1", "Up"));
+    assert!(result.is_ok());
+    assert_eq!(count, 1);
+    let (result, count) = noted_calls("key", "failed", || press_key_with(&bad, "%1", "Up"));
+    assert!(result.is_err());
+    assert_eq!(count, 1);
+    let (result, count) = noted_calls("key", "absent", || {
+        press_key_with("/nonexistent/harold-test-tmux", "%1", "Up")
+    });
+    assert!(result.is_err());
+    assert_eq!(count, 1);
 }
 
 // -- a pane id on another Rex host reaches no writer -----------------------------------------

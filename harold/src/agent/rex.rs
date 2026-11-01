@@ -1015,6 +1015,9 @@ pub(crate) struct SystemRex {
     setting: Option<String>,
     found: Mutex<Option<PathBuf>>,
     timeout: Duration,
+    /// Set by a test that wants no `rex` found, even when the machine has one.
+    #[cfg(test)]
+    finds_nothing: bool,
 }
 
 /// Times `call` and counts it as a multiplexer call under `operation`. The result passes
@@ -1055,7 +1058,16 @@ impl SystemRex {
             setting,
             found: Mutex::new(None),
             timeout: CALL_TIMEOUT,
+            #[cfg(test)]
+            finds_nothing: false,
         }
+    }
+
+    /// The same program that finds no `rex`, for tests.
+    #[cfg(test)]
+    fn finding_nothing(mut self) -> Self {
+        self.finds_nothing = true;
+        self
     }
 
     /// The same program with another call limit, for tests.
@@ -1070,6 +1082,10 @@ impl SystemRex {
         let mut found = self.found.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(path) = found.as_ref().filter(|path| path.is_file()) {
             return Ok(path.clone());
+        }
+        #[cfg(test)]
+        if self.finds_nothing {
+            return Err(RexError::Absent);
         }
         let path = find_rex(self.setting.as_deref()).ok_or(RexError::Absent)?;
         *found = Some(path.clone());

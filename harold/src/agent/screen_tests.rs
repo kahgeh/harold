@@ -773,33 +773,35 @@ fn bounded_output_stops_on_request() {
     assert!(started.elapsed() < Duration::from_secs(1));
 }
 
-fn screen_rise(operation: &str, outcome: &str, runner: FakeRunner, pane_id: &str) -> u64 {
-    let before = crate::telemetry::test_support::multiplexer_calls(operation, outcome);
-    let screen = TmuxVisibleScreen::with_runner(runner, || 99);
-    let _ = screen.observe(&pane(pane_id), &provider());
-    crate::telemetry::test_support::multiplexer_calls(operation, outcome) - before
+/// How many calls with this operation and outcome this thread recorded for one observation.
+fn screen_calls(operation: &str, outcome: &str, runner: FakeRunner, pane_id: &str) -> usize {
+    crate::telemetry::test_support::noted_calls(operation, outcome, || {
+        let screen = TmuxVisibleScreen::with_runner(runner, || 99);
+        let _ = screen.observe(&pane(pane_id), &provider());
+    })
+    .1
 }
 
 #[test]
 fn a_tmux_capture_is_counted_under_screen_read_with_its_outcome() {
     let ok = FakeRunner::output(true, "Ready\n");
-    assert!(screen_rise("screen_read", "ok", ok, "%7") >= 1);
+    assert_eq!(screen_calls("screen_read", "ok", ok, "%7"), 1);
     let failed = FakeRunner::output(false, "").then_output(true, "%7\n");
-    assert!(screen_rise("screen_read", "failed", failed, "%7") >= 1);
+    assert_eq!(screen_calls("screen_read", "failed", failed, "%7"), 1);
     let absent = FakeRunner::error(io::ErrorKind::NotFound);
-    assert!(screen_rise("screen_read", "absent", absent, "%7") >= 1);
+    assert_eq!(screen_calls("screen_read", "absent", absent, "%7"), 1);
     let timeout = FakeRunner::error(io::ErrorKind::TimedOut);
-    assert!(screen_rise("screen_read", "timeout", timeout, "%7") >= 1);
+    assert_eq!(screen_calls("screen_read", "timeout", timeout, "%7"), 1);
 }
 
 #[test]
 fn the_tmux_check_after_a_failed_capture_is_counted_under_list() {
     let ok = FakeRunner::output(false, "").then_output(true, "%7\n");
-    assert!(screen_rise("list", "ok", ok, "%7") >= 1);
+    assert_eq!(screen_calls("list", "ok", ok, "%7"), 1);
     let failed = FakeRunner::output(false, "").then_output(false, "");
-    assert!(screen_rise("list", "failed", failed, "%7") >= 1);
+    assert_eq!(screen_calls("list", "failed", failed, "%7"), 1);
     let timeout = FakeRunner::output(false, "").then_error(io::ErrorKind::TimedOut);
-    assert!(screen_rise("list", "timeout", timeout, "%7") >= 1);
+    assert_eq!(screen_calls("list", "timeout", timeout, "%7"), 1);
 }
 
 // -- the Rex observer: the program status record first --------------------------------

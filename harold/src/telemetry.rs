@@ -369,67 +369,69 @@ pub(crate) fn instruments() -> &'static Instruments {
     // instruments to the no-op meter for the whole test binary.
     #[cfg(test)]
     test_support::install();
-    INSTRUMENTS.get_or_init(|| {
-        let meter = global::meter(SCOPE);
-        let counter = |name: &'static str, unit: &'static str| {
-            meter.u64_counter(name).with_unit(unit).build()
-        };
-        let seconds = |name: &'static str, buckets: &[f64]| {
-            meter
-                .f64_histogram(name)
-                .with_unit("s")
-                .with_boundaries(buckets.to_vec())
-                .build()
-        };
-        let milliseconds = |name: &'static str, buckets: &[f64]| {
-            meter
-                .f64_histogram(name)
-                .with_unit("ms")
-                .with_boundaries(buckets.to_vec())
-                .build()
-        };
-        Instruments {
-            phone_requests: counter("harold.phone_requests", "{request}"),
-            phone_requests_wrong: counter("harold.phone_requests.wrong", "{request}"),
-            phone_request_latency: seconds(
-                "harold.phone_request.latency",
-                &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
-            ),
-            turns: counter("harold.turns", "{turn}"),
-            turn_duration: seconds(
-                "harold.turn.duration",
-                &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
-            ),
-            pod_merges: counter("pod.merges", "{merge}"),
-            pod_merged_lines: counter("pod.merged_lines", "{line}"),
-            pod_spec_lead_time: seconds(
-                "pod.spec.lead_time",
-                &[
-                    600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
-                ],
-            ),
-            watch_runs: counter("watch.runs", "{run}"),
-            watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
-            notifications: counter("harold.notifications", "{notification}"),
-            web_app_pushes: counter("harold.web_app.pushes", "{push}"),
-            app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
-            multiplexer_calls: counter("harold.multiplexer.calls", "{call}"),
-            multiplexer_call_duration: milliseconds(
-                "harold.multiplexer.call.duration",
-                &[
-                    10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
-                ],
-            ),
-            agent_state_duration: seconds(
-                "harold.agent.state.duration",
-                &[
-                    10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
-                ],
-            ),
-            agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
-            agent_recap_read: counter("harold.agent.recap_read", "{read}"),
-        }
-    })
+    INSTRUMENTS.get_or_init(|| build_instruments(&global::meter(SCOPE)))
+}
+
+/// Makes the instruments from `meter`. With the no-op meter, which export off leaves in place,
+/// every instrument takes records and keeps none.
+fn build_instruments(meter: &Meter) -> Instruments {
+    let counter =
+        |name: &'static str, unit: &'static str| meter.u64_counter(name).with_unit(unit).build();
+    let seconds = |name: &'static str, buckets: &[f64]| {
+        meter
+            .f64_histogram(name)
+            .with_unit("s")
+            .with_boundaries(buckets.to_vec())
+            .build()
+    };
+    let milliseconds = |name: &'static str, buckets: &[f64]| {
+        meter
+            .f64_histogram(name)
+            .with_unit("ms")
+            .with_boundaries(buckets.to_vec())
+            .build()
+    };
+    Instruments {
+        phone_requests: counter("harold.phone_requests", "{request}"),
+        phone_requests_wrong: counter("harold.phone_requests.wrong", "{request}"),
+        phone_request_latency: seconds(
+            "harold.phone_request.latency",
+            &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
+        ),
+        turns: counter("harold.turns", "{turn}"),
+        turn_duration: seconds(
+            "harold.turn.duration",
+            &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
+        ),
+        pod_merges: counter("pod.merges", "{merge}"),
+        pod_merged_lines: counter("pod.merged_lines", "{line}"),
+        pod_spec_lead_time: seconds(
+            "pod.spec.lead_time",
+            &[
+                600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
+            ],
+        ),
+        watch_runs: counter("watch.runs", "{run}"),
+        watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
+        notifications: counter("harold.notifications", "{notification}"),
+        web_app_pushes: counter("harold.web_app.pushes", "{push}"),
+        app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
+        multiplexer_calls: counter("harold.multiplexer.calls", "{call}"),
+        multiplexer_call_duration: milliseconds(
+            "harold.multiplexer.call.duration",
+            &[
+                10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+            ],
+        ),
+        agent_state_duration: seconds(
+            "harold.agent.state.duration",
+            &[
+                10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
+            ],
+        ),
+        agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
+        agent_recap_read: counter("harold.agent.recap_read", "{read}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,17 +542,6 @@ pub(crate) fn register_recap_counters(provider_ids: &[&str]) {
 /// The `host` of Harold's own machine: the empty string.
 pub(crate) const HOST_OWN_MACHINE: &str = "";
 
-/// The names of the six multiplexer and agent metrics. None holds the name of a program.
-#[cfg(test)]
-pub(crate) const MULTIPLEXER_METRIC_NAMES: [&str; 6] = [
-    "harold.multiplexer.calls",
-    "harold.multiplexer.call.duration",
-    "harold.agents",
-    "harold.agent.state.duration",
-    "harold.multiplexer.sessions",
-    "harold.multiplexer.panes",
-];
-
 /// What a multiplexer call did, as the `operation` attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MultiplexerOperation {
@@ -635,7 +626,12 @@ pub(crate) fn outcome_of_io(error: &std::io::Error) -> MultiplexerOutcome {
 
 /// The multiplexer name from the settings: `tmux` when the settings are not set yet.
 pub(crate) fn configured_multiplexer() -> &'static str {
-    crate::settings::try_get_settings().map_or("tmux", |settings| {
+    multiplexer_name(crate::settings::try_get_settings())
+}
+
+/// The name of the multiplexer in `settings`, or `tmux` when there are none.
+fn multiplexer_name(settings: Option<&'static Arc<crate::settings::Settings>>) -> &'static str {
+    settings.map_or("tmux", |settings| {
         settings.agent_monitor.multiplexer.as_str()
     })
 }
@@ -665,6 +661,12 @@ pub(crate) fn record_call(
     outcome: MultiplexerOutcome,
     elapsed: Duration,
 ) {
+    #[cfg(test)]
+    CALLS_NOTED.with(|noted| {
+        noted
+            .borrow_mut()
+            .push((operation.as_str(), outcome.as_str()));
+    });
     let instruments = instruments();
     let attributes = [
         KeyValue::new("multiplexer", multiplexer.to_owned()),
@@ -932,6 +934,21 @@ fn note_listing_for(multiplexer: &str, sessions: u64, panes: u64) {
         .unwrap_or_else(PoisonError::into_inner)
         .listings
         .insert(multiplexer.to_owned(), (sessions, panes));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The multiplexer calls this thread recorded, as (operation, outcome), so a test sees its
+    /// own calls beside other tests. The shared counter holds the calls of every test.
+    static CALLS_NOTED: std::cell::RefCell<Vec<(&'static str, &'static str)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The multiplexer calls the current thread recorded since the last call, as
+/// (operation, outcome).
+#[cfg(test)]
+pub(crate) fn take_noted_calls() -> Vec<(&'static str, &'static str)> {
+    CALLS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -2703,13 +2720,21 @@ pub(crate) mod test_support {
         .unwrap_or_default()
     }
 
-    /// How many `harold.multiplexer.calls` carry this `operation` and `outcome` so far.
-    pub(crate) fn multiplexer_calls(operation: &str, outcome: &str) -> u64 {
-        counter_value(
-            "harold.multiplexer.calls",
-            &[("operation", operation), ("outcome", outcome)],
-        )
-        .unwrap_or(0)
+    /// Runs `call` and returns its result with how many multiplexer calls of this `operation`
+    /// and `outcome` the current thread recorded during it. Other tests record the same pair
+    /// on their own threads, so the count is exact.
+    pub(crate) fn noted_calls<T>(
+        operation: &str,
+        outcome: &str,
+        call: impl FnOnce() -> T,
+    ) -> (T, usize) {
+        super::take_noted_calls();
+        let result = call();
+        let count = super::take_noted_calls()
+            .into_iter()
+            .filter(|(op, out)| *op == operation && *out == outcome)
+            .count();
+        (result, count)
     }
 
     /// Writes an executable `sh` script with this body and returns its path. The test meter
@@ -2719,8 +2744,29 @@ pub(crate) mod test_support {
         let dir = std::env::temp_dir().join(format!("harold-fake-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("tmux");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Another test thread can fork while the file is open for writing, and until that
+        // child runs `exec` a start of the script fails with "Text file busy". The probe run
+        // works only when no such child is left.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(&script).arg("--probe").status() {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the script stays busy"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("the probe run of the script failed: {error}"),
+            }
+        }
         script.to_string_lossy().into_owned()
     }
 

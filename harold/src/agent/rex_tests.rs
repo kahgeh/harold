@@ -793,19 +793,9 @@ fn fake_rex(name: &str, rules: &str) -> SystemRex {
     SystemRex::new(Some(script.to_string_lossy().into_owned()))
 }
 
-fn calls(operation: &str, outcome: &str) -> u64 {
-    crate::telemetry::test_support::counter_value(
-        "harold.multiplexer.calls",
-        &[("operation", operation), ("outcome", outcome)],
-    )
-    .unwrap_or(0)
-}
-
-/// Runs `call` and returns how much the counter for the pair rose.
-fn rise<T>(operation: &str, outcome: &str, call: impl FnOnce() -> T) -> (T, u64) {
-    let before = calls(operation, outcome);
-    let result = call();
-    (result, calls(operation, outcome) - before)
+/// Runs `call` and returns how many calls of the pair this thread recorded during it.
+fn rise<T>(operation: &str, outcome: &str, call: impl FnOnce() -> T) -> (T, usize) {
+    crate::telemetry::test_support::noted_calls(operation, outcome, call)
 }
 
 #[test]
@@ -813,11 +803,14 @@ fn each_rex_call_is_counted_as_ok_under_its_operation() {
     let rex = fake_rex("ok", "");
     let args = json!({});
     let (ok, risen) = rise("list", "ok", || rex.sessions().is_ok());
-    assert!(ok && risen >= 1);
+    assert!(ok);
+    assert_eq!(risen, 1);
     let (ok, risen) = rise("layout", "ok", || rex.session_view("s").is_ok());
-    assert!(ok && risen >= 1);
+    assert!(ok);
+    assert_eq!(risen, 1);
     let (ok, risen) = rise("process", "ok", || rex.process("s", "b").is_ok());
-    assert!(ok && risen >= 1);
+    assert!(ok);
+    assert_eq!(risen, 1);
     for (method, operation) in [
         ("size", "screen_size"),
         ("format", "screen_read"),
@@ -827,13 +820,22 @@ fn each_rex_call_is_counted_as_ok_under_its_operation() {
     ] {
         let (result, risen) = rise(operation, "ok", || rex.block_call("s", "b", method, &args));
         assert!(result.is_ok(), "{method}");
-        // Other tests can record the same pair at once, so the rise is at least 1.
-        assert!(risen >= 1, "{method}");
+        assert_eq!(risen, 1, "{method}");
     }
     let (ok, risen) = rise("type", "ok", || rex.paste("s", "b", "x").is_ok());
-    assert!(ok && risen >= 1);
+    assert!(ok);
+    assert_eq!(risen, 1);
     let (ok, risen) = rise("key", "ok", || rex.send_key("s", "b", "enter").is_ok());
-    assert!(ok && risen >= 1);
+    assert!(ok);
+    assert_eq!(risen, 1);
+}
+
+#[test]
+fn a_missing_rex_program_is_the_outcome_absent() {
+    let rex = SystemRex::new(Some("/nonexistent/harold-test-rex".to_string())).finding_nothing();
+    let (result, absent) = rise("list", "absent", || rex.sessions());
+    assert_eq!(result, Err(RexError::Absent));
+    assert_eq!(absent, 1);
 }
 
 #[test]
@@ -843,7 +845,7 @@ fn a_failed_size_call_is_screen_size_failed() {
         rex.block_call("s", "b", "size", &json!({}))
     });
     assert_eq!(result, Err(RexError::Failed));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -854,7 +856,7 @@ fn a_slow_status_call_is_status_timeout() {
         rex.block_call("s", "b", "program_status", &json!({}))
     });
     assert_eq!(result, Err(RexError::Timeout));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -862,7 +864,7 @@ fn the_version_call_is_counted_under_other() {
     let rex = fake_rex("version-ok", "");
     let (result, risen) = rise("other", "ok", || rex.version());
     assert!(result.is_ok());
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -877,7 +879,7 @@ fn a_call_that_harold_stops_is_recorded_as_timeout() {
         })
     });
     assert_eq!(result, Err(RexError::Failed));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -889,7 +891,7 @@ fn a_stopped_ls_is_list_timeout_and_still_gives_absent() {
         run_stoppable(signal, || rex.sessions())
     });
     assert_eq!(result.err(), Some(RexError::Absent));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -900,7 +902,7 @@ fn the_recorder_maps_an_absent_program_to_absent() {
         })
     });
     assert_eq!(result, Err(RexError::Absent));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -908,7 +910,7 @@ fn a_reply_that_is_not_json_is_process_malformed() {
     let rex = fake_rex("process-bad", "*\" process\"*) echo nope;;");
     let (result, risen) = rise("process", "malformed", || rex.process("s", "b"));
     assert_eq!(result.err(), Some(RexError::Malformed));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 #[test]
@@ -916,7 +918,7 @@ fn a_failed_ls_is_list_absent() {
     let rex = fake_rex("ls-fail", "*\" ls --json\"*) exit 1;;");
     let (result, risen) = rise("list", "absent", || rex.sessions());
     assert_eq!(result.err(), Some(RexError::Absent));
-    assert!(risen >= 1);
+    assert_eq!(risen, 1);
 }
 
 /// A fake of 3 sessions that hold 14 blocks, none of them an agent.
