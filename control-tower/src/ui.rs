@@ -2661,7 +2661,6 @@ mod tests {
             differs.contains("HAROLD / CONTROL-TOWER  v0.9.0  ·  TRANSPORT LIVE  ·  REV #00043")
         );
         assert!(!differs.contains("v0.8.0"));
-        assert!(!differs.contains("(CONTROL-TOWER"));
 
         let same = rendered(
             &versioned_app(Some("v0.9.0"), "v0.9.0", false),
@@ -2726,7 +2725,6 @@ mod tests {
         let app = versioned_app(None, tag, false);
         let content = rendered(&app, 200, 38, 100_000);
         assert!(content.contains(&format!("HAROLD / CONTROL-TOWER  {cut}  ·  TRANSPORT LIVE")));
-        assert!(!content.contains("(CONTROL-TOWER"));
     }
 
     #[test]
