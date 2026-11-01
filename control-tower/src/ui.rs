@@ -3561,6 +3561,51 @@ mod tests {
         }
     }
 
+    /// The host row that the daemon builds, from the golden file, with a local row.
+    fn golden_host_app(marker: HostMarker) -> App {
+        let snapshot = crate::api::golden::snapshot_with_host_and_local("block:abc")
+            .expect("the stream mapping accepts the snapshot");
+        let mut app = live_app(snapshot.rows, None);
+        app.host_marker = marker;
+        app
+    }
+
+    #[test]
+    fn the_golden_host_row_shows_the_session_name_in_where_in_all_modes_and_widths() {
+        for (marker, mark) in [
+            (HostMarker::Glyph, "\u{f233}  "),
+            (HostMarker::Emoji, "\u{1F4BB} "),
+            (HostMarker::Text, "omarchy \u{b7} "),
+        ] {
+            for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+                let rows = buffer_rows(&rendered_buffer(
+                    &golden_host_app(marker),
+                    width,
+                    height,
+                    100_000,
+                ));
+                let expected = format!("{mark}harold");
+                let host = text_row_with(&rows, &expected);
+                // The mark and its space are 3 cells for a glyph or an emoji: 2 for the mark
+                // and 1 for the space. The text form is the label, a dot and a space.
+                let mark_width = Line::raw(mark).width();
+                let where_at = cell_column(host, &expected) + mark_width;
+                assert_eq!(
+                    where_at,
+                    cell_column(host, "harold"),
+                    "{marker:?} {width}: {host:?}"
+                );
+                for row in &rows {
+                    assert_eq!(
+                        Line::raw(row.as_str()).width(),
+                        usize::from(width),
+                        "{marker:?} {width}: {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_text_mark_shows_the_label_then_the_session_and_cuts_at_the_column() {
         let app = host_app(HostMarker::Text, "", "/w/harold", None);

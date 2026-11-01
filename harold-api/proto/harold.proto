@@ -113,6 +113,7 @@ message AgentPaneState {
   string session_name = 3;
   uint32 window_index = 4;
   uint32 pane_index = 5;
+  // The pane-root process id. A row for an agent on a Rex host carries the agent pid on that host.
   uint32 pane_pid = 6;
   uint32 agent_pid = 7;
   int64 agent_started_at_ms = 8;

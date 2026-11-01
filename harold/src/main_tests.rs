@@ -12,7 +12,7 @@ use super::agent::domain::{
 use super::agent::inventory::{AgentInventoryPort, InventoryError};
 use super::agent::recap::Recaps;
 use super::agent::rex::CurrentSteps;
-use super::agent::rex_host_runner::{HostAgents, HostReport};
+use super::agent::rex_host_runner::{HostAgentRow, HostAgents, HostReport};
 use super::agent::rex_hosts::{HostAgentState, RexHostAgent};
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
@@ -2922,7 +2922,7 @@ async fn a_host_agent_is_in_the_watch_stream_and_not_in_the_snapshot_events_or_p
     assert_eq!(host.session_name, "harold");
     assert_eq!(host.working_directory, "");
     assert_eq!((host.window_index, host.pane_index), (2, 3));
-    assert_eq!((host.pane_pid, host.agent_pid), (0, 4_200));
+    assert_eq!((host.pane_pid, host.agent_pid), (4_200, 4_200));
     assert_eq!(host.agent_started_at_ms, 7_000);
     assert_eq!(host.last_transition_at_ms, 7_000);
     assert_eq!(host.provider_id, "claude");
@@ -2987,8 +2987,58 @@ fn an_unreachable_host_shows_its_last_agents_as_unknown() {
     assert_eq!(mapped.panes[1].last_transition_at_ms, 9_900);
     assert_eq!(mapped.panes[1].current_step, None);
 }
-    let mut stream = service
-        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
-        .await
-        .unwrap()
-        .into_inner();
+
+/// The row that the daemon builds for a fixed host agent, with no clock.
+fn fixed_host_agent_row() -> HostAgentRow {
+    HostAgentRow {
+        agent: host_agent(ObservedAgentState::Working),
+        last_transition_at_ms: 7_500,
+        icon: "server.rack".into(),
+    }
+}
+
+#[test]
+fn a_host_agent_row_has_the_agent_pid_as_its_pane_pid() {
+    let row = super::map_host_agent(fixed_host_agent_row()).expect("a row for a nonzero pid");
+    assert_eq!(row.agent_pid, 4_200);
+    assert_ne!(row.pane_pid, 0);
+    assert_eq!(row.pane_pid, row.agent_pid);
+    assert!(row.agent_started_at_ms >= 0 && row.last_transition_at_ms >= 0);
+    assert_eq!(row.host, "omarchy");
+    assert_eq!(row.host_icon, "server.rack");
+    assert_eq!(row.working_directory, "");
+    assert_eq!(row.tmux_target, "harold");
+    assert_eq!(row.session_name, "harold");
+    assert_eq!(row.pane_id, "rex:omarchy/block:b1");
+}
+
+#[test]
+fn an_agent_with_a_zero_pid_on_a_host_gets_no_row() {
+    let mut row = fixed_host_agent_row();
+    row.agent.pid = 0;
+    assert!(super::map_host_agent(row).is_none());
+}
+
+/// The golden file holds the bytes of the row above. The control-tower tests decode it, so
+/// they test the exact row that the daemon builds.
+#[test]
+fn the_host_agent_row_bytes_match_the_golden_file() {
+    use prost::Message;
+    let row = super::map_host_agent(fixed_host_agent_row()).expect("a row");
+    let actual: String = row
+        .encode_to_vec()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../harold-api/tests/fixtures/host_agent_row.hex"
+    );
+    let golden = std::fs::read_to_string(path).unwrap_or_default();
+    assert_eq!(
+        golden.trim(),
+        actual,
+        "The golden file is out of date. Write this one line, with a newline, to \
+         harold-api/tests/fixtures/host_agent_row.hex:\n{actual}"
+    );
+}

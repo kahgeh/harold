@@ -2028,3 +2028,84 @@ impl NotesBackend for KnowledgeNotes {
         })
     }
 }
+
+/// The row that the daemon builds for an agent on a Rex host, from the golden file that the
+/// harold tests keep up to date, for tests in this crate.
+#[cfg(test)]
+pub(crate) mod golden {
+    use harold_api::harold::{AgentPaneState, AgentStateSnapshot};
+    use harold_api::prost::Message;
+
+    use super::{ProtocolError, map_snapshot};
+    use crate::app::Snapshot;
+
+    const GOLDEN_HEX: &str = include_str!("../../harold-api/tests/fixtures/host_agent_row.hex");
+
+    fn decode_hex(text: &str) -> Vec<u8> {
+        let text = text.trim();
+        assert_eq!(text.len() % 2, 0, "the hex text has an odd length");
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("a hex pair"))
+            .collect()
+    }
+
+    /// The host row, decoded from the bytes that the daemon sends.
+    pub(crate) fn host_pane() -> AgentPaneState {
+        AgentPaneState::decode(decode_hex(GOLDEN_HEX).as_slice()).expect("a protobuf row")
+    }
+
+    pub(crate) fn local_pane(pane_id: &str) -> AgentPaneState {
+        AgentPaneState {
+            pane_id: pane_id.into(),
+            tmux_target: "agents:1.2".into(),
+            session_name: "agents".into(),
+            window_index: 1,
+            pane_index: 2,
+            pane_pid: 100,
+            agent_pid: 200,
+            agent_started_at_ms: 300,
+            provider_id: "codex".into(),
+            provider_display_name: "Codex".into(),
+            working_directory: "/work/project".into(),
+            state: 1,
+            last_transition_at_ms: 400,
+            ..AgentPaneState::default()
+        }
+    }
+
+    /// The stream snapshot with the host row and one local row, through the real mapping.
+    pub(crate) fn snapshot_with_host_and_local(
+        local_pane_id: &str,
+    ) -> Result<Snapshot, ProtocolError> {
+        map_snapshot(AgentStateSnapshot {
+            through_event_version: 1,
+            server_time_ms: 10_000,
+            panes: vec![host_pane(), local_pane(local_pane_id)],
+            ..AgentStateSnapshot::default()
+        })
+    }
+}
+
+#[cfg(test)]
+mod golden_host_row_tests {
+    use super::golden::{host_pane, snapshot_with_host_and_local};
+    use super::map_pane;
+
+    #[test]
+    fn the_row_the_daemon_builds_for_a_host_agent_passes_the_mapping() {
+        let pane = host_pane();
+        assert_ne!(pane.pane_pid, 0);
+        let row = map_pane(pane).expect("the mapping accepts the host row");
+        assert_eq!(row.host, "omarchy");
+        assert_eq!(row.host_icon, "server.rack");
+        assert_eq!(row.incarnation.pane_id, "rex:omarchy/block:b1");
+        assert!(row.is_on_host());
+    }
+
+    #[test]
+    fn a_snapshot_with_the_host_row_and_a_local_row_is_mapped() {
+        let snapshot = snapshot_with_host_and_local("block:abc").expect("a mapped snapshot");
+        assert_eq!(snapshot.rows.len(), 2);
+    }
+}

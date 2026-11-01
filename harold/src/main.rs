@@ -742,22 +742,27 @@ fn map_agent_snapshot(
                     host_icon: String::new(),
                 }
             })
-            .chain(hosts.snapshot().into_iter().map(map_host_agent))
+            .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
             .collect(),
     }
 }
 
 /// One agent on a Rex host as a pane of the stream. Its working directory is empty, so the
-/// control-tower shows the session name.
-fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> AgentPaneState {
+/// control-tower shows the session name. The pane pid is the agent pid on the Rex host: the
+/// stream needs a nonzero pane pid, and Harold does not read the pane process of a host.
+/// An agent with a zero pid has no row.
+fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPaneState> {
     let agent = row.agent;
-    AgentPaneState {
+    if agent.pid == 0 {
+        return None;
+    }
+    Some(AgentPaneState {
         pane_id: agent.host_pane_id,
         tmux_target: agent.session_name.clone(),
         session_name: agent.session_name,
         window_index: agent.window_index,
         pane_index: agent.pane_index,
-        pane_pid: 0,
+        pane_pid: agent.pid,
         agent_pid: agent.pid,
         agent_started_at_ms: agent.first_seen_ms,
         provider_id: agent.provider_id,
@@ -775,9 +780,11 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> AgentPaneState {
         last_transition_at_ms: row.last_transition_at_ms,
         work_summary: None,
         current_step: agent.current_step,
+        recap: None,
+        recap_at_ms: 0,
         host: agent.host,
         host_icon: row.icon,
-    }
+    })
 }
 
 /// `value` trimmed, or `None` when that is empty: an old hook sends an empty string for a

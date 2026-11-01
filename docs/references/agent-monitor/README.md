@@ -50,7 +50,7 @@ Every pane-scoped agent event identifies the complete current agent incarnation:
 | Field | Meaning |
 | --- | --- |
 | `pane_id` | The pane ID: a tmux pane, such as `%22`, or a Rex block, such as `block:01a18fe6-c4f7-7b52-a9f2-9682b5c097c7` |
-| `pane_pid` | Long-lived pane-root process ID |
+| `pane_pid` | Long-lived pane-root process ID. A row for an agent on a Rex host carries the agent process ID on that host. |
 | `agent_pid` | Selected configured agent process ID |
 | `agent_started_at_ms` | OS-reported agent-process start time |
 | `provider_id` | Named provider ID, or `unknown` for an ambiguous provider match |

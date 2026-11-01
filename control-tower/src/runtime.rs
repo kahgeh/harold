@@ -1988,6 +1988,29 @@ mod tests {
     }
 
     #[test]
+    fn the_row_the_daemon_builds_for_a_host_agent_is_accepted_by_the_runtime() {
+        let snapshot = crate::api::golden::snapshot_with_host_and_local("block:abc")
+            .expect("the stream mapping accepts the snapshot");
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        assert_eq!(core.accept_snapshot(snapshot, 1), StreamControl::Continue);
+        assert!(!core.first_snapshot_pending);
+        let host = core
+            .app
+            .snapshot
+            .rows
+            .iter()
+            .find(|row| row.incarnation.pane_id == "rex:omarchy/block:b1")
+            .expect("the host row is present");
+        assert_eq!(host.host, "omarchy");
+        assert_eq!(host.host_icon, "server.rack");
+        assert_ne!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+    }
+
+    #[test]
     fn with_no_local_row_accept_snapshot_keeps_its_last_value() {
         let mut core = RuntimeCore::new(None);
         core.begin_stream();
