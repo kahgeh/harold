@@ -3675,6 +3675,7 @@ mod tests {
         app.snapshot.rows[0].work_summary = Some("OLD-SUMMARY-MARK".to_string());
         let content = rendered(&app, 140, 44, 100_000);
 
+        // The table header plus the panel heading.
         assert_eq!(content.matches("WORK SUMMARY").count(), 2);
         assert!(content.contains("WORK SUMMARY  12m"));
         assert!(content.contains("Goal: ship the recap"));
@@ -3717,7 +3718,8 @@ mod tests {
         let content = rendered(&app, 140, 44, 100_000);
 
         assert!(content.contains("AGENT DETAILS"));
-        assert!(content.contains("Goal: ship the recap"));
+        // Once in the row and once in the panel.
+        assert_eq!(content.matches("Goal: ship the recap").count(), 2);
     }
 
     #[test]
