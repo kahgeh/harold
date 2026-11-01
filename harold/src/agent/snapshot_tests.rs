@@ -156,6 +156,63 @@ fn a_new_a_departed_and_an_unchanged_pane_record_nothing() {
 }
 
 #[test]
+fn a_new_incarnation_in_the_same_pane_records_nothing() {
+    let provider = "incarnation-provider";
+    let hub = AgentSnapshotHub::new(timed_snapshot(
+        1,
+        provider,
+        &[("%1", EffectiveAgentState::Working, 10_000)],
+    ));
+    let mut next = timed_snapshot(2, provider, &[("%1", EffectiveAgentState::Idle, 100_000)]);
+    next.panes[0].pane.incarnation.agent_pid += 1;
+
+    hub.publish_committed(next);
+
+    for state in ["working", "idle", "unknown"] {
+        assert_eq!(seconds_in(provider, state), None, "{state}");
+    }
+}
+
+#[test]
+fn a_negative_time_in_state_records_nothing() {
+    let provider = "negative-provider";
+    let hub = AgentSnapshotHub::new(timed_snapshot(
+        1,
+        provider,
+        &[("%1", EffectiveAgentState::Working, 100_000)],
+    ));
+
+    hub.publish_committed(timed_snapshot(
+        2,
+        provider,
+        &[("%1", EffectiveAgentState::Idle, 10_000)],
+    ));
+
+    assert_eq!(seconds_in(provider, "working"), None);
+}
+
+#[test]
+fn two_working_agents_give_zero_idle_and_zero_unknown_for_their_provider() {
+    let snapshot = timed_snapshot(
+        1,
+        "provider-a",
+        &[
+            ("%1", EffectiveAgentState::Working, 1),
+            ("%2", EffectiveAgentState::Working, 1),
+        ],
+    );
+
+    assert_eq!(
+        super::snapshot::agent_counts(&snapshot),
+        vec![
+            row("idle", "provider-a", 0),
+            row("unknown", "provider-a", 0),
+            row("working", "provider-a", 2),
+        ]
+    );
+}
+
+#[test]
 fn a_rejected_stale_snapshot_records_nothing() {
     let provider = "stale-provider";
     let hub = AgentSnapshotHub::new(timed_snapshot(
@@ -208,6 +265,8 @@ fn row(state: &'static str, provider_id: &str, count: u64) -> AgentCount {
 fn mixed_rows() -> Vec<AgentCount> {
     vec![
         row("idle", "provider-a", 1),
+        row("idle", "provider-b", 0),
+        row("unknown", "provider-a", 0),
         row("unknown", "provider-b", 1),
         row("working", "provider-a", 2),
         row("working", "provider-b", 1),

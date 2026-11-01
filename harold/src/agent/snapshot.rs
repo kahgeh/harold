@@ -5,7 +5,7 @@ use tokio::sync::watch;
 use crate::store::EventVersion;
 use crate::telemetry::{AgentCount, note_agent_counts, record_agent_state_duration};
 
-use super::domain::AgentSnapshot;
+use super::domain::{AgentSnapshot, EffectiveAgentState};
 
 #[derive(Clone)]
 pub(crate) struct AgentSnapshotHub {
@@ -68,10 +68,16 @@ fn record_state_changes(old: &AgentSnapshot, new: &AgentSnapshot) {
         let Some(previous) = before.get(pane.pane.incarnation.pane_id.as_str()) else {
             continue;
         };
-        if previous.effective_state == pane.effective_state {
+        if previous.pane.incarnation != pane.pane.incarnation
+            || previous.effective_state == pane.effective_state
+        {
             continue;
         }
-        let seconds = (pane.last_transition_at_ms - previous.last_transition_at_ms) as f64 / 1000.0;
+        let elapsed_ms = pane.last_transition_at_ms - previous.last_transition_at_ms;
+        if elapsed_ms < 0 {
+            continue;
+        }
+        let seconds = elapsed_ms as f64 / 1000.0;
         record_agent_state_duration(
             previous.effective_state.as_str(),
             &previous.pane.incarnation.provider_id,
@@ -80,9 +86,17 @@ fn record_state_changes(old: &AgentSnapshot, new: &AgentSnapshot) {
     }
 }
 
-/// The number of panes in each state, for each provider.
+/// The number of panes in each state, for each provider in the snapshot. A state with no panes
+/// reports 0, because the gauge exports only the values it reads.
 pub(super) fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
     let mut counts: BTreeMap<(&'static str, &str), u64> = BTreeMap::new();
+    for pane in &snapshot.panes {
+        for state in ALL_STATES {
+            counts
+                .entry((state.as_str(), pane.pane.incarnation.provider_id.as_str()))
+                .or_default();
+        }
+    }
     for pane in &snapshot.panes {
         *counts
             .entry((
@@ -100,3 +114,9 @@ pub(super) fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
         })
         .collect()
 }
+
+const ALL_STATES: [EffectiveAgentState; 3] = [
+    EffectiveAgentState::Working,
+    EffectiveAgentState::Idle,
+    EffectiveAgentState::Unknown,
+];
