@@ -942,7 +942,11 @@ fn find_rex(setting: Option<&str>) -> Option<PathBuf> {
 
 /// The output of `program` with `args`, or why it failed. A call that takes more than
 /// `timeout` is killed. The call never starts a Rex server.
-fn run_program(program: &Path, args: &[&str], timeout: Duration) -> Result<String, RexError> {
+pub(super) fn run_program(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, RexError> {
     let mut command = Command::new(program);
     command
         .arg("--autostart=false")

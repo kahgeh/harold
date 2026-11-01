@@ -23,8 +23,7 @@ pub(crate) fn valid_host_label(label: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-/// Builds the pane id of a block on another Rex host. Only the tests call it until Part B.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Builds the pane id of a block on another Rex host.
 pub(crate) fn host_pane_id(label: &str, block_id: &str) -> String {
     format!("{HOST_PREFIX}{label}/block:{block_id}")
 }

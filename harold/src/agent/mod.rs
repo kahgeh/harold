@@ -41,3 +41,9 @@ pub(crate) mod pane_route;
 #[cfg(test)]
 #[path = "pane_route_tests.rs"]
 mod pane_route_tests;
+
+pub(crate) mod rex_hosts;
+
+#[cfg(test)]
+#[path = "rex_hosts_tests.rs"]
+mod rex_hosts_tests;
