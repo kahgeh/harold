@@ -992,10 +992,12 @@ mod rex_observer {
         let api = api_with(block, Some(reply("done", 99)));
         let script = FakeEvents::new("otherpid", &[]);
         let (screen, status) = streaming_screen(&api, &script, block);
+        let calls_before = api.count("program_status");
         let observation = observe(&screen, block);
         assert_eq!(observation.classifier_id, "rex-visible-v1");
         assert_eq!(observation.state, Some(ObservedAgentState::Idle));
         assert!(api.screen_reads() > 0);
+        assert_eq!(api.count("program_status"), calls_before);
         status.stop_all();
     }
 
@@ -1005,9 +1007,11 @@ mod rex_observer {
         let api = api_with(block, Some(json!({"records": []})));
         let script = FakeEvents::new("norecord", &[]);
         let (screen, status) = streaming_screen(&api, &script, block);
+        let calls_before = api.count("program_status");
         let observation = observe(&screen, block);
         assert_eq!(observation.classifier_id, "rex-visible-v1");
         assert!(api.screen_reads() > 0);
+        assert_eq!(api.count("program_status"), calls_before);
         status.stop_all();
     }
 

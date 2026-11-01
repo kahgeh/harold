@@ -4,12 +4,17 @@
 //! writes about itself. This module parses that record and the `rex events` lines about it,
 //! maps the record state to an agent state, and keeps each agent's current step in memory.
 
-use std::collections::HashMap;
+#![allow(
+    dead_code,
+    reason = "the inventory scan starts the streams and the watch stream reads the steps in a later task"
+)]
+
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,10 +28,6 @@ use super::{RexApi, RexBlockSlot, RexError, parse_json};
 
 /// The state word of a record. A word that is not in this list makes the record unusable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the observer and the streams use these in later tasks"
-)]
 pub(crate) enum RecordState {
     Working,
     Blocked,
@@ -48,7 +49,6 @@ impl RecordState {
     }
 
     /// Stage 2 has two agent states. A blocked agent counts as working.
-    #[allow(dead_code, reason = "the observer uses this in a later task")]
     pub(crate) fn observed(self) -> ObservedAgentState {
         match self {
             Self::Working | Self::Blocked => ObservedAgentState::Working,
@@ -59,10 +59,6 @@ impl RecordState {
 
 /// The root record of a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the observer and the streams use these in later tasks"
-)]
 pub(crate) struct StatusRecord {
     pub state: RecordState,
     pub pid: u32,
@@ -93,7 +89,6 @@ fn has_id(value: &Value) -> bool {
 }
 
 /// Parses the output of `program_status` and returns the root record.
-#[allow(dead_code, reason = "the observer uses this in a later task")]
 pub(crate) fn parse_program_status(text: &str) -> Result<Option<StatusRecord>, RexError> {
     let value = parse_json(text)?;
     let records = value
@@ -108,13 +103,12 @@ pub(crate) fn parse_program_status(text: &str) -> Result<Option<StatusRecord>, R
 
 /// An event about the program status of a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "the event streams use these in a later task")]
 pub(crate) enum StatusEvent {
-    /// The root record changed. `record` is `None` when the new record is unusable.
+    /// The root record changed. The event is only a trigger: it holds no record Harold uses.
     Changed {
         block_id: String,
-        record: Option<StatusRecord>,
     },
+    /// A record was removed. The event is only a trigger for a new call.
     Removed {
         block_id: String,
     },
@@ -131,7 +125,6 @@ pub(crate) enum StatusEvent {
 /// `{"type":"block_closed","payload":{"block_id":..}}`. The parser also reads an event
 /// object that sits at the top of the line, an event with no `block_event` wrapper, and
 /// an event whose data sits on the event object itself.
-#[allow(dead_code, reason = "the event streams use this in a later task")]
 pub(crate) fn parse_event_line(line: &str) -> Option<StatusEvent> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
     let event = value
@@ -155,10 +148,7 @@ pub(crate) fn parse_event_line(line: &str) -> Option<StatusEvent> {
             if has_id(data) || has_id(record) {
                 return None;
             }
-            Some(StatusEvent::Changed {
-                block_id,
-                record: record_from_value(record),
-            })
+            Some(StatusEvent::Changed { block_id })
         }
         "program_status_removed" => {
             let record = data.get("record").unwrap_or(data);
@@ -189,18 +179,9 @@ impl Default for StepsInner {
 /// The current step of each agent, in memory only. It is keyed by block id and holds the
 /// pid of the agent that owns the step.
 #[derive(Clone, Default)]
-#[allow(
-    dead_code,
-    reason = "the streams and the watch stream use this in later tasks"
-)]
 pub(crate) struct CurrentSteps {
     inner: Arc<StepsInner>,
 }
-
-#[allow(
-    dead_code,
-    reason = "the streams and the watch stream use this in later tasks"
-)]
 impl CurrentSteps {
     /// Stores the step, or removes it when `step` is `None`. The version rises only when
     /// the stored value changes.
@@ -269,7 +250,6 @@ pub(crate) const RESTART_GAP: Duration = Duration::from_secs(5);
 
 /// What the streams know about one block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "the observer uses this in a later task")]
 pub(crate) enum Lookup {
     /// The block's session has a running stream. The record is the root record, if any.
     Stream(Option<StatusRecord>),
@@ -309,6 +289,13 @@ impl Shared {
             self.steps.clear_block(block);
         }
         blocks.len()
+    }
+
+    fn count(&self, generation: u64) -> usize {
+        lock(&self.records)
+            .values()
+            .filter(|(owner, _)| *owner == generation)
+            .count()
     }
 
     /// Stores a record for stream `generation`, unless the stream was asked to stop. The
@@ -415,15 +402,12 @@ fn log_stream(
 }
 
 /// One `rex events` child for each Rex session, and the root record of each block.
-#[allow(dead_code, reason = "the observer uses this in a later task")]
 pub(crate) struct RexStatus {
     shared: Arc<Shared>,
     program: Program,
     clock: Clock,
     registry: Mutex<Registry>,
 }
-
-#[allow(dead_code, reason = "the observer uses this in a later task")]
 impl RexStatus {
     pub(crate) fn new(api: Arc<dyn RexApi>, program: Program, steps: CurrentSteps) -> Self {
         Self::with_clock(api, program, steps, Arc::new(Instant::now))
@@ -550,7 +534,7 @@ impl RexStatus {
         };
         let thread = std::thread::Builder::new()
             .name("rex-status".to_string())
-            .spawn(move || reader.run(&blocks, stdout))
+            .spawn(move || reader.run(blocks, stdout))
             .ok();
         if thread.is_none() {
             log_stream(dispatch, session_id, "ended", Some("read_error"), 0);
@@ -652,7 +636,66 @@ fn read_event_line(
     }
 }
 
-/// The reader thread of one stream.
+/// The blocks that wait for a `program_status` call, and the blocks that closed.
+#[derive(Default)]
+struct Pending {
+    state: Mutex<PendingState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct PendingState {
+    /// In arrival order. A block is here once, however many events came.
+    blocks: Vec<String>,
+    closed: HashSet<String>,
+    done: bool,
+}
+
+impl Pending {
+    fn add(&self, block_id: &str) {
+        let mut state = lock(&self.state);
+        if !state.closed.contains(block_id) && !state.blocks.iter().any(|b| b == block_id) {
+            state.blocks.push(block_id.to_string());
+            self.wake.notify_one();
+        }
+    }
+
+    /// Marks the block closed and cancels a waiting call.
+    fn close(&self, block_id: &str) {
+        let mut state = lock(&self.state);
+        state.blocks.retain(|b| b != block_id);
+        state.closed.insert(block_id.to_string());
+    }
+
+    fn is_closed(&self, block_id: &str) -> bool {
+        lock(&self.state).closed.contains(block_id)
+    }
+
+    fn finish(&self) {
+        lock(&self.state).done = true;
+        self.wake.notify_all();
+    }
+
+    /// The next block that waits for a call. It waits until there is one. The result is
+    /// `None` when the stream is done or stopped.
+    fn next(&self, stop: &AtomicBool) -> Option<String> {
+        let mut state = lock(&self.state);
+        loop {
+            if state.done || stop.load(Ordering::Acquire) {
+                return None;
+            }
+            if !state.blocks.is_empty() {
+                return Some(state.blocks.remove(0));
+            }
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// The reader thread of one stream. It reads lines and never calls Rex.
 struct Reader {
     generation: u64,
     shared: Arc<Shared>,
@@ -662,33 +705,32 @@ struct Reader {
 }
 
 impl Reader {
-    fn run(self, blocks: &[String], stdout: std::process::ChildStdout) {
-        // The child is already running, so events that come during the first read wait in
-        // the pipe. The events that follow replace what the first read stored.
-        for block in blocks {
-            if self.flags.stop.load(Ordering::Acquire) {
-                break;
-            }
-            self.refresh(block);
-        }
-        self.flags.ready.store(true, Ordering::Release);
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        let reason = loop {
-            if self.flags.stop.load(Ordering::Acquire) {
-                break "exit";
-            }
-            match read_event_line(&mut reader, &mut line) {
-                Ok(Line::End) => break "exit",
-                Err(_) => break "read_error",
-                Ok(Line::TooLong) => continue,
-                Ok(Line::Text) => {}
-            }
-            if let Some(event) = parse_event_line(&String::from_utf8_lossy(&line)) {
-                self.apply(event);
-            }
+    fn run(self, blocks: Vec<String>, stdout: std::process::ChildStdout) {
+        let pending = Arc::new(Pending::default());
+        let worker = Worker {
+            generation: self.generation,
+            shared: Arc::clone(&self.shared),
+            session_id: self.session_id.clone(),
+            flags: Arc::clone(&self.flags),
+            pending: Arc::clone(&pending),
+            failed: HashSet::new(),
+        };
+        // The child is already running, so events that come during the first calls wait in
+        // the pipe or in `pending`.
+        let worker = std::thread::Builder::new()
+            .name("rex-status-calls".to_string())
+            .spawn(move || worker.run(&blocks))
+            .ok();
+        let reason = if worker.is_some() {
+            self.read_lines(&pending, stdout)
+        } else {
+            "read_error"
         };
         self.flags.ended.store(true, Ordering::Release);
+        pending.finish();
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
         if let Some(mut child) = lock(&self.child).take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -703,45 +745,103 @@ impl Reader {
         );
     }
 
-    fn apply(&self, event: StatusEvent) {
-        match event {
-            StatusEvent::Changed {
-                block_id,
-                record: Some(record),
-            } => self.store(&block_id, record),
-            // An event record may carry no owner pid. A fresh call gives the whole record.
-            StatusEvent::Changed {
-                block_id,
-                record: None,
-            } => self.refresh(&block_id),
-            StatusEvent::Removed { block_id } | StatusEvent::BlockClosed { block_id } => {
-                self.remove(&block_id);
+    fn read_lines(&self, pending: &Pending, stdout: std::process::ChildStdout) -> &'static str {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        loop {
+            if self.flags.stop.load(Ordering::Acquire) {
+                return "exit";
+            }
+            match read_event_line(&mut reader, &mut line) {
+                Ok(Line::End) => return "exit",
+                Err(_) => return "read_error",
+                Ok(Line::TooLong) => continue,
+                Ok(Line::Text) => {}
+            }
+            match parse_event_line(&String::from_utf8_lossy(&line)) {
+                Some(StatusEvent::Changed { block_id } | StatusEvent::Removed { block_id }) => {
+                    pending.add(&block_id);
+                }
+                Some(StatusEvent::BlockClosed { block_id }) => {
+                    pending.close(&block_id);
+                    self.shared
+                        .remove(self.generation, &self.flags.stop, &block_id);
+                }
+                None => {}
             }
         }
     }
+}
 
-    /// Reads the root record of the block with `program_status` and stores it.
-    fn refresh(&self, block_id: &str) {
-        let record = self
-            .shared
-            .api
-            .block_call(&self.session_id, block_id, "program_status", &json!({}))
-            .ok()
-            .and_then(|value| parse_program_status(&value.to_string()).ok())
-            .flatten();
-        match record {
-            Some(record) => self.store(block_id, record),
-            None => self.remove(block_id),
+/// The call thread of one stream. It makes one `program_status` call at a time, so a block
+/// has at most one call running. Events that come during a call leave the block in `pending`
+/// once, which gives one more call.
+struct Worker {
+    generation: u64,
+    shared: Arc<Shared>,
+    session_id: String,
+    flags: Arc<Flags>,
+    pending: Arc<Pending>,
+    /// The blocks whose last call failed. A block logs `call_failed` once until a call works.
+    failed: HashSet<String>,
+}
+
+impl Worker {
+    fn run(mut self, blocks: &[String]) {
+        for block in blocks {
+            if self.flags.stop.load(Ordering::Acquire) {
+                break;
+            }
+            self.call(block);
+        }
+        self.flags.ready.store(true, Ordering::Release);
+        let pending = Arc::clone(&self.pending);
+        while let Some(block) = pending.next(&self.flags.stop) {
+            self.call(&block);
         }
     }
 
-    fn store(&self, block_id: &str, record: StatusRecord) {
-        self.shared
-            .store(self.generation, &self.flags.stop, block_id, record);
+    /// Asks Rex for the root record of the block. The answer replaces the record whole.
+    fn call(&mut self, block_id: &str) {
+        let answer = self
+            .shared
+            .api
+            .block_call(&self.session_id, block_id, "program_status", &json!({}))
+            .and_then(|value| parse_program_status(&value.to_string()));
+        let stop = &self.flags.stop;
+        if self.pending.is_closed(block_id) {
+            return;
+        }
+        match answer {
+            Ok(Some(record)) => {
+                self.failed.remove(block_id);
+                self.shared.store(self.generation, stop, block_id, record);
+            }
+            Ok(None) => {
+                self.failed.remove(block_id);
+                self.shared.remove(self.generation, stop, block_id);
+            }
+            Err(error) => {
+                self.shared.remove(self.generation, stop, block_id);
+                if self.failed.insert(block_id.to_string()) && !stop.load(Ordering::Acquire) {
+                    log_stream(
+                        &self.shared.dispatch,
+                        &self.session_id,
+                        "call_failed",
+                        Some(call_failure_reason(error)),
+                        self.shared.count(self.generation),
+                    );
+                }
+            }
+        }
     }
+}
 
-    fn remove(&self, block_id: &str) {
-        self.shared
-            .remove(self.generation, &self.flags.stop, block_id);
+fn call_failure_reason(error: RexError) -> &'static str {
+    match error {
+        RexError::Absent => "rex_absent",
+        RexError::Timeout => "timeout",
+        RexError::Failed => "failed",
+        RexError::Malformed => "malformed",
     }
 }

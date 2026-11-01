@@ -233,14 +233,18 @@ struct FakeRex {
     keys: Mutex<Vec<(String, String)>>,
     /// The windows of a session, when they differ from `windows`.
     views: HashMap<String, Vec<Vec<String>>>,
-    /// The reply of `program_status` for each block.
-    statuses: HashMap<String, Value>,
+    /// The replies of `program_status` for each block, in call order. The last one repeats.
+    /// `None` is a failed call.
+    sequences: HashMap<String, Vec<Option<Value>>>,
+    status_calls: Mutex<HashMap<String, usize>>,
     /// Holds the first `program_status` call until the test opens the gate.
     gate: Option<Arc<Gate>>,
 }
 
-/// The first `program_status` call waits and answers `first`. Later calls answer `later`.
+/// The first `program_status` call for `block` waits and answers `first`. Later calls for
+/// the block answer `later`.
 struct Gate {
+    block: String,
     calls: std::sync::atomic::AtomicUsize,
     open: Mutex<bool>,
     changed: std::sync::Condvar,
@@ -249,8 +253,9 @@ struct Gate {
 }
 
 impl Gate {
-    fn new(first: Value, later: Value) -> Arc<Self> {
+    fn new(block: &str, first: Value, later: Value) -> Arc<Self> {
         Arc::new(Self {
+            block: block.to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
             open: Mutex::new(false),
             changed: std::sync::Condvar::new(),
@@ -315,8 +320,21 @@ impl RexApi for FakeRex {
             .unwrap()
             .push((method.to_string(), args.clone()));
         match method {
-            "program_status" if self.gate.is_some() => Ok(self.gate.as_ref().unwrap().call()),
-            "program_status" => self.statuses.get(block).cloned().ok_or(RexError::Failed),
+            "program_status" => {
+                let n = {
+                    let mut calls = self.status_calls.lock().unwrap();
+                    let n = calls.entry(block.to_string()).or_insert(0);
+                    *n += 1;
+                    *n - 1
+                };
+                if let Some(gate) = self.gate.as_ref().filter(|gate| gate.block == block) {
+                    return Ok(gate.call());
+                }
+                let sequence = self.sequences.get(block).ok_or(RexError::Failed)?;
+                sequence[n.min(sequence.len() - 1)]
+                    .clone()
+                    .ok_or(RexError::Failed)
+            }
             "size" => Ok(json!({"rows": 24, "columns": 80})),
             "format" => Ok(json!({"id": 7, "total": self.blob.len()})),
             "blob_read" => {
@@ -341,6 +359,17 @@ impl RexApi for FakeRex {
     fn send_key(&self, _: &str, block: &str, key: &str) -> Result<(), RexError> {
         self.keys.lock().unwrap().push((block.into(), key.into()));
         Ok(())
+    }
+}
+
+impl FakeRex {
+    fn status_calls(&self, block: &str) -> usize {
+        self.status_calls
+            .lock()
+            .unwrap()
+            .get(block)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -965,11 +994,6 @@ fn event_lines_parse_and_bad_lines_are_skipped() {
         parse_event_line(&changed),
         Some(StatusEvent::Changed {
             block_id: "block:b1".to_string(),
-            record: Some(StatusRecord {
-                state: RecordState::Working,
-                pid: 5,
-                msg: Some("go".to_string()),
-            }),
         })
     );
     let mut child = root.clone();
@@ -1015,7 +1039,6 @@ fn event_lines_parse_and_bad_lines_are_skipped() {
         parse_event_line(&unusable),
         Some(StatusEvent::Changed {
             block_id: "block:b1".to_string(),
-            record: None
         })
     );
 }
@@ -1049,12 +1072,11 @@ const LIVE_CLOSED: &str = r#"{"type":"session_event","payload":{"session_id":"se
 
 #[test]
 fn a_live_line_and_a_flat_event_parse() {
-    // The live record has no owner pid, so the record is unusable and the stream asks again.
+    // The live record has no owner pid. The event is only a trigger for a call.
     assert_eq!(
         parse_event_line(LIVE_CHANGED),
         Some(StatusEvent::Changed {
             block_id: "block:01a196ca-ea23-7148-9fc0-352b07759d6f".to_string(),
-            record: None,
         })
     );
     assert_eq!(
@@ -1077,11 +1099,6 @@ fn a_live_line_and_a_flat_event_parse() {
         parse_event_line(&flat),
         Some(StatusEvent::Changed {
             block_id: "block:f".to_string(),
-            record: Some(StatusRecord {
-                state: RecordState::Blocked,
-                pid: 9,
-                msg: Some("Allow?".to_string()),
-            }),
         })
     );
 }
@@ -1093,6 +1110,8 @@ use std::os::unix::fs::PermissionsExt;
 /// fixed lines and, when `hold` is set, waits until a test kills it.
 struct FakeProgram {
     dir: PathBuf,
+    /// The open end of the fifo, so `cat` does not see the end of its input.
+    writer: Mutex<Option<std::fs::File>>,
 }
 
 impl FakeProgram {
@@ -1116,7 +1135,51 @@ impl FakeProgram {
         let path = dir.join("rex");
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        Self {
+            dir,
+            writer: Mutex::new(None),
+        }
+    }
+
+    /// A script that copies whatever a test sends with `feed`, as it comes.
+    fn new_fifo(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("harold-rex-status-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("events");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let script = format!(
+            "#!/bin/sh\necho run >> '{runs}'\necho $$ > '{pid}'\nexec cat '{fifo}'\n",
+            runs = dir.join("runs").display(),
+            pid = dir.join("pid").display(),
+            fifo = fifo.display(),
+        );
+        let path = dir.join("rex");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            dir,
+            writer: Mutex::new(None),
+        }
+    }
+
+    /// Sends one event line to a script from `new_fifo`.
+    fn feed(&self, line: &str) {
+        use std::io::Write;
+        let mut writer = self.writer.lock().unwrap();
+        let file = writer.get_or_insert_with(|| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.dir.join("events"))
+                .unwrap()
+        });
+        writeln!(file, "{line}").unwrap();
     }
 
     fn program(&self) -> Program {
@@ -1165,16 +1228,21 @@ fn slot_in(session: &str, block: &str) -> RexBlockSlot {
     }
 }
 
-fn changed_line(block: &str, state: &str, pid: u32, msg: &str) -> String {
+fn changed_line(block: &str) -> String {
     event_line(
         "program_status_changed",
-        &json!({"block_id": block, "record": {"state": state, "owner": {"pid": pid}, "msg": msg}}),
+        &json!({"block_id": block, "id": "", "reason": "report", "record": {"state": "working"}}),
     )
 }
 
-fn status_with(api: FakeRex, program: &FakeProgram, clock: Clock) -> (RexStatus, CurrentSteps) {
+fn status_with(
+    api: impl Into<Arc<FakeRex>>,
+    program: &FakeProgram,
+    clock: Clock,
+) -> (RexStatus, CurrentSteps) {
+    let api: Arc<FakeRex> = api.into();
     let steps = CurrentSteps::default();
-    let status = RexStatus::with_clock(Arc::new(api), program.program(), steps.clone(), clock);
+    let status = RexStatus::with_clock(api, program.program(), steps.clone(), clock);
     (status, steps)
 }
 
@@ -1182,18 +1250,34 @@ fn now_clock() -> Clock {
     Arc::new(Instant::now)
 }
 
+/// A fake where each block answers `program_status` with the same reply every time.
 fn fake_with_statuses(statuses: &[(&str, Value)]) -> FakeRex {
     FakeRex {
-        statuses: statuses
+        sequences: statuses
             .iter()
-            .map(|(block, value)| ((*block).to_string(), value.clone()))
+            .map(|(block, value)| ((*block).to_string(), vec![Some(value.clone())]))
             .collect(),
         ..FakeRex::default()
     }
 }
 
+/// A fake where each block answers its replies in order. `None` is a failed call.
+fn fake_with_sequences(sequences: &[(&str, Vec<Option<Value>>)]) -> Arc<FakeRex> {
+    Arc::new(FakeRex {
+        sequences: sequences
+            .iter()
+            .map(|(block, replies)| ((*block).to_string(), replies.clone()))
+            .collect(),
+        ..FakeRex::default()
+    })
+}
+
 fn reply(state: &str, pid: u32, msg: &str) -> Value {
     json!({"records": [{"state": state, "owner": {"pid": pid}, "msg": msg}, {"id": "c", "state": "idle"}]})
+}
+
+fn no_root() -> Value {
+    json!({"records": [{"id": "c", "state": "idle", "owner": {"pid": 1}}]})
 }
 
 fn record(state: RecordState, pid: u32, msg: Option<&str>) -> StatusRecord {
@@ -1204,23 +1288,29 @@ fn record(state: RecordState, pid: u32, msg: Option<&str>) -> StatusRecord {
     }
 }
 
+fn working(pid: u32, msg: &str) -> Lookup {
+    Lookup::Stream(Some(record(RecordState::Working, pid, Some(msg))))
+}
+
 #[test]
-fn a_stream_reads_the_first_record_of_each_block_then_applies_changes() {
-    let program = FakeProgram::new(
-        "first",
-        &[changed_line("block:a", "done", 5, "ignored")],
-        true,
-    );
-    let api = fake_with_statuses(&[
-        ("block:a", reply("working", 5, "first read")),
-        ("block:b", reply("blocked", 7, "Allow Bash?")),
+fn a_stream_reads_the_first_record_of_each_block_then_a_call_replaces_it() {
+    let program = FakeProgram::new("first", &[changed_line("block:a")], true);
+    let api = fake_with_sequences(&[
+        (
+            "block:a",
+            vec![
+                Some(reply("working", 5, "first read")),
+                Some(reply("done", 5, "x")),
+            ],
+        ),
+        ("block:b", vec![Some(reply("blocked", 7, "Allow Bash?"))]),
     ]);
-    let (status, steps) = status_with(api, &program, now_clock());
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
     status.sync(&[
         slot_in("session:1", "block:a"),
         slot_in("session:1", "block:b"),
     ]);
-    wait_until("the change replaces the first read", || {
+    wait_until("the call replaces the first read", || {
         status.lookup("block:a") == Lookup::Stream(Some(record(RecordState::Done, 5, None)))
     });
     assert_eq!(
@@ -1231,54 +1321,150 @@ fn a_stream_reads_the_first_record_of_each_block_then_applies_changes() {
     assert_eq!(steps.get("block:a", 5), None);
     assert_eq!(status.lookup("block:other"), Lookup::NoStream);
     assert_eq!(program.runs(), 1);
+    assert_eq!(api.status_calls("block:a"), 2);
+    assert_eq!(api.status_calls("block:b"), 1);
 }
 
 #[test]
-fn a_change_with_no_owner_pid_asks_for_the_record_again() {
-    let program = FakeProgram::new("noowner", &[LIVE_CHANGED.to_string()], true);
-    let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
-    let api = fake_with_statuses(&[(block, reply("working", 11, "full record"))]);
-    let (status, steps) = status_with(api, &program, now_clock());
-    status.sync(&[slot_in("session:1", block)]);
-    wait_until("the record arrives", || {
-        status.lookup(block)
-            == Lookup::Stream(Some(record(RecordState::Working, 11, Some("full record"))))
-    });
-    assert_eq!(steps.get(block, 11).as_deref(), Some("full record"));
-}
-
-#[test]
-fn a_removal_and_a_closed_block_drop_the_record() {
-    let program = FakeProgram::new(
-        "removal",
-        &[
-            event_line("program_status_removed", &json!({"block_id": "block:a"})),
-            event_line("block_closed", &json!({"block_id": "block:b"})),
-        ],
-        true,
+fn a_removed_event_triggers_a_call_and_the_answer_replaces_the_record() {
+    // The event holds a record with another pid. Harold must not use it.
+    let removed = event_line(
+        "program_status_removed",
+        &json!({"block_id": "block:a", "record": {"state": "done", "owner": {"pid": 99}}}),
     );
-    let api = fake_with_statuses(&[
-        ("block:a", reply("working", 5, "one")),
-        ("block:b", reply("working", 6, "two")),
-        ("block:c", reply("working", 7, "three")),
-    ]);
-    let (status, steps) = status_with(api, &program, now_clock());
-    status.sync(&[
-        slot_in("session:1", "block:a"),
-        slot_in("session:1", "block:b"),
-        slot_in("session:1", "block:c"),
-    ]);
-    wait_until("both records drop", || {
-        status.lookup("block:a") == Lookup::Stream(None)
-            && status.lookup("block:b") == Lookup::Stream(None)
+    let program = FakeProgram::new("removed", &[removed], true);
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![
+            Some(reply("working", 5, "one")),
+            Some(reply("working", 6, "two")),
+        ],
+    )]);
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the answer replaces the record", || {
+        status.lookup("block:a") == working(6, "two")
+    });
+    assert_eq!(steps.get("block:a", 6).as_deref(), Some("two"));
+    assert_eq!(steps.get("block:a", 5), None);
+    assert_eq!(api.status_calls("block:a"), 2);
+}
+
+#[test]
+fn an_answer_with_no_root_record_removes_the_record() {
+    let program = FakeProgram::new("noroot", &[changed_line("block:a")], true);
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![Some(reply("working", 5, "one")), Some(no_root())],
+    )]);
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the record is removed", || {
+        api.status_calls("block:a") == 2 && status.lookup("block:a") == Lookup::Stream(None)
     });
     assert_eq!(steps.get("block:a", 5), None);
-    assert_eq!(steps.get("block:b", 6), None);
-    assert_eq!(steps.get("block:c", 7).as_deref(), Some("three"));
-    assert_eq!(
-        status.lookup("block:c"),
-        Lookup::Stream(Some(record(RecordState::Working, 7, Some("three"))))
+}
+
+#[test]
+fn a_burst_of_events_during_a_call_costs_one_more_call_not_one_each() {
+    let mut lines: Vec<String> = (0..5).map(|_| changed_line("block:a")).collect();
+    lines.push(event_line("block_closed", &json!({"block_id": "block:s"})));
+    let program = FakeProgram::new("burst", &lines, true);
+    let gate = Gate::new(
+        "block:a",
+        reply("working", 5, "held"),
+        reply("working", 5, "later"),
     );
+    let api = Arc::new(FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
+        ..FakeRex::default()
+    });
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    // `block:s` is read first. `block:a` then holds the first call.
+    status.sync(&[
+        slot_in("session:1", "block:s"),
+        slot_in("session:1", "block:a"),
+    ]);
+    wait_until("block:s has its step", || steps.get("block:s", 9).is_some());
+    // The reader handles the close at once, so the step goes only after it read all lines.
+    wait_until("the reader read every line", || {
+        steps.get("block:s", 9).is_none()
+    });
+    assert_eq!(gate.calls(), 1);
+    gate.release();
+    wait_until("the one more call answers", || {
+        status.lookup("block:a") == working(5, "later")
+    });
+    assert_eq!(gate.calls(), 2);
+    assert_eq!(api.status_calls("block:s"), 1);
+}
+
+#[test]
+fn block_closed_removes_the_block_with_no_call() {
+    let closed = event_line("block_closed", &json!({"block_id": "block:a"}));
+    let program = FakeProgram::new("closed", &[closed], true);
+    let api = fake_with_sequences(&[("block:a", vec![Some(reply("working", 5, "one"))])]);
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the stream is ready", || {
+        status.lookup("block:a") != Lookup::NoStream
+    });
+    // Even if the first read finished before the close, the block has no record now.
+    wait_until("the block has no record", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+    assert_eq!(steps.get("block:a", 5), None);
+    assert_eq!(api.status_calls("block:a"), 1);
+}
+
+#[test]
+fn a_failed_call_drops_the_record_and_logs_call_failed_once_until_a_call_works() {
+    let (logs, _guard) = capture_logs();
+    let program = FakeProgram::new_fifo("failed");
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![
+            Some(reply("working", 5, "ok")),
+            None,
+            None,
+            Some(reply("working", 5, "back")),
+            None,
+        ],
+    )]);
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the first read", || {
+        status.lookup("block:a") == working(5, "ok")
+    });
+    let failed = || {
+        logs.with("agent status stream")
+            .iter()
+            .filter(|line| line.contains("event=\"call_failed\""))
+            .count()
+    };
+    program.feed(&changed_line("block:a"));
+    wait_until("the failed call drops the record", || {
+        status.lookup("block:a") == Lookup::Stream(None)
+    });
+    wait_until("the failure is logged", || failed() == 1);
+    assert_eq!(steps.get("block:a", 5), None);
+    let line = logs.with("call_failed").into_iter().next().unwrap();
+    assert!(line.contains("session.id=\"session:1\""), "{line}");
+    assert!(line.contains("reason=\"failed\""), "{line}");
+    // A second failure logs nothing new.
+    program.feed(&changed_line("block:a"));
+    wait_until("the second call", || api.status_calls("block:a") == 3);
+    // A call that works brings the record back.
+    program.feed(&changed_line("block:a"));
+    wait_until("the record returns", || {
+        status.lookup("block:a") == working(5, "back")
+    });
+    assert_eq!(failed(), 1);
+    // The next failure logs again.
+    program.feed(&changed_line("block:a"));
+    wait_until("the failure is logged again", || failed() == 2);
+    assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
 }
 
 #[test]
@@ -1289,19 +1475,21 @@ fn a_bad_line_and_an_unknown_event_are_skipped() {
             "this is not json".to_string(),
             "{\"type\":".to_string(),
             event_line("client_connected", &json!({"block_id": "block:a"})),
-            changed_line("block:a", "working", 5, "after the bad lines"),
+            changed_line("block:a"),
         ],
         true,
     );
-    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![
+            Some(reply("done", 5, "x")),
+            Some(reply("working", 5, "after the bad lines")),
+        ],
+    )]);
+    let (status, _) = status_with(api, &program, now_clock());
     status.sync(&[slot_in("session:1", "block:a")]);
     wait_until("the good line applies", || {
-        status.lookup("block:a")
-            == Lookup::Stream(Some(record(
-                RecordState::Working,
-                5,
-                Some("after the bad lines"),
-            )))
+        status.lookup("block:a") == working(5, "after the bad lines")
     });
 }
 
@@ -1309,46 +1497,38 @@ fn a_bad_line_and_an_unknown_event_are_skipped() {
 fn an_over_long_line_is_discarded_and_the_stream_goes_on() {
     let program = FakeProgram::new(
         "toolong",
-        &[
-            "x".repeat(2 * 1024 * 1024),
-            changed_line("block:a", "working", 5, "after the long line"),
-        ],
+        &["x".repeat(2 * 1024 * 1024), changed_line("block:a")],
         true,
     );
-    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    let api = fake_with_sequences(&[(
+        "block:a",
+        vec![
+            Some(reply("done", 5, "x")),
+            Some(reply("working", 5, "after the long line")),
+        ],
+    )]);
+    let (status, _) = status_with(api, &program, now_clock());
     status.sync(&[slot_in("session:1", "block:a")]);
     wait_until("the line after the long one applies", || {
-        status.lookup("block:a")
-            == Lookup::Stream(Some(record(
-                RecordState::Working,
-                5,
-                Some("after the long line"),
-            )))
+        status.lookup("block:a") == working(5, "after the long line")
     });
 }
 
 #[test]
 fn a_stream_that_ends_drops_the_sessions_records_and_restarts_after_five_seconds() {
     let (logs, _guard) = capture_logs();
-    let program = FakeProgram::new(
-        "ends",
-        &[changed_line("block:a", "working", 5, "step")],
-        false,
-    );
+    let program = FakeProgram::new("ends", &[], false);
     let base = Instant::now();
     let offset = Arc::new(Mutex::new(Duration::ZERO));
     let clock: Clock = {
         let offset = Arc::clone(&offset);
         Arc::new(move || base + *offset.lock().unwrap())
     };
-    let (status, steps) = status_with(FakeRex::default(), &program, clock);
+    let api = fake_with_statuses(&[("block:a", reply("working", 5, "step"))]);
+    let (status, steps) = status_with(api, &program, clock);
     let slots = [slot_in("session:1", "block:a")];
     status.sync(&slots);
-    wait_until("the stream ends", || {
-        logs.with("agent status stream")
-            .iter()
-            .any(|line| line.contains("event=\"ended\""))
-    });
+    wait_until("the stream ends", || ended_lines(&logs) == 1);
     wait_until("the records drop", || {
         status.lookup("block:a") == Lookup::NoStream
     });
@@ -1360,7 +1540,6 @@ fn a_stream_that_ends_drops_the_sessions_records_and_restarts_after_five_seconds
         .unwrap();
     assert!(ended.contains("session.id=\"session:1\""), "{ended}");
     assert!(ended.contains("reason=\"exit\""), "{ended}");
-    assert!(ended.contains("records=1"), "{ended}");
     assert!(!ended.contains("step"), "{ended}");
     // Less than the gap later: no new child.
     *offset.lock().unwrap() = RESTART_GAP - Duration::from_millis(1);
@@ -1488,7 +1667,11 @@ fn ended_lines(logs: &Logs) -> usize {
 fn a_stopped_reader_never_touches_a_newer_stream_of_the_same_session() {
     let (logs, _guard) = capture_logs();
     let program = FakeProgram::new("stale", &[], true);
-    let gate = Gate::new(reply("working", 1, "stale"), reply("working", 2, "fresh"));
+    let gate = Gate::new(
+        "block:a",
+        reply("working", 1, "stale"),
+        reply("working", 2, "fresh"),
+    );
     let api = FakeRex {
         gate: Some(Arc::clone(&gate)),
         ..FakeRex::default()
@@ -1520,7 +1703,11 @@ fn a_stopped_reader_reads_no_queued_line_and_makes_no_call() {
     // The queued line has no owner pid, so a read of it would call `program_status`.
     let program = FakeProgram::new("queued", &[LIVE_CHANGED.to_string()], true);
     let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
-    let gate = Gate::new(reply("working", 1, "stale"), reply("working", 2, "later"));
+    let gate = Gate::new(
+        block,
+        reply("working", 1, "stale"),
+        reply("working", 2, "later"),
+    );
     let api = FakeRex {
         gate: Some(Arc::clone(&gate)),
         ..FakeRex::default()
