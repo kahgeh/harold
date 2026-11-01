@@ -162,9 +162,11 @@ async fn no_chief_and_no_agents_give_an_empty_document() {
 
 #[tokio::test]
 async fn the_watch_facts_have_no_current_step_field() {
-    // The agent works and reports a current step. The step lives beside the snapshot.
+    // The agent works and reports a current step and a recap. Both live beside the snapshot.
     let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set("%3", 20, Some("LEAKCHECK-7f3a".into()));
+    steps.set("%3", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%3", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
     worker.work_summary = Some("Plain summary".into());
     let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
@@ -181,16 +183,22 @@ async fn the_watch_facts_have_no_current_step_field() {
     )
     .await;
     let json = serde_json::to_string(&facts).unwrap();
-    assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    // The step is stored for this pane, so a leak would show its text.
+    assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
+    assert!(recaps.get("%3", 20).is_some());
     assert!(json.contains("Plain summary"), "{json}");
-    assert!(!json.contains("LEAKCHECK-7f3a"), "{json}");
-    assert!(!json.contains("step"), "{json}");
+    assert!(!json.contains("LEAKCHECK-step-7f3a"), "{json}");
 }
 
 // This guards against a recap field being added to the facts, because the watch code cannot
 // reach the store.
 #[tokio::test]
 async fn the_watch_facts_have_no_recap() {
+    // The agent has a step and a recap. Both live beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%3", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%3", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
     worker.work_summary = Some("Plain summary".into());
     let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
@@ -207,6 +215,13 @@ async fn the_watch_facts_have_no_recap() {
     )
     .await;
     let json = serde_json::to_string(&facts).unwrap();
+    // The recap is stored for this pane, so a leak would show its text.
+    assert_eq!(
+        recaps.get("%3", 20).map(|line| line.text).as_deref(),
+        Some("LEAKCHECK-recap-9c1d")
+    );
+    assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(json.contains("Plain summary"), "{json}");
-    assert!(!json.contains("recap"), "{json}");
+    assert!(!json.contains("LEAKCHECK-recap-9c1d"), "{json}");
+    assert!(!json.contains("LEAKCHECK-step-7f3a"), "{json}");
 }

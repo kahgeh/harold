@@ -964,19 +964,46 @@ async fn the_warm_up_reads_the_facts_and_starts_the_program_once_and_the_answer_
 
 #[test]
 fn the_call_facts_have_no_current_step_field() {
-    // The agent works and reports a current step. The step lives beside the snapshot.
+    // The agent works and reports a current step and a recap. Both live beside the snapshot.
+    // The agent in `sources()` has the pane id `%2`.
     let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set("%1", 20, Some("LEAKCHECK-7f3a".into()));
+    steps.set("%2", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%2", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
-    assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-7f3a"));
-    assert!(!facts.to_string().contains("LEAKCHECK-7f3a"), "{facts}");
-    assert!(!facts.to_string().contains("step"), "{facts}");
+    // The step is stored for this pane, so a leak would show its text.
+    assert_eq!(steps.get("%2", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
+    assert!(recaps.get("%2", 20).is_some());
+    assert!(facts.to_string().contains("chief-of-pods"), "{facts}");
+    assert!(
+        !facts.to_string().contains("LEAKCHECK-step-7f3a"),
+        "{facts}"
+    );
 }
 
 // This guards against a recap field being added to the facts, because the answerer cannot
 // reach the store.
 #[test]
 fn the_call_facts_have_no_recap() {
+    // The agent in `sources()` has the pane id `%2`.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%2", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%2", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
-    assert!(!facts.to_string().contains("recap"), "{facts}");
+    // The recap is stored for this pane, so a leak would show its text.
+    assert_eq!(
+        recaps.get("%2", 20).map(|line| line.text).as_deref(),
+        Some("LEAKCHECK-recap-9c1d")
+    );
+    assert_eq!(steps.get("%2", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
+    assert!(facts.to_string().contains("chief-of-pods"), "{facts}");
+    assert!(
+        !facts.to_string().contains("LEAKCHECK-recap-9c1d"),
+        "{facts}"
+    );
+    assert!(
+        !facts.to_string().contains("LEAKCHECK-step-7f3a"),
+        "{facts}"
+    );
 }

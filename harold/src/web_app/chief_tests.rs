@@ -247,9 +247,12 @@ fn find_chief_logs_the_pane_once_per_change() {
 /// has no step field. This fails if one is added.
 #[test]
 fn the_phone_apps_chief_result_has_no_current_step_field() {
-    // The chief works and reports a current step. The step lives beside the snapshot.
+    // The chief works and reports a current step and a recap. Both live beside the snapshot.
+    // The chief pane `%1` has the agent pid 20 in the fixture.
     let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set(CHIEF, 20, Some("LEAKCHECK-7f3a".into()));
+    steps.set("%1", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%1", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let found = find_chief(
         &chief_and_pod(EffectiveAgentState::Working),
         Some(CHIEF),
@@ -260,24 +263,38 @@ fn the_phone_apps_chief_result_has_no_current_step_field() {
     let ChiefPane::One { pane_id, busy: _ } = &found else {
         panic!("the chief is found: {found:?}");
     };
-    assert!(!pane_id.contains("LEAKCHECK-7f3a"), "{found:?}");
-    assert_eq!(steps.get(CHIEF, 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    assert!(!pane_id.contains("LEAKCHECK-step-7f3a"), "{found:?}");
+    // The step is stored for this pane, so a leak would show its text.
+    assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
+    assert!(recaps.get("%1", 20).is_some());
     assert!(
-        !format!("{found:?}").contains("LEAKCHECK-7f3a"),
+        !format!("{found:?}").contains("LEAKCHECK-step-7f3a"),
         "{found:?}"
     );
-    assert!(!format!("{found:?}").contains("step"), "{found:?}");
 }
 
 /// The phone app reads panes only to find the chief. The result has no recap field.
 #[test]
 fn the_phone_apps_agent_rows_have_no_recap() {
     // This guards against a recap field being added, because this code cannot reach the store.
+    // The chief pane `%1` has the agent pid 20 in the fixture.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%1", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%1", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let found = find_chief(
         &chief_and_pod(EffectiveAgentState::Working),
         Some(CHIEF),
         None,
     );
     let text = format!("{found:?}");
-    assert!(!text.contains("recap"), "{text}");
+    // The recap is stored for this pane, so a leak would show its text.
+    assert_eq!(
+        recaps.get("%1", 20).map(|line| line.text).as_deref(),
+        Some("LEAKCHECK-recap-9c1d")
+    );
+    assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
+    assert!(text.contains("%1"), "{text}");
+    assert!(!text.contains("LEAKCHECK-recap-9c1d"), "{text}");
+    assert!(!text.contains("LEAKCHECK-step-7f3a"), "{text}");
 }

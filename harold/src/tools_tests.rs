@@ -1091,9 +1091,11 @@ fn the_agents_port_rows_have_no_current_step_field() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
-    // The agent works and reports a current step. The step lives beside the snapshot.
+    // The agent works and reports a current step and a recap. Both live beside the snapshot.
     let steps = crate::agent::rex::CurrentSteps::default();
-    steps.set("%7", 20, Some("LEAKCHECK-7f3a".into()));
+    steps.set("%7", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%7", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     let agents = SnapshotAgents {
         ports: Arc::new(Fake::at(DAY, "09:00:00")),
@@ -1124,16 +1126,13 @@ fn the_agents_port_rows_have_no_current_step_field() {
         .into_iter()
         .flatten()
         {
-            assert!(!text.contains("LEAKCHECK-7f3a"), "{text}");
+            assert!(!text.contains("LEAKCHECK-step-7f3a"), "{text}");
         }
     }
-    assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-7f3a"));
+    // The step is stored for this pane, so a leak would show its text.
+    assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(rows.contains("%7"), "{rows}");
-    assert!(!rows.contains("LEAKCHECK-7f3a"), "{rows}");
-    assert!(
-        !rows.contains("current_step") && !rows.contains("step"),
-        "{rows}"
-    );
+    assert!(!rows.contains("LEAKCHECK-step-7f3a"), "{rows}");
 }
 
 /// This guards against a recap field being added to a row, because the agents port cannot
@@ -1143,6 +1142,11 @@ fn the_agents_port_rows_have_no_recap() {
     use crate::settings::ScreenAdapter;
     use crate::timed_prompts::tests::{projection, provider, snapshot};
 
+    // The agent has a step and a recap. Both live beside the snapshot.
+    let steps = crate::agent::rex::CurrentSteps::default();
+    steps.set("%7", 20, Some("LEAKCHECK-step-7f3a".into()));
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%7", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Working);
     let agents = SnapshotAgents {
         ports: Arc::new(Fake::at(DAY, "09:00:00")),
@@ -1150,6 +1154,12 @@ fn the_agents_port_rows_have_no_recap() {
         providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
     };
     let rows = format!("{:?}", agents.agents());
+    // The recap is stored for this pane, so a leak would show its text.
+    assert_eq!(
+        recaps.get("%7", 20).map(|line| line.text).as_deref(),
+        Some("LEAKCHECK-recap-9c1d")
+    );
     assert!(rows.contains("%7"), "{rows}");
-    assert!(!rows.contains("recap"), "{rows}");
+    assert!(!rows.contains("LEAKCHECK-recap-9c1d"), "{rows}");
+    assert!(!rows.contains("LEAKCHECK-step-7f3a"), "{rows}");
 }
