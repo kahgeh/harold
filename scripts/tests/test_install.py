@@ -140,6 +140,59 @@ class InstallTests(unittest.TestCase):
                 self.install.replace_bundle(stage, bundle, False)
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'irreplaceable')
 
+    def old_bundle_with_data(self):
+        bundle = self.prefix / 'harold'
+        (bundle / 'data/store').mkdir(parents=True)
+        (bundle / 'data/store/state.db').write_bytes(b'live')
+        (bundle / 'data/events').mkdir()
+        (bundle / 'data/events/marker').write_text('history')
+        stage = self.prefix / 'stage'
+        (stage / 'data/store').mkdir(parents=True)
+        return bundle, stage
+
+    def test_an_interrupt_during_the_data_copy_leaves_the_live_data_in_place(self):
+        bundle, stage = self.old_bundle_with_data()
+
+        def interrupted(source, target):
+            (target / 'store').mkdir(parents=True)
+            (target / 'store/state.db').write_bytes(b'part')
+            raise KeyboardInterrupt
+
+        with patch.object(self.install, 'copy_data_to_backup', interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertTrue(stage.is_dir())
+
+    def test_an_interrupt_after_the_move_puts_the_data_back_and_leaves_no_copy(self):
+        bundle, stage = self.old_bundle_with_data()
+        rename = Path.rename
+
+        def interrupted_swap(source, destination):
+            if source == stage:
+                raise KeyboardInterrupt
+            return rename(source, destination)
+
+        with patch.object(Path, 'rename', interrupted_swap):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(bundle.glob('data-copy')), [])
+
+    def test_a_copy_with_no_store_or_events_copies_nothing(self):
+        bundle = self.prefix / 'harold'
+        (bundle / 'data/pod').mkdir(parents=True)
+        stage = self.prefix / 'stage'
+        (stage / 'data').mkdir(parents=True)
+        info = {}
+        backup = self.install.replace_bundle(stage, bundle, False, info)
+        self.assertEqual(info, {})
+        self.assertFalse((backup / 'data').exists())
+        self.assertTrue((bundle / 'data/pod').is_dir())
+
     def test_the_service_starts_at_login_and_restarts_after_a_crash(self):
         home = Path(self.temp.name).resolve() / 'home'
         with patch.dict('os.environ', {'HOME': str(home)}):
@@ -1133,11 +1186,29 @@ class InstalledServiceTests(unittest.TestCase):
             output = self.run_install('-')
         backup, note, commands = self.rollback()
         self.assertIn('No data copy exists in the backup (No space left on device). '
-                      'A rollback would lose the data written since the install.', output)
+                      'A rollback would lose the data written since the install, '
+                      'and the old Harold cannot read the new store.', output)
         self.assertNotIn('copied data to', output)
         self.assertFalse((backup / 'data').exists())
         self.assertIn('mv {}/data harold/data'.format(backup.name.replace('harold.backup-', 'harold.replaced-')), commands)
         self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+
+    def test_the_rollback_note_moves_the_other_data_entries_back(self):
+        self.old_install_with_store()
+        for path in ('data/pod/tips', 'data/tools/x.db', 'data/my dir/y', 'data/restart-reminder.json'):
+            (self.bundle / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.bundle / path).write_text('x')
+        self.run_install('-')
+        backup, note, commands = self.rollback()
+        aside = backup.name.replace('harold.backup-', 'harold.replaced-')
+        lines = commands.splitlines()
+        for name in ('pod', 'tools', 'my dir', 'restart-reminder.json'):
+            self.assertIn('mv {}/data/{} harold/data/{}'.format(aside, shlex.quote(name), shlex.quote(name)), lines)
+        self.assertNotIn('mv {}/data/store harold/data/store'.format(aside), lines)
+        self.assertNotIn('mv {}/data/events harold/data/events'.format(aside), lines)
+        self.assertLess(lines.index('mv {}/data/pod harold/data/pod'.format(aside)), lines.index(self.TIPS_STEP))
+        self.assertIn('The new store and events stay in {}/data.'.format(aside), note)
+        self.assertIn('Replies and events from after the install are lost.', note)
 
     def test_an_install_from_before_versions_says_they_were_not_recorded(self):
         self.install_existing(saved='-')
