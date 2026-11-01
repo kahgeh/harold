@@ -646,10 +646,25 @@ fn rex_host_errors(monitor: &AgentMonitorSettings) -> Vec<String> {
             errors.push(format!("duplicate agent_monitor.rex_hosts: {host}"));
         }
     }
-    for (host, mark) in &monitor.rex_host_marks {
-        if !monitor.rex_hosts.contains(host) {
+    errors
+}
+
+/// What is wrong with the table of host marks. A key names a host: a label in `rex_hosts`
+/// or this machine's `machine_name` (compared without case). A label in `rex_hosts` may not
+/// equal `machine_name`, so one key never names two hosts.
+fn host_marks_errors(monitor: &AgentMonitorSettings, machine_name: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    for host in &monitor.rex_hosts {
+        if host.to_lowercase() == machine_name.to_lowercase() {
             errors.push(format!(
-                "agent_monitor.rex_host_marks names a host that is not in rex_hosts: {host}"
+                "agent_monitor.rex_hosts names this machine's machine_name: {host}"
+            ));
+        }
+    }
+    for (host, mark) in &monitor.rex_host_marks {
+        if !monitor.rex_hosts.contains(host) && host.to_lowercase() != machine_name.to_lowercase() {
+            errors.push(format!(
+                "agent_monitor.rex_host_marks names neither a label in rex_hosts nor this machine's machine_name: {host}"
             ));
         }
         if !matches!(mark.as_str(), "arch" | "linux" | "mac") {
@@ -659,6 +674,17 @@ fn rex_host_errors(monitor: &AgentMonitorSettings) -> Vec<String> {
         }
     }
     errors
+}
+
+impl AgentMonitorSettings {
+    /// The mark name for `machine_name`: the entry whose key equals it, ignoring case.
+    pub(crate) fn mark_for_machine(&self, machine_name: &str) -> Option<&str> {
+        let wanted = machine_name.to_lowercase();
+        self.rex_host_marks
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == wanted)
+            .map(|(_, mark)| mark.as_str())
+    }
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -1604,6 +1630,7 @@ impl Settings {
         let mut errors = Vec::new();
         errors.extend(machine_name_error(&self.machine_name));
         errors.extend(machines_errors(&self.machine_name, &self.machines));
+        errors.extend(host_marks_errors(&self.agent_monitor, &self.machine_name));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.control_tower.validate());
         errors.extend(self.activity_summary.validate());
@@ -2738,7 +2765,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert_eq!(
             errors,
             vec![
-                "agent_monitor.rex_host_marks names a host that is not in rex_hosts: other"
+                "agent_monitor.rex_host_marks names neither a label in rex_hosts nor this machine's machine_name: other"
                     .to_string()
             ]
         );
@@ -2746,6 +2773,72 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]\n\
              [agent_monitor.rex_host_marks]\nomarchy = \"windows\"",
         );
+        assert_eq!(
+            errors,
+            vec!["agent_monitor.rex_host_marks must be \"arch\", \"linux\" or \"mac\": omarchy = windows".to_string()]
+        );
+    }
+
+    const REX: &str = "[agent_monitor]\nmultiplexer = \"rex\"\n";
+
+    #[test]
+    fn marks_accept_a_rex_label_and_the_machine_name() {
+        let errors = host_errors(&format!(
+            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"omarchy\"]\n\
+             [agent_monitor.rex_host_marks]\nomarchy = \"arch\"\nPasM4MBP = \"mac\""
+        ));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_machine_name_key_loads_with_no_rex_hosts() {
+        let errors = host_errors(
+            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\nPasM4MBP = \"mac\"",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn the_machine_name_key_ignores_case() {
+        let overrides =
+            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\npasm4mbp = \"mac\"";
+        assert!(host_errors(overrides).is_empty());
+        let settings = crate::settings::settings_with(overrides);
+        assert_eq!(
+            settings.agent_monitor.mark_for_machine("PasM4MBP"),
+            Some("mac")
+        );
+        assert_eq!(settings.agent_monitor.mark_for_machine("other"), None);
+    }
+
+    #[test]
+    fn a_key_naming_no_host_is_refused() {
+        let errors = host_errors(
+            "machine_name = \"PasM4MBP\"\n[agent_monitor.rex_host_marks]\nother = \"arch\"",
+        );
+        assert_eq!(
+            errors,
+            vec!["agent_monitor.rex_host_marks names neither a label in rex_hosts nor this machine's machine_name: other".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_label_equal_to_the_machine_name_is_refused() {
+        let errors = host_errors(&format!(
+            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"pasm4mbp\"]"
+        ));
+        assert_eq!(
+            errors,
+            vec!["agent_monitor.rex_hosts names this machine's machine_name: pasm4mbp".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_bad_mark_value_is_refused_as_today() {
+        let errors = host_errors(&format!(
+            "machine_name = \"PasM4MBP\"\n{REX}rex_hosts = [\"omarchy\"]\n\
+             [agent_monitor.rex_host_marks]\nomarchy = \"windows\""
+        ));
         assert_eq!(
             errors,
             vec!["agent_monitor.rex_host_marks must be \"arch\", \"linux\" or \"mac\": omarchy = windows".to_string()]
