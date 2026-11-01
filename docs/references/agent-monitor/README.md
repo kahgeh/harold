@@ -360,7 +360,7 @@ The `outcome` is one of five words:
 - `failed`: the program ran and failed.
 - `timeout`: Harold stopped the program at its limit.
 - `absent`: there is no program, or no server.
-- `malformed`: Harold cannot read the answer. A tmux call never gives this outcome.
+- `malformed`: Harold cannot read the answer. A tmux call gives this outcome when its reply is not UTF-8 or Harold cannot parse it.
 
 A listing that did not work is the operation `list` with the outcome `absent`, `failed` or `timeout`. The alert `multiplexer-calls-failing` reads the outcomes `failed`, `timeout` and `malformed`.
 

@@ -336,7 +336,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 
 A multiplexer call is one request that Harold makes to its multiplexer. Harold records each one at its end, with its operation, its outcome and its time. Each call has one operation, the same word for Rex and tmux. A call that has no operation word is recorded as `other`, so a new call does not go unseen. The calls of the control-tower are not Harold's and are not recorded.
 
-`harold.agents` is read at each export from the agent snapshot. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
+`harold.agents` is read at each export from the agent snapshot. For each provider in the snapshot, it reports all three states, with 0 for a state that has no agents. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
 
 `harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
 
@@ -534,7 +534,7 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 
 The seven cards of the group "Agents and multiplexer" have no earlier tile. Each one is a single chart or table over the dashboard's time range. A quantile in the cards that read a histogram ("Time in each state" and "Multiplexer call time") can fall in the overflow bucket, above the last explicit bound. The card then shows the last explicit bound, so the number is a lower bound.
 
-The notifications card and the call turn card are the two cards that are tables and have no earlier tile. Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
+Some cards are tables and have no earlier tile: the notifications card, the call turn card and the table cards of the group "Agents and multiplexer". Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 
 - HyperDX's builder cannot express some cards, such as a median of per-session counts.
 - HyperDX's own counter reading loses the first point of every new series ([Counters in HyperDX](#counters-in-hyperdx)).
