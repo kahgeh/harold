@@ -47,7 +47,7 @@ A rollback to an install from before that move returns the old program. The back
 
 The agent state rename changes the events Harold writes. An older Harold cannot read the events that this Harold writes.
 
-To roll back, put back the old bundle and its copied data folder as `ROLLBACK.md` says. The installer copies `data/store` and `data/events` into the backup folder. The old Harold reads that copy. The new data stays in the folder you move aside.
+To roll back, put back the old bundle and its copied data folder as `ROLLBACK.md` tells. The installer copies `data/store` and `data/events` into the backup folder. The old Harold reads that copy. The new data stays in the folder you move aside.
 
 Replies and events from after the install are lost on a rollback. If the copy fails, the install puts the old bundle back and starts the old Harold.
 
@@ -65,4 +65,4 @@ A control-tower that started before the install shows `UNKNOWN` for these three 
 
 ### Roll back from stage 3 to stage 2 or 1
 
-A rollback from stage 3 needs no data copy, because stage 1 already changed the events and the store. A Harold of stage 2 or 1 reads the event words `Blocked`, `Done` and `Error` as unknown, and the store accepts all six states. Put back the old bundle as `ROLLBACK.md` says. Start the control-tower again after the rollback.
+A rollback from stage 3 needs no data copy, because stage 1 already changed the events and the store. A Harold of stage 2 or 1 reads the event words `Blocked`, `Done` and `Error` as unknown, and the store accepts all six states. Put back the old bundle as `ROLLBACK.md` tells. Start the control-tower again after the rollback.
