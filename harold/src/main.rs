@@ -941,7 +941,7 @@ fn print_help() {
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
     println!("  harold accept EVENT --pane ID --adapter NAME");
     println!(
-        "                          Report a pane working (turn-started, still-working) or idle"
+        "                          Report a pane working (turn-started, still-working) or done"
     );
     println!("                          (turn-completed, subagents-finished); 3s timeout");
     println!("  harold start-control-tower [--endpoint URI]");

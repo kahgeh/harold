@@ -328,7 +328,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome` |
 | `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` (the empty string for Harold's own machine, or the label of a Rex host) |
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
-| `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `idle`, `unknown`), `provider_id`, `multiplexer` |
+| `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |
 | `harold.agent.blocked_long` | counter, `{event}` | `provider_id` |
 | `harold.multiplexer.sessions` | gauge, `{session}` | `multiplexer`, `host` |
@@ -341,7 +341,7 @@ A multiplexer call is one request that Harold makes to its multiplexer. Harold r
 
 `harold.agent.state_observed` counts one observation of an agent's state. `source` is `program_status` when the observation comes from a running record stream, `program_status_call` when it comes from a direct status call, and `screen` when Harold read the screen. `state` is the state word that Harold maps, or `unknown` when the observation holds no state. `multiplexer` comes from the settings. No `pane_id` is an attribute.
 
-`harold.agents` is read at each export from the agent snapshot. For each provider in the snapshot, it reports all three states, with 0 for a state that has no agents. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
+`harold.agents` is read at each export from the agent snapshot. For each provider in the snapshot, it reports all six states, with 0 for a state that has no agents. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
 
 `harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
 

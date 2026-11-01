@@ -307,7 +307,7 @@ screen_history_lines = 2000
 | `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's `Done` state wins over the screen for a pane with no lifecycle adapter |
 | `agent_monitor.multiplexer` | `"tmux"` (the default) or `"rex"`; the one multiplexer Harold works with. Harold reads it once, at start. Any other value stops Harold at start with `agent_monitor.multiplexer must be "tmux" or "rex"` |
 | `agent_monitor.rex` | Optional path to the `rex` program. When it is not set, Harold tries the running server's own copy (`~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`), then `rex` on the `PATH`, then `/Applications/Rex*.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex` |
-| `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Working` report can be before the screen decides, and how long the screen must read `Working` without a break to replace an `Idle` report |
+| `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Working` report can be before the screen decides, and how long the screen must read `Working` without a break to replace an at-rest report (done, idle or error) |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
 | `agents[].display_name` | Non-empty display label |
 | `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively against the process's program, not its whole command line. The program is the file name of the `ps` command's first word; when that is `node`, `bun`, `deno`, `python` or `python3`, it is the file name of the second word instead |

@@ -956,7 +956,7 @@ async fn completion_placeholder_cannot_leak_at_a_projection_page_boundary() {
 }
 
 #[tokio::test]
-async fn resolved_completion_starts_an_idle_reconciliation_epoch() {
+async fn resolved_completion_starts_a_done_reconciliation_epoch() {
     let observation = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::default()).await;
     fixture

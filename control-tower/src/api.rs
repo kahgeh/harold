@@ -811,6 +811,9 @@ mod tests {
             (ProtoAgentState::Idle, AgentState::Idle),
             (ProtoAgentState::Unknown, AgentState::Unknown),
             (ProtoAgentState::Unspecified, AgentState::Unknown),
+            (ProtoAgentState::Blocked, AgentState::Blocked),
+            (ProtoAgentState::Done, AgentState::Done),
+            (ProtoAgentState::Error, AgentState::Error),
         ]
         .into_iter()
         .enumerate()
@@ -850,12 +853,15 @@ mod tests {
 
         assert_eq!(mapped.through_event_version, 42);
         assert_eq!(mapped.server_time_ms, 9_876);
-        assert_eq!(mapped.rows.len(), 4);
+        assert_eq!(mapped.rows.len(), 7);
         for (index, (_, expected_state)) in [
             (ProtoAgentState::Working, AgentState::Working),
             (ProtoAgentState::Idle, AgentState::Idle),
             (ProtoAgentState::Unknown, AgentState::Unknown),
             (ProtoAgentState::Unspecified, AgentState::Unknown),
+            (ProtoAgentState::Blocked, AgentState::Blocked),
+            (ProtoAgentState::Done, AgentState::Done),
+            (ProtoAgentState::Error, AgentState::Error),
         ]
         .into_iter()
         .enumerate()

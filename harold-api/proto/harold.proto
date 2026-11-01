@@ -85,7 +85,7 @@ enum AgentState {
   AGENT_STATE_UNKNOWN = 3;
   // The agent waits for an answer inside its turn.
   AGENT_STATE_BLOCKED = 4;
-  // The agent ended its turn and nobody has looked at it yet.
+  // The agent finished a turn. It stays done until the next state arrives.
   AGENT_STATE_DONE = 5;
   // The last turn of the agent ended with an error.
   AGENT_STATE_ERROR = 6;
