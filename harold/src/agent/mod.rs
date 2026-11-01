@@ -1,11 +1,16 @@
 pub(crate) mod domain;
 pub(crate) mod inventory;
+pub(crate) mod recap;
 pub(crate) mod reducer;
 pub(crate) mod rex;
 pub(crate) mod runtime;
 pub(crate) mod screen;
 pub(crate) mod snapshot;
 pub(crate) mod summary;
+
+#[cfg(test)]
+#[path = "recap_tests.rs"]
+mod recap_tests;
 
 #[cfg(test)]
 #[path = "reducer_tests.rs"]
