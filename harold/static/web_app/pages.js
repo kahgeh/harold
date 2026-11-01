@@ -649,7 +649,7 @@ document.addEventListener("datastar-fetch", (event) => {
 
   function restore() {
     // A note with no focus (a tap that took none) is kept only long enough for the redraw
-    // of its own save, so picks made in the dash show afterwards.
+    // of its own save, so picks made in the control-tower show afterwards.
     if (note && !note.focus && Date.now() - note.at > NOTE_WITHOUT_FOCUS_MS) {
       note = null;
     }

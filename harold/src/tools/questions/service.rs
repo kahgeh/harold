@@ -401,7 +401,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             })?
             .map_err(refused)?
             .map_err(|field| invalid(&field))?;
-        // A pick is for the dash and the chief to read: it wakes nothing.
+        // A pick is for the control-tower and the chief to read: it wakes nothing.
         info!(tool = NAME, question_id = %id, version, "picks saved");
         Ok(Response::new(pb::SavePicksResponse {}))
     }

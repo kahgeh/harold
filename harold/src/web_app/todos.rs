@@ -1,5 +1,5 @@
 //! The todo page: the question tool's todos, read and answered through its gRPC service
-//! on Harold's own address, as the dash does. The web app never calls into the tool's
+//! on Harold's own address, as the control-tower does. The web app never calls into the tool's
 //! module (ADR 0001).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -30,10 +30,10 @@ use crate::settings::GrpcSettings;
 const WRITE_LIMIT: Duration = Duration::from_secs(5);
 /// The largest todo form read, in bytes.
 const FORM_MAX_BYTES: usize = 32 * 1024;
-/// The longest note for a revise or reject, in characters, as in the dash.
+/// The longest note for a revise or reject, in characters, as in the control-tower.
 const NOTE_MAX_CHARS: usize = 1999;
 
-/// How long one read of the todos may take, as the dash allows.
+/// How long one read of the todos may take, as the control-tower allows.
 const READ_LIMIT: Duration = Duration::from_secs(2);
 
 /// The checked line turns red this long after the last check, when a todo is waiting.

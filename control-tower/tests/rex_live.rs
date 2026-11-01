@@ -15,7 +15,7 @@ fn enter_on_a_live_rex_block_shows_it() {
 
     let focused = navigator.rex_focused_block().unwrap();
     println!("focused: {focused:?}");
-    // With more than one Rex session the dash does not guess, so the reading is `None`.
+    // With more than one Rex session the control-tower does not guess, so the reading is `None`.
     if let Some(focused) = focused {
         assert_eq!(focused, block);
     }

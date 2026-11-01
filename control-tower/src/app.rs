@@ -244,7 +244,7 @@ pub enum FocusReading {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub connection: ConnectionState,
-    /// This dash's own release, fixed at compile time.
+    /// This control-tower's own release, fixed at compile time.
     pub dash_version: String,
     pub snapshot: Snapshot,
     pub search: SearchState,
@@ -1170,7 +1170,7 @@ impl App {
                     return Effect::None;
                 };
                 if !self.focus_tracking {
-                    // Without a focus probe, jumping from the dash is the only visit we can see.
+                    // Without a focus probe, jumping from the control-tower is the only visit we can see.
                     self.waiting.retain(|waiting| *waiting != incarnation);
                 }
                 return Effect::Navigate {

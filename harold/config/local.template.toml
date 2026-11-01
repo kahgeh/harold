@@ -67,7 +67,7 @@ command = "say"
 # python = "/home/you/.local/share/harold/tts-venv/bin/python"
 # idle_minutes = 10   # the TTS worker stops after this many minutes with no request or call
 
-# Calls with the chief at the desk (tmx-agent-dash: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
+# Calls with the chief at the desk (control-tower: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
 # [voice_input] needs the `calls` feature, which the Mac package has.
 # [voice_input]
 # command = "/Users/you/Dev/xn/mlx-audio/.venv/bin/python"

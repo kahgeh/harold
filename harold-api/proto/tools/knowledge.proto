@@ -3,7 +3,7 @@
 // A vault note is one Markdown file in the vault; its name is its path without ".md",
 // such as "a-knowledge-index-on-buckwal" or "references/hyperdx".
 //
-// Callers (the chief's CLI, the web app and the dash):
+// Callers (the chief's CLI, the web app and the control-tower):
 //   Search         the closest vault notes to some words, best passage per note,
 //                  closest first. `source` is "chief", "app" or "dash" and goes only
 //                  to the search span.

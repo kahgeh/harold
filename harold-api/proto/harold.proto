@@ -12,7 +12,7 @@ service Harold {
   rpc SendMessageToAwayDevice (SendMessageToAwayDeviceRequest) returns (SendMessageToAwayDeviceResponse);
   // The chief asks Harold to say a line at the desk, or to send it to the phone as text when away.
   rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
-  // tmx-agent-dash starts, ends and watches a call with the chief.
+  // The control-tower starts, ends and watches a call with the chief.
   rpc Call (CallRequest) returns (CallResponse);
 }
 

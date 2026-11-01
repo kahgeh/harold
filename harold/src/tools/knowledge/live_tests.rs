@@ -184,7 +184,7 @@ async fn the_real_index_meets_the_acceptance_criteria() {
     println!("related:\n{related}");
     assert!(related.contains("(linked)"));
 
-    // 6: what the dash asks, as the dash asks it: the 10 most recent, a search from the
+    // 6: what the control-tower asks, as the control-tower asks it: the 10 most recent, a search from the
     // dash, and the absolute file of a vault note.
     {
         use harold_api::tools::knowledge::v1 as pb;

@@ -126,7 +126,7 @@ pub struct Outgoing {
     pub kind: AnswerKind,
     pub picks: Vec<PickView>,
     pub note: String,
-    /// Harold's send-now mark. Every answer from the dash sets it, since `send` means now.
+    /// Harold's send-now mark. Every answer from the control-tower sets it, since `send` means now.
     pub send_now: bool,
 }
 
@@ -1508,7 +1508,7 @@ mod tests {
     fn a_question_dismissed_then_put_again_says_picks_kept() {
         let mut b = open_block(vec![question("Q1", 1, 2)]);
         press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
-        // The chief dismisses Q1; the dash reads the empty listing first.
+        // The chief dismisses Q1; the control-tower reads the empty listing first.
         let mut gone = queue(vec![]);
         gone.dismissed = vec![("Q1".into(), "stale".into())];
         b.reconcile(gone);

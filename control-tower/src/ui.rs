@@ -184,7 +184,7 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let available = usize::from(area.width.saturating_sub(2));
     // The header shapes are tried in this order and the first that fits wins: `HAROLD / TMUX`
-    // and the dash's version, `TMX DASH` and the version, the version alone, then without
+    // and the control-tower's version, `TMX DASH` and the version, the version alone, then without
     // `REV`, then no version at all. Transport, voice and the paused marker always remain.
     let mut lines = candidates
         .into_iter()
@@ -2805,6 +2805,7 @@ mod tests {
             &summary,
             90_000,
         );
+        // The extra "1" keeps the width the layout test needs.
         agent.working_directory = "/Users/you/code/dev/control-tower1".into();
         let app = live_app(vec![agent], Some(selected));
 

@@ -1,4 +1,4 @@
-//! The dash's notes search: `s` opens the vault notes changed most recently over the agent
+//! The control-tower's notes search: `s` opens the vault notes changed most recently over the agent
 //! list, typing searches them by meaning, `j` and `k` move, Enter opens the vault note's
 //! file in `$EDITOR` in a new tmux window and Esc goes back. It reads the knowledge tool's
 //! gRPC service; there is no note pane and no related list.
@@ -25,7 +25,7 @@ const DISPLAY_MAX: usize = 200;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// What the dash asks of the knowledge tool. The real one speaks gRPC; tests have their own.
+/// What the control-tower asks of the knowledge tool. The real one speaks gRPC; tests have their own.
 pub trait NotesBackend: Send + Sync {
     /// The vault notes changed most recently.
     fn recent(&self) -> BoxFuture<Result<Vec<NoteLine>, String>>;

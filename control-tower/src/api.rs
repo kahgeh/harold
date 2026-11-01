@@ -425,7 +425,7 @@ pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResul
     }
 }
 
-/// What `TickStep`'s answer means. The dash only sends steps in range, so an
+/// What `TickStep`'s answer means. The control-tower only sends steps in range, so an
 /// `invalid step` means the item is not the instructions it saw: it is no longer waiting.
 pub(crate) fn tick_send_result(result: Result<(), tonic::Status>) -> SendResult {
     match result {
@@ -469,7 +469,7 @@ fn answer_request(out: &Outgoing) -> AnswerQuestionRequest {
         picks: out.picks.iter().map(proto_pick).collect(),
         note: out.note.clone(),
         send_now: out.send_now,
-        // The dash carries no trace.
+        // The control-tower carries no trace.
         trace_parent: String::new(),
     }
 }
@@ -585,7 +585,7 @@ fn map_option(option: DecisionOption) -> OptionView {
     }
 }
 
-/// The dash's queue read. `done_since_ms` 0 would return every done item, a history
+/// The control-tower's queue read. `done_since_ms` 0 would return every done item, a history
 /// that only grows, so the read asks for done items from the end of time: none.
 pub(crate) fn now_request() -> ListQueueRequest {
     ListQueueRequest {

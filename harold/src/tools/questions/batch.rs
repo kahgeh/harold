@@ -289,7 +289,7 @@ impl<S: QuestionStore> Sender<S> {
         match self.typing.type_line(&pane, &batch.text).await {
             how @ (Typing::Typed { .. } | Typing::EnterFailed) => {
                 // The chief's turn for this line joins the trace of the answer that came
-                // with one; a line of answers from the dash is a root.
+                // with one; a line of answers from the control-tower is a root.
                 telemetry::answers_typed(&pane, &batch.traces, typing_from);
                 // The line reached the pane, so this spell of waiting is over.
                 self.waiting_logged = None;

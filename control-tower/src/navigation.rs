@@ -232,7 +232,7 @@ impl TmuxNavigator {
             .find(|candidate| candidate.is_absolute() && self.context.is_file(candidate))
     }
 
-    /// Runs `rex` with its first argument, then `--autostart=false` (the dash never
+    /// Runs `rex` with its first argument, then `--autostart=false` (the control-tower never
     /// starts a Rex server), then the rest.
     fn run_rex(
         &self,
@@ -247,7 +247,7 @@ impl TmuxNavigator {
 
     /// The Rex block the user sees: the focused block of the active window of the one session
     /// the Rex app shows. Rex does not say which session the app has in front, so with
-    /// more than one session this is `None` and the dash does not guess.
+    /// more than one session this is `None` and the control-tower does not guess.
     pub fn rex_focused_block(&self) -> Result<Option<String>, NavigationError> {
         if self.find_rex().is_none() {
             return Ok(None);

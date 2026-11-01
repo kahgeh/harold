@@ -7,13 +7,13 @@
 //   PutQuestion      adds a question or instructions, or replaces one with the
 //                    same id (the version rises and it is waiting again).
 //   DismissQuestion  withdraws a question or instructions, with a reason the
-//                    dash shows.
+//                    control-tower shows.
 //   ReorderQuestions puts the listed waiting ids, of questions and
 //                    instructions, first, in order.
 //   MarkChecked      records that the chief has just checked every todo against
 //                    its spec.
 //
-// The dash calls:
+// The control-tower calls:
 //   ListQuestions    the waiting questions and instructions, the
 //                    count of questions waiting (instructions are not counted),
 //                    recently dismissed ids with their reasons, the time of the
@@ -21,10 +21,10 @@
 //                    and the specs listener's address.
 //   AnswerQuestion   answers a question (picks or a note), relegates it to an idea
 //                    (RELEGATE: the picks so far and an optional note) or answers
-//                    instructions (DONE or IGNORE) at the version the dash saw.
+//                    instructions (DONE or IGNORE) at the version the control-tower saw.
 //   TickStep         ticks or unticks one step of waiting instructions.
 //   SavePicks        replaces the saved picks of a waiting question
-//                    at the version the dash saw.
+//                    at the version the control-tower saw.
 //
 // The chief of pods and the CLI also call:
 //   ShowQuestion     a stored question in any state, with its saved picks.
@@ -44,7 +44,7 @@
 //   NotFound             message "unknown_question" (ShowQuestion of an id
 //                        that was never stored).
 //   FailedPrecondition   message "version_changed" (the question or instructions
-//                        changed since the dash read it) or "not_waiting" (it is no longer
+//                        changed since the control-tower read it) or "not_waiting" (it is no longer
 //                        waiting for an answer) or "spec_changed" (AnswerQuestion
 //                        and SavePicks: the todo's spec file no longer matches
 //                        the checksum it was asked with).
@@ -199,14 +199,14 @@ message AnswerQuestionRequest {
   // Asks for the ANSWERS line at once, without the settle wait.
   bool send_now = 6;
   // The W3C traceparent of the request that carried the answer, when it came with one.
-  // Empty from the dash and from older callers.
+  // Empty from the control-tower and from older callers.
   string trace_parent = 7;
 }
 
 message AnswerQuestionResponse {}
 
 // Ticks (`ticked` true) or unticks one step, counted from 1, of waiting
-// instructions at the version the dash saw.
+// instructions at the version the control-tower saw.
 message TickStepRequest {
   string id = 1;
   uint32 version = 2;
