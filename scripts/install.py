@@ -41,6 +41,8 @@ REFUSAL_SENTENCES = (
 )
 SKILL_NAME = 'send-message-to-away-device'
 SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)
+# The program that stage 1 moved into the bundle as control-tower.
+OLD_PROGRAM = 'tmx-agent-dash'
 # What the skill source writes where the installed harold binary's path goes.
 BIN_PLACEHOLDER = '{{HAROLD_BIN}}'
 # Each agent that reads SKILL.md, and the folder it reads skills from.
@@ -76,6 +78,7 @@ def validate_destination(prefix):
     reject_symlinks(prefix)
     if prefix.exists() and not prefix.is_dir():
         raise RuntimeError('Install prefix must be a directory')
+    # An old install can still hold tmx-agent-dash, so it stays in both lists.
     for name in ('harold', 'haroldctl', 'tmx-agent-dash', '.harold-install.lock'):
         candidate = prefix / name
         reject_symlinks(candidate)
@@ -86,6 +89,7 @@ def validate_destination(prefix):
                         raise RuntimeError('Unsafe symlink in installed bundle: {}'.format(Path(root) / child))
     if (prefix / 'harold').exists() and not (prefix / 'harold').is_dir():
         raise RuntimeError('Installed harold bundle must be a directory')
+    # An old install can still hold tmx-agent-dash.
     for name in ('haroldctl', 'tmx-agent-dash', '.harold-install.lock'):
         path = prefix / name
         if path.exists() and not path.is_file():
@@ -120,7 +124,7 @@ def prerequisites(repo, prebuilt=False):
 
 
 def prebuilt_files(directory):
-    required = ('harold', 'tmx-agent-dash', 'harold.proto',
+    required = ('harold', 'control-tower', 'harold.proto',
                 'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                 'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                 'config/default.toml', 'config/local.template.toml') + CLAUDE_MOD_FILES + (SKILL_FILE,)
@@ -128,10 +132,10 @@ def prebuilt_files(directory):
         path = directory / name
         if not path.is_file() or path.is_symlink():
             raise RuntimeError('Missing regular release file: {}'.format(path))
-    for name in ('harold', 'tmx-agent-dash'):
+    for name in ('harold', 'control-tower'):
         if not os.access(directory / name, os.X_OK):
             raise RuntimeError('Release binary is not executable: {}'.format(directory / name))
-    return {name: directory / name for name in ('harold', 'tmx-agent-dash')}
+    return {name: directory / name for name in ('harold', 'control-tower')}
 
 
 def write_settings(target, data):
@@ -421,12 +425,12 @@ def permissions_message(old, new, identity, binary):
 
 
 def build_binaries(repo, offline):
-    names = ('harold', 'tmx-agent-dash')
+    names = ('harold', 'control-tower')
     command = ['cargo', 'build', '--locked', '--release',
-               '--message-format=json-render-diagnostics', '-p', 'harold', '-p', 'tmx-agent-dash']
+               '--message-format=json-render-diagnostics', '-p', 'harold', '-p', 'control-tower']
     if offline:
         command.append('--offline')
-    print('Building Harold and dashboard…', flush=True)
+    print('Building Harold and the control-tower…', flush=True)
     result = subprocess.run(command, cwd=repo, check=True, stdout=subprocess.PIPE, text=True)
     artifacts = {}
     for line in result.stdout.splitlines():
@@ -587,14 +591,24 @@ def rollback_note(prefix, backup, copied, reinstall, metadata):
 
 
 def keep_rollback_copy(prefix, backup, reinstall, metadata):
-    """Copy haroldctl and tmx-agent-dash into `backup`, which holds the old bundle, and write
-    ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
+    """Copy haroldctl and, when it is there, tmx-agent-dash into `backup`, which holds the old
+    bundle, and write ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
     copied = []
+    # An install before stage 1 keeps tmx-agent-dash beside the bundle, not in it. This copy
+    # must run before remove_old_program deletes that file.
     for name in ('haroldctl', 'tmx-agent-dash'):
         if (prefix / name).is_file():
             shutil.copy2(prefix / name, backup / name)
             copied.append(name)
     (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata))
+
+
+def remove_old_program(prefix):
+    """Delete the old tmx-agent-dash from `prefix`. The control tower now lives in the bundle."""
+    old = prefix / OLD_PROGRAM
+    if old.is_file():
+        old.unlink()
+        print('removed ~/bin/tmx-agent-dash (now harold start-control-tower)', flush=True)
 
 
 def replace_bundle(stage, bundle, reinstall):
@@ -647,7 +661,7 @@ def install(args, repo):
             (stage / 'hooks').mkdir()
             (stage / 'data/store').mkdir(parents=True)
             shutil.copy2(artifacts['harold'], stage / 'harold')
-            shutil.copy2(artifacts['tmx-agent-dash'], staging / 'tmx-agent-dash')
+            shutil.copy2(artifacts['control-tower'], stage / 'control-tower')
             shutil.copy2(assets / ('harold.proto' if prebuilt is not None else 'harold-api/proto/harold.proto'),
                          stage / 'harold.proto')
             shutil.copy2(assets / ('hooks/harold_turn_complete.py' if prebuilt is not None else 'hooks/shared/harold_turn_complete.py'),
@@ -674,7 +688,7 @@ def install(args, repo):
             reject_symlinks(Path(metadata['plist']))
             identity = args.signing_identity if args.signing_identity is not None else saved_signing_identity(bundle)
             metadata['signing_identity'] = identity
-            for binary in (stage / 'harold', staging / 'tmx-agent-dash'):
+            for binary in (stage / 'harold', stage / 'control-tower'):
                 sign(binary, identity)
             old_requirement = designated_requirement(bundle / 'harold')
             new_requirement = designated_requirement(stage / 'harold')
@@ -714,16 +728,20 @@ def install(args, repo):
             service.unload(old_metadata)
             service.stop_unmanaged(old_metadata)
             backup = replace_bundle(stage, bundle, args.reinstall)
+            copy_kept = True
             if backup:
-                # Before haroldctl and tmx-agent-dash are overwritten below. Harold is stopped and
-                # the old bundle has moved, so a failed copy is reported and the install goes on.
+                # Before haroldctl is overwritten below. Harold is stopped and the old bundle
+                # has moved, so a failed copy is reported and the install goes on.
                 try:
                     keep_rollback_copy(prefix, backup, args.reinstall, metadata)
                 except Exception as error:
-                    print('Rollback copy incomplete ({}); the old bundle is still in the folder below.'.format(
-                        getattr(error, 'strerror', None) or error), flush=True)
+                    copy_kept = False
+                    print('Rollback copy incomplete ({}); the old tmx-agent-dash stays in place; '
+                          'the old bundle is still in the folder below.'.format(
+                              getattr(error, 'strerror', None) or error), flush=True)
                 print('Previous installation archived at {}'.format(backup), flush=True)
-            os.replace(staging / 'tmx-agent-dash', prefix / 'tmx-agent-dash')
+            if copy_kept:
+                remove_old_program(prefix)
             os.replace(staging / 'haroldctl', prefix / 'haroldctl')
             write_launch_agent(metadata)
             pid = service.start(metadata)

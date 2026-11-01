@@ -32,7 +32,7 @@ def artifact_output(repo, directory):
         'target': {'name': name, 'kind': ['bin']},
         'profile': {'test': False},
         'executable': str(directory / name),
-    }) for name in ('harold', 'tmx-agent-dash'))
+    }) for name in ('harold', 'control-tower'))
 
 
 class InstallTests(unittest.TestCase):
@@ -185,7 +185,7 @@ class InstallTests(unittest.TestCase):
 
     def test_signing_and_invalid_config_fail_before_stopping_old_service(self):
         repo = self.prefix / 'repo'
-        for name in ('target/release/harold', 'target/release/tmx-agent-dash',
+        for name in ('target/release/harold', 'target/release/control-tower',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts',
@@ -221,7 +221,7 @@ class InstallTests(unittest.TestCase):
 
     def test_installs_cargo_reported_binaries_from_custom_target_directory(self):
         repo = self.prefix / 'repo'
-        for name in ('target/release/harold', 'target/release/tmx-agent-dash',
+        for name in ('target/release/harold', 'target/release/control-tower',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
@@ -235,7 +235,7 @@ class InstallTests(unittest.TestCase):
         self.claude_skills.mkdir()
         artifacts = self.prefix / 'custom target/aarch64-apple-darwin/release'
         artifacts.mkdir(parents=True)
-        for name in ('harold', 'tmx-agent-dash'):
+        for name in ('harold', 'control-tower'):
             (artifacts / name).write_text('built ' + name)
         config = self.prefix / 'import.toml'
         config.write_text('agents = []')
@@ -247,6 +247,8 @@ class InstallTests(unittest.TestCase):
                 self.assertIn('--locked', argv)
                 self.assertIn('--offline', argv)
                 self.assertIn('--message-format=json-render-diagnostics', argv)
+                self.assertEqual(argv[argv.index('control-tower') - 1], '-p')
+                self.assertNotIn('tmx-agent-dash', argv)
                 output = artifact_output(repo, artifacts)
             elif '--check-config' in argv:
                 self.assertEqual(Path(argv[0]).read_text(), 'built harold')
@@ -266,7 +268,7 @@ class InstallTests(unittest.TestCase):
             with contextlib.redirect_stdout(printed):
                 self.install.install(args, repo)
         self.assertEqual((self.prefix / 'harold/harold').read_text(), 'built harold')
-        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'built tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'built control-tower')
         for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
             self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(), 'stale')
         mod = self.prefix / 'harold/hooks/claude-mod'
@@ -291,7 +293,7 @@ class InstallTests(unittest.TestCase):
 
     def test_prebuilt_install_needs_no_source_or_build_tools(self):
         release = self.prefix / 'release'
-        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+        for name in ('harold', 'control-tower', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
@@ -300,7 +302,7 @@ class InstallTests(unittest.TestCase):
             path = release / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('release ' + name)
-            if name in ('harold', 'tmx-agent-dash'):
+            if name in ('harold', 'control-tower'):
                 path.chmod(0o755)
         config = self.prefix / 'import.toml'
         config.write_text('agents = []')
@@ -337,7 +339,7 @@ class InstallTests(unittest.TestCase):
             self.install.install(args, self.prefix / 'nonexistent source')
         build.assert_not_called()
         self.assertEqual((self.prefix / 'harold/harold').read_text(), 'release harold')
-        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'release control-tower')
         self.assertEqual((self.prefix / 'harold/config/default.toml').read_text(),
                          'release config/default.toml')
         self.assertEqual((self.prefix / 'harold/config/local.toml').read_text(), 'agents = []')
@@ -381,7 +383,7 @@ class InstallTests(unittest.TestCase):
     def test_release_missing_any_mod_runtime_file_is_rejected(self):
         for missing in RUNTIME_FILES:
             release = self.prefix / ('release-' + missing.replace('/', '-'))
-            for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+            for name in ('harold', 'control-tower', 'harold.proto',
                          'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                          'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                          'config/default.toml', 'config/local.template.toml', SKILL_FILE,
@@ -397,9 +399,26 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Missing regular release file'):
             self.install.prebuilt_files(self.prefix)
 
+    def test_prebuilt_without_control_tower_is_rejected(self):
+        release = self.prefix / 'release-no-control-tower'
+        for name in ('harold', 'harold.proto',
+                     'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                     'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                     'config/default.toml', 'config/local.template.toml', SKILL_FILE,
+                     *('hooks/claude-mod/' + f for f in RUNTIME_FILES)):
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('x')
+            path.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, re.escape(str(release / 'control-tower'))):
+            self.install.prebuilt_files(release)
+        (release / 'control-tower').write_text('x')
+        (release / 'control-tower').chmod(0o755)
+        self.assertEqual(sorted(self.install.prebuilt_files(release)), ['control-tower', 'harold'])
+
     def test_release_without_the_skill_is_rejected(self):
         release = self.prefix / 'release-no-skill'
-        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+        for name in ('harold', 'control-tower', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                      'config/default.toml', 'config/local.template.toml',
@@ -496,7 +515,7 @@ class InstalledServiceTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.release = root / 'release'
-        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+        for name in ('harold', 'control-tower', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                      'config/default.toml', 'config/local.template.toml', SKILL_FILE,
@@ -504,7 +523,7 @@ class InstalledServiceTests(unittest.TestCase):
             path = self.release / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('release ' + name)
-        for name in ('harold', 'tmx-agent-dash'):
+        for name in ('harold', 'control-tower'):
             (self.release / name).chmod(0o755)
         (self.release / 'config/default.toml').write_text('[notify]\nmachines = []\n')
         self.config = root / 'import.toml'
@@ -733,7 +752,7 @@ class InstalledServiceTests(unittest.TestCase):
     def test_a_named_identity_signs_both_programs_with_fixed_identifiers_and_is_saved(self):
         self.run_install('Kah Geh Tan')
         self.assertEqual(self.signed(), [('Kah Geh Tan', 'harold', 'harold'),
-                                         ('Kah Geh Tan', 'tmx-agent-dash', 'tmx-agent-dash')])
+                                         ('Kah Geh Tan', 'control-tower', 'control-tower')])
         self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
 
     def test_without_a_name_the_saved_identity_is_used_and_kept(self):
@@ -751,7 +770,7 @@ class InstalledServiceTests(unittest.TestCase):
     def test_with_no_name_and_nothing_installed_signing_is_ad_hoc(self):
         self.run_install(None)
         self.assertEqual(self.signed(), [('-', 'harold', 'harold'),
-                                         ('-', 'tmx-agent-dash', 'tmx-agent-dash')])
+                                         ('-', 'control-tower', 'control-tower')])
         self.assertEqual(self.installed_metadata()['signing_identity'], '-')
 
     def test_an_install_from_before_saved_identities_reads_as_ad_hoc(self):
@@ -883,7 +902,54 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertIn('- Version: v0.5.0\n', note)
         self.assertIn('- Revision: 08095dde67ea035ff4e0aaa3109a344d39ceb019\n', note)
         self.assertRegex(note, r'- Replaced: \d{4}-\d\d-\d\d \d\d:\d\d UTC\n')
-        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'release control-tower')
+
+    REMOVED = 'removed ~/bin/tmx-agent-dash (now harold start-control-tower)'
+
+    def test_an_install_over_the_old_layout_keeps_a_copy_then_removes_the_old_program(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        output = self.run_install('-')
+        backup, note, commands = self.rollback()
+        self.assertEqual((backup / 'tmx-agent-dash').read_text(), 'old dash')
+        self.assertIn('tmx-agent-dash', note)
+        self.assertRegex(commands, r'(?m)^mv .*harold/tmx-agent-dash \.$')
+        self.assertFalse((self.prefix / 'tmx-agent-dash').exists())
+        self.assertTrue((self.prefix / 'harold' / 'control-tower').exists())
+        self.assertIn(self.REMOVED, output)
+
+    def test_a_first_install_beside_a_stale_old_program_removes_it(self):
+        (self.prefix / 'tmx-agent-dash').write_text('old dash')
+        output = self.run_install('-')
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertFalse((self.prefix / 'tmx-agent-dash').exists())
+        self.assertIn(self.REMOVED, output)
+
+    def test_a_second_install_finds_control_tower_in_the_bundle_backup(self):
+        self.run_install('-')
+        output = self.run_install('-')
+        backup, = self.prefix.glob('harold.backup-*')
+        self.assertEqual((backup / 'control-tower').read_text(), 'release control-tower')
+        self.assertFalse((backup / 'tmx-agent-dash').exists())
+        self.assertNotIn('removed', output)
+
+    def test_a_failed_rollback_copy_leaves_the_old_program_in_place(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        with patch.object(self.install, 'keep_rollback_copy', side_effect=OSError(28, 'No space left on device')):
+            output = self.run_install('-')
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'old dash')
+        self.assertNotIn('removed', output)
+        self.assertIn('Rollback copy incomplete (No space left on device); the old tmx-agent-dash stays in place',
+                      output)
+        self.assertIn('Harold ready at', output)
+
+    def test_a_symlinked_old_program_is_still_refused(self):
+        target = self.prefix.parent / 'elsewhere'
+        target.write_text('x')
+        (self.prefix / 'tmx-agent-dash').symlink_to(target)
+        with self.assertRaisesRegex(RuntimeError, 'Unsafe symlink'):
+            self.install.validate_destination(self.prefix)
 
     def test_the_rollback_commands_put_the_old_install_back(self):
         log = self.prefix.parent / 'haroldctl.log'
@@ -1032,7 +1098,7 @@ class InstalledServiceTests(unittest.TestCase):
             output = self.run_install('-')
         self.assertIn('Rollback copy incomplete (No space left on device)', output)
         self.assertIn('Harold ready at', output)
-        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'release control-tower')
 
     def test_any_rollback_copy_failure_still_starts_harold(self):
         self.install_existing(saved='-')
@@ -1041,7 +1107,7 @@ class InstalledServiceTests(unittest.TestCase):
             output = self.run_install('-')
         self.assertIn('Rollback copy incomplete (boom)', output)
         self.assertIn('Harold ready at', output)
-        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'release control-tower')
 
 
 class PermissionsTests(unittest.TestCase):
