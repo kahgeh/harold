@@ -6,7 +6,7 @@ A timed prompt is a text Harold types into an agent's pane at a set local time e
 
 A scheduled job outside Harold can send a text to a pane at 07:50, but it cannot see the pane. It cannot tell whether the agent is in the middle of a turn, or whether you have half a sentence typed in the input box. A text sent then is added to the end of your sentence and submitted with it.
 
-Harold already lists the panes (tmux panes, or Rex blocks when `[agent_monitor] multiplexer` is `"rex"`) that run agents and knows for each whether its agent is busy or idle. A timed prompt uses that, and reads the pane's screen once more before typing.
+Harold already lists the panes (tmux panes, or Rex blocks when `[agent_monitor] multiplexer` is `"rex"`) that run agents and knows for each whether its agent is working or idle. A timed prompt uses that, and reads the pane's screen once more before typing.
 
 ## Configuration
 
@@ -71,7 +71,7 @@ When all seven pass, Harold types `text` into the pane as literal keys and then 
 
 Two more things make a prompt wait:
 
-- A pane Harold typed into counts as busy until Harold has seen its agent in a state other than idle or the pane is gone, for at most the next 12 rounds. When Harold never sees the agent leave idle, for example because it answered in under 5 seconds, a second text can go into the pane about 65 seconds after the first at the earliest. Two entries for one folder and one time are typed in list order, the second once the agent is idle again.
+- A pane Harold typed into counts as working until Harold has seen its agent in a state other than idle or the pane is gone, for at most the next 12 rounds. When Harold never sees the agent leave idle, for example because it answered in under 5 seconds, a second text can go into the pane about 65 seconds after the first at the earliest. Two entries for one folder and one time are typed in list order, the second once the agent is idle again.
 - If typing the text fails, nothing is recorded and Harold tries again in the next round. The reason logged is `typing_failed`.
 
 If the text is typed and Enter fails, Harold records the prompt as failed and does not try again that day. Trying again would put the text in the box twice.

@@ -223,6 +223,16 @@ fn turn_complete_request_carries_session_and_start() {
 }
 
 #[test]
+fn proto_keeps_the_old_busy_name_as_an_alias() {
+    // An installed opencode plugin sends AGENT_STATE_BUSY through grpcurl,
+    // which reads the names from this file.
+    let proto = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/proto/harold.proto"))
+        .expect("read harold.proto");
+    assert!(proto.contains("AGENT_STATE_BUSY = 1"));
+    assert!(proto.contains("allow_alias = true"));
+}
+
+#[test]
 fn harold_service_exposes_only_the_approved_rpcs() {
     let descriptor = harold_file_descriptor()
         .service

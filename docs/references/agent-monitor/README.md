@@ -76,7 +76,7 @@ sequenceDiagram
     par scheduled inventory
         Inventory->>Runtime: complete pane and process observations
     and explicit lifecycle
-        Hook->>Runtime: pane ID, Busy/Idle, optional work summary update
+        Hook->>Runtime: pane ID, working/idle, optional work summary update
     and screen acquisition
         Screen->>Runtime: matching incarnation, optional state, ordered prompt scan
     end
@@ -127,8 +127,8 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | --- | --- | --- |
 | `AgentPaneObserved` | Pane metadata, provider display data, full incarnation, observation time | Inserts or refreshes the matching pane. A new incarnation replaces the row and starts `Unknown` with empty evidence. |
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
-| `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
-| `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback work summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
+| `AgentLifecycleObserved` | Full incarnation, `Working`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
+| `AgentScreenObserved` | Full incarnation, optional `Working`/`Idle`, optional normalized fallback work summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, activity summary, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
@@ -144,17 +144,24 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 ### State
 
 1. Inventory owns presence. A pane is departed only after two complete successful scans omit it and a fresh lookup confirms the exact incarnation is no longer current.
-2. A lifecycle observation supplies `Busy` or `Idle`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. A new incarnation starts with no lifecycle adapter.
+2. A lifecycle observation supplies `Working` or `Idle`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. A new incarnation starts with no lifecycle adapter.
 3. A turn-complete supplies `Idle` only for a pane with no lifecycle adapter. That state wins during `agent_monitor.hook_grace_ms` (2 seconds); at or after it, a conclusive screen observation can replace it.
-4. For a pane with a lifecycle adapter, a `Busy` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again.
-5. For a pane with a lifecycle adapter, an `Idle` report wins with no repeats. When the screen has read `Busy` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not.
-6. Within one visible grid, a matching busy clause wins over a matching idle clause.
+4. For a pane with a lifecycle adapter, a `Working` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again.
+5. For a pane with a lifecycle adapter, an `Idle` report wins with no repeats. When the screen has read `Working` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not.
+6. Within one visible grid, a matching working clause wins over a matching idle clause.
 7. Inconclusive screen state preserves existing evidence. With no conclusive lifecycle or screen evidence, effective state is `Unknown`.
 8. `last_transition_at_ms` changes only when effective state changes.
 
 The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Work summary changes remain independent and can append during a grace period.
 
-The Claude Code mod reports `Busy` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
+The Claude Code mod reports `Working` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
+
+Harold keeps these facts about the state words:
+
+- An old `Busy` event still reads as `Working`. Harold writes `Working` from now on.
+- An unknown state word in an event reads as `Unknown` for a state and as no observation for a screen read.
+- An installed OpenCode plugin may send the old name `AGENT_STATE_BUSY`. The proto keeps it as an alias of `AGENT_STATE_WORKING`, so both names mean number 1.
+- An older Harold cannot read the events that this Harold writes.
 
 ### Work summaries
 
@@ -192,7 +199,7 @@ A fresh installation creates `<store.path>/harold-state.db` from one migration, 
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
 | `settings` | Key/value application settings; currently `tts_muted`, written by `TtsMuteChanged`, and `messaging_paused`, written by `MessagingPausedChanged` |
 
-`agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep an activity summary tied to its source revision while preserving the original source candidates. A store whose recorded migrations differ from this build's is rejected at start; Harold does not convert or reset it. A store made by v0.3.1 or earlier is such a store: install with `./scripts/install.sh --reinstall`, which archives the old data and starts a fresh store with voice not muted, messaging not paused and no panes.
+`agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep an activity summary tied to its source revision while preserving the original source candidates. Migration `006_agent_states.sql` rebuilds `agent_panes` with the six-state rules. It changes each stored `busy` row to `working`. A stored `idle` or `unknown` row stays as it is. A store whose recorded migrations differ from this build's is rejected at start; Harold does not convert or reset it. A store made by v0.3.1 or earlier is such a store: install with `./scripts/install.sh --reinstall`, which archives the old data and starts a fresh store with voice not muted, messaging not paused and no panes.
 
 The state database uses WAL mode, `synchronous = NORMAL`, and a five-second busy timeout. For each projection batch, Harold opens one immediate transaction, applies agent rows, stages only externally deliverable events, advances `last_processed_event`, and commits. An error rolls the whole transaction back.
 
@@ -243,7 +250,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `provider_id` | 9 | `string` |
 | `provider_display_name` | 10 | `string` |
 | `working_directory` | 11 | `string` |
-| `state` | 12 | `AgentState` (`Busy`, `Idle`, or `Unknown`) |
+| `state` | 12 | `AgentState` (`Working`, `Idle`, or `Unknown`) |
 | `last_transition_at_ms` | 13 | `int64` |
 | `work_summary` | 14 | `optional string` |
 
@@ -291,7 +298,7 @@ screen_history_lines = 2000
 | `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's idle state wins over the screen for a pane with no lifecycle adapter |
 | `agent_monitor.multiplexer` | `"tmux"` (the default) or `"rex"`; the one multiplexer Harold works with. Harold reads it once, at start. Any other value stops Harold at start with `agent_monitor.multiplexer must be "tmux" or "rex"` |
 | `agent_monitor.rex` | Optional path to the `rex` program. When it is not set, Harold tries the running server's own copy (`~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`), then `rex` on the `PATH`, then `/Applications/Rex*.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex` |
-| `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Busy` report can be before the screen decides, and how long the screen must read `Busy` without a break to replace an `Idle` report |
+| `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Working` report can be before the screen decides, and how long the screen must read `Working` without a break to replace an `Idle` report |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
 | `agents[].display_name` | Non-empty display label |
 | `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively against the process's program, not its whole command line. The program is the file name of the `ps` command's first word; when that is `node`, `bun`, `deno`, `python` or `python3`, it is the file name of the second word instead |
@@ -376,7 +383,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - `WatchAgentStates` is snapshot-then-stream, not replay from a checkpoint. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered work summary.
-- Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
+- Harold does not infer working or idle from CPU use, tmux window activity, or elapsed silence.
 - Harold does not navigate tmux or Rex for the control-tower and does not implement the control-tower's filter.
 - The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and agents without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.

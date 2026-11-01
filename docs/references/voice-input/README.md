@@ -61,7 +61,7 @@ The chief treats `🎙` lines as possibly misheard, and confirms anything conseq
 |---|---|
 | The chief's pane is busy | With the call answerer on, an answered turn needs no idle pane, and a hand-over is typed into a busy chief ([hand-overs](call-answerer.md#hand-overs)). A turn that falls back to the chief: Harold says `The chief is busy. I'll pass it on when it's free.` It tries to type the turn every second, for up to 2 minutes, and listens meanwhile. A second turn spoken meanwhile is joined to the waiting one with a space, so the chief gets one `🎙` line. After 2 minutes the turn is dropped, with no phrase. When the call ends before the turn is typed, the turn keeps waiting ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). |
 | The chief takes longer than 3 seconds | The tick, every 3 seconds. At 90 seconds Harold says `No answer yet.` and listens again. |
-| The chief's turn ends without `harold speak` | Harold reads the chief's pane every 500 ms. When it sees the pane busy and then idle, and no line arrives within 2 seconds, it says the desk's turn-end update for that prompt, so every turn gets an answer. |
+| The chief's turn ends without `harold speak` | Harold reads the chief's pane every 500 ms. When it sees the pane working and then idle, and no line arrives within 2 seconds, it says the desk's turn-end update for that prompt, so every turn gets an answer. |
 | Nothing was heard, or the transcript is empty | `Sorry, I didn't catch that.`, and listening again. |
 | No chief is running | `There's no chief running.`, and the call ends. |
 | A line is typed that cannot be sent (Enter failed) | The turn is dropped with result `failed`, and the text is not typed again. |

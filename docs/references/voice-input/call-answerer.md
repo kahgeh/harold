@@ -6,7 +6,7 @@ In a call, a small model answers each thing you say within a few seconds, and pa
 
 You ask "Is anything building?" and stop talking. Harold hears the stop 1.2 s later, transcribes the turn in about 0.5 s, and then runs the call answerer once:
 
-1. Harold reads the **call facts**: which agents are busy, what each pod is building, your todos, the chief's queue, and what has been said in this call.
+1. Harold reads the **call facts**: which agents are working, what each pod is building, your todos, the chief's queue, and what has been said in this call.
 2. Harold starts one `claude -p` run on Haiku with the rules, the call facts and your words.
 3. The run returns JSON with `say`, the sentence to speak, and, only when you asked for work, `hand_over`, your request in your own words.
 4. Harold makes `say` into audio with the voice worker and plays it. The line does not pass through the delivery queue, so another agent's update cannot hold it up.
@@ -49,7 +49,7 @@ Harold builds them fresh for each turn and sends them, with your spoken words, t
 
 | Facts | Where Harold reads them |
 |---|---|
-| Each agent: its folder's name, Busy, Idle or Unknown, for how long, and its work summary cut to 200 characters | the agent monitor's snapshot |
+| Each agent: its folder's name, `working`, `idle` or `unknown`, for how long, and its work summary cut to 200 characters | the agent monitor's snapshot |
 | Each product's pod: slots busy and free, and each spec's id and state, for the specs that are drafted, waiting for approval, approved or building, and those merged or rejected in the last 24 hours | Harold's pod facts, refreshed every minute |
 | Your todos: id, product, title and progress (`picks 2/2`, `steps 0/6`) | the question tool's gRPC service |
 | The chief's queue: whether a note is Now or Parked, its id, and its first sentence cut to 120 characters | the backlog tool's gRPC service |
@@ -79,7 +79,7 @@ When `say` is empty and `hand_over` is set, Harold says "I've passed that to the
 
 1. Harold numbers the hand-over within the call (`H1`, `H2`, …).
 2. Harold types `🎙 hand-over H1: <your request>` and Enter into the chief's pane, even while the chief is working. Claude Code reads a line typed while it works after its current step.
-3. The typing goes through `Writer::HandOver` in `harold/src/timed_prompts.rs`. Like a spoken turn it is not held back by another writer's one-minute hold. It is the only writer that may type into a Claude Code pane that is `Busy`. It still waits when the pane list cannot be read, when the chief's folder has no agent, when the agent is not Claude Code, when its state is `Unknown`, when the input box is not showing or holds text, and for the pane lock. Once it has typed, it sets the usual one-minute hold.
+3. The typing goes through `Writer::HandOver` in `harold/src/timed_prompts.rs`. Like a spoken turn it is not held back by another writer's one-minute hold. It is the only writer that may type into a Claude Code pane that is `working`. It still waits when the pane list cannot be read, when the chief's folder has no agent, when the agent is not Claude Code, when its state is `Unknown`, when the input box is not showing or holds text, and for the pane lock. Once it has typed, it sets the usual one-minute hold.
 4. When a check refuses, Harold tries again every 5 s, for 30 minutes, also after the call ends. If the line is still not typed, Harold sends an away message from the chief's pane, `Harold couldn't pass hand-over H1 to the chief.`, which the web app's thread shows. With no chief running there is no pane to send it from, and only the log line records it. A restart of Harold drops a hand-over not yet typed.
 
 "Typed" is all Harold knows: tmux accepted the keys, not that the chief read the line. No receipt check follows it: agent-message-tool, which would have added one, was set aside (ADR 0009, note of 2026-10-23).

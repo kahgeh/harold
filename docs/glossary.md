@@ -30,7 +30,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | INSERT mode | Claude Code's Vim editor mode in which keys type text into the input box | — |
 | NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |
 | pane resolve | The look-up of one pane by its id (`resolve_pane` in the code), which runs its own scan after it waits for the monitor's current tick. Harold logs a slow one as `agent pane resolve slow` | "pane lookup" |
-| incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
+| incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at `unknown` | — |
 | the chief, chief of pods | The first agent pane in the chief's session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
 | the chief's row | The chief's row in the control-tower's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
@@ -96,12 +96,18 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | suggested prompt | The dim text Claude Code draws in an empty input box after a turn. It is not typed text, and the input box still counts as empty | "grey suggestion", "autocomplete" |
 | hook | A small script a provider runs to tell Harold what an agent did | — |
 | Claude Code mod | The Claude Code plugin in `hooks/claude-mod` that reports a working pane | "plugin" for it. OpenCode's is an OpenCode plugin |
-| Busy, Idle, Unknown | An agent's state. Unknown: an agent runs in the pane, and neither its hooks nor its screen say Busy or Idle yet. A pane with no agent program has no state and is not listed | "unknown" for a pane with no agent |
+| agent state | What an agent does now: `working`, `idle`, or `unknown` when Harold has no conclusive evidence. The agent's own report, the hooks or the screen supply it. A pane with no agent program has no state and is not listed. Later stages add `blocked`, `done` and `error` | "Busy", "Idle" (the old states), "status" |
+| working | The agent runs a turn | "busy", "running" |
+| blocked | The agent waits for you inside its turn: a permission prompt, a question or a login | "waiting", "stuck" |
+| done | The agent finished a turn | "finished", "complete" |
+| idle | The agent waits at its prompt | "free", "ready" |
+| error | The agent stopped with a failure | "failed", "crashed" |
+| unknown | An agent runs in the pane, and no evidence gives its state yet | "Unknown" with a capital, "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
 | work summary | Short text saying what an agent is working on | "task description", "current work", "dashboard description", "summary" alone |
 | activity summary | A work summary that Claude Code writes from the agent's evidence, when `[activity_summary]` is on | "generated description" |
-| waiting agent | An agent that went from Busy to Idle while the user wasn't looking at it, marked `◆` | — |
+| waiting agent | An agent that stopped working while you were not looking at it: its state went from working to idle. The control-tower marks it `◆` until you go to it | — |
 | focus tracking | The control-tower's check, once a second, of which pane the user's tmux client or the Rex app shows | — |
 
 ## Talking to the user
@@ -164,7 +170,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | masthead | The control-tower's top line: version, transport, REV, voice and the messaging pause | "header" for it |
-| summary strip | The line under the masthead with the BUSY and IDLE counts, the UNKNOWN count when above 0, and the server's clock | "summary" alone |
+| summary strip | The line under the masthead with the count of agents in each state, `unknown` only when above 0, and the server's clock. It shows WORKING and IDLE now | "summary" alone |
 | transport | The control-tower's connection to Harold: `LIVE`, `STALE` and the like | — |
 | filter | The control-tower's search, which hides agent rows that don't match | — |
 | agent row | A row of the agent list for one agent | — |

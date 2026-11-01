@@ -78,7 +78,8 @@ enum AgentState {
   option allow_alias = true;
   AGENT_STATE_UNSPECIFIED = 0;
   AGENT_STATE_WORKING = 1;
-  // An installed opencode plugin sends the old name, so the proto still accepts it.
+  // The old name stays as an alias. An installed opencode plugin sends it through grpcurl.
+  // grpcurl reads the name from this file and sends number 1.
   AGENT_STATE_BUSY = 1;
   AGENT_STATE_IDLE = 2;
   AGENT_STATE_UNKNOWN = 3;

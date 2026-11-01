@@ -47,7 +47,7 @@ Source observations are appended before generation is scheduled. Agent-state upd
 
 Every result carries the full agent-process incarnation and the source activity revision. Both runtime and reducer reject results that no longer match. A new task invalidates the previous activity summary; pane replacement starts with no inherited activity summary. A newly recovered submitted occurrence advances that revision even when its instruction repeats the previous task. Routine metadata refreshes and repeated captures of the same occurrence do not request fresh inference.
 
-Successful activity summaries are recorded as projection-only events. They do not invoke delivery of a turn-end update or trigger another activity summary request. Original explicit and screen candidates remain available for fallback. A generated activity summary changes only the work summary candidate; it never changes Busy/Idle/Unknown or lifecycle timestamps.
+Successful activity summaries are recorded as projection-only events. They do not invoke delivery of a turn-end update or trigger another activity summary request. Original explicit and screen candidates remain available for fallback. A generated activity summary changes only the work summary candidate; it never changes Working/Idle/Unknown or lifecycle timestamps.
 
 The generated candidate survives restart and event replay. Pending generation jobs are ephemeral and are not automatically resumed after restart. Disabling generation stops new jobs; existing stored activity summaries remain subject to the normal source-revision rules.
 

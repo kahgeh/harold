@@ -26,6 +26,12 @@ the RPC. `grpcurl` is launched directly with `shell: false`; the JSON request
 is written to stdin rather than exposed in process arguments. Output is
 discarded, failures are fail-open, and prompt content is never logged.
 
+## After an install
+
+Refresh the opencode plugin after this install. An installed plugin that sends the old name
+`AGENT_STATE_BUSY` still works, because `harold.proto` keeps that name as an alias of
+`AGENT_STATE_WORKING`. `grpcurl` reads the name from `harold.proto` and sends number 1.
+
 ## Isolated setup
 
 The installed OpenCode 1.18.15 discovers JavaScript modules under either

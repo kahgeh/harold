@@ -40,10 +40,10 @@ tmux capture-pane -p -e -S -2000 -t <pane-id>
 | --- | --- |
 | Newly observed incarnation | Capture immediately to establish its baseline; emit no existing prompt. |
 | Baseline capture failed | Retry no more than once every 30 seconds while present, including while Idle. The first success still establishes only a baseline. |
-| Transition into Busy after baseline | Capture even if an older work summary exists. |
-| Busy-to-Idle after an inconclusive Busy recovery | Retry once for a newly submitted prompt. |
-| Sustained Busy | Retry no more than once every 30 seconds. |
-| Recovered prompt could not be appended | Keep the checkpoint unchanged. Retry on the next Busy-to-Idle edge; if an Idle retry also fails, retry no more than once every 30 seconds while the source append remains pending. |
+| Transition into Working after baseline | Capture even if an older work summary exists. |
+| Working-to-Idle after an inconclusive Working recovery | Retry once for a newly submitted prompt. |
+| Sustained Working | Retry no more than once every 30 seconds. |
+| Recovered prompt could not be appended | Keep the checkpoint unchanged. Retry on the next Working-to-Idle edge; if an Idle retry also fails, retry no more than once every 30 seconds while the source append remains pending. |
 | Ordinary Idle after baseline | Do not capture history. |
 | Explicit work summary clear | Permit recovery at the next eligible trigger; clearing does not make old history new. |
 
@@ -55,20 +55,20 @@ Visible-state evidence remains independent of prompt recovery. A history failure
 
 The adapter accepts ASCII `>` and Unicode `›` submitted blocks, joins their wrapped continuation rows, and excludes composer, assistant, tool, shell, and inconclusive rows. Ambiguous or malformed styling produces no submitted candidate. Exact normalized configured idle placeholders cannot become work summaries; a substantive instruction that merely contains the placeholder wording remains eligible.
 
-`generic-v1` retains configurable `busy_all`, `idle_all`, and safe-prefix parsing without embedding Codex layout rules. Every adapter uses visible-grid state clauses, with Busy winning when both full clauses match.
+`generic-v1` retains configurable `busy_all`, `idle_all`, and safe-prefix parsing without embedding Codex layout rules. Every adapter uses visible-grid state clauses, with Working winning when both full clauses match.
 
 ## Claude running status
 
 `claude-v1` reads Claude Code's status row before falling back to the configured clauses. It finds the input box (a `❯` row directly below a `─` border) and takes the newest non-blank, unindented row above it. Rows Claude nests under a status, such as tool results, todos, and tips, are indented and skipped.
 
-That row is Busy when it starts with a spinner glyph (`·`, `✢`, `✳`, `✶`, `✻`, `✽`, or `*`) and a space, and contains `…` or `retrying`:
+That row is Working when it starts with a spinner glyph (`·`, `✢`, `✳`, `✶`, `✻`, `✽`, or `*`) and a space, and contains `…` or `retrying`:
 
 ```text
 ✽ Synthesizing… (13m 18s · ↓ 72.3k tokens)
 ✻ No response from the API after 3m · retrying once, waiting up to 10m
 ```
 
-A finished turn keeps the glyph without an ellipsis (`✻ Worked for 20s · done 8:32 am`). Any other row leaves the decision to `busy_all` and `idle_all`. The shipped `❯` idle clause matches whenever the input box is visible, so a pane without a running status is Idle. Claude Code 2.1.295 in vim mode does not draw `esc to interrupt` while busy; the shipped `busy_all` keeps it for renderings that do.
+A finished turn keeps the glyph without an ellipsis (`✻ Worked for 20s · done 8:32 am`). Any other row leaves the decision to `busy_all` and `idle_all`. The shipped `❯` idle clause matches whenever the input box is visible, so a pane without a running status is Idle. Claude Code 2.1.295 in vim mode does not draw `esc to interrupt` while working; the shipped `busy_all` keeps it for renderings that do.
 
 ## Acquisition checkpoint and selection
 

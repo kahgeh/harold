@@ -104,7 +104,7 @@ What other components or products depend on, each with where its contract is wri
 - **Hook payloads** from Claude Code, Codex and OpenCode. Contract: [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).
 - **Settings:** `default.toml` and `local.toml`, read in that order, with `local.toml` laid over `default.toml`. Contract: `harold/config/local.template.toml` and each feature's reference page.
 - **The web app's HTTP routes**, and the specs listener's two page routes. Contract: the [web app reference](../references/away-app/README.md).
-- **Lines Harold types into panes:** the answers line, alerts, timed prompts, the chief's restart reminder, phone replies (a web app reply may end with `📷 <path>`, ADR 0010), `WATCH` lines and hand-overs from a call. A hand-over is the one writer that may type into a `Busy` Claude Code pane (ADR 0009). Contracts: the [questions reference](../references/tools/questions.md), the [call answerer reference](../references/voice-input/call-answerer.md), the [watch reference](../references/tools/watch.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) (which also covers the restart reminder) and the [inbound routing reference](../references/inbound-message-routing/README.md).
+- **Lines Harold types into panes:** the answers line, alerts, timed prompts, the chief's restart reminder, phone replies (a web app reply may end with `📷 <path>`, ADR 0010), `WATCH` lines and hand-overs from a call. A hand-over is the one writer that may type into a `working` Claude Code pane (ADR 0009). Contracts: the [questions reference](../references/tools/questions.md), the [call answerer reference](../references/voice-input/call-answerer.md), the [watch reference](../references/tools/watch.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) (which also covers the restart reminder) and the [inbound routing reference](../references/inbound-message-routing/README.md).
 - **The alert address:** `POST /alert` on `[telemetry] alert_listen`, where HyperDX's webhooks post. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **Machine stats:** Harold reads its machine every 60 seconds when export is on, and sends gauges and `harold.machine.past_normal` to the collector. The alerts `machine-past-normal` and `disk-low` come back through the alert address. Contract: the [telemetry reference](../references/telemetry/README.md#machine-stats).
 - **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
@@ -186,10 +186,10 @@ Suppose an agent is idle and you submit “Fix the login error.” With lifecycl
 
 1. The agent's start hook tells Harold that work has begun and supplies the task text. A **hook** is a small script a provider runs to report an agent action.
 2. Harold checks which agent process is running in that pane and records the observation in the event stream.
-3. Harold reads the recorded observation and updates its stored view of that agent to `Busy`, with the submitted instruction available as its work summary.
-4. After saving that view, Harold publishes it to the control-tower. The control-tower can now show `Busy` and “Fix the login error.”
+3. Harold reads the recorded observation and updates its stored view of that agent to `working`, with the submitted instruction available as its work summary.
+4. After saving that view, Harold publishes it to the control-tower. The control-tower can now show `working` and “Fix the login error.”
 
-When the agent finishes, a completion hook can report its reply. Harold updates the agent to `Idle` and separately considers whether to tell you. Finishing a turn does not by itself prove the requested fix succeeded.
+When the agent finishes, a completion hook can report its reply. Harold updates the agent to `idle` and separately considers whether to tell you. Finishing a turn does not by itself prove the requested fix succeeded.
 
 This flow has two useful records: **what Harold observed**, and **what Harold currently knows about each agent**. Keeping the observations lets Harold rebuild the current view after a restart.
 
@@ -246,25 +246,25 @@ See the [watch reference](../references/tools/watch.md).
 
 ### Why the agent monitor uses several sources
 
-A start hook may say an agent is busy while its terminal still displays the previous idle screen. Later, a completion hook might be missed even though the terminal clearly shows the agent idle at its prompt. Harold needs rules for both situations.
+A start hook may say an agent is working while its terminal still displays the previous idle screen. Later, a completion hook might be missed even though the terminal clearly shows the agent idle at its prompt. Harold needs rules for both situations.
 
 Each source answers a different question:
 
 | Source | What it tells Harold | Limitation |
 | --- | --- | --- |
-| Process inventory | Which agent process is present in each pane | Presence alone does not establish Busy or Idle |
+| Process inventory | Which agent process is present in each pane | Presence alone does not establish working or idle |
 | Lifecycle hooks | The agent explicitly started or finished work | Hooks can be missed |
-| Screen adapters | The visible terminal matches a configured Busy or Idle marker | The terminal can be stale, ambiguous, or changed by a provider update |
+| Screen adapters | The visible terminal matches a configured working or idle marker | The terminal can be stale, ambiguous, or changed by a provider update |
 
 A **screen adapter** interprets the terminal format used by a particular agent. It returns observations for the agent monitor to record; it does not edit the state database.
 
-After a hook fires, Harold gives the terminal a short grace period to repaint. During that period, the hook wins. Afterward, conclusive screen evidence can correct stale state. An unreadable or inconclusive screen preserves earlier evidence; without any conclusive evidence, the state is `Unknown`. CPU use and elapsed silence do not determine Busy or Idle.
+After a hook fires, Harold gives the terminal a short grace period to repaint. During that period, the hook wins. Afterward, conclusive screen evidence can correct stale state. An unreadable or inconclusive screen preserves earlier evidence; without any conclusive evidence, the state is `unknown`. CPU use and elapsed silence do not determine working or idle.
 
 Recording the evidence before applying these rules makes the result reproducible. A failed capture does not erase known state, and replaying the same history applies the same decisions. The [reconciliation contract](../references/agent-monitor/README.md#reconciliation-contract) defines the exact timing and precedence rules.
 
 ### Identity before state
 
-Suppose an agent exits and you launch another in the same tmux pane. The pane still exists, but the new agent must not inherit the old agent's Busy state or work summary.
+Suppose an agent exits and you launch another in the same tmux pane. The pane still exists, but the new agent must not inherit the old agent's working state or work summary.
 
 Harold therefore identifies the pane together with the agent process, its start time, and its provider. This combination is called an **incarnation**. Process start time matters because the operating system can reuse a process ID.
 
@@ -272,7 +272,7 @@ A replacement starts at `Unknown` with no work summary. Recorded events belongin
 
 ### Keeping the work summary useful
 
-Busy/Idle answers “Is it working?” The work summary answers “What is it working on?” Those values can change independently. An idle agent can keep the work summary of its last task, and Harold can learn a work summary even when screen state is inconclusive.
+The state answers “Is it working?” The work summary answers “What is it working on?” Those values can change independently. An idle agent can keep the work summary of its last task, and Harold can learn a work summary even when screen state is inconclusive.
 
 Hooks supply task text directly. Screen adapters can recover submitted instructions when hooks miss them. Harold keeps these sources separately and normally uses the most recent meaningful instruction. Idle prompts such as “Ask Codex to do anything” do not replace a work summary.
 
@@ -282,7 +282,7 @@ An activity summary condenses supplied evidence; it does not independently verif
 
 ### Recovering a submitted task from scrollback
 
-A submitted instruction may scroll out of view before Harold reads it. For supported terminal formats, Harold can look through a bounded history tail to recover it. Busy/Idle classification continues to use the visible screen.
+A submitted instruction may scroll out of view before Harold reads it. For supported terminal formats, Harold can look through a bounded history tail to recover it. State classification continues to use the visible screen.
 
 Old history creates an identity problem: text already in a pane may belong to a previous agent. On its first successful history capture, Harold records a baseline of prompt fingerprints (compact identifiers for recognizing the same submitted blocks) without adopting any existing prompt as new work. Later captures must establish continuity with that baseline before newly submitted text becomes eligible. If continuity is lost, Harold establishes another baseline.
 
