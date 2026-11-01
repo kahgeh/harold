@@ -734,15 +734,7 @@ fn map_agent_snapshot(
                     provider_id: pane.incarnation.provider_id,
                     provider_display_name: pane.provider_display_name,
                     working_directory: pane.working_directory,
-                    state: match projection.effective_state {
-                        // Task 5 gives Blocked, Done and Error their own API values.
-                        agent::domain::EffectiveAgentState::Working
-                        | agent::domain::EffectiveAgentState::Blocked => AgentState::Working.into(),
-                        agent::domain::EffectiveAgentState::Done
-                        | agent::domain::EffectiveAgentState::Idle
-                        | agent::domain::EffectiveAgentState::Error => AgentState::Idle.into(),
-                        agent::domain::EffectiveAgentState::Unknown => AgentState::Unknown.into(),
-                    },
+                    state: proto_agent_state(projection.effective_state),
                     last_transition_at_ms: projection.last_transition_at_ms,
                     work_summary: projection.work_summary,
                     current_step,
@@ -754,6 +746,17 @@ fn map_agent_snapshot(
             })
             .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
             .collect(),
+    }
+}
+
+/// The API state of an effective state. Task 5 gives Blocked, Done and Error their own API
+/// values. Until then Blocked reads as Working, and Done and Error read as Idle.
+fn proto_agent_state(state: agent::domain::EffectiveAgentState) -> i32 {
+    use agent::domain::EffectiveAgentState as Effective;
+    match state {
+        Effective::Working | Effective::Blocked => AgentState::Working.into(),
+        Effective::Done | Effective::Idle | Effective::Error => AgentState::Idle.into(),
+        Effective::Unknown => AgentState::Unknown.into(),
     }
 }
 
@@ -778,15 +781,7 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
         provider_id: agent.provider_id,
         provider_display_name: agent.provider_display_name,
         working_directory: String::new(),
-        state: match agent.state {
-            agent::rex_hosts::HostAgentState::Observed(
-                agent::domain::ObservedAgentState::Working,
-            ) => AgentState::Working.into(),
-            agent::rex_hosts::HostAgentState::Observed(agent::domain::ObservedAgentState::Idle) => {
-                AgentState::Idle.into()
-            }
-            agent::rex_hosts::HostAgentState::Unknown => AgentState::Unknown.into(),
-        },
+        state: proto_agent_state(agent.state.effective()),
         last_transition_at_ms: row.last_transition_at_ms,
         work_summary: None,
         current_step: agent.current_step,

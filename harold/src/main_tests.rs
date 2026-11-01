@@ -3073,6 +3073,26 @@ fn a_host_agent_row_has_the_agent_pid_as_its_pane_pid() {
 }
 
 #[test]
+fn a_host_agent_row_maps_each_state_as_a_pane_does() {
+    for (observed, expected) in [
+        (ObservedAgentState::Working, AgentState::Working),
+        (ObservedAgentState::Blocked, AgentState::Working),
+        (ObservedAgentState::Done, AgentState::Idle),
+        (ObservedAgentState::Idle, AgentState::Idle),
+        (ObservedAgentState::Error, AgentState::Idle),
+    ] {
+        let mut row = fixed_host_agent_row();
+        row.agent = host_agent(observed);
+        let mapped = super::map_host_agent(row).expect("a row");
+        assert_eq!(mapped.state, i32::from(expected), "{observed:?}");
+    }
+    let mut row = fixed_host_agent_row();
+    row.agent.state = HostAgentState::Unknown;
+    let mapped = super::map_host_agent(row).expect("a row");
+    assert_eq!(mapped.state, i32::from(AgentState::Unknown));
+}
+
+#[test]
 fn an_agent_with_a_zero_pid_on_a_host_gets_no_row() {
     let mut row = fixed_host_agent_row();
     row.agent.pid = 0;

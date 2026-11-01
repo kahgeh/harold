@@ -199,6 +199,50 @@ fn host_lines(logs: &CapturedLogs) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn host_agents_in_blocked_done_and_error_count_under_their_own_words() {
+    crate::telemetry::test_support::install();
+    let agents = HostAgents::new(vec!["five_host".into()]);
+    let states = [
+        ObservedAgentState::Blocked,
+        ObservedAgentState::Done,
+        ObservedAgentState::Error,
+    ];
+    let found = states
+        .iter()
+        .zip(["b1", "b2", "b3"])
+        .zip(300_u32..)
+        .map(|((state, block), pid)| {
+            let mut found = agent("five_host", block, pid, 1, HostAgentState::Observed(*state));
+            found.provider_id = "five_provider".into();
+            found
+        })
+        .collect();
+    agents.record(
+        "five_host",
+        HostReport::Reached {
+            agents: found,
+            host_id: Some("id".into()),
+            icon: String::new(),
+        },
+        10,
+    );
+    for (word, count) in [
+        ("working", 0),
+        ("blocked", 1),
+        ("done", 1),
+        ("idle", 0),
+        ("error", 1),
+        ("unknown", 0),
+    ] {
+        assert_eq!(
+            gauge("five_host", "five_provider", word),
+            Some(count),
+            "{word}"
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn after_three_failures_the_host_is_tried_every_30_seconds_and_a_good_scan_resets() {
     let logs = CapturedLogs::start();
@@ -415,6 +459,13 @@ fn host_agents_are_counted_by_state_and_an_unreached_host_counts_unknown() {
     assert_eq!(gauge("count_host", "count_provider", "working"), Some(1));
     assert_eq!(gauge("count_host", "count_provider", "idle"), Some(1));
     assert_eq!(gauge("count_host", "count_provider", "unknown"), Some(0));
+    for word in ["blocked", "done", "error"] {
+        assert_eq!(
+            gauge("count_host", "count_provider", word),
+            Some(0),
+            "{word}"
+        );
+    }
     agents.record(
         "count_host",
         HostReport::Unreached {

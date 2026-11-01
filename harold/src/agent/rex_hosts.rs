@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::domain::{ObservedAgentState, UNKNOWN_PROVIDER_DISPLAY_NAME, UNKNOWN_PROVIDER_ID};
+use super::domain::{
+    EffectiveAgentState, ObservedAgentState, UNKNOWN_PROVIDER_DISPLAY_NAME, UNKNOWN_PROVIDER_ID,
+};
 use super::inventory::{ProviderResolution, resolve_provider};
 use super::pane_route::host_pane_id;
 use super::rex::{
@@ -36,6 +38,16 @@ const ICON_INTERVAL_MS: i64 = 60_000;
 pub(crate) enum HostAgentState {
     Observed(ObservedAgentState),
     Unknown,
+}
+
+impl HostAgentState {
+    /// The effective state of a host agent. A host agent with no record is `Unknown`.
+    pub(crate) fn effective(self) -> EffectiveAgentState {
+        match self {
+            Self::Observed(state) => state.effective(),
+            Self::Unknown => EffectiveAgentState::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

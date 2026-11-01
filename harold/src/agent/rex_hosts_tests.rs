@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::settings::{AgentProviderSettings, AgentSettings, ScreenAdapter};
 
-use super::domain::ObservedAgentState;
+use super::domain::{EffectiveAgentState, ObservedAgentState};
 use super::rex::RexError;
 use super::rex_hosts::*;
 
@@ -169,6 +169,33 @@ fn an_agent_gets_a_host_pane_id_and_its_place() {
     assert_eq!(agent.session_name, "work");
     assert_eq!((agent.window_index, agent.pane_index), (1, 1));
     assert_eq!(agent.working_directory, "/work/repo");
+}
+
+#[test]
+fn a_record_that_says_blocked_done_or_error_gives_that_state() {
+    let fake = Fake::new("five-states");
+    for (word, expected) in [
+        ("blocked", ObservedAgentState::Blocked),
+        ("done", ObservedAgentState::Done),
+        ("error", ObservedAgentState::Error),
+    ] {
+        fake.status(200, word, "");
+        let agent = fake
+            .inventory("omarchy", None, clock(1))
+            .scan()
+            .agents
+            .remove(0);
+        assert_eq!(agent.state, HostAgentState::Observed(expected), "{word}");
+        assert_eq!(agent.state.effective(), expected.effective(), "{word}");
+    }
+}
+
+#[test]
+fn an_unknown_host_state_is_effectively_unknown() {
+    assert_eq!(
+        HostAgentState::Unknown.effective(),
+        EffectiveAgentState::Unknown
+    );
 }
 
 #[test]

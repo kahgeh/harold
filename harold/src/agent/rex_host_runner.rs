@@ -13,10 +13,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::domain::ObservedAgentState;
 use super::rex::RexError;
 use super::rex_hosts::{HostAgentState, HostClock, HostScan, RexHostAgent, RexHostInventory};
 use super::screen::{StopSignal, run_stoppable};
+use super::snapshot::ALL_STATES;
 use crate::settings::{Multiplexer, Settings};
 use crate::telemetry::AgentCount;
 
@@ -299,18 +299,14 @@ impl HostAgents {
 fn host_agent_counts<'a>(rows: impl Iterator<Item = &'a HostAgentRow> + Clone) -> Vec<AgentCount> {
     let mut counts: BTreeMap<(&'static str, &str), u64> = BTreeMap::new();
     for row in rows.clone() {
-        for state in ["working", "idle", "unknown"] {
+        for state in ALL_STATES {
             counts
-                .entry((state, row.agent.provider_id.as_str()))
+                .entry((state.as_str(), row.agent.provider_id.as_str()))
                 .or_default();
         }
     }
     for row in rows {
-        let state = match row.agent.state {
-            HostAgentState::Observed(ObservedAgentState::Working) => "working",
-            HostAgentState::Observed(ObservedAgentState::Idle) => "idle",
-            HostAgentState::Unknown => "unknown",
-        };
+        let state = row.agent.state.effective().as_str();
         *counts
             .entry((state, row.agent.provider_id.as_str()))
             .or_default() += 1;

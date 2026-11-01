@@ -115,7 +115,8 @@ pub(super) fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
         .collect()
 }
 
-const ALL_STATES: [EffectiveAgentState; 6] = [
+/// Every effective state, for the state counts of the metrics.
+pub(crate) const ALL_STATES: [EffectiveAgentState; 6] = [
     EffectiveAgentState::Working,
     EffectiveAgentState::Blocked,
     EffectiveAgentState::Done,
