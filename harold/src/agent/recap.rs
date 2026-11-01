@@ -109,7 +109,6 @@ pub(crate) struct Recaps {
 }
 
 impl Recaps {
-    #[allow(dead_code)] // Phase 2 streams the recap to the watchers.
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.version.subscribe()
     }
@@ -157,8 +156,24 @@ impl Recaps {
         }
     }
 
+    /// Stores a recap for the agent, as a test needs it.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&self, pane_id: &str, agent_pid: u32, text: &str, at_ms: i64) {
+        self.note_turn_end(pane_id, agent_pid, "claude", "s-test", "/t/s-test.jsonl");
+        self.update_read(
+            pane_id,
+            agent_pid,
+            "s-test",
+            "/t/s-test.jsonl",
+            Tail::default(),
+            Some(RecapLine {
+                text: text.to_string(),
+                at_ms,
+            }),
+        );
+    }
+
     /// The recap of the pane, only when the stored agent pid is `agent_pid`.
-    #[allow(dead_code)] // Phase 2 maps the recap into the agent snapshot.
     pub(crate) fn get(&self, pane_id: &str, agent_pid: u32) -> Option<RecapLine> {
         self.lock()
             .get(pane_id)

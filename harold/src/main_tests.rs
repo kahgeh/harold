@@ -10,6 +10,7 @@ use super::agent::domain::{
     MonitorHealthProjection, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::agent::inventory::{AgentInventoryPort, InventoryError};
+use super::agent::recap::Recaps;
 use super::agent::rex::CurrentSteps;
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
@@ -1039,7 +1040,12 @@ async fn overlapping_mute_requests_wait_for_the_one_in_progress() {
 #[test]
 fn snapshot_mapping_carries_the_harold_version() {
     assert_eq!(
-        map_agent_snapshot(empty_snapshot(), &CurrentSteps::default()).harold_version,
+        map_agent_snapshot(
+            empty_snapshot(),
+            &CurrentSteps::default(),
+            &Recaps::default()
+        )
+        .harold_version,
         HAROLD_VERSION
     );
     // Tests build without HAROLD_RELEASE_VERSION.
@@ -1057,7 +1063,7 @@ fn an_unset_or_empty_release_version_is_source() {
 fn snapshot_mapping_carries_tts_muted() {
     let mut snapshot = empty_snapshot();
     snapshot.tts_muted = true;
-    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default()).tts_muted);
+    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default(), &Recaps::default()).tts_muted);
 }
 
 #[tokio::test]
@@ -1112,7 +1118,9 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
 fn snapshot_mapping_carries_messaging_paused() {
     let mut snapshot = empty_snapshot();
     snapshot.messaging_paused = true;
-    assert!(map_agent_snapshot(snapshot, &CurrentSteps::default()).messaging_paused);
+    assert!(
+        map_agent_snapshot(snapshot, &CurrentSteps::default(), &Recaps::default()).messaging_paused
+    );
 }
 
 #[tokio::test]
@@ -2337,12 +2345,25 @@ fn step_stream(
     watch::Sender<()>,
     AgentSnapshotHub,
 ) {
+    recap_stream(steps, &Recaps::default())
+}
+
+/// Like `step_stream`, with the recaps the stream joins.
+fn recap_stream(
+    steps: &CurrentSteps,
+    recaps: &Recaps,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+) {
     let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     let (shutdown, shutdown_rx) = watch::channel(());
     tokio::spawn(super::forward_agent_snapshots(
         hub.subscribe(),
         steps.clone(),
+        recaps.clone(),
         sender,
         shutdown_rx,
     ));
@@ -2387,7 +2408,7 @@ async fn a_working_record_gives_current_step_on_the_stream() {
 async fn a_blocked_record_gives_its_step() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, Some("Allow Bash?".into()));
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
 }
 
@@ -2398,12 +2419,12 @@ async fn a_blocked_record_gives_its_step() {
 fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
     let steps = CurrentSteps::default();
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
     assert_eq!(step_of(&mapped), None);
     // A step that is removed goes from the next snapshot too.
     steps.set(STEP_PANE, STEP_PID, Some("Run".into()));
     steps.set(STEP_PANE, STEP_PID, None);
-    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps);
+    let mapped = map_agent_snapshot(populated_snapshot(1, None), &steps, &Recaps::default());
     assert_eq!(step_of(&mapped), None);
 }
 
@@ -2610,4 +2631,136 @@ async fn turn_complete_keeps_the_session_and_transcript_for_the_recap_reader() {
     assert_eq!(targets[0].agent_pid, 82);
     assert_eq!(targets[0].transcript_path, "/t/s-1.jsonl");
     task.abort();
+}
+
+const RECAP_MARKER: &str = "RECAPCHECK-91bd";
+
+fn recap_of(snapshot: &super::harold::AgentStateSnapshot) -> (Option<String>, i64) {
+    let pane = &snapshot.panes[0];
+    (pane.recap.clone(), pane.recap_at_ms)
+}
+
+#[tokio::test]
+async fn a_recap_reaches_the_stream_with_its_time() {
+    let recaps = Recaps::default();
+    recaps.put_for_test(STEP_PANE, STEP_PID, "Plan done", 1_234);
+    let (mut receiver, _shutdown, _hub) = recap_stream(&CurrentSteps::default(), &recaps);
+    let item = next_item(&mut receiver).await;
+    assert_eq!(recap_of(&item), (Some("Plan done".to_string()), 1_234));
+    // A recap of another agent pid in the same pane does not show.
+    let other = Recaps::default();
+    other.put_for_test(STEP_PANE, STEP_PID + 1, "Other agent", 9);
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &other,
+    );
+    assert_eq!(recap_of(&mapped), (None, 0));
+}
+
+#[test]
+fn a_pane_without_a_recap_has_none_and_zero() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+    );
+    assert_eq!(recap_of(&mapped), (None, 0));
+}
+
+#[tokio::test]
+async fn a_new_recap_sends_a_new_snapshot_at_the_same_event_version() {
+    let recaps = Recaps::default();
+    let (mut receiver, _shutdown, _hub) = recap_stream(&CurrentSteps::default(), &recaps);
+    let first = next_item(&mut receiver).await;
+    assert_eq!(recap_of(&first), (None, 0));
+    recaps.put_for_test(STEP_PANE, STEP_PID, "First", 10);
+    let second = next_item(&mut receiver).await;
+    assert_eq!(recap_of(&second), (Some("First".to_string()), 10));
+    assert_eq!(second.through_event_version, first.through_event_version);
+    // The same recap again changes nothing.
+    recaps.put_for_test(STEP_PANE, STEP_PID, "First", 10);
+    no_item(&mut receiver).await;
+    recaps.put_for_test(STEP_PANE, STEP_PID, "Second", 20);
+    let third = next_item(&mut receiver).await;
+    assert_eq!(recap_of(&third), (Some("Second".to_string()), 20));
+    assert_eq!(third.through_event_version, first.through_event_version);
+}
+
+#[tokio::test]
+async fn recap_and_current_step_reach_the_stream_together() {
+    let steps = CurrentSteps::default();
+    let recaps = Recaps::default();
+    recaps.put_for_test(STEP_PANE, STEP_PID, "Recap text", 77);
+    // A blocked record gives its msg.
+    steps.set(STEP_PANE, STEP_PID, Some("Allow Bash?".into()));
+    let (mut receiver, _shutdown, _hub) = recap_stream(&steps, &recaps);
+    let item = next_item(&mut receiver).await;
+    assert_eq!(step_of(&item).as_deref(), Some("Allow Bash?"));
+    assert_eq!(recap_of(&item), (Some("Recap text".to_string()), 77));
+    // A done, idle or error record gives no step; the recap stays.
+    steps.set(STEP_PANE, STEP_PID, None);
+    let item = next_item(&mut receiver).await;
+    assert_eq!(step_of(&item), None);
+    assert_eq!(recap_of(&item), (Some("Recap text".to_string()), 77));
+}
+
+#[tokio::test]
+async fn the_recap_is_not_in_the_captured_logs_spans_or_stored_rows() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::test_support::install();
+    let directory = std::env::temp_dir().join(format!("harold-leak-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, _shutdown, _task) = test_service(
+        Arc::clone(&store),
+        populated_snapshot(1, Some("Plain summary")),
+    );
+    service
+        .recaps
+        .put_for_test(STEP_PANE, STEP_PID, RECAP_MARKER, 5);
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    // The stream holds the marker: that proves the marker is in play where the tests look.
+    let item = stream.next().await.expect("an item").unwrap();
+    assert_eq!(recap_of(&item).0.as_deref(), Some(RECAP_MARKER));
+    assert!(!format!("{:?}", item.panes[0].work_summary).contains(RECAP_MARKER));
+    service
+        .recaps
+        .put_for_test(STEP_PANE, STEP_PID, &format!("{RECAP_MARKER} again"), 6);
+    let second = stream.next().await.expect("a second item").unwrap();
+    assert_eq!(recap_of(&second).0, Some(format!("{RECAP_MARKER} again")));
+
+    assert!(!logs.text().contains(RECAP_MARKER), "{}", logs.text());
+    let spans = format!("{:?}", crate::telemetry::test_support::spans());
+    let records = format!("{:?}", crate::telemetry::test_support::logs());
+    assert!(!spans.contains(RECAP_MARKER));
+    assert!(!records.contains(RECAP_MARKER));
+
+    super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
+        .await
+        .unwrap();
+    let stored = format!("{:?}", store.load_agent_snapshot().await.unwrap());
+    assert!(!stored.contains(RECAP_MARKER));
+    let mut files = vec![directory.clone()];
+    while let Some(path) = files.pop() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes
+                    .windows(RECAP_MARKER.len())
+                    .any(|w| w == RECAP_MARKER.as_bytes()),
+                "{path:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -398,7 +398,10 @@ impl Harold for HaroldService {
         let shutdown = self.shutdown.clone();
         let (sender, receiver) = mpsc::channel(1);
         let steps = self.current_steps.clone();
-        tokio::spawn(forward_agent_snapshots(snapshots, steps, sender, shutdown));
+        let recaps = self.recaps.clone();
+        tokio::spawn(forward_agent_snapshots(
+            snapshots, steps, recaps, sender, shutdown,
+        ));
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
@@ -573,6 +576,7 @@ fn call_response(status: &voice_input::CallStatus) -> CallResponse {
 async fn forward_agent_snapshots(
     mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
     steps: agent::rex::CurrentSteps,
+    recaps: agent::recap::Recaps,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -582,7 +586,9 @@ async fn forward_agent_snapshots(
 
     let mut step_versions = steps.subscribe();
     step_versions.borrow_and_update();
-    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps);
+    let mut recap_versions = recaps.subscribe();
+    recap_versions.borrow_and_update();
+    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps);
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }
@@ -596,7 +602,8 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps);
+                let snapshot =
+                    map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -605,7 +612,16 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps);
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = recap_versions.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -629,6 +645,7 @@ async fn send_agent_snapshot(
 fn map_agent_snapshot(
     snapshot: agent::domain::AgentSnapshot,
     steps: &agent::rex::CurrentSteps,
+    recaps: &agent::recap::Recaps,
 ) -> AgentStateSnapshot {
     AgentStateSnapshot {
         tts_muted: snapshot.tts_muted,
@@ -656,6 +673,7 @@ fn map_agent_snapshot(
             .map(|projection| {
                 let pane = projection.pane;
                 let current_step = steps.get(&pane.incarnation.pane_id, pane.incarnation.agent_pid);
+                let recap = recaps.get(&pane.incarnation.pane_id, pane.incarnation.agent_pid);
                 AgentPaneState {
                     pane_id: pane.incarnation.pane_id,
                     tmux_target: pane.tmux_target,
@@ -676,8 +694,8 @@ fn map_agent_snapshot(
                     last_transition_at_ms: projection.last_transition_at_ms,
                     work_summary: projection.work_summary,
                     current_step,
-                    recap: None,
-                    recap_at_ms: 0,
+                    recap_at_ms: recap.as_ref().map_or(0, |line| line.at_ms),
+                    recap: recap.map(|line| line.text),
                 }
             })
             .collect(),

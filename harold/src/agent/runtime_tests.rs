@@ -1601,8 +1601,11 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         "capture_failed"
     );
     assert!(!format!("{stored_snapshot:?}").contains(&sentinel));
-    let protobuf =
-        crate::map_agent_snapshot(stored_snapshot, &crate::agent::rex::CurrentSteps::default());
+    let protobuf = crate::map_agent_snapshot(
+        stored_snapshot,
+        &crate::agent::rex::CurrentSteps::default(),
+        &crate::agent::recap::Recaps::default(),
+    );
     assert!(!format!("{protobuf:?}").contains(&sentinel));
     assert!(
         !protobuf

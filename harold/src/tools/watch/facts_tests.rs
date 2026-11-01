@@ -180,3 +180,31 @@ async fn the_watch_facts_have_no_current_step_field() {
     assert!(json.contains("Plain summary"), "{json}");
     assert!(!json.contains("step"), "{json}");
 }
+
+#[tokio::test]
+async fn the_watch_facts_have_no_recap() {
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%3", 30, "RECAPCHECK-91bd", 5);
+    let mut worker = agent("%3", "/work/harold-x", EffectiveAgentState::Working);
+    worker.work_summary = Some("Plain summary".into());
+    let agents: Arc<dyn Agents> = FakeAgents::with(vec![worker]);
+    let pods: Arc<dyn Pods> = Arc::new(FakePods::default());
+    let chief: Arc<dyn ChiefPane> = FakeChief::at(Some("%1"));
+    let facts = gather(
+        &sources(&agents, &pods, &chief),
+        1_800_000_000_000,
+        WatchEntry {
+            run: 1,
+            runs_left: 1,
+            previous_outcome: None,
+        },
+    )
+    .await;
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(json.contains("Plain summary"), "{json}");
+    assert!(recaps.get("%3", 30).is_some());
+    assert!(
+        !json.contains("RECAPCHECK-91bd") && !json.contains("recap"),
+        "{json}"
+    );
+}

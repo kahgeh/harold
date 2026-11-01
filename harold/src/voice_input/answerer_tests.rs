@@ -965,3 +965,16 @@ fn the_call_facts_have_no_current_step_field() {
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
     assert!(!facts.to_string().contains("step"), "{facts}");
 }
+
+#[test]
+fn the_call_facts_have_no_recap() {
+    let recaps = crate::agent::recap::Recaps::default();
+    recaps.put_for_test("%1", 10, "RECAPCHECK-91bd", 5);
+    let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
+    assert!(recaps.get("%1", 10).is_some());
+    let text = facts.to_string();
+    assert!(
+        !text.contains("RECAPCHECK-91bd") && !text.contains("recap"),
+        "{facts}"
+    );
+}
