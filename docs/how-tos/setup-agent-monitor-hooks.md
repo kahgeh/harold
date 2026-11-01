@@ -68,7 +68,7 @@ A stop adapter must select the most recent substantive submitted user instructio
 A lifecycle adapter calls `ReportAgentState` with:
 
 - the current `TMUX_PANE`, such as `%22`;
-- `AGENT_STATE_WORKING` or `AGENT_STATE_IDLE`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING`, for installed plugins;
+- `AGENT_STATE_WORKING`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_DONE`, `AGENT_STATE_IDLE` or `AGENT_STATE_ERROR`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING`, for installed plugins;
 - a bounded adapter identifier;
 - an optional `workSummary`.
 
@@ -276,7 +276,7 @@ Fixtures and fake provider processes do not satisfy this check. Use the real ins
 
 ### `INVALID_ARGUMENT`
 
-Use a pane ID in `%` plus decimal-digits form, use only `AGENT_STATE_WORKING` or `AGENT_STATE_IDLE`, and ensure the adapter ID matches `[a-z0-9][a-z0-9._-]{0,63}`.
+Use a pane ID in `%` plus decimal-digits form, use only one of the five state names that `ReportAgentState` accepts, and ensure the adapter ID matches `[a-z0-9][a-z0-9._-]{0,63}`.
 
 ### `FAILED_PRECONDITION: agent incarnation not found`
 

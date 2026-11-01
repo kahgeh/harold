@@ -103,7 +103,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | suggested prompt | The dim text Claude Code draws in an empty input box after a turn. It is not typed text, and the input box still counts as empty | "grey suggestion", "autocomplete" |
 | hook | A small script a provider runs to tell Harold what an agent did | — |
 | Claude Code mod | The Claude Code plugin in `hooks/claude-mod` that reports a working pane | "plugin" for it. OpenCode's is an OpenCode plugin |
-| agent state | What an agent does now: `working`, `idle`, or `unknown` when Harold has no conclusive evidence. The agent's own report, the hooks or the screen supply it. A pane with no agent program has no state and is not listed. Later stages add `blocked`, `done` and `error` | "Busy", "Idle" (the old states), "status" |
+| agent state | What an agent does now: `working`, `blocked`, `done`, `idle`, `error`, or `unknown` when Harold has no conclusive evidence. The agent's own report, the hooks, the program status record or the screen supply it. A pane with no agent program has no state and is not listed | "Busy", "Idle" (the old states), "status" |
 | working | The agent runs a turn | "busy", "running" |
 | blocked | The agent waits for you inside its turn: a permission prompt, a question or a login | "waiting", "stuck" |
 | done | The agent finished a turn | "finished", "complete" |
@@ -118,7 +118,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | recap | An agent's own short text of what its session is doing and what comes next, which the provider writes into the session's transcript. Today only Claude Code writes one, after you were away. The control-tower shows the latest one under the label `RECAP` | "away summary", "summary" alone |
 | recap adapter | The per-provider reader of recaps from a transcript, such as `claude-transcript-v1`, named by `recap_adapter` in the provider's `[[agents]]` entry | "recap parser" |
 | current step | The one line an agent reports as its step now, from the `msg` of its program status record, while the state of the record is working or blocked. It is not a work summary | "status", "activity" |
-| waiting agent | An agent that stopped working while you were not looking at it: its state went from working to idle. The control-tower marks it `◆` until you go to it | — |
+| waiting agent | An agent that stopped working while you were not looking at it: its state went from working or blocked to done, idle or error. The control-tower marks it `◆` until you go to it | — |
 | focus tracking | The control-tower's check, once a second, of which pane the user's tmux client or the Rex app shows | — |
 
 ## Talking to the user
@@ -181,7 +181,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | masthead | The control-tower's top line: version, transport, REV, voice and the messaging pause | "header" for it |
-| summary strip | The line under the masthead with the count of agents in each state, `unknown` only when above 0, and the server's clock. It shows WORKING and IDLE now | "summary" alone |
+| summary strip | The line under the masthead with the count of agents in each state, `unknown` only when above 0, and the server's clock. It shows WORKING, BLOCKED, DONE, IDLE and ERROR | "summary" alone |
 | transport | The control-tower's connection to Harold: `LIVE`, `STALE` and the like | — |
 | filter | The control-tower's search, which hides agent rows that don't match | — |
 | agent row | A row of the agent list for one agent | — |

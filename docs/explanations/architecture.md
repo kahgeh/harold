@@ -160,7 +160,9 @@ Each place Harold does not follow the organisation's `knowledge/standards.md`, w
 
 ## How it works
 
-Harold inventories configured agent processes in the panes of its multiplexer (tmux or Rex, see [Two multiplexers](#two-multiplexers)), combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates.
+Harold inventories configured agent processes in the panes of its multiplexer (tmux or Rex, see [Two multiplexers](#two-multiplexers)), combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates. A completed turn gives the state `done`.
+
+An agent has one of six states: `working`, `blocked`, `done`, `idle`, `error` or `unknown`. Two functions group them, and no code compares with one state by hand. `is_working()` is true for `working` and `blocked`. `is_at_rest()` is true for `done`, `idle` and `error`. `unknown` is neither. A blocked agent waits for you inside its turn, so Harold treats it as a working agent and types no differently.
 
 The public agent-state stream starts with a complete current snapshot, then sends later revisions. Raw pane captures remain inside the screen adapter; only classified state and a normalized work summary can cross the acquisition boundary. The [agent-monitor reference](../references/agent-monitor/README.md) and the [hook setup guide](../how-tos/setup-agent-monitor-hooks.md) give the detail.
 
@@ -209,7 +211,7 @@ Suppose an agent is idle and you submit “Fix the login error.” With lifecycl
 3. Harold reads the recorded observation and updates its stored view of that agent to `working`, with the submitted instruction available as its work summary.
 4. After saving that view, Harold publishes it to the control-tower. The control-tower can now show `working` and “Fix the login error.”
 
-When the agent finishes, a completion hook can report its reply. Harold updates the agent to `idle` and separately considers whether to tell you. Finishing a turn does not by itself prove the requested fix succeeded.
+When the agent finishes, a completion hook can report its reply. Harold updates the agent to `done` and separately considers whether to tell you. Finishing a turn does not by itself prove the requested fix succeeded.
 
 This flow has two useful records: **what Harold observed**, and **what Harold currently knows about each agent**. Keeping the observations lets Harold rebuild the current view after a restart.
 

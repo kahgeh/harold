@@ -127,13 +127,13 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | --- | --- | --- |
 | `AgentPaneObserved` | Pane metadata, provider display data, full incarnation, observation time | Inserts or refreshes the matching pane. A new incarnation replaces the row and starts `Unknown` with empty evidence. |
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
-| `AgentLifecycleObserved` | Full incarnation, `Working`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
-| `AgentScreenObserved` | Full incarnation, optional `Working`/`Idle`, optional normalized fallback work summary, classifier ID (`tmux-visible-v1`, `rex-visible-v1` or `program_status`), observation time | Applies each present fact independently. An absent field preserves its candidate. A `program_status` observation has a state and no fallback work summary. |
+| `AgentLifecycleObserved` | Full incarnation, `Working`/`Blocked`/`Done`/`Idle`/`Error`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
+| `AgentScreenObserved` | Full incarnation, optional `Working`/`Blocked`/`Done`/`Idle`/`Error`, optional normalized fallback work summary, classifier ID (`tmux-visible-v1`, `rex-visible-v1` or `program_status`), observation time | Applies each present fact independently. An absent field preserves its candidate. A `program_status` observation has a state and no fallback work summary. |
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, activity summary, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
 | `MessagingPausedChanged` | `{paused}` | Upserts `settings.messaging_paused`, advances the snapshot revision, and creates no delivery. |
-| `TurnCompleted` | Five turn-end update fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves turn-end update behavior. A matching resolved incarnation also supplies a non-destructive work summary update, and supplies idle evidence only while the pane has no lifecycle adapter. |
+| `TurnCompleted` | Five turn-end update fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves turn-end update behavior. A matching resolved incarnation also supplies a non-destructive work summary update, and supplies `Done` evidence only while the pane has no lifecycle adapter. |
 
 `ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for a turn-end update but does not alter agent state.
 
@@ -144,10 +144,10 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 ### State
 
 1. Inventory owns presence. A pane is departed only after two complete successful scans omit it and a fresh lookup confirms the exact incarnation is no longer current.
-2. A lifecycle observation supplies `Working` or `Idle`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. A new incarnation starts with no lifecycle adapter.
-3. A turn-complete supplies `Idle` only for a pane with no lifecycle adapter. That state wins during `agent_monitor.hook_grace_ms` (2 seconds); at or after it, a conclusive screen observation can replace it.
-4. For a pane with a lifecycle adapter, a `Working` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again.
-5. For a pane with a lifecycle adapter, an `Idle` report wins with no repeats. When the screen has read `Working` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not.
+2. A lifecycle observation supplies `Working`, `Blocked`, `Done`, `Idle` or `Error`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. A new incarnation starts with no lifecycle adapter.
+3. A turn-complete supplies `Done` only for a pane with no lifecycle adapter. That state wins during `agent_monitor.hook_grace_ms` (2 seconds); at or after it, a conclusive screen observation can replace it.
+4. For a pane with a lifecycle adapter, a `Working` or `Blocked` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again.
+5. For a pane with a lifecycle adapter, a `Done`, `Idle` or `Error` report wins with no repeats. When the screen has read `Working` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not.
 6. Within one visible grid, a matching working clause wins over a matching idle clause.
 7. Inconclusive screen state preserves existing evidence. With no conclusive lifecycle or screen evidence, effective state is `Unknown`.
 8. `last_transition_at_ms` changes only when effective state changes.
@@ -156,7 +156,7 @@ The projection changes only when an event is stored, so each period ends at a sc
 
 The Claude Code mod reports `Working` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
 
-A `program_status` observation is a conclusive screen observation. It follows rules 3 to 7 in the place of a screen read. It takes the state of the program status record of the block: `working` and `blocked` read as `Working`, and `done`, `idle` and `error` read as `Idle`. A record counts only when its `owner.pid` is the agent's pid. With no usable record of the agent, Harold sends no `program_status` observation and reads the screen.
+A `program_status` observation is a conclusive screen observation. It follows rules 3 to 7 in the place of a screen read. It takes the state of the program status record of the block, and each of the five record words gives the state with the same name. In rules 3 to 7, "working" means `Working` or `Blocked`, and "idle" means `Done`, `Idle` or `Error`. Rule 4 therefore applies to a `Working` or `Blocked` report, and rule 5 applies to a `Done`, `Idle` or `Error` report. A record counts only when its `owner.pid` is the agent's pid. With no usable record of the agent, Harold sends no `program_status` observation and reads the screen.
 
 The record is the fourth source of evidence, next to the process inventory, the hooks and the screen adapters. Events are only triggers. Harold starts one `rex events` child process for each Rex session. A `program_status_changed` or `program_status_removed` event for a block causes one `program_status` call, and the answer of the call replaces the record of the block. Harold runs at most one call for each block at a time. When a call fails, Harold drops the record of the block. The next sample then makes one direct `program_status` call, and reads the screen only if that call also fails.
 
@@ -165,6 +165,9 @@ The `msg` of a record is the current step of the agent. Harold keeps it in memor
 Harold keeps these facts about the state words:
 
 - An old `Busy` event still reads as `Working`. Harold writes `Working` from now on.
+- Stage 3 writes the event words `Blocked`, `Done` and `Error`. A Harold of stage 1 or 2 reads each of them as `Unknown` for a state, and as no observation for a screen read.
+- The turn end from the hooks (`TurnComplete`) gives `Done`. It gave `Idle` before stage 3.
+- A pane that stays `Blocked` for 15 minutes gives one log line, `agent blocked long` (`pane_id`, `provider_id`), for each blocked spell. The timer starts at the first sample that shows `Blocked` and restarts after a restart of Harold. A new turn after `Error` clears it. The alert `agent-blocked-long` reads this line.
 - An unknown state word in an event reads as `Unknown` for a state and as no observation for a screen read.
 - An installed OpenCode plugin may send the old name `AGENT_STATE_BUSY`. The proto keeps it as an alias of `AGENT_STATE_WORKING`, so both names mean number 1.
 - An older Harold cannot read the events that this Harold writes.
@@ -225,7 +228,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 
-`ReportAgentState.state` accepts only `AGENT_STATE_WORKING` and `AGENT_STATE_IDLE`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING` for installed plugins. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
+`ReportAgentState.state` accepts `AGENT_STATE_WORKING`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_DONE`, `AGENT_STATE_IDLE` and `AGENT_STATE_ERROR`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING` for installed plugins. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
 
 ### `AgentStateSnapshot`
 
@@ -256,7 +259,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `provider_id` | 9 | `string` |
 | `provider_display_name` | 10 | `string` |
 | `working_directory` | 11 | `string` |
-| `state` | 12 | `AgentState` (`Working`, `Idle`, or `Unknown`) |
+| `state` | 12 | `AgentState` (`Working`, `Blocked`, `Done`, `Idle`, `Error`, or `Unknown`) |
 | `last_transition_at_ms` | 13 | `int64` |
 | `work_summary` | 14 | `optional string` |
 
@@ -301,7 +304,7 @@ screen_history_lines = 2000
 | `agent_monitor.inventory_interval_ms` | Positive integer; scheduled inventory period, default 2000 |
 | `agent_monitor.inventory_timeout_ms` | Positive integer; inventory scan/resolve deadline in milliseconds, default 3000; the next tick's scan retries a failed one with the same deadline |
 | `agent_monitor.screen_interval_ms` | Positive integer; scheduled visible-screen period, default 2000 |
-| `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's idle state wins over the screen for a pane with no lifecycle adapter |
+| `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's `Done` state wins over the screen for a pane with no lifecycle adapter |
 | `agent_monitor.multiplexer` | `"tmux"` (the default) or `"rex"`; the one multiplexer Harold works with. Harold reads it once, at start. Any other value stops Harold at start with `agent_monitor.multiplexer must be "tmux" or "rex"` |
 | `agent_monitor.rex` | Optional path to the `rex` program. When it is not set, Harold tries the running server's own copy (`~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`), then `rex` on the `PATH`, then `/Applications/Rex*.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex` |
 | `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Working` report can be before the screen decides, and how long the screen must read `Working` without a break to replace an `Idle` report |

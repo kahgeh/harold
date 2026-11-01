@@ -52,3 +52,17 @@ To roll back, put back the old bundle and its copied data folder as `ROLLBACK.md
 Replies and events from after the install are lost on a rollback. If the copy fails, the install puts the old bundle back and starts the old Harold.
 
 The old name `AGENT_STATE_BUSY` stays readable through the proto alias. Refresh the opencode plugin after this install.
+
+### Restart the control-tower after the stage 3 install
+
+The install of stage 3 prints this line after `Harold ready at ...`:
+
+```
+restart the control-tower to see blocked, done and error
+```
+
+A control-tower that started before the install shows `UNKNOWN` for these three states until you restart it.
+
+### Roll back from stage 3 to stage 2 or 1
+
+A rollback from stage 3 needs no data copy, because stage 1 already changed the events and the store. A Harold of stage 2 or 1 reads the event words `Blocked`, `Done` and `Error` as unknown, and the store accepts all six states. Put back the old bundle as `ROLLBACK.md` says. Start the control-tower again after the rollback.
