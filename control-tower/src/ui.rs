@@ -498,16 +498,17 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
     let inner_width = detail.width.saturating_sub(2);
-    // When the panel does not fit with the current step, it leaves the step lines out and
-    // keeps the rest. The row does not show the step, so the step shows nowhere meanwhile. The
-    // panel hides only when it does not fit either way, so a step that comes and goes does
-    // not make the panel come and go.
+    // The panel tries the full step lines, then one step line cut by width, then no step. The
+    // panel hides only when it does not fit even without the step, so a step that comes and
+    // goes does not make the panel come and go.
     let detail_lines = app.selected_row().map(|agent| {
-        let with_step = detail_lines(agent, now_ms, inner_width, true);
-        if detail_fits(detail, Some(&with_step)) {
-            return with_step;
+        for mode in [StepMode::Full, StepMode::OneCutLine] {
+            let lines = detail_lines(agent, now_ms, inner_width, mode);
+            if detail_fits(detail, Some(&lines)) {
+                return lines;
+            }
         }
-        detail_lines(agent, now_ms, inner_width, false)
+        detail_lines(agent, now_ms, inner_width, StepMode::None)
     });
     if !detail_fits(detail, detail_lines.as_deref()) {
         render_inventory(frame, area, app, now_ms);
@@ -1502,11 +1503,22 @@ fn detail_paragraph<'a>(lines: Vec<Line<'a>>) -> Paragraph<'a> {
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }
 
+/// How much of the current step the detail panel shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepMode {
+    /// The step in full, wrapped over as many lines as it needs.
+    Full,
+    /// One step line, cut by width and ended with `…` when it is longer.
+    OneCutLine,
+    /// No step lines.
+    None,
+}
+
 fn detail_lines<'a>(
     agent: &'a crate::app::AgentRow,
     now_ms: i64,
     inner_width: u16,
-    with_step: bool,
+    step_mode: StepMode,
 ) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::styled(
@@ -1545,13 +1557,17 @@ fn detail_lines<'a>(
     if let Some(step) = agent
         .current_step
         .as_deref()
-        .filter(|step| with_step && !step.is_empty())
+        .filter(|step| step_mode != StepMode::None && !step.is_empty())
     {
         lines.push(Line::styled(
             "CURRENT STEP",
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         ));
-        lines.push(Line::styled(step, Style::default().fg(INK)));
+        let text = match step_mode {
+            StepMode::OneCutLine => cut_to_width(step, usize::from(inner_width)),
+            _ => Cow::Borrowed(step),
+        };
+        lines.push(Line::styled(text, Style::default().fg(INK)));
         lines.push(Line::raw(""));
     }
     lines.push(Line::styled(
@@ -1989,6 +2005,27 @@ fn fit(text: &str, width: usize) -> Cow<'_, str> {
     }
     fitted.push('…');
     Cow::Owned(fitted)
+}
+
+/// Cuts `text` to at most `width` terminal columns on a grapheme boundary and ends the cut
+/// with `…`. A wide character or a grapheme cluster is never split.
+fn cut_to_width(text: &str, width: usize) -> Cow<'_, str> {
+    if Line::raw(text).width() <= width {
+        return Cow::Borrowed(text);
+    }
+    let room = width.saturating_sub(1);
+    let mut cut = String::new();
+    let mut used = 0;
+    for grapheme in Line::raw(text).styled_graphemes(Style::default()) {
+        let grapheme_width = Line::raw(grapheme.symbol).width();
+        if used + grapheme_width > room {
+            break;
+        }
+        used += grapheme_width;
+        cut.push_str(grapheme.symbol);
+    }
+    cut.push('…');
+    Cow::Owned(cut)
 }
 
 fn state_glyph(state: AgentState) -> &'static str {
@@ -3255,7 +3292,7 @@ mod tests {
             90_000,
         );
 
-        let lines = super::detail_lines(&agent, 100_000, 40, true);
+        let lines = super::detail_lines(&agent, 100_000, 40, super::StepMode::Full);
 
         for (line_index, span_index) in [(3, 1), (4, 1), (5, 1), (9, 0)] {
             assert!(
@@ -3440,17 +3477,84 @@ mod tests {
         assert!(!content.contains("CURRENT WORK"));
     }
 
+    const LONG_STEP: &str = "Reading the long failing test output and then comparing it with the last green run to find the change";
+
     #[test]
-    fn a_panel_that_does_not_fit_with_the_step_leaves_out_the_step_lines_and_stays() {
+    fn a_panel_that_does_not_fit_with_the_step_keeps_one_cut_step_line_and_stays() {
         for width in [120, 140] {
-            // At 28 rows the panel fits without the step lines and not with them.
+            // At 30 rows the panel fits with one step line and not with the full step lines.
+            let content = rendered(&step_app(Some(LONG_STEP)), width, 30, 100_000);
+
+            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert_eq!(content.matches("CURRENT STEP").count(), 1, "width {width}");
+            assert!(
+                content.contains("Reading the long failing"),
+                "width {width}"
+            );
+            assert!(content.contains('…'), "width {width}");
+            assert!(!content.contains("to find the change"), "width {width}");
+            assert!(!content.contains("CURRENT WORK"), "width {width}");
+            assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_panel_that_does_not_fit_with_one_step_line_leaves_out_the_step_and_stays() {
+        for width in [120, 140] {
+            // At 28 rows the panel fits without the step lines and not with one step line.
             let content = rendered(&step_app(Some("Running the tests")), width, 28, 100_000);
 
             assert!(content.contains("SELECTED SIGNAL"), "width {width}");
             assert!(!content.contains("CURRENT STEP"), "width {width}");
             assert!(!content.contains("Running the tests"), "width {width}");
-            assert!(!content.contains("CURRENT WORK"), "width {width}");
             assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_panel_does_not_come_and_go_when_a_long_step_comes_and_goes_near_the_limit() {
+        for width in [120, 140] {
+            for height in 24..=34 {
+                let with = rendered(&step_app(Some(LONG_STEP)), width, height, 100_000);
+                let without = rendered(&step_app(None), width, height, 100_000);
+
+                assert_eq!(
+                    with.contains("SELECTED SIGNAL"),
+                    without.contains("SELECTED SIGNAL"),
+                    "width {width} height {height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_cut_step_ends_with_an_ellipsis_and_fits_the_inner_width() {
+        let long = "漢字".repeat(60) + " e\u{301}e\u{301}e\u{301}";
+        let mut agent = row(
+            incarnation("%17", 91700, 91844, "codex"),
+            AgentState::Working,
+            "Codex",
+            "control-tower:2.17",
+            "Build the panel",
+            90_000,
+        );
+        agent.current_step = Some(long.clone());
+
+        for inner_width in [10u16, 31, 40, 41] {
+            let lines =
+                super::detail_lines(&agent, 100_000, inner_width, super::StepMode::OneCutLine);
+            let label = lines
+                .iter()
+                .position(|line| line.to_string() == "CURRENT STEP")
+                .expect("step label");
+            let cut = lines[label + 1].to_string();
+
+            assert!(cut.ends_with('…'), "inner width {inner_width}");
+            assert!(
+                lines[label + 1].width() <= usize::from(inner_width),
+                "inner width {inner_width}"
+            );
+            assert!(!cut.contains("e\u{301}e\u{301}e\u{301}"));
         }
     }
 

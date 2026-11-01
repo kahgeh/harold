@@ -389,10 +389,11 @@ is `RECAP`, `CURRENT STEP`, `WORK SUMMARY`. The step is the line the agent repor
 status. Harold cuts it to 160 characters and removes control characters, as it does for the work
 summary. Harold cuts the recap to 400 characters.
 
-When the panel does not fit with the `CURRENT STEP` lines, it leaves them out and keeps the rest, so
-a step that comes and goes does not make the panel come and go. The panel hides only when it does not
-fit without those lines. While the lines are out, the step shows nowhere, because the row does not
-show the step.
+When the panel does not fit with the full `CURRENT STEP` lines, it keeps the heading and one step
+line. It cuts that line by width and ends it with `…` when it is longer. When the panel does not
+fit with that line, it leaves the step out and keeps the rest. The panel hides only when it does
+not fit without the step, so a step that comes and goes does not make the panel come and go. While
+the step is out, it shows nowhere, because the row does not show the step.
 
 The work summary column of an agent row shows the recap, cut to the column, when the agent has a
 recap. Otherwise it shows the work summary. The row does not show the step. The filter `f`
