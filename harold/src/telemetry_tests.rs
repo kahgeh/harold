@@ -3201,6 +3201,93 @@ fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
     }
 }
 
+#[test]
+fn record_call_adds_one_and_records_the_time() {
+    record_call(
+        "rex",
+        "",
+        MultiplexerOperation::List,
+        MultiplexerOutcome::Timeout,
+        Duration::from_millis(120),
+    );
+    let set = [
+        ("multiplexer", "rex"),
+        ("host", ""),
+        ("operation", "list"),
+        ("outcome", "timeout"),
+    ];
+    assert_eq!(
+        test_support::counter_value("harold.multiplexer.calls", &set),
+        Some(1)
+    );
+    assert_eq!(
+        test_support::histogram_sum("harold.multiplexer.call.duration", &set),
+        Some(120.0)
+    );
+}
+
+#[test]
+fn start_records_zero_on_the_32_failure_series() {
+    test_support::install();
+    register_multiplexer_counters("zero_probe");
+    let mut series = 0;
+    for operation in MultiplexerOperation::ALL {
+        for outcome in MultiplexerOutcome::FAILURES {
+            let set = [
+                ("multiplexer", "zero_probe"),
+                ("host", HOST_OWN_MACHINE),
+                ("operation", operation.as_str()),
+                ("outcome", outcome.as_str()),
+            ];
+            let value = test_support::exact_counter_value("harold.multiplexer.calls", &set);
+            if operation == MultiplexerOperation::Other {
+                assert_eq!(value, None, "{set:?}");
+                continue;
+            }
+            assert_eq!(value, Some(0), "{set:?}");
+            series += 1;
+        }
+    }
+    assert_eq!(series, 32);
+    assert_eq!(
+        test_support::counter_value(
+            "harold.multiplexer.calls",
+            &[("multiplexer", "zero_probe"), ("outcome", "ok")]
+        ),
+        None
+    );
+}
+
+#[test]
+fn no_metric_name_holds_rex_or_tmux() {
+    for name in MULTIPLEXER_METRIC_NAMES {
+        for word in ["rex", "tmux", "claude"] {
+            assert!(!name.contains(word), "{name} holds {word}");
+        }
+    }
+    assert_eq!(MULTIPLEXER_METRIC_NAMES.len(), 6);
+}
+
+#[test]
+fn multiplexer_metrics_are_missing_and_harmless_with_export_off() {
+    // Export off leaves the global meter as the no-op meter, which takes any record.
+    record_call(
+        "tmux",
+        "",
+        MultiplexerOperation::Key,
+        MultiplexerOutcome::Ok,
+        Duration::ZERO,
+    );
+    register_multiplexer_counters("tmux");
+}
+
+#[test]
+fn the_helper_names_the_multiplexer_tmux_when_settings_are_unset() {
+    assert_eq!(HOST_OWN_MACHINE, "");
+    assert_eq!(MultiplexerOperation::ScreenRead.as_str(), "screen_read");
+    assert_eq!(MultiplexerOutcome::Malformed.as_str(), "malformed");
+}
+
 /// The first `sh` block after the paragraph starting `after` in the README's "Creating the
 /// definitions" section.
 fn readme_block(after: &str) -> String {

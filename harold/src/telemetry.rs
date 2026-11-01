@@ -337,6 +337,20 @@ pub(crate) struct Instruments {
     pub web_app_pushes: Counter<u64>,
     /// `harold.app_spans.not_forwarded`, `{span}`, by `reason`.
     pub app_spans_not_forwarded: Counter<u64>,
+    /// `harold.multiplexer.calls`, `{call}`, by `multiplexer`, `host`, `operation`, `outcome`.
+    pub multiplexer_calls: Counter<u64>,
+    #[allow(
+        dead_code,
+        reason = "Task 2 and later tasks call this; remove the allow then"
+    )]
+    /// `harold.multiplexer.call.duration`, milliseconds, with the same attributes.
+    pub multiplexer_call_duration: Histogram<f64>,
+    #[allow(
+        dead_code,
+        reason = "Task 2 and later tasks call this; remove the allow then"
+    )]
+    /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
+    pub agent_state_duration: Histogram<f64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -368,6 +382,13 @@ pub(crate) fn instruments() -> &'static Instruments {
                 .with_boundaries(buckets.to_vec())
                 .build()
         };
+        let milliseconds = |name: &'static str, buckets: &[f64]| {
+            meter
+                .f64_histogram(name)
+                .with_unit("ms")
+                .with_boundaries(buckets.to_vec())
+                .build()
+        };
         Instruments {
             phone_requests: counter("harold.phone_requests", "{request}"),
             phone_requests_wrong: counter("harold.phone_requests.wrong", "{request}"),
@@ -393,6 +414,19 @@ pub(crate) fn instruments() -> &'static Instruments {
             notifications: counter("harold.notifications", "{notification}"),
             web_app_pushes: counter("harold.web_app.pushes", "{push}"),
             app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
+            multiplexer_calls: counter("harold.multiplexer.calls", "{call}"),
+            multiplexer_call_duration: milliseconds(
+                "harold.multiplexer.call.duration",
+                &[
+                    10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+                ],
+            ),
+            agent_state_duration: seconds(
+                "harold.agent.state.duration",
+                &[
+                    10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
+                ],
+            ),
         }
     })
 }
@@ -480,6 +514,172 @@ pub(crate) fn register_phone_counters() {
                 KeyValue::new("resolved_by", ResolvedBy::None.as_str()),
             ],
         );
+    }
+}
+
+/// The `host` of Harold's own machine: the empty string.
+pub(crate) const HOST_OWN_MACHINE: &str = "";
+
+/// The names of the six multiplexer and agent metrics. None holds the name of a program.
+#[cfg(test)]
+pub(crate) const MULTIPLEXER_METRIC_NAMES: [&str; 6] = [
+    "harold.multiplexer.calls",
+    "harold.multiplexer.call.duration",
+    "harold.agents",
+    "harold.agent.state.duration",
+    "harold.multiplexer.sessions",
+    "harold.multiplexer.panes",
+];
+
+/// What a multiplexer call did, as the `operation` attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MultiplexerOperation {
+    List,
+    Layout,
+    Process,
+    ScreenSize,
+    ScreenRead,
+    Status,
+    Type,
+    Key,
+    Other,
+}
+
+impl MultiplexerOperation {
+    /// Every operation, `Other` last.
+    pub(crate) const ALL: [Self; 9] = [
+        Self::List,
+        Self::Layout,
+        Self::Process,
+        Self::ScreenSize,
+        Self::ScreenRead,
+        Self::Status,
+        Self::Type,
+        Self::Key,
+        Self::Other,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Layout => "layout",
+            Self::Process => "process",
+            Self::ScreenSize => "screen_size",
+            Self::ScreenRead => "screen_read",
+            Self::Status => "status",
+            Self::Type => "type",
+            Self::Key => "key",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// How a multiplexer call ended, as the `outcome` attribute.
+#[allow(
+    dead_code,
+    reason = "Task 2 and later tasks call this; remove the allow then"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MultiplexerOutcome {
+    Ok,
+    Failed,
+    Timeout,
+    Absent,
+    Malformed,
+}
+
+impl MultiplexerOutcome {
+    /// Every outcome that is not `Ok`.
+    pub(crate) const FAILURES: [Self; 4] =
+        [Self::Failed, Self::Timeout, Self::Absent, Self::Malformed];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+            Self::Absent => "absent",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 2 and later tasks call this; remove the allow then"
+)]
+/// The multiplexer name from the settings: `tmux` when the settings are not set yet.
+fn configured_multiplexer() -> &'static str {
+    crate::settings::try_get_settings().map_or("tmux", |settings| {
+        settings.agent_monitor.multiplexer.as_str()
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 2 and later tasks call this; remove the allow then"
+)]
+/// Counts one multiplexer call and records its time. The multiplexer comes from the
+/// settings. The host is Harold's own machine.
+pub(crate) fn record_multiplexer_call(
+    operation: MultiplexerOperation,
+    outcome: MultiplexerOutcome,
+    elapsed: Duration,
+) {
+    record_call(
+        configured_multiplexer(),
+        HOST_OWN_MACHINE,
+        operation,
+        outcome,
+        elapsed,
+    );
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 2 and later tasks call this; remove the allow then"
+)]
+/// Adds 1 to `harold.multiplexer.calls` and records `elapsed` in milliseconds on
+/// `harold.multiplexer.call.duration`, with all four attributes.
+pub(crate) fn record_call(
+    multiplexer: &str,
+    host: &str,
+    operation: MultiplexerOperation,
+    outcome: MultiplexerOutcome,
+    elapsed: Duration,
+) {
+    let instruments = instruments();
+    let attributes = [
+        KeyValue::new("multiplexer", multiplexer.to_owned()),
+        KeyValue::new("host", host.to_owned()),
+        KeyValue::new("operation", operation.as_str()),
+        KeyValue::new("outcome", outcome.as_str()),
+    ];
+    instruments.multiplexer_calls.add(1, &attributes);
+    instruments
+        .multiplexer_call_duration
+        .record(elapsed.as_secs_f64() * 1000.0, &attributes);
+}
+
+/// Records 0 once on the 32 failure series of `harold.multiplexer.calls`: 8 operations
+/// (not `other`) times 4 outcomes (not `ok`). `main` calls it once when export is on.
+pub(crate) fn register_multiplexer_counters(multiplexer: &str) {
+    let instruments = instruments();
+    for operation in MultiplexerOperation::ALL {
+        if operation == MultiplexerOperation::Other {
+            continue;
+        }
+        for outcome in MultiplexerOutcome::FAILURES {
+            instruments.multiplexer_calls.add(
+                0,
+                &[
+                    KeyValue::new("multiplexer", multiplexer.to_owned()),
+                    KeyValue::new("host", HOST_OWN_MACHINE),
+                    KeyValue::new("operation", operation.as_str()),
+                    KeyValue::new("outcome", outcome.as_str()),
+                ],
+            );
+        }
     }
 }
 
