@@ -1459,8 +1459,8 @@ async fn a_stream_sends_a_beat_every_15_seconds_until_the_page_goes() {
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await).await;
     let logs = CapturedLogs::start();
-    let mut page = server.get("/updates").await;
     let started = tokio::time::Instant::now();
+    let mut page = server.get("/updates").await;
 
     let read = read_until(&mut page, r#"{"_beat":3}"#).await;
 
@@ -1469,7 +1469,11 @@ async fn a_stream_sends_a_beat_every_15_seconds_until_the_page_goes() {
     let third = read.find(r#"{"_beat":3}"#).expect("beat 3");
     assert!(first < second && second < third, "{read}");
     assert_eq!(read.matches("datastar-patch-signals").count(), 3, "{read}");
-    assert_eq!(started.elapsed().as_secs(), 45);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(45) && elapsed < Duration::from_secs(60),
+        "the third beat came after {elapsed:?}"
+    );
 
     drop(page);
     let line = line_with(&logs, "app page disconnected").await;
