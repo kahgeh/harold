@@ -292,6 +292,40 @@ impl Gate {
     fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Opens the gate when it drops, also when the test panics. Declare it after the
+    /// `RexStatus`, so it drops first: the drop of `RexStatus` joins the reader threads,
+    /// and a thread in a closed gate never ends.
+    fn guard(self: &Arc<Self>) -> GateGuard {
+        GateGuard(Arc::clone(self))
+    }
+}
+
+struct GateGuard(Arc<Gate>);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Runs a test body on its own thread. A body that does not end in 30 s fails with the
+/// test's name, so a hang costs 30 s and not the 60 minutes of a CI job.
+fn within_30s(name: &str, body: impl FnOnce() + Send + 'static) {
+    let (done, ended) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        let _ = done.send(());
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    });
+    if ended.recv_timeout(Duration::from_secs(30)).is_err() {
+        panic!("{name} did not end in 30 s");
+    }
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 impl RexApi for FakeRex {
@@ -1156,13 +1190,35 @@ struct FakeProgram {
     writer: Mutex<Option<std::fs::File>>,
 }
 
+/// Writes an executable script and waits until the system lets it start.
+///
+/// Another test thread can fork while this file is open for writing. The child keeps the
+/// write handle until it runs `exec`, and until then a start of the script fails with
+/// "Text file busy". The probe run (the script ends at once on `--probe`) succeeds only
+/// when no such child is left, so the start by the code under test cannot meet the error.
+fn install_script(path: &Path, script: &str) {
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::process::Command::new(path).arg("--probe").status() {
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                assert!(Instant::now() < deadline, "the script stays busy: {error}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("the probe run of the script failed: {error}"),
+        }
+    }
+}
+
 impl FakeProgram {
     fn new(name: &str, lines: &[String], hold: bool) -> Self {
         let dir =
             std::env::temp_dir().join(format!("harold-rex-status-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut script = format!(
-            "#!/bin/sh\necho run >> '{runs}'\necho $$ > '{pid}'\ncat <<'END_OF_EVENTS'\n",
+            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho run >> '{runs}'\necho $$ > '{pid}'\ncat <<'END_OF_EVENTS'\n",
             runs = dir.join("runs").display(),
             pid = dir.join("pid").display(),
         );
@@ -1175,8 +1231,7 @@ impl FakeProgram {
             script.push_str("exec sleep 30\n");
         }
         let path = dir.join("rex");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        install_script(&path, &script);
         Self {
             dir,
             writer: Mutex::new(None),
@@ -1197,14 +1252,13 @@ impl FakeProgram {
                 .success()
         );
         let script = format!(
-            "#!/bin/sh\necho run >> '{runs}'\necho $$ > '{pid}'\nexec cat '{fifo}'\n",
+            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho run >> '{runs}'\necho $$ > '{pid}'\nexec cat '{fifo}'\n",
             runs = dir.join("runs").display(),
             pid = dir.join("pid").display(),
             fifo = fifo.display(),
         );
         let path = dir.join("rex");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        install_script(&path, &script);
         Self {
             dir,
             writer: Mutex::new(None),
@@ -1449,37 +1503,49 @@ fn an_answer_with_no_root_record_removes_the_record() {
 
 #[test]
 fn a_burst_of_events_during_a_call_costs_one_more_call_not_one_each() {
-    let mut lines: Vec<String> = (0..5).map(|_| changed_line("block:a")).collect();
-    lines.push(event_line("block_closed", &json!({"block_id": "block:s"})));
-    let program = FakeProgram::new("burst", &lines, true);
-    let gate = Gate::new(
-        "block:a",
-        reply("working", 5, "held"),
-        reply("working", 5, "later"),
+    within_30s(
+        "a_burst_of_events_during_a_call_costs_one_more_call_not_one_each",
+        || {
+            let mut lines: Vec<String> = (0..5).map(|_| changed_line("block:a")).collect();
+            lines.push(event_line("block_closed", &json!({"block_id": "block:s"})));
+            let program = FakeProgram::new_fifo("burst");
+            let gate = Gate::new(
+                "block:a",
+                reply("working", 5, "held"),
+                reply("working", 5, "later"),
+            );
+            let api = Arc::new(FakeRex {
+                gate: Some(Arc::clone(&gate)),
+                sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
+                ..FakeRex::default()
+            });
+            let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+            let _open = gate.guard();
+            // `block:s` is read first. `block:a` then holds the first call.
+            status.sync(&[
+                slot_in("session:1", "block:s"),
+                slot_in("session:1", "block:a"),
+            ]);
+            // The call thread reads `block:s` first, then holds in `block:a`. So when the gate has
+            // its call, the read of `block:s` is done. `block:s` then has no step only after
+            // the reader handled the close, the last line.
+            wait_until("the gate has its call", || gate.calls() == 1);
+            // The lines come while the call is held, as the test name says.
+            for line in &lines {
+                program.feed(line);
+            }
+            wait_until("the reader read every line", || {
+                steps.get("block:s", 9).is_none()
+            });
+            assert_eq!(gate.calls(), 1);
+            gate.release();
+            wait_until("the one more call answers", || {
+                status.lookup("block:a") == working(5, "later")
+            });
+            assert_eq!(gate.calls(), 2);
+            assert_eq!(api.status_calls("block:s"), 1);
+        },
     );
-    let api = Arc::new(FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
-        ..FakeRex::default()
-    });
-    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
-    // `block:s` is read first. `block:a` then holds the first call.
-    status.sync(&[
-        slot_in("session:1", "block:s"),
-        slot_in("session:1", "block:a"),
-    ]);
-    wait_until("block:s has its step", || steps.get("block:s", 9).is_some());
-    // The reader handles the close at once, so the step goes only after it read all lines.
-    wait_until("the reader read every line", || {
-        steps.get("block:s", 9).is_none()
-    });
-    assert_eq!(gate.calls(), 1);
-    gate.release();
-    wait_until("the one more call answers", || {
-        status.lookup("block:a") == working(5, "later")
-    });
-    assert_eq!(gate.calls(), 2);
-    assert_eq!(api.status_calls("block:s"), 1);
 }
 
 #[test]
@@ -1502,38 +1568,51 @@ fn block_closed_removes_the_block_with_no_call() {
 
 #[test]
 fn a_close_between_the_check_and_the_store_does_not_bring_the_record_back() {
-    let lines = [
-        event_line("block_closed", &json!({"block_id": "block:a"})),
-        event_line("block_closed", &json!({"block_id": "block:s"})),
-    ];
-    let program = FakeProgram::new("closeheld", &lines, true);
-    let gate = Gate::new(
-        "block:a",
-        reply("working", 5, "held"),
-        reply("working", 5, "x"),
+    within_30s(
+        "a_close_between_the_check_and_the_store_does_not_bring_the_record_back",
+        || {
+            let lines = [
+                event_line("block_closed", &json!({"block_id": "block:a"})),
+                event_line("block_closed", &json!({"block_id": "block:s"})),
+            ];
+            let program = FakeProgram::new_fifo("closeheld");
+            let gate = Gate::new(
+                "block:a",
+                reply("working", 5, "held"),
+                reply("working", 5, "x"),
+            );
+            let api = Arc::new(FakeRex {
+                gate: Some(Arc::clone(&gate)),
+                sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
+                ..FakeRex::default()
+            });
+            let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+            let _open = gate.guard();
+            status.sync(&[
+                slot_in("session:1", "block:s"),
+                slot_in("session:1", "block:a"),
+            ]);
+            // The call thread reads `block:s` first, then holds in `block:a`. `block:s` has no
+            // step only after the reader handled its close, which comes after the close of
+            // `block:a`.
+            wait_until("the gate has its call", || gate.calls() == 1);
+            // The closes come while the call is held.
+            for line in &lines {
+                program.feed(line);
+            }
+            wait_until("the reader read both lines", || {
+                steps.get("block:s", 9).is_none()
+            });
+            assert_eq!(gate.calls(), 1);
+            gate.release();
+            // The first read is ready only after the held call decided to store or not.
+            wait_until("the held call is done", || {
+                status.lookup("block:a") != Lookup::NoStream
+            });
+            assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
+            assert_eq!(steps.get("block:a", 5), None);
+        },
     );
-    let api = Arc::new(FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
-        ..FakeRex::default()
-    });
-    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
-    status.sync(&[
-        slot_in("session:1", "block:s"),
-        slot_in("session:1", "block:a"),
-    ]);
-    wait_until("block:s has its step", || steps.get("block:s", 9).is_some());
-    // The close of `block:s` comes after the close of `block:a`, so both are read.
-    wait_until("the reader read both closes", || {
-        steps.get("block:s", 9).is_none()
-    });
-    assert_eq!(gate.calls(), 1);
-    gate.release();
-    wait_until("the held call is done", || {
-        status.lookup("block:a") != Lookup::NoStream
-    });
-    assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
-    assert_eq!(steps.get("block:a", 5), None);
 }
 
 #[test]
@@ -1658,50 +1737,59 @@ fn dropping_the_stream_clears_the_call_failed_mark() {
 
 #[test]
 fn a_stale_generation_cannot_set_the_call_failed_mark() {
-    let (logs, _guard) = capture_logs();
-    let program = FakeProgram::new("markstaleset", &[], true);
-    // The old stream's held call fails after its stream stopped. The new stream's call works.
-    let gate = Gate::with("block:a", Err(RexError::Failed), Ok(no_root()));
-    let api = Arc::new(FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        ..FakeRex::default()
+    within_30s("a_stale_generation_cannot_set_the_call_failed_mark", || {
+        let (logs, _guard) = capture_logs();
+        let program = FakeProgram::new("markstaleset", &[], true);
+        // The old stream's held call fails after its stream stopped. The new stream's call works.
+        let gate = Gate::with("block:a", Err(RexError::Failed), Ok(no_root()));
+        let api = Arc::new(FakeRex {
+            gate: Some(Arc::clone(&gate)),
+            ..FakeRex::default()
+        });
+        let (status, _) = status_with(api, &program, now_clock());
+        let _open = gate.guard();
+        let slots = [slot_in("session:1", "block:a")];
+        status.sync(&slots);
+        wait_until("the old call is held", || gate.calls() == 1);
+        status.sync(&[]);
+        status.sync(&slots);
+        wait_until("the new stream is ready", || {
+            status.lookup("block:a") == Lookup::Stream(None)
+        });
+        gate.release();
+        wait_until("the old reader ends", || ended_lines(&logs) == 1);
+        assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
     });
-    let (status, _) = status_with(api, &program, now_clock());
-    let slots = [slot_in("session:1", "block:a")];
-    status.sync(&slots);
-    wait_until("the old call is held", || gate.calls() == 1);
-    status.sync(&[]);
-    status.sync(&slots);
-    wait_until("the new stream is ready", || {
-        status.lookup("block:a") == Lookup::Stream(None)
-    });
-    gate.release();
-    wait_until("the old reader ends", || ended_lines(&logs) == 1);
-    assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
 }
 
 #[test]
 fn a_stale_generation_cannot_clear_the_call_failed_mark() {
-    let (logs, _guard) = capture_logs();
-    let program = FakeProgram::new("markstaleclear", &[], true);
-    // The old stream's held call works after its stream stopped. The new stream's call fails.
-    let gate = Gate::with("block:a", Ok(no_root()), Err(RexError::Failed));
-    let api = Arc::new(FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        ..FakeRex::default()
-    });
-    let (status, _) = status_with(api, &program, now_clock());
-    let slots = [slot_in("session:1", "block:a")];
-    status.sync(&slots);
-    wait_until("the old call is held", || gate.calls() == 1);
-    status.sync(&[]);
-    status.sync(&slots);
-    wait_until("the new stream has the mark", || {
-        is_failed(&status, "block:a")
-    });
-    gate.release();
-    wait_until("the old reader ends", || ended_lines(&logs) == 1);
-    assert!(is_failed(&status, "block:a"));
+    within_30s(
+        "a_stale_generation_cannot_clear_the_call_failed_mark",
+        || {
+            let (logs, _guard) = capture_logs();
+            let program = FakeProgram::new("markstaleclear", &[], true);
+            // The old stream's held call works after its stream stopped. The new stream's call fails.
+            let gate = Gate::with("block:a", Ok(no_root()), Err(RexError::Failed));
+            let api = Arc::new(FakeRex {
+                gate: Some(Arc::clone(&gate)),
+                ..FakeRex::default()
+            });
+            let (status, _) = status_with(api, &program, now_clock());
+            let _open = gate.guard();
+            let slots = [slot_in("session:1", "block:a")];
+            status.sync(&slots);
+            wait_until("the old call is held", || gate.calls() == 1);
+            status.sync(&[]);
+            status.sync(&slots);
+            wait_until("the new stream has the mark", || {
+                is_failed(&status, "block:a")
+            });
+            gate.release();
+            wait_until("the old reader ends", || ended_lines(&logs) == 1);
+            assert!(is_failed(&status, "block:a"));
+        },
+    );
 }
 
 #[test]
@@ -1902,62 +1990,74 @@ fn ended_lines(logs: &Logs) -> usize {
 
 #[test]
 fn a_stopped_reader_never_touches_a_newer_stream_of_the_same_session() {
-    let (logs, _guard) = capture_logs();
-    let program = FakeProgram::new("stale", &[], true);
-    let gate = Gate::new(
-        "block:a",
-        reply("working", 1, "stale"),
-        reply("working", 2, "fresh"),
+    within_30s(
+        "a_stopped_reader_never_touches_a_newer_stream_of_the_same_session",
+        || {
+            let (logs, _guard) = capture_logs();
+            let program = FakeProgram::new("stale", &[], true);
+            let gate = Gate::new(
+                "block:a",
+                reply("working", 1, "stale"),
+                reply("working", 2, "fresh"),
+            );
+            let api = FakeRex {
+                gate: Some(Arc::clone(&gate)),
+                ..FakeRex::default()
+            };
+            let (status, steps) = status_with(api, &program, now_clock());
+            let _open = gate.guard();
+            let slots = [slot_in("session:1", "block:a")];
+            status.sync(&slots);
+            wait_until("the old reader is in its call", || gate.calls() == 1);
+            // The session leaves and returns while the old call is held.
+            status.sync(&[]);
+            status.sync(&slots);
+            wait_until("the new stream reads the fresh record", || {
+                status.lookup("block:a")
+                    == Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
+            });
+            gate.release();
+            wait_until("the old reader ends", || ended_lines(&logs) == 1);
+            assert_eq!(
+                status.lookup("block:a"),
+                Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
+            );
+            assert_eq!(steps.get("block:a", 2).as_deref(), Some("fresh"));
+            assert_eq!(steps.get("block:a", 1), None);
+        },
     );
-    let api = FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        ..FakeRex::default()
-    };
-    let (status, steps) = status_with(api, &program, now_clock());
-    let slots = [slot_in("session:1", "block:a")];
-    status.sync(&slots);
-    wait_until("the old reader is in its call", || gate.calls() == 1);
-    // The session leaves and returns while the old call is held.
-    status.sync(&[]);
-    status.sync(&slots);
-    wait_until("the new stream reads the fresh record", || {
-        status.lookup("block:a")
-            == Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
-    });
-    gate.release();
-    wait_until("the old reader ends", || ended_lines(&logs) == 1);
-    assert_eq!(
-        status.lookup("block:a"),
-        Lookup::Stream(Some(record(RecordState::Working, 2, Some("fresh"))))
-    );
-    assert_eq!(steps.get("block:a", 2).as_deref(), Some("fresh"));
-    assert_eq!(steps.get("block:a", 1), None);
 }
 
 #[test]
 fn a_stopped_reader_reads_no_queued_line_and_makes_no_call() {
-    let (logs, _guard) = capture_logs();
-    // The queued line has no owner pid, so a read of it would call `program_status`.
-    let program = FakeProgram::new("queued", &[LIVE_CHANGED.to_string()], true);
-    let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
-    let gate = Gate::new(
-        block,
-        reply("working", 1, "stale"),
-        reply("working", 2, "later"),
+    within_30s(
+        "a_stopped_reader_reads_no_queued_line_and_makes_no_call",
+        || {
+            let (logs, _guard) = capture_logs();
+            // The queued line has no owner pid, so a read of it would call `program_status`.
+            let program = FakeProgram::new("queued", &[LIVE_CHANGED.to_string()], true);
+            let block = "block:01a196ca-ea23-7148-9fc0-352b07759d6f";
+            let gate = Gate::new(
+                block,
+                reply("working", 1, "stale"),
+                reply("working", 2, "later"),
+            );
+            let api = FakeRex {
+                gate: Some(Arc::clone(&gate)),
+                ..FakeRex::default()
+            };
+            let (status, steps) = status_with(api, &program, now_clock());
+            let _open = gate.guard();
+            status.sync(&[slot_in("session:1", block)]);
+            wait_until("the reader is in its first call", || gate.calls() == 1);
+            status.sync(&[]);
+            gate.release();
+            wait_until("the reader ends", || ended_lines(&logs) == 1);
+            assert_eq!(gate.calls(), 1);
+            assert_eq!(status.lookup(block), Lookup::NoStream);
+            assert_eq!(steps.get(block, 1), None);
+        },
     );
-    let api = FakeRex {
-        gate: Some(Arc::clone(&gate)),
-        ..FakeRex::default()
-    };
-    let (status, steps) = status_with(api, &program, now_clock());
-    status.sync(&[slot_in("session:1", block)]);
-    wait_until("the reader is in its first call", || gate.calls() == 1);
-    status.sync(&[]);
-    gate.release();
-    wait_until("the reader ends", || ended_lines(&logs) == 1);
-    assert_eq!(gate.calls(), 1);
-    assert_eq!(status.lookup(block), Lookup::NoStream);
-    assert_eq!(steps.get(block, 1), None);
 }
 
 // -- the inventory starts the streams ---------------------------------------------
