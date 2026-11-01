@@ -4923,7 +4923,7 @@ fn the_multiplexer_calls_failing_alert_sums_the_bad_outcomes_over_15_minutes() {
     );
     assert_eq!(
         alert["message"],
-        "Multiplexer calls failed or timed out more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server."
+        "Multiplexer calls failed, timed out or gave output that could not be read more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server."
     );
 
     let webhook = definition("webhook-multiplexer-calls-failing.json");

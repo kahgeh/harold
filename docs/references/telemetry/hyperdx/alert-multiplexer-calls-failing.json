@@ -1,7 +1,7 @@
 {
   "name": "multiplexer-calls-failing",
   "note": "multiplexer-calls-failing",
-  "message": "Multiplexer calls failed or timed out more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server.",
+  "message": "Multiplexer calls failed, timed out or gave output that could not be read more than 300 times in 15 minutes. Read the agent monitor degraded lines and the multiplexer's server.",
   "source": "inline",
   "chartConfig": {
     "name": "multiplexer-calls-failing",
