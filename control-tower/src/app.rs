@@ -61,7 +61,7 @@ pub struct AgentRow {
     pub working_directory: String,
     pub work_summary: Option<String>,
     pub current_step: Option<String>,
-    /// Claude Code's own recap of the session, when Harold has read one.
+    /// The agent's own recap of its session, when Harold has read one.
     pub recap: Option<String>,
     pub recap_at_ms: i64,
     pub state: AgentState,

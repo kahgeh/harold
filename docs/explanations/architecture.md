@@ -287,7 +287,7 @@ An activity summary condenses supplied evidence; it does not independently verif
 
 Harold reads an agent's recap from the agent's transcript. It reads the tail of the transcript file through the shared tail reader. The recap adapter of the provider, named by `recap_adapter`, finds the recap in that tail. Today only `claude-transcript-v1` exists, for Claude Code.
 
-Harold checks the transcript every 10 seconds and at a turn end. It keeps the recaps in memory only. It sends them only on the `WatchAgentStates` stream, for the control-tower. A recap and a current step are not work summaries. See [recaps](../references/agent-monitor/README.md#metrics) for the counter and the log lines.
+Harold checks the transcript every 10 seconds. It keeps the recaps in memory only. It sends them only on the `WatchAgentStates` stream, for the control-tower. A recap and a current step are not work summaries. See [recaps](../references/agent-monitor/README.md#metrics) for the counter and the log lines.
 
 ### Recovering a submitted task from scrollback
 

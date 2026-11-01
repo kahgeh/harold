@@ -5,7 +5,7 @@ Status: Accepted (recap-as-work-summary). Builds on 0024 (rex-state-from-rex).
 
 ## Context
 
-Claude Code writes a recap of a session into the session's transcript after the user was away. The line (`away_summary`) is not documented. Harold already reads a transcript for the restart reminder. The standards forbid transcript text in a log line, a span or a metric, and let only agent facts and activity summaries go to a hosted model. They did not say whether Harold may keep transcript text in memory.
+Claude Code writes a recap of a session into the session's transcript after the user was away. The line (`away_summary`) is not documented. Harold already reads a transcript for the restart reminder. The standards forbid transcript text in a log line, a span or a metric, and let only agent facts and activity summaries go to a hosted model. They did not state whether Harold may keep transcript text in memory.
 
 ## Decision
 
