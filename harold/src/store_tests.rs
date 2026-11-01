@@ -342,6 +342,53 @@ async fn staging_is_ordered_checkpointed_and_idempotent() {
 }
 
 #[tokio::test]
+async fn next_pending_delivery_without_replies_skips_inbound_rows() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let reply = |text: &str| InboundMessage { text: text.into() };
+    append_inbound_message(&store, &reply("first"))
+        .await
+        .unwrap();
+    append_turn_completed(
+        &store,
+        &TurnCompleted {
+            pane_id: "%1".into(),
+            pane_label: "harold:0.1".into(),
+            last_user_prompt: "ask".into(),
+            assistant_message: "done".into(),
+            main_context: "harold".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap();
+    append_inbound_message(&store, &reply("second"))
+        .await
+        .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+
+    let oldest = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(oldest.event_type, "InboundMessageReceived");
+    assert_eq!(oldest.event_version.get(), 1);
+    let turn_end = store
+        .next_pending_delivery_without_replies()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn_end.event_type, "TurnCompleted");
+
+    store.mark_delivered(&turn_end.event_id).await.unwrap();
+    assert!(
+        store
+            .next_pending_delivery_without_replies()
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn failed_delivery_remains_pending_until_marked_delivered() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();

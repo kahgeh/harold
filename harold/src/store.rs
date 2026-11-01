@@ -878,19 +878,35 @@ impl HaroldStore {
     }
 
     pub async fn next_pending_delivery(&self) -> Result<Option<PendingDelivery>> {
+        self.first_pending_delivery(
+            r#"
+            SELECT event_id, event_version, event_type, payload, trace_id, attempt_count
+            FROM delivery_outbox
+            WHERE delivered_at_ms IS NULL
+            ORDER BY event_version
+            LIMIT 1
+            "#,
+        )
+        .await
+    }
+
+    /// The oldest pending row that is not a phone reply.
+    pub async fn next_pending_delivery_without_replies(&self) -> Result<Option<PendingDelivery>> {
+        self.first_pending_delivery(
+            r#"
+            SELECT event_id, event_version, event_type, payload, trace_id, attempt_count
+            FROM delivery_outbox
+            WHERE delivered_at_ms IS NULL AND event_type != 'InboundMessageReceived'
+            ORDER BY event_version
+            LIMIT 1
+            "#,
+        )
+        .await
+    }
+
+    async fn first_pending_delivery(&self, sql: &str) -> Result<Option<PendingDelivery>> {
         let conn = self.state.connect()?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT event_id, event_version, event_type, payload, trace_id, attempt_count
-                FROM delivery_outbox
-                WHERE delivered_at_ms IS NULL
-                ORDER BY event_version
-                LIMIT 1
-                "#,
-                (),
-            )
-            .await?;
+        let mut rows = conn.query(sql, ()).await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
         };
