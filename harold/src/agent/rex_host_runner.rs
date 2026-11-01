@@ -202,7 +202,7 @@ impl HostAgents {
     }
 
     /// Whether the caller must read the local `host_id`. True for the first caller only.
-    fn begin_local_read(&self) -> bool {
+    pub(super) fn begin_local_read(&self) -> bool {
         let mut local = self.local_lock();
         if *local != LocalId::Unread {
             return false;
@@ -211,8 +211,20 @@ impl HostAgents {
         true
     }
 
-    fn finish_local_read(&self, id: Option<String>) {
-        *self.local_lock() = LocalId::Read(id);
+    /// Keeps the local `host_id` and leaves out the hosts that lead to this Mac. The lock order
+    /// is the hosts, then the local id, as in `record`.
+    pub(super) fn finish_local_read(&self, id: Option<String>) {
+        let changed = {
+            let mut hosts = self.lock();
+            let before = rows(&self.inner.labels, &hosts);
+            *self.local_lock() = LocalId::Read(id.clone());
+            leave_out_duplicates(&self.inner.labels, &mut hosts, id.as_deref());
+            rows(&self.inner.labels, &hosts) != before
+        };
+        if changed {
+            self.note_counts();
+            self.inner.version.send_modify(|version| *version += 1);
+        }
     }
 
     fn local_id(&self) -> Option<String> {

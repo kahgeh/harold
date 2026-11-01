@@ -583,6 +583,35 @@ async fn a_label_for_this_mac_is_left_out_with_one_warning() {
     assert!(lines[0].contains(r#"state="left_out""#), "{lines:?}");
 }
 
+#[test]
+fn a_label_that_leads_to_this_mac_shows_no_agents_when_the_local_id_arrives_late() {
+    let logs = CapturedLogs::start();
+    let agents = HostAgents::new(vec!["loopback".into()]);
+    let versions = agents.subscribe();
+    // The Mac's own host_id is being read when the host task records its agents.
+    assert!(agents.begin_local_read());
+    agents.record(
+        "loopback",
+        HostReport::Reached {
+            agents: vec![agent("loopback", "b1", 200, 100, WORKING)],
+            host_id: Some("mac-id".into()),
+            icon: String::new(),
+        },
+        500,
+    );
+    assert_eq!(agents.snapshot().len(), 1);
+    let version = *versions.borrow();
+    agents.finish_local_read(Some("mac-id".into()));
+    assert!(agents.snapshot().is_empty());
+    assert!(*versions.borrow() > version);
+    let lines: Vec<_> = host_lines(&logs)
+        .into_iter()
+        .filter(|line| line.contains("local_host"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].trim_start().starts_with("WARN"), "{lines:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_failed_local_read_leaves_out_nothing_and_logs_nothing() {
     let logs = CapturedLogs::start();
