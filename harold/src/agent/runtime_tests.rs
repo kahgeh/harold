@@ -1062,6 +1062,27 @@ async fn departure_requires_two_successful_absences_and_exact_incarnation_revali
 }
 
 #[tokio::test]
+async fn a_tracked_tmux_pane_departs_after_two_absent_scans_and_the_inventory_stays_healthy() {
+    let tracked = pane("%2", 20, 200, 1_000, 100);
+    let inventory = FakeInventory::scans(vec![
+        Ok(vec![tracked.clone()]),
+        Ok(Vec::new()),
+        Ok(Vec::new()),
+    ]);
+    inventory.push_current(Ok(false));
+    let fixture = Fixture::new(inventory).await;
+
+    for _ in 0..3 {
+        fixture.handle.inventory_tick().await.unwrap();
+    }
+
+    assert_eq!(
+        event_types(&fixture.events().await),
+        ["AgentPaneObserved", "AgentPaneDeparted"]
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_and_departure_orders_converge_on_exact_liveness() {
     let original = pane("%8", 80, 800, 1_000, 100);
     let hook_first_inventory = FakeInventory::scans(vec![
