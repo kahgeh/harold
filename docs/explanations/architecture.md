@@ -90,7 +90,7 @@ flowchart LR
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did | `hooks/` |
-| control-tower | The control-tower: agent rows, todo rows, voice and messaging switches, and the notes search (`s`) over the knowledge tool | `control-tower/` |
+| control-tower | The control-tower: agent rows, todo rows, voice and messaging switches, and the notes search (`s`) over the knowledge tool. `harold start-control-tower` starts it | `control-tower/` |
 | API contracts | The protobuf definitions shared by Harold, the control-tower and the tools | `harold-api/` |
 
 ## Interfaces

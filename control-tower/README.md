@@ -38,7 +38,15 @@ The resulting development executable is `../target/release/control-tower`.
 
 ## Run
 
-Harold's loopback endpoint is the default:
+An installed Harold starts the control-tower with this command:
+
+```sh
+harold start-control-tower [--endpoint URI]
+```
+
+The command passes the gRPC address from the Harold settings. The `--endpoint` argument overrides it.
+
+For development, Harold's loopback endpoint is the default:
 
 ```sh
 cargo run

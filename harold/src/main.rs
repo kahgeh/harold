@@ -775,6 +775,8 @@ fn print_help() {
     println!("  harold accept EVENT --pane ID --adapter NAME");
     println!("                          Report a pane busy (turn-started, still-working) or idle");
     println!("                          (turn-completed, subagents-finished); 3s timeout");
+    println!("  harold start-control-tower [--endpoint URI]");
+    println!("                          Start the control-tower in this terminal");
     println!("  harold send-message-to-away-device --src-id ID TEXT");
     println!("                          Send TEXT to the away device from tmux or Rex pane ID;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");

@@ -785,6 +785,21 @@ fn help_lists_the_away_message_command() {
     );
 }
 
+#[test]
+fn help_lists_start_control_tower() {
+    let output = Fixture::new(VALID).run(&["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("harold start-control-tower [--endpoint URI]"),
+        "{help}"
+    );
+    assert!(
+        help.contains("Start the control-tower in this terminal"),
+        "{help}"
+    );
+}
+
 /// A valid configuration whose gRPC port Harold cannot bind, so a daemon that got past its
 /// start-up checks by mistake exits instead of serving beside the installed Harold.
 /// A config that fails validation in every build: an empty one lacks the iMessage recipient,

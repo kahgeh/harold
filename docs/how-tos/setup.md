@@ -191,13 +191,13 @@ Five wrong codes in all lock pairing for good. Unlock it by changing the code in
 
 Success requires both the managed process owning the listening socket and Harold returning a current agent-state snapshot. The installer performs this same check before reporting success. It does not send a test phone notification.
 
-Start the control-tower from inside tmux:
+Start the control-tower from a terminal in Rex or in tmux:
 
 ```sh
-~/bin/harold/control-tower
+~/bin/harold/harold start-control-tower
 ```
 
-If you configure a different gRPC endpoint, pass it explicitly, for example `--endpoint http://127.0.0.1:50061`.
+The command finds `control-tower` in the same folder as `harold`. It passes the gRPC address from the settings to the control-tower. To use a different address, add `--endpoint URI`, for example `--endpoint http://127.0.0.1:50061`. Pane navigation needs tmux.
 
 Service commands are:
 
