@@ -1531,22 +1531,6 @@ fn detail_lines<'a>(
         fact("AGE", age(now_ms, agent.last_transition_at_ms)),
         Line::raw(""),
     ];
-    if let Some(recap) = agent.recap.as_deref().filter(|recap| !recap.is_empty()) {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "RECAP",
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", age(now_ms, agent.recap_at_ms)),
-                Style::default().fg(MUTED),
-            ),
-        ]));
-        for line in wrap_capped(recap, usize::from(inner_width), RECAP_PANEL_LINES) {
-            lines.push(Line::styled(line, Style::default().fg(INK)));
-        }
-        lines.push(Line::raw(""));
-    }
     if let Some(step) = agent
         .current_step
         .as_deref()
@@ -1573,14 +1557,30 @@ fn detail_lines<'a>(
             StepMode::None => {}
         }
     }
-    lines.push(Line::styled(
-        "WORK SUMMARY",
-        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-    ));
-    lines.push(Line::styled(
-        display_work_summary(agent.work_summary.as_deref()),
-        Style::default().fg(INK),
-    ));
+    if let Some(recap) = agent.recap.as_deref().filter(|recap| !recap.is_empty()) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "WORK SUMMARY",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", age(now_ms, agent.recap_at_ms)),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+        for line in wrap_capped(recap, usize::from(inner_width), RECAP_PANEL_LINES) {
+            lines.push(Line::styled(line, Style::default().fg(INK)));
+        }
+    } else {
+        lines.push(Line::styled(
+            "WORK SUMMARY",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            display_work_summary(agent.work_summary.as_deref()),
+            Style::default().fg(INK),
+        ));
+    }
     if agent.is_on_host() {
         // Right after the STATE line.
         lines.insert(3, fact("HOST", &agent.host));
@@ -3670,7 +3670,31 @@ mod tests {
     }
 
     #[test]
-    fn the_detail_panel_shows_recap_with_age_current_step_and_work_summary_in_order() {
+    fn with_a_recap_the_panel_shows_work_summary_with_the_recap_age() {
+        let mut app = recap_app(Some("Goal: ship the recap"), None);
+        app.snapshot.rows[0].work_summary = Some("OLD-SUMMARY-MARK".to_string());
+        let content = rendered(&app, 140, 44, 100_000);
+
+        assert_eq!(content.matches("WORK SUMMARY").count(), 2);
+        assert!(content.contains("WORK SUMMARY  12m"));
+        assert!(content.contains("Goal: ship the recap"));
+        assert!(!content.contains("RECAP"));
+        assert!(!content.contains("OLD-SUMMARY-MARK"));
+    }
+
+    #[test]
+    fn an_empty_recap_shows_the_old_summary() {
+        let mut app = recap_app(Some(""), None);
+        app.snapshot.rows[0].work_summary = Some("OLD-SUMMARY-MARK".to_string());
+        let content = rendered(&app, 140, 44, 100_000);
+
+        assert!(content.contains("OLD-SUMMARY-MARK"));
+        assert!(!content.contains("12m"));
+        assert!(!content.contains("RECAP"));
+    }
+
+    #[test]
+    fn with_a_recap_and_a_step_the_order_is_step_then_work_summary() {
         let content = rendered(
             &recap_app(Some("Goal: ship the recap"), Some("Running the tests")),
             140,
@@ -3678,15 +3702,43 @@ mod tests {
             100_000,
         );
 
-        let recap_label = content.find("RECAP").expect("recap label");
-        let age_line = content.find("12m").expect("recap age");
-        let recap_text = content.rfind("Goal: ship the recap").expect("recap text");
         let step_label = content.find("CURRENT STEP").expect("step label");
-        let summary_label = content.rfind("WORK SUMMARY").expect("summary label");
-        assert!(recap_label < age_line);
-        assert!(age_line < recap_text);
-        assert!(recap_text < step_label);
+        let summary_label = content.find("WORK SUMMARY  12m").expect("summary label");
+        let recap_text = content.rfind("Goal: ship the recap").expect("recap text");
         assert!(step_label < summary_label);
+        assert!(summary_label < recap_text);
+        assert!(!content.contains("RECAP"));
+    }
+
+    #[test]
+    fn a_recap_with_no_age_still_renders() {
+        let mut app = recap_app(Some("Goal: ship the recap"), None);
+        app.snapshot.rows[0].recap_at_ms = 0;
+        let content = rendered(&app, 140, 44, 100_000);
+
+        assert!(content.contains("AGENT DETAILS"));
+        assert!(content.contains("Goal: ship the recap"));
+    }
+
+    #[test]
+    fn the_one_line_step_sits_above_work_summary_with_a_recap() {
+        let mut found = false;
+        for height in 20..=44 {
+            let content = rendered(
+                &recap_app(Some("Goal: ship the recap"), Some(LONG_STEP)),
+                140,
+                height,
+                100_000,
+            );
+            if !content.contains("AGENT DETAILS") || content.contains("CURRENT STEP") {
+                continue;
+            }
+            found = true;
+            let step = content.find("Reading the long failing").expect("step");
+            let summary = content.find("WORK SUMMARY  12m").expect("summary");
+            assert!(step < summary, "height {height}");
+        }
+        assert!(found, "no height showed the one-line step");
     }
 
     #[test]
@@ -3702,7 +3754,7 @@ mod tests {
             let content = rendered(&app, width, height, 100_000);
 
             assert!(content.contains("AGENT DETAILS"), "width {width}");
-            assert_eq!(content.matches("RECAP").count(), 1, "width {width}");
+            assert!(!content.contains("RECAP"), "width {width}");
             assert_eq!(content.matches("CURRENT STEP").count(), 1, "width {width}");
             assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
             assert!(content.contains("12m"), "width {width}");
