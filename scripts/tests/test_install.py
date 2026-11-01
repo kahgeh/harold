@@ -925,6 +925,23 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertFalse((self.prefix / 'tmx-agent-dash').exists())
         self.assertIn(self.REMOVED, output)
 
+    def test_an_old_program_that_cannot_be_deleted_does_not_stop_the_install(self):
+        old = self.prefix / 'tmx-agent-dash'
+        old.write_text('old dash')
+        real_unlink = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path == old:
+                raise PermissionError(13, 'Permission denied')
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, 'unlink', autospec=False, new=unlink):
+            output = self.run_install('-')
+        self.assertIn('could not remove ~/bin/tmx-agent-dash (Permission denied); delete it by hand', output)
+        self.assertIn('Harold ready at', output)
+        self.assertNotIn('removed ~/bin', output)
+        self.start.assert_called()
+
     def test_a_second_install_finds_control_tower_in_the_bundle_backup(self):
         self.run_install('-')
         output = self.run_install('-')
