@@ -1,4 +1,4 @@
-# 25. Harold reads agents on other Rex hosts, read-only, through Rex
+# 27. Harold reads agents on other Rex hosts, read-only, through Rex
 
 Date: 2026-11-02
 Status: Accepted (rex-other-hosts). Builds on 0022.

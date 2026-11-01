@@ -35,4 +35,4 @@
 - [3. Pod merge counts save the counted tip before recording](adr/0003-pod-merge-counts-save-the-tip-first.md)
 - [24. Agents have six states, and Harold takes them from the terminal when the agent reports them](adr/0024-agents-have-six-states-and-harold-takes-them-from-the-terminal-when-it-reports-them.md)
 - [25. Harold keeps transcript text in memory and shows it only in the control-tower](adr/0025-harold-keeps-transcript-text-in-memory-and-shows-it-only-in-the-control-tower.md)
-- [25. Harold reads agents on other Rex hosts, read-only, through Rex](adr/0025-harold-reads-agents-on-other-rex-hosts-read-only-through-rex.md)
+- [27. Harold reads agents on other Rex hosts, read-only, through Rex](adr/0027-harold-reads-agents-on-other-rex-hosts-read-only-through-rex.md)
