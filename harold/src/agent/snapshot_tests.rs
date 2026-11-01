@@ -80,3 +80,99 @@ async fn publish_requires_a_higher_durable_revision_and_coalesces_slow_receivers
     );
     assert!(receiver.has_changed().is_ok_and(|changed| !changed));
 }
+
+fn timed_snapshot(
+    revision: i64,
+    provider_id: &str,
+    panes: &[(&str, EffectiveAgentState, i64)],
+) -> AgentSnapshot {
+    let mut base = snapshot(revision, None);
+    let template = base.panes[0].clone();
+    base.panes = panes
+        .iter()
+        .map(|(pane_id, state, transition_ms)| {
+            let mut pane = template.clone();
+            pane.pane.incarnation.pane_id = (*pane_id).into();
+            pane.pane.incarnation.provider_id = provider_id.into();
+            pane.effective_state = *state;
+            pane.last_transition_at_ms = *transition_ms;
+            pane
+        })
+        .collect();
+    base
+}
+
+fn seconds_in(provider_id: &str, state: &str) -> Option<f64> {
+    crate::telemetry::test_support::histogram_sum(
+        "harold.agent.state.duration",
+        &[("provider_id", provider_id), ("state", state)],
+    )
+}
+
+#[test]
+fn a_state_change_records_the_seconds_in_the_state_left() {
+    let provider = "state-change-provider";
+    let hub = AgentSnapshotHub::new(timed_snapshot(
+        1,
+        provider,
+        &[("%1", EffectiveAgentState::Working, 10_000)],
+    ));
+
+    hub.publish_committed(timed_snapshot(
+        2,
+        provider,
+        &[("%1", EffectiveAgentState::Idle, 100_000)],
+    ));
+
+    assert_eq!(seconds_in(provider, "working"), Some(90.0));
+    assert_eq!(seconds_in(provider, "idle"), None);
+}
+
+#[test]
+fn a_new_a_departed_and_an_unchanged_pane_record_nothing() {
+    let provider = "quiet-provider";
+    let hub = AgentSnapshotHub::new(timed_snapshot(
+        1,
+        provider,
+        &[
+            ("%1", EffectiveAgentState::Working, 10_000),
+            ("%2", EffectiveAgentState::Idle, 20_000),
+        ],
+    ));
+
+    hub.publish_committed(timed_snapshot(
+        2,
+        provider,
+        &[
+            ("%1", EffectiveAgentState::Working, 10_000),
+            ("%3", EffectiveAgentState::Working, 50_000),
+        ],
+    ));
+
+    for state in ["working", "idle", "unknown"] {
+        assert_eq!(seconds_in(provider, state), None, "{state}");
+    }
+}
+
+#[test]
+fn a_rejected_stale_snapshot_records_nothing() {
+    let provider = "stale-provider";
+    let hub = AgentSnapshotHub::new(timed_snapshot(
+        5,
+        provider,
+        &[("%1", EffectiveAgentState::Working, 10_000)],
+    ));
+
+    hub.publish_committed(timed_snapshot(
+        5,
+        provider,
+        &[("%1", EffectiveAgentState::Idle, 100_000)],
+    ));
+    hub.publish_committed(timed_snapshot(
+        4,
+        provider,
+        &[("%1", EffectiveAgentState::Idle, 100_000)],
+    ));
+
+    assert_eq!(seconds_in(provider, "working"), None);
+}

@@ -342,7 +342,6 @@ pub(crate) struct Instruments {
     /// `harold.multiplexer.call.duration`, milliseconds, with the same attributes.
     pub multiplexer_call_duration: Histogram<f64>,
     /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
-    #[allow(dead_code, reason = "Task 5 records this; remove the allow then")]
     pub agent_state_duration: Histogram<f64>,
 }
 
@@ -648,7 +647,6 @@ pub(crate) fn record_call(
         .record(elapsed.as_secs_f64() * 1000.0, &attributes);
 }
 
-#[allow(dead_code, reason = "Task 5 builds these rows")]
 /// One row of `harold.agents`: how many agents are in `state` for `provider_id`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentCount {
@@ -735,9 +733,35 @@ fn listing_gauge(
 }
 
 /// Replaces the counts `harold.agents` reads. The multiplexer comes from the settings.
-#[allow(dead_code, reason = "Task 5 calls this from the agent state recorder")]
 pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
     note_agent_counts_for(configured_multiplexer(), counts);
+}
+
+/// Records the seconds an agent spent in `left_state` on `harold.agent.state.duration`.
+/// The multiplexer comes from the settings. The host is Harold's own machine.
+pub(crate) fn record_agent_state_duration(
+    left_state: &'static str,
+    provider_id: &str,
+    seconds: f64,
+) {
+    record_agent_state_duration_for(configured_multiplexer(), left_state, provider_id, seconds);
+}
+
+fn record_agent_state_duration_for(
+    multiplexer: &str,
+    left_state: &'static str,
+    provider_id: &str,
+    seconds: f64,
+) {
+    instruments().agent_state_duration.record(
+        seconds,
+        &[
+            KeyValue::new("state", left_state),
+            KeyValue::new("provider_id", provider_id.to_owned()),
+            KeyValue::new("multiplexer", multiplexer.to_owned()),
+            KeyValue::new("host", HOST_OWN_MACHINE),
+        ],
+    );
 }
 
 fn note_agent_counts_for(multiplexer: &str, counts: Vec<AgentCount>) {

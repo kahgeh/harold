@@ -2,6 +2,10 @@ use tokio::sync::watch;
 
 use crate::store::EventVersion;
 
+use std::collections::{BTreeMap, HashMap};
+
+use crate::telemetry::{AgentCount, record_agent_state_duration};
+
 use super::domain::AgentSnapshot;
 
 #[derive(Clone)]
@@ -45,8 +49,54 @@ impl AgentSnapshotHub {
             if snapshot.through_event_version.get() <= current.through_event_version.get() {
                 return false;
             }
+            record_state_changes(current, &snapshot);
+            crate::telemetry::note_agent_counts(agent_counts(&snapshot));
             *current = snapshot;
             true
         });
     }
+}
+
+/// Records the time each pane spent in the state it left. A new or departed pane records nothing.
+fn record_state_changes(old: &AgentSnapshot, new: &AgentSnapshot) {
+    let before: HashMap<&str, _> = old
+        .panes
+        .iter()
+        .map(|pane| (pane.pane.incarnation.pane_id.as_str(), pane))
+        .collect();
+    for pane in &new.panes {
+        let Some(previous) = before.get(pane.pane.incarnation.pane_id.as_str()) else {
+            continue;
+        };
+        if previous.effective_state == pane.effective_state {
+            continue;
+        }
+        let seconds = (pane.last_transition_at_ms - previous.last_transition_at_ms) as f64 / 1000.0;
+        record_agent_state_duration(
+            previous.effective_state.as_str(),
+            &previous.pane.incarnation.provider_id,
+            seconds,
+        );
+    }
+}
+
+/// The number of panes in each state, for each provider.
+fn agent_counts(snapshot: &AgentSnapshot) -> Vec<AgentCount> {
+    let mut counts: BTreeMap<(&'static str, &str), u64> = BTreeMap::new();
+    for pane in &snapshot.panes {
+        *counts
+            .entry((
+                pane.effective_state.as_str(),
+                pane.pane.incarnation.provider_id.as_str(),
+            ))
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|((state, provider_id), count)| AgentCount {
+            state,
+            provider_id: provider_id.to_owned(),
+            count,
+        })
+        .collect()
 }

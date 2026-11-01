@@ -55,7 +55,6 @@ pub(crate) enum EffectiveAgentState {
 
 impl EffectiveAgentState {
     /// The `state` attribute word of the agent metrics.
-    #[allow(dead_code, reason = "Task 5 uses this to build agent counts")]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Working => "working",
