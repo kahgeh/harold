@@ -391,7 +391,7 @@ summary. Harold cuts the recap to 400 characters.
 
 When the panel does not fit with the full `CURRENT STEP` lines, it shows the step as one line
 instead. That line has no `CURRENT STEP` heading and no blank line after it. It sits above
-`WORK SUMMARY`, and Harold cuts it by width and ends it with `…` when it is longer. The panel hides
+`WORK SUMMARY`, and the control-tower cuts it by width and ends it with `…` when it is longer. The panel hides
 only when it does not fit even without the step, so a step that comes and goes does not make the
 panel come and go.
 

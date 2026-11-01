@@ -6521,7 +6521,8 @@ async fn a_non_blocked_record_clears_the_blocked_timer() {
         10 * MINUTE_MS + 1_000,
     )
     .await;
-    // The second spell: the record reads blocked from `second`, and BLOCKED shows 40 s later.
+    // The second spell: the record reads blocked from `second`.
+    // Samples follow at 0, 20 and 40 s.
     let second = 10 * MINUTE_MS + 2_000;
     for at in [second, second + 20_000, second + 40_000] {
         sample_record(&fixture, &observed, ObservedAgentState::Blocked, at).await;
@@ -6559,7 +6560,7 @@ async fn a_hook_report_alone_does_not_stop_the_blocked_timer() {
     report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
     sample_record(&fixture, &observed, ObservedAgentState::Blocked, 2_000).await;
 
-    // A working report arrives every 10 s. The record keeps the state at BLOCKED.
+    // A working report arrives every 60 s in this loop. The record keeps the state at BLOCKED.
     let mut at = 12_000;
     while at < 2_000 + BLOCKED_LONG_MS {
         report_on(&fixture, &observed, ObservedAgentState::Working, at).await;
@@ -6584,7 +6585,7 @@ async fn no_blocked_line_comes_while_the_reducer_shows_working() {
     let (captured, _guard) = capture_logs();
     report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
 
-    // The record reads blocked, but a working report 20 s later takes the state to WORKING.
+    // The record reads blocked, but a working report 1 s later takes the state to WORKING.
     sample_record(&fixture, &observed, ObservedAgentState::Blocked, 5_000).await;
     report_on(&fixture, &observed, ObservedAgentState::Working, 6_000).await;
     sample_screen(

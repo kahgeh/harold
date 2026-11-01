@@ -1129,10 +1129,12 @@ fn the_agents_port_rows_have_no_current_step_field() {
             assert!(!text.contains("LEAKCHECK-step-7f3a"), "{text}");
         }
     }
-    // The step is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(rows.contains("%7"), "{rows}");
     assert!(!rows.contains("LEAKCHECK-step-7f3a"), "{rows}");
+    assert!(!rows.contains("step"), "{rows}");
 }
 
 /// This guards against a recap field being added to a row, because the agents port cannot
@@ -1154,7 +1156,8 @@ fn the_agents_port_rows_have_no_recap() {
         providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
     };
     let rows = format!("{:?}", agents.agents());
-    // The recap is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(
         recaps.get("%7", 20).map(|line| line.text).as_deref(),
         Some("LEAKCHECK-recap-9c1d")
@@ -1162,4 +1165,5 @@ fn the_agents_port_rows_have_no_recap() {
     assert!(rows.contains("%7"), "{rows}");
     assert!(!rows.contains("LEAKCHECK-recap-9c1d"), "{rows}");
     assert!(!rows.contains("LEAKCHECK-step-7f3a"), "{rows}");
+    assert!(!rows.contains("recap"), "{rows}");
 }

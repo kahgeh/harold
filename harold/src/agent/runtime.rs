@@ -208,7 +208,8 @@ struct TrackedPane {
     /// The screen evidence that counts in the reduction: the agent's record that refines the
     /// hook report, or a reading after the report's grace window. None while the hook decides.
     screen: Option<ScreenEvidence>,
-    /// When the unbroken busy reading began, for a pane whose adapter reported idle.
+    /// When the unbroken working reading began, for a pane whose adapter reported done or idle,
+    /// or the working run after an error record.
     screen_busy_since_ms: Option<i64>,
     screen_summary: Option<String>,
     summary_basis_version: EventVersion,

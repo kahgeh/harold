@@ -971,7 +971,8 @@ fn the_call_facts_have_no_current_step_field() {
     let recaps = crate::agent::recap::Recaps::default();
     recaps.put_for_test("%2", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
-    // The step is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(steps.get("%2", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(recaps.get("%2", 20).is_some());
     assert!(facts.to_string().contains("chief-of-pods"), "{facts}");
@@ -979,6 +980,7 @@ fn the_call_facts_have_no_current_step_field() {
         !facts.to_string().contains("LEAKCHECK-step-7f3a"),
         "{facts}"
     );
+    assert!(!facts.to_string().contains("step"), "{facts}");
 }
 
 // This guards against a recap field being added to the facts, because the answerer cannot
@@ -991,7 +993,8 @@ fn the_call_facts_have_no_recap() {
     let recaps = crate::agent::recap::Recaps::default();
     recaps.put_for_test("%2", 20, "LEAKCHECK-recap-9c1d", 3_000);
     let facts = facts_json(&sources(), None, None, now_ms(), UtcOffset::UTC);
-    // The recap is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(
         recaps.get("%2", 20).map(|line| line.text).as_deref(),
         Some("LEAKCHECK-recap-9c1d")
@@ -1006,4 +1009,5 @@ fn the_call_facts_have_no_recap() {
         !facts.to_string().contains("LEAKCHECK-step-7f3a"),
         "{facts}"
     );
+    assert!(!facts.to_string().contains("recap"), "{facts}");
 }

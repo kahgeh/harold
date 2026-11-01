@@ -183,11 +183,13 @@ async fn the_watch_facts_have_no_current_step_field() {
     )
     .await;
     let json = serde_json::to_string(&facts).unwrap();
-    // The step is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(steps.get("%3", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(recaps.get("%3", 20).is_some());
     assert!(json.contains("Plain summary"), "{json}");
     assert!(!json.contains("LEAKCHECK-step-7f3a"), "{json}");
+    assert!(!json.contains("step"), "{json}");
 }
 
 // This guards against a recap field being added to the facts, because the watch code cannot
@@ -215,7 +217,8 @@ async fn the_watch_facts_have_no_recap() {
     )
     .await;
     let json = serde_json::to_string(&facts).unwrap();
-    // The recap is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(
         recaps.get("%3", 20).map(|line| line.text).as_deref(),
         Some("LEAKCHECK-recap-9c1d")
@@ -224,4 +227,5 @@ async fn the_watch_facts_have_no_recap() {
     assert!(json.contains("Plain summary"), "{json}");
     assert!(!json.contains("LEAKCHECK-recap-9c1d"), "{json}");
     assert!(!json.contains("LEAKCHECK-step-7f3a"), "{json}");
+    assert!(!json.contains("recap"), "{json}");
 }

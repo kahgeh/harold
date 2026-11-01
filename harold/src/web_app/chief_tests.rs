@@ -264,13 +264,15 @@ fn the_phone_apps_chief_result_has_no_current_step_field() {
         panic!("the chief is found: {found:?}");
     };
     assert!(!pane_id.contains("LEAKCHECK-step-7f3a"), "{found:?}");
-    // The step is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(steps.get("%1", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(recaps.get("%1", 20).is_some());
     assert!(
         !format!("{found:?}").contains("LEAKCHECK-step-7f3a"),
         "{found:?}"
     );
+    assert!(!format!("{found:?}").contains("step"), "{found:?}");
 }
 
 /// The phone app reads panes only to find the chief. The result has no recap field.
@@ -288,7 +290,8 @@ fn the_phone_apps_agent_rows_have_no_recap() {
         None,
     );
     let text = format!("{found:?}");
-    // The recap is stored for this pane, so a leak would show its text.
+    // The store is local and the code under test does not read it. The test fails when the marker
+    // text reaches the output.
     assert_eq!(
         recaps.get("%1", 20).map(|line| line.text).as_deref(),
         Some("LEAKCHECK-recap-9c1d")
@@ -297,4 +300,5 @@ fn the_phone_apps_agent_rows_have_no_recap() {
     assert!(text.contains("%1"), "{text}");
     assert!(!text.contains("LEAKCHECK-recap-9c1d"), "{text}");
     assert!(!text.contains("LEAKCHECK-step-7f3a"), "{text}");
+    assert!(!text.contains("recap"), "{text}");
 }
