@@ -61,6 +61,16 @@ pub(crate) struct StatusRecord {
     pub msg: Option<String>,
 }
 
+impl StatusRecord {
+    /// The current step: the `msg` of a `working` or `blocked` record.
+    fn step(&self) -> Option<String> {
+        match self.state {
+            RecordState::Working | RecordState::Blocked => self.msg.clone(),
+            RecordState::Done | RecordState::Idle | RecordState::Error => None,
+        }
+    }
+}
+
 /// Reads one record object. The result is `None` when the state word is unknown or the
 /// owner pid is missing.
 fn record_from_value(value: &Value) -> Option<StatusRecord> {
@@ -300,12 +310,6 @@ impl Shared {
         blocks.len()
     }
 
-    /// Whether the last trigger call for the block failed.
-    fn call_failed(&self, block_id: &str) -> bool {
-        let _records = lock(&self.records);
-        lock(&self.call_failed).contains_key(block_id)
-    }
-
     /// Notes a failed call of stream `generation`: the block has no record and the mark is
     /// set. A stream that was asked to stop, or a closed block, sets nothing.
     fn fail(
@@ -361,11 +365,7 @@ impl Shared {
         if stop.load(Ordering::Acquire) || closed() {
             return;
         }
-        let step = match record.state {
-            RecordState::Working | RecordState::Blocked => record.msg.clone(),
-            RecordState::Done | RecordState::Idle | RecordState::Error => None,
-        };
-        self.steps.set(block_id, record.pid, step);
+        self.steps.set(block_id, record.pid, record.step());
         records.insert(block_id.to_string(), (generation, record));
         self.clear_failed(generation, block_id);
     }
@@ -508,8 +508,6 @@ impl RexStatus {
         if registry.closed {
             return;
         }
-        // Reader threads of ended streams. They are joined after the registry lock goes.
-        let mut old_threads: Vec<JoinHandle<()>> = Vec::new();
         let mut sessions: Vec<(&str, Vec<String>)> = Vec::new();
         registry.owners.clear();
         for slot in slots {
@@ -543,15 +541,12 @@ impl RexStatus {
                 }
                 if let Some(old) = registry.streams.remove(id) {
                     // The reader may still wait for a call thread that is in a `block_call`.
-                    old_threads.extend(old.stop());
+                    // `sync` does not wait for it: the thread ends and reaps its child alone.
+                    drop(old.stop());
                 }
             }
             let stream = self.start(id, blocks, now);
             registry.streams.insert(id.to_string(), stream);
-        }
-        drop(registry);
-        for thread in old_threads {
-            let _ = thread.join();
         }
     }
 
@@ -589,7 +584,6 @@ impl RexStatus {
             log_stream(dispatch, session_id, "ended", Some("read_error"), 0);
             return Stream::failed(now);
         };
-        log_stream(dispatch, session_id, "started", None, 0);
         let flags = Arc::new(Flags::default());
         let child = Arc::new(Mutex::new(Some(child)));
         let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
@@ -636,10 +630,11 @@ impl RexStatus {
         if !running {
             return Lookup::NoStream;
         }
-        let record = lock(&self.shared.records)
-            .get(block_id)
-            .map(|(_, record)| record.clone());
-        if record.is_none() && self.shared.call_failed(block_id) {
+        // One take of the records lock reads the record and the mark. `fail` and `store`
+        // change both under this lock, so a half-set pair is never read.
+        let records = lock(&self.shared.records);
+        let record = records.get(block_id).map(|(_, record)| record.clone());
+        if record.is_none() && lock(&self.shared.call_failed).contains_key(block_id) {
             return Lookup::CallFailed;
         }
         Lookup::Stream(record)
@@ -655,16 +650,61 @@ impl RexStatus {
             .collect()
     }
 
-    /// Kills and reaps every child. A `sync` after this call starts no stream.
+    /// Kills every child and waits for the readers, which reap them, for at most `STOP_WAIT`.
+    /// A reader that is still in a call reaps its child later, on its own thread. A `sync`
+    /// after this call starts no stream.
     pub(crate) fn stop_all(&self) {
         let mut registry = lock(&self.registry);
         registry.closed = true;
         let streams: Vec<Stream> = registry.streams.drain().map(|(_, stream)| stream).collect();
         drop(registry);
+        // `stop` signals each reader and kills its child at once.
         let threads: Vec<_> = streams.into_iter().filter_map(Stream::stop).collect();
-        for thread in threads {
-            let _ = thread.join();
+        if threads.is_empty() {
+            return;
         }
+        // The readers end on their own threads. The wait is off the async threads and takes
+        // at most `STOP_WAIT` in all. A reader that is still in a call ends later alone.
+        let (done, ended) = std::sync::mpsc::channel();
+        let joiner = std::thread::Builder::new()
+            .name("rex-status-stop".to_string())
+            .spawn(move || {
+                for thread in threads {
+                    let _ = thread.join();
+                }
+                let _ = done.send(());
+            });
+        if joiner.is_ok() {
+            off_async_threads(|| {
+                let _ = ended.recv_timeout(STOP_WAIT);
+            });
+        }
+    }
+
+    /// Notes the current step of a record that a direct call read, for a block with no
+    /// stream yet. A stream stores the step of its records the same way.
+    pub(crate) fn note_direct(&self, block_id: &str, record: &StatusRecord) {
+        // A stream that holds a record for the block is newer than the direct call, which
+        // can have been in flight while the stream made its first read.
+        let records = lock(&self.shared.records);
+        if !records.contains_key(block_id) {
+            self.shared.steps.set(block_id, record.pid, record.step());
+        }
+    }
+}
+
+/// The most time `stop_all` waits for the reader threads.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
+/// Runs a wait so that it does not hold a tokio worker thread: the runtime moves the other
+/// tasks of the worker to another thread. On a current-thread runtime or with no runtime,
+/// the wait runs as it is.
+fn off_async_threads<R>(wait: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(wait)
+        }
+        _ => wait(),
     }
 }
 
@@ -744,10 +784,10 @@ impl Pending {
     }
 
     fn add(&self, block_id: &str) {
+        // A block that closed while its call is in hand and then came back gets queued too.
+        // The answer of the call in hand is dropped by the closed mark, so the next call
+        // reads the block again.
         let mut state = lock(&self.state);
-        if state.closed.contains(block_id) {
-            return;
-        }
         if !state.queue.iter().any(|b| b == block_id) {
             state.queue.push(block_id.to_string());
             self.wake.notify_one();
@@ -777,8 +817,13 @@ impl Pending {
     }
 
     /// Notes a failed call. The result is true for the first failure since a call worked.
+    /// A block that closed while the call was in hand leaves no entry.
     fn note_failed(&self, block_id: &str) -> bool {
-        lock(&self.state).failed.insert(block_id.to_string())
+        let mut state = lock(&self.state);
+        if state.closed.contains(block_id) {
+            return false;
+        }
+        state.failed.insert(block_id.to_string())
     }
 
     fn note_worked(&self, block_id: &str) {
@@ -909,6 +954,17 @@ impl Worker {
             }
             self.call(block);
         }
+        if !self.flags.stop.load(Ordering::Acquire) {
+            // The first read is done, so the count is the number of records the stream found.
+            // The line comes before `ready`, so a caller that sees the stream ready sees it.
+            log_stream(
+                &self.shared.dispatch,
+                &self.session_id,
+                "started",
+                None,
+                self.shared.count(self.generation),
+            );
+        }
         self.flags.ready.store(true, Ordering::Release);
         let pending = Arc::clone(&self.pending);
         while let Some(block) = pending.next(&self.flags.stop) {
@@ -969,3 +1025,7 @@ fn call_failure_reason(error: RexError) -> &'static str {
         RexError::Malformed => "malformed",
     }
 }
+
+#[cfg(test)]
+#[path = "rex_status_tests.rs"]
+mod tests;

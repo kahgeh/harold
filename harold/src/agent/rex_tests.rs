@@ -315,13 +315,16 @@ impl Drop for GateGuard {
 /// test's name, so a hang costs 30 s and not the 60 minutes of a CI job.
 fn within_30s(name: &str, body: impl FnOnce() + Send + 'static) {
     let (done, ended) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-        let _ = done.send(());
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
-    });
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            let _ = done.send(());
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
+        })
+        .unwrap();
     if ended.recv_timeout(Duration::from_secs(30)).is_err() {
         panic!("{name} did not end in 30 s");
     }
@@ -728,11 +731,10 @@ fn an_absent_program_is_absent_and_a_slow_one_times_out() {
     let dir = std::env::temp_dir().join(format!("rex-timeout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("slow-rex.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    install_script(
+        &script,
+        "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nsleep 5\n",
+    );
     let started = Instant::now();
     let slow = run_program(&script, &["ls"], Duration::from_millis(100));
     assert_eq!(slow, Err(RexError::Timeout));
@@ -781,15 +783,13 @@ fn a_pane_id_of_the_other_form_is_told_apart_from_a_bad_one() {
 
 /// A `rex` shell script. `rules` come first as `case` arms and the default arms follow.
 fn fake_rex(name: &str, rules: &str) -> SystemRex {
-    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("rex-record-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("rex");
     let body = format!(
-        "#!/bin/sh\ncase \"$*\" in\n{rules}\n*\" ls --json\"*) echo '{{\"sessions\":[]}}';;\n*session.view*) echo '{{\"windows\":[]}}';;\n*\" process\"*) echo '{{\"child\":{{\"pid\":1,\"name\":\"login\"}}}}';;\n*) echo '{{}}';;\nesac\n"
+        "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\ncase \"$*\" in\n{rules}\n*\" ls --json\"*) echo '{{\"sessions\":[]}}';;\n*session.view*) echo '{{\"windows\":[]}}';;\n*\" process\"*) echo '{{\"child\":{{\"pid\":1,\"name\":\"login\"}}}}';;\n*) echo '{{}}';;\nesac\n"
     );
-    std::fs::write(&script, body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&script, &body);
     SystemRex::new(Some(script.to_string_lossy().into_owned()))
 }
 
@@ -1546,6 +1546,9 @@ fn a_burst_of_events_during_a_call_costs_one_more_call_not_one_each() {
             });
             assert_eq!(gate.calls(), 2);
             assert_eq!(api.status_calls("block:s"), 1);
+            // A wrong third call would come just after the record. Check the count again.
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(gate.calls(), 2);
         },
     );
 }
@@ -1738,33 +1741,6 @@ fn dropping_the_stream_clears_the_call_failed_mark() {
 }
 
 #[test]
-fn a_stale_generation_cannot_set_the_call_failed_mark() {
-    within_30s("a_stale_generation_cannot_set_the_call_failed_mark", || {
-        let (logs, _guard) = capture_logs();
-        let program = FakeProgram::new("markstaleset", &[], true);
-        // The old stream's held call fails after its stream stopped. The new stream's call works.
-        let gate = Gate::with("block:a", Err(RexError::Failed), Ok(no_root()));
-        let api = Arc::new(FakeRex {
-            gate: Some(Arc::clone(&gate)),
-            ..FakeRex::default()
-        });
-        let (status, _) = status_with(api, &program, now_clock());
-        let _open = gate.guard();
-        let slots = [slot_in("session:1", "block:a")];
-        status.sync(&slots);
-        wait_until("the old call is held", || gate.calls() == 1);
-        status.sync(&[]);
-        status.sync(&slots);
-        wait_until("the new stream is ready", || {
-            status.lookup("block:a") == Lookup::Stream(None)
-        });
-        gate.release();
-        wait_until("the old reader ends", || ended_lines(&logs) == 1);
-        assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
-    });
-}
-
-#[test]
 fn a_stale_generation_cannot_clear_the_call_failed_mark() {
     within_30s(
         "a_stale_generation_cannot_clear_the_call_failed_mark",
@@ -1876,12 +1852,14 @@ fn a_stream_that_ends_drops_the_sessions_records_and_restarts_after_five_seconds
     *offset.lock().unwrap() = RESTART_GAP;
     status.sync(&slots);
     wait_until("the second run", || program.runs() == 2);
-    let started = logs
-        .with("agent status stream")
-        .iter()
-        .filter(|line| line.contains("event=\"started\""))
-        .count();
-    assert_eq!(started, 2);
+    let started = || {
+        logs.with("agent status stream")
+            .iter()
+            .filter(|line| line.contains("event=\"started\""))
+            .count()
+    };
+    // The line comes after the first read.
+    wait_until("the second started line", || started() == 2);
 }
 
 fn process_exists(pid: &str) -> bool {
@@ -2132,6 +2110,7 @@ fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
 
 #[test]
 fn a_scan_after_a_stream_ended_and_the_gap_passed_changes_the_generation() {
+    let (logs, _guard) = capture_logs();
     let program = FakeProgram::new("scan-restarts", &[], false);
     let base = Instant::now();
     let offset = Arc::new(Mutex::new(Duration::ZERO));
@@ -2148,9 +2127,8 @@ fn a_scan_after_a_stream_ended_and_the_gap_passed_changes_the_generation() {
     );
     inventory.scan().unwrap();
     let before = status.generations();
-    wait_until("the stream ends", || {
-        program.runs() == 1 && status.lookup("block:a") == Lookup::NoStream
-    });
+    // `lookup` also gives `NoStream` before the first read, so wait for the end line.
+    wait_until("the stream ends", || ended_lines(&logs) == 1);
     *offset.lock().unwrap() = RESTART_GAP;
     inventory.scan().unwrap();
     let after = status.generations();

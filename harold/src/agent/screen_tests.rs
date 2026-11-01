@@ -999,6 +999,24 @@ mod rex_observer {
     }
 
     #[test]
+    fn a_direct_call_for_a_block_with_no_stream_gives_the_current_step() {
+        let block = "block:obs-direct-step";
+        let api = api_with(block, Some(reply("working", 20)));
+        // The program is absent, so the block has no stream.
+        let steps = CurrentSteps::default();
+        let status = Arc::new(RexStatus::new(
+            api.clone(),
+            Arc::new(|| Err(RexError::Absent)),
+            steps.clone(),
+        ));
+        let screen = RexVisibleScreen::with_status(api, status.clone());
+        assert_eq!(status.lookup(block), Lookup::NoStream);
+        let observation = observe(&screen, block);
+        assert_eq!(observation.classifier_id, PROGRAM_STATUS_CLASSIFIER_ID);
+        assert_eq!(steps.get(block, 20).as_deref(), Some("a step"));
+    }
+
+    #[test]
     fn a_failed_trigger_call_makes_one_direct_call_and_no_screen_read_when_it_works() {
         let block = "block:obs-call-failed";
         // The first call of the stream fails. The direct call of the observer works.
