@@ -772,7 +772,7 @@ class InstalledServiceTests(unittest.TestCase):
         note = (backup / 'ROLLBACK.md').read_text()
         return backup, note, note.split('```sh\n', 1)[1].split('\n```', 1)[0]
 
-    def run_install(self, identity='-', reinstall=False):
+    def run_install(self, identity='-', reinstall=False, start_error=None):
         self.printed = io.StringIO()
         args = argparse.Namespace(prefix=str(self.prefix), config=str(self.config), reinstall=reinstall,
                                   offline=False, signing_identity=identity, prebuilt_dir=str(self.release))
@@ -782,7 +782,8 @@ class InstalledServiceTests(unittest.TestCase):
              patch.object(self.install.service, 'stop') as self.stop, \
              patch.object(self.install.service, 'unload', side_effect=self.unloaded) as self.unload, \
              patch.object(self.install.service, 'stop_unmanaged'), \
-             patch.object(self.install.service, 'start', side_effect=self.started) as self.start, \
+             patch.object(self.install.service, 'start',
+                          side_effect=start_error or self.started) as self.start, \
              contextlib.redirect_stdout(self.printed):
             self.install.install(args, self.prefix / 'no source')
         return self.printed.getvalue()
@@ -1315,26 +1316,68 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertIn('data from before the reinstall', note)
         self.assertNotIn('Replies and events from after the install are lost.', note)
 
-    def test_a_failed_data_copy_is_reported_and_the_note_keeps_the_move_back_command(self):
+    def stopped_install(self, start_error=None):
+        """Run an install over an old bundle with a store, with the data copy failing. Returns the exit code."""
         self.old_install_with_store()
         with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
-            output = self.run_install('-')
-        backup, note, commands = self.rollback()
-        self.assertIn('No data copy exists in the backup (No space left on device). '
-                      'A rollback would lose the data written since the install, '
-                      'and the old Harold cannot read the new store.', output)
-        self.assertNotIn('copied data to', output)
-        self.assertFalse((backup / 'data').exists())
-        self.assertIn('mv {}/data harold/data'.format(backup.name.replace('harold.backup-', 'harold.replaced-')), commands)
-        self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+            with self.assertRaises(SystemExit) as raised:
+                self.run_install('-', start_error=start_error)
+        return raised.exception.code
 
-    def test_the_note_for_a_failed_data_copy_says_the_new_store_cannot_go_back(self):
+    def assert_old_harold_untouched(self):
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
+        self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes' * 100)
+        self.assertEqual((self.bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertEqual(list(self.prefix.glob('.harold-stage-*')), [])
+        self.assertIn('echo "old $*"', (self.prefix / 'haroldctl').read_text())
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'old dash')
+
+    def test_a_failed_data_copy_stops_the_install_and_starts_the_old_harold(self):
+        code = self.stopped_install()
+        output = self.printed.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn('Install stopped: the data copy failed (No space left on device). '
+                      'Nothing changed: the old Harold runs again with its data. '
+                      'Free the space or fix the cause, then install again.', output)
+        self.assertNotIn('Harold ready', output)
+        self.assert_old_harold_untouched()
+        self.start.assert_called_once()
+        self.assertEqual(self.start.call_args.args[0]['bundle'], str(self.bundle))
+        self.assertEqual(self.order[-1], ('start', False))
+        self.assertFalse(list(self.home.rglob('*.plist')))
+        self.assertEqual(json.loads((self.bundle / 'service.json').read_text())['bundle'], str(self.bundle))
+
+    def test_a_failed_data_copy_and_a_failed_old_start_name_both_problems(self):
+        code = self.stopped_install(start_error=RuntimeError('boom'))
+        output = self.printed.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn('Install stopped: the data copy failed (No space left on device).', output)
+        self.assertIn('The old Harold did not start: boom. Start it with haroldctl start.', output)
+        self.assertNotIn('Harold ready', output)
+        self.assert_old_harold_untouched()
+
+    def test_main_exits_with_code_1_after_a_failed_data_copy_and_removes_the_staging_folder(self):
         self.old_install_with_store()
-        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
-            self.run_install('-')
-        _, note, _ = self.rollback()
-        self.assertIn('incompatible state schema', note)
-        self.assertIn('The old data is not in the backup.', note)
+        argv = ['install.py', '--prefix', str(self.prefix), '--config', str(self.config),
+                '--signing-identity', '-', '--prebuilt-dir', str(self.release)]
+        self.printed = io.StringIO()
+        with patch.object(sys, 'argv', argv), \
+             patch.object(self.install, 'prerequisites'), \
+             patch.object(subprocess, 'run', side_effect=self.process), \
+             patch.object(self.install.service, 'listener_pids', return_value=set()), \
+             patch.object(self.install.service, 'unload', side_effect=self.unloaded), \
+             patch.object(self.install.service, 'stop_unmanaged'), \
+             patch.object(self.install.service, 'start', side_effect=self.started) as start, \
+             patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')), \
+             contextlib.redirect_stdout(self.printed):
+            with self.assertRaises(SystemExit) as raised:
+                self.install.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn('Install stopped: the data copy failed (No space left on device).', self.printed.getvalue())
+        start.assert_called_once()
+        self.assertEqual(list(self.prefix.glob('.harold-stage-*')), [])
+        self.assert_old_harold_untouched()
 
     def test_the_rollback_note_moves_the_other_data_entries_back(self):
         self.old_install_with_store()

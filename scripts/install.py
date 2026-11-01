@@ -543,7 +543,7 @@ def starts_at_login(bundle):
         return False
 
 
-def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False, copy_failed=False):
+def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False):
     """ROLLBACK.md for `backup`: what it holds and the commands that put it back.
 
     `copied` names the files from `prefix` kept in `backup`. The commands set the new bundle
@@ -552,8 +552,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     does not start at login, and enable the label, which the new `haroldctl stop` disabled.
     They also delete the counted-tip file, which an older Harold would leave stale.
     When `data_copied` is true, `backup` holds a copy of the store and events, so the commands move back
-    only the other entries of the new data folder. When `copy_failed` is true, the note also warns that the
-    new store cannot go back to the old Harold and that the backup holds no old data.
+    only the other entries of the new data folder.
     """
     aside = 'harold.replaced-' + backup.name[len('harold.backup-'):]
     commands = ['cd ' + shlex.quote(str(prefix)), './haroldctl stop',
@@ -574,10 +573,6 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     else:
         holds = ('It holds the programs, configuration and scripts. The data and log moved to the new '
                  'install, and the commands move them back.')
-        if copy_failed:
-            holds += (' The data copy failed. The old Harold refuses the migrated store with '
-                      '`incompatible state schema`. The old data is not in the backup. '
-                      'The commands below move back the migrated store. The old Harold cannot start with that store.')
         commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
     if copied:
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
@@ -607,7 +602,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     return '\n'.join(lines) + '\n'
 
 
-def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False, copy_failed=False):
+def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False):
     """Copy haroldctl and, when it is there, tmx-agent-dash into `backup`, which holds the old
     bundle, and write ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
     copied = []
@@ -617,7 +612,7 @@ def keep_rollback_copy(prefix, backup, reinstall, metadata, data_copied=False, c
         if (prefix / name).is_file():
             shutil.copy2(prefix / name, backup / name)
             copied.append(name)
-    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata, data_copied, copy_failed))
+    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata, data_copied))
 
 
 def remove_old_program(prefix):
@@ -829,20 +824,27 @@ def install(args, repo):
             service.unload(old_metadata)
             service.stop_unmanaged(old_metadata)
             data_copy = {}
-            backup = replace_bundle(stage, bundle, args.reinstall, data_copy)
+            try:
+                backup = replace_bundle(stage, bundle, args.reinstall, data_copy)
+            except DataCopyFailed as failure:
+                print('Install stopped: the data copy failed ({}). Nothing changed: the old Harold runs again '
+                      'with its data. Free the space or fix the cause, then install again.'.format(failure.reason),
+                      flush=True)
+                try:
+                    service.start(old_metadata)
+                except Exception as error:
+                    print('The old Harold did not start: {}. Start it with haroldctl start.'.format(error), flush=True)
+                # The staging folder and the service lock release as SystemExit leaves the with blocks.
+                raise SystemExit(1) from failure
             copy_kept = True
             if backup:
                 if 'bytes' in data_copy:
                     print('copied data to {} ({:.1f} MB)'.format(shown(backup / 'data'), data_copy['bytes'] / 1_000_000),
                           flush=True)
-                elif 'error' in data_copy:
-                    print('No data copy exists in the backup ({}). A rollback would lose the data '
-                          'written since the install, and the old Harold cannot read the new store.'.format(data_copy['error']), flush=True)
                 # Before haroldctl is overwritten below. Harold is stopped and the old bundle
                 # has moved, so a failed copy is reported and the install goes on.
                 try:
-                    keep_rollback_copy(prefix, backup, args.reinstall, metadata, 'bytes' in data_copy,
-                                         'error' in data_copy)
+                    keep_rollback_copy(prefix, backup, args.reinstall, metadata, 'bytes' in data_copy)
                 except Exception as error:
                     copy_kept = False
                     old_stays = ('the old {} stays in place; '.format(OLD_PROGRAM)

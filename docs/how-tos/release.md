@@ -45,6 +45,6 @@ The agent state rename changes the events Harold writes. An older Harold cannot 
 
 To roll back, put back the old bundle and its copied data folder as `ROLLBACK.md` says. The installer copies `data/store` and `data/events` into the backup folder. The old Harold reads that copy. The new data stays in the folder you move aside.
 
-Replies and events from after the install are lost on a rollback. If the copy fails, the installer prints that no copy exists. The install then goes on. In that case the old Harold cannot use the migrated store: it refuses the store with `incompatible state schema`. The old data is not in the backup. `ROLLBACK.md` states this.
+Replies and events from after the install are lost on a rollback. If the copy fails, the install stops before it moves anything, and the old Harold runs again.
 
 The old name `AGENT_STATE_BUSY` stays readable through the proto alias. Refresh the opencode plugin after this install.
