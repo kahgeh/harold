@@ -989,6 +989,9 @@ fn recorded<T>(
     let result = call();
     let outcome = match &result {
         Ok(_) => MultiplexerOutcome::Ok,
+        // Harold stopped the call at its scan limit: it is a timeout, whatever error the
+        // caller gets.
+        Err(_) if stop_requested() => MultiplexerOutcome::Timeout,
         Err(RexError::Absent) => MultiplexerOutcome::Absent,
         Err(RexError::Timeout) => MultiplexerOutcome::Timeout,
         Err(RexError::Failed) => MultiplexerOutcome::Failed,
@@ -1041,13 +1044,8 @@ impl SystemRex {
 
     /// The output of `rex version`, for the start line.
     pub(crate) fn version(&self) -> Result<String, RexError> {
-        Ok(self
-            .run(&["version"])?
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string())
+        let output = recorded(MultiplexerOperation::Other, || self.run(&["version"]))?;
+        Ok(output.lines().next().unwrap_or_default().trim().to_string())
     }
 }
 

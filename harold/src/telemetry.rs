@@ -597,7 +597,10 @@ impl MultiplexerOutcome {
 pub(crate) fn outcome_of_io(error: &std::io::Error) -> MultiplexerOutcome {
     match error.kind() {
         std::io::ErrorKind::NotFound => MultiplexerOutcome::Absent,
-        std::io::ErrorKind::TimedOut => MultiplexerOutcome::Timeout,
+        // Harold stops a call at its limit: the stopped child gives `Interrupted`.
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted => {
+            MultiplexerOutcome::Timeout
+        }
         _ => MultiplexerOutcome::Failed,
     }
 }

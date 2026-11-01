@@ -716,6 +716,41 @@ fn a_slow_status_call_is_status_timeout() {
 }
 
 #[test]
+fn the_version_call_is_counted_under_other() {
+    let rex = fake_rex("version-ok", "");
+    let (result, risen) = rise("other", "ok", || rex.version());
+    assert!(result.is_ok());
+    assert!(risen >= 1);
+}
+
+#[test]
+fn a_call_that_harold_stops_is_recorded_as_timeout() {
+    let signal = StopSignal::default();
+    signal.request();
+    let (result, risen) = rise("key", "timeout", || {
+        run_stoppable(signal, || {
+            recorded(MultiplexerOperation::Key, || -> Result<(), RexError> {
+                Err(RexError::Failed)
+            })
+        })
+    });
+    assert_eq!(result, Err(RexError::Failed));
+    assert!(risen >= 1);
+}
+
+#[test]
+fn a_stopped_ls_is_list_timeout_and_still_gives_absent() {
+    let rex = fake_rex("ls-stopped", "*\" ls --json\"*) sleep 3;;");
+    let signal = StopSignal::default();
+    signal.request();
+    let (result, risen) = rise("list", "timeout", || {
+        run_stoppable(signal, || rex.sessions())
+    });
+    assert_eq!(result.err(), Some(RexError::Absent));
+    assert!(risen >= 1);
+}
+
+#[test]
 fn the_recorder_maps_an_absent_program_to_absent() {
     let (result, risen) = rise("key", "absent", || {
         recorded(MultiplexerOperation::Key, || -> Result<(), RexError> {

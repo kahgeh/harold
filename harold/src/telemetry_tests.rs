@@ -3325,6 +3325,12 @@ fn the_helper_names_the_multiplexer_tmux_when_settings_are_unset() {
 }
 
 #[test]
+fn an_interrupted_io_error_is_a_timeout() {
+    let error = std::io::Error::from(std::io::ErrorKind::Interrupted);
+    assert_eq!(outcome_of_io(&error), MultiplexerOutcome::Timeout);
+}
+
+#[test]
 fn agent_counts_give_the_agents_gauge() {
     let row = |state, count| AgentCount {
         state,
@@ -4522,6 +4528,18 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             assert!(sql.contains("FROM $__sourceTable(gauge)"), "{name}: {sql}");
             assert!(sql.contains("argMax(Value, TimeUnix)"), "{name}: {sql}");
             assert!(!sql.contains("rise"), "{name}: {sql}");
+            // The two Macs stay apart in the inner group, so a sum adds each Mac once.
+            assert!(
+                sql.contains("Attributes, ResourceAttributes['harold.machine']) GROUP BY ts"),
+                "{name}: {sql}"
+            );
+        }
+        if histogram {
+            // Both branches of the bucket rise must be Array(UInt64) for ClickHouse.
+            assert!(
+                sql.contains("toUInt64(now_count - before_count)"),
+                "{name}: {sql}"
+            );
         }
     }
 
