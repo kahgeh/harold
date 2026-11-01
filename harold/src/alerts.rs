@@ -36,7 +36,7 @@ use crate::timed_prompts::{
 };
 
 /// The alerts HyperDX may post, as named in the definition files.
-pub(crate) const ALERT_NAMES: [&str; 9] = [
+pub(crate) const ALERT_NAMES: [&str; 10] = [
     "phone-request-unavailable",
     "phone-request-slow",
     "wrong-agent",
@@ -46,6 +46,7 @@ pub(crate) const ALERT_NAMES: [&str; 9] = [
     "disk-low",
     "multiplexer-calls-failing",
     "agent-recaps-stopped",
+    "agent-blocked-long",
 ];
 
 const ALERT_STATES: [&str; 2] = ["firing", "cleared"];

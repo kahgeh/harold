@@ -1277,6 +1277,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,
         ));
+        crate::telemetry::register_blocked_long_counters(
+            &settings
+                .agents
+                .0
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+        );
         crate::telemetry::register_multiplexer_counters(&settings.agent_monitor.multiplexer);
         crate::telemetry::register_host_counters(
             &settings.agent_monitor.multiplexer,

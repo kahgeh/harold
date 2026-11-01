@@ -212,7 +212,14 @@ struct TrackedPane {
     summary_basis_version: EventVersion,
     /// Whether `agent monitor pane gone` has been logged for this incarnation.
     pane_gone_logged: bool,
+    /// When the first sample of the current blocked spell was taken. `None` outside a spell.
+    blocked_since_ms: Option<i64>,
+    /// Whether `agent blocked long` has been logged for the current blocked spell.
+    blocked_long_logged: bool,
 }
+
+/// How long a blocked agent waits before `agent blocked long`: 15 minutes.
+const BLOCKED_LONG_MS: i64 = 15 * 60 * 1_000;
 
 impl TrackedPane {
     fn new(pane: AgentPaneObservation) -> Self {
@@ -230,7 +237,30 @@ impl TrackedPane {
             screen_summary: None,
             summary_basis_version: EventVersion::start(),
             pane_gone_logged: false,
+            blocked_since_ms: None,
+            blocked_long_logged: false,
         }
+    }
+
+    /// Follows the blocked spell with one sample whose effective state is `effective`. The
+    /// timer starts at the first sample that shows `Blocked` and clears at any other state.
+    /// Returns true once per spell, when the sample is 15 minutes or more after the start.
+    fn blocked_long_due(
+        &mut self,
+        effective: super::domain::EffectiveAgentState,
+        observed_at_ms: i64,
+    ) -> bool {
+        if effective != super::domain::EffectiveAgentState::Blocked {
+            self.blocked_since_ms = None;
+            self.blocked_long_logged = false;
+            return false;
+        }
+        let since = *self.blocked_since_ms.get_or_insert(observed_at_ms);
+        if self.blocked_long_logged || observed_at_ms < since.saturating_add(BLOCKED_LONG_MS) {
+            return false;
+        }
+        self.blocked_long_logged = true;
+        true
     }
 }
 
@@ -684,6 +714,8 @@ fn panes_from_snapshot(
                 screen_summary: projection.screen_work_summary.clone(),
                 summary_basis_version: projection.summary_basis_version,
                 pane_gone_logged: false,
+                blocked_since_ms: None,
+                blocked_long_logged: false,
             };
             (projection.pane.incarnation.pane_id.clone(), tracked)
         })
@@ -1381,6 +1413,23 @@ impl AgentMonitorRuntime {
                 observation.observed_at_ms,
                 self.graces,
             );
+            // The effective state of this sample: the state about to be stored, else the one
+            // already stored, else the last hook report.
+            let effective = state
+                .or(tracked.screen_state)
+                .or(tracked.last_hook.map(|(hook, _)| hook))
+                .map_or(super::domain::EffectiveAgentState::Unknown, |state| {
+                    state.effective()
+                });
+            if tracked.blocked_long_due(effective, observation.observed_at_ms) {
+                let provider_id = tracked.pane.incarnation.provider_id.as_str();
+                tracing::warn!(
+                    pane_id = tracked.pane.incarnation.pane_id.as_str(),
+                    provider_id,
+                    "agent blocked long"
+                );
+                crate::telemetry::record_blocked_long(provider_id);
+            }
             let recovered = recovery
                 .as_ref()
                 .and_then(|(_, candidate)| candidate.clone());

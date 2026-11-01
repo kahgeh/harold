@@ -228,6 +228,14 @@ impl Fixture {
     }
 
     async fn with_graces(inventory: FakeInventory, graces: GraceWindows) -> Self {
+        Self::with_graces_and_provider(inventory, graces, provider()).await
+    }
+
+    async fn with_graces_and_provider(
+        inventory: FakeInventory,
+        graces: GraceWindows,
+        provider: AgentProviderSettings,
+    ) -> Self {
         let directory = TestDirectory::new();
         let store = Arc::new(
             HaroldStore::open_with_graces(&directory.0, graces)
@@ -241,7 +249,7 @@ impl Fixture {
             Arc::clone(&store),
             inventory.clone(),
             screen.clone(),
-            vec![provider()],
+            vec![provider],
             graces,
             shutdown_rx,
         );
@@ -6087,4 +6095,354 @@ async fn the_macs_agents_keep_their_states_while_a_rex_host_times_out() {
         rows[0].agent.state,
         super::rex_hosts::HostAgentState::Unknown
     );
+}
+
+// ---------------------------------------------------------------------------
+// `agent blocked long`: one warn line and one count after 15 minutes blocked.
+//
+// The timer reads the sample's own `observed_at_ms`, so the tests drive time by the sample
+// stamps. No real or paused clock is involved: the time of a sample is data.
+// ---------------------------------------------------------------------------
+
+const MINUTE_MS: i64 = 60_000;
+const BLOCKED_LONG_MS: i64 = 15 * MINUTE_MS;
+
+/// A provider and pane with an id of their own, so the global counter of one test is not
+/// moved by another test.
+fn blocked_provider(id: &str) -> AgentProviderSettings {
+    AgentProviderSettings {
+        id: id.into(),
+        ..provider()
+    }
+}
+
+fn blocked_pane(provider_id: &str, agent_pid: u32) -> AgentPaneObservation {
+    let mut observed = pane("%8", 80, agent_pid, 1_000, 100);
+    observed.incarnation.provider_id = provider_id.into();
+    observed
+}
+
+async fn blocked_fixture(provider_id: &str, panes: Vec<Vec<AgentPaneObservation>>) -> Fixture {
+    crate::telemetry::test_support::install();
+    let inventory = FakeInventory::scans(panes.into_iter().map(Ok).collect());
+    Fixture::with_graces_and_provider(
+        inventory,
+        GraceWindows::same(2_000),
+        blocked_provider(provider_id),
+    )
+    .await
+}
+
+async fn sample_state(
+    fixture: &Fixture,
+    observed: &AgentPaneObservation,
+    state: ObservedAgentState,
+    at_ms: i64,
+) {
+    fixture.screen.push(Ok(screen(
+        observed,
+        Some(state),
+        Some("SECRET agent text"),
+        at_ms,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+}
+
+fn blocked_long_count(provider_id: &str) -> u64 {
+    crate::telemetry::test_support::exact_counter_value(
+        "harold.agent.blocked_long",
+        &[("provider_id", provider_id)],
+    )
+    .unwrap_or(0)
+}
+
+fn blocked_long_lines(logs: &str) -> usize {
+    logs.matches("agent blocked long").count()
+}
+
+#[tokio::test]
+async fn a_pane_blocked_for_15_minutes_logs_and_counts_once() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = blocked_fixture(&provider_id, vec![vec![observed.clone()]]).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    sample_state(&fixture, &observed, ObservedAgentState::Blocked, start).await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + BLOCKED_LONG_MS - 1,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + BLOCKED_LONG_MS,
+    )
+    .await;
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(blocked_long_lines(&logs), 1, "{logs}");
+    assert!(logs.contains("WARN"), "{logs}");
+    assert!(logs.contains("pane_id=\"%8\""), "{logs}");
+    assert!(
+        logs.contains(&format!("provider_id=\"{provider_id}\"")),
+        "{logs}"
+    );
+    assert!(!logs.contains("SECRET"), "{logs}");
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn a_blocked_spell_does_not_log_again() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = blocked_fixture(&provider_id, vec![vec![observed.clone()]]).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    for at in [
+        start,
+        start + BLOCKED_LONG_MS,
+        start + BLOCKED_LONG_MS + 1_000,
+        start + 2 * BLOCKED_LONG_MS,
+        start + 4 * BLOCKED_LONG_MS,
+    ] {
+        sample_state(&fixture, &observed, ObservedAgentState::Blocked, at).await;
+    }
+
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn working_then_blocked_again_starts_a_new_spell() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = blocked_fixture(&provider_id, vec![vec![observed.clone()]]).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    sample_state(&fixture, &observed, ObservedAgentState::Blocked, 1_000).await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Working,
+        10 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        12 * MINUTE_MS,
+    )
+    .await;
+    // 17 minutes after the first spell began, 5 after the second.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        17 * MINUTE_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    // 15 minutes after the second spell began.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        27 * MINUTE_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+
+    // A third spell after the log fires again, once.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Working,
+        28 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        29 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        44 * MINUTE_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 2);
+    assert_eq!(blocked_long_count(&provider_id), 2);
+}
+
+#[tokio::test]
+async fn blocked_for_14_minutes_59_seconds_then_done_logs_nothing() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = blocked_fixture(&provider_id, vec![vec![observed.clone()]]).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    sample_state(&fixture, &observed, ObservedAgentState::Blocked, start).await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + BLOCKED_LONG_MS - 1_000,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Done,
+        start + BLOCKED_LONG_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Done,
+        start + 3 * BLOCKED_LONG_MS,
+    )
+    .await;
+
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+}
+
+#[tokio::test]
+async fn a_new_incarnation_starts_with_no_timer() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let first = blocked_pane(&provider_id, 800);
+    let second = blocked_pane(&provider_id, 900);
+    let fixture = blocked_fixture(
+        &provider_id,
+        vec![vec![first.clone()], vec![second.clone()]],
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    sample_state(&fixture, &first, ObservedAgentState::Blocked, start).await;
+    sample_state(
+        &fixture,
+        &first,
+        ObservedAgentState::Blocked,
+        start + 14 * MINUTE_MS,
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+
+    // 15 minutes after the first incarnation began, the second one starts its own timer.
+    sample_state(
+        &fixture,
+        &second,
+        ObservedAgentState::Blocked,
+        start + BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    sample_state(
+        &fixture,
+        &second,
+        ObservedAgentState::Blocked,
+        start + 2 * BLOCKED_LONG_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn error_clears_the_blocked_timer_and_a_new_turn_starts_again() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = blocked_fixture(&provider_id, vec![vec![observed.clone()]]).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    sample_state(&fixture, &observed, ObservedAgentState::Blocked, start).await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Error,
+        start + 10 * MINUTE_MS,
+    )
+    .await;
+    // The error leaves the pane at rest, then a new turn works and blocks again.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Working,
+        start + 11 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + 12 * MINUTE_MS,
+    )
+    .await;
+    // 16 minutes after the first spell, 4 after the new one.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + 16 * MINUTE_MS,
+    )
+    .await;
+
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+
+    // Error straight to Blocked, with no working sample between, also starts afresh.
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Error,
+        start + 17 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + 18 * MINUTE_MS,
+    )
+    .await;
+    sample_state(
+        &fixture,
+        &observed,
+        ObservedAgentState::Blocked,
+        start + 30 * MINUTE_MS,
+    )
+    .await;
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
 }

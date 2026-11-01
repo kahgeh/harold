@@ -1,0 +1,31 @@
+{
+  "name": "agent-blocked-long",
+  "note": "agent-blocked-long",
+  "message": "An agent has been blocked for 15 minutes. Go to the agent and answer it.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "agent-blocked-long",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.agent.blocked_long",
+        "metricType": "sum",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0,
+  "thresholdType": "above_exclusive",
+  "interval": "5m",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

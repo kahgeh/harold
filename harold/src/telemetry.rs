@@ -350,6 +350,8 @@ pub(crate) struct Instruments {
     pub agent_state_observed: Counter<u64>,
     /// `harold.agent.recap_read`, `{read}`, by `result` and `provider_id`.
     pub agent_recap_read: Counter<u64>,
+    /// `harold.agent.blocked_long`, `{event}`, by `provider_id`.
+    pub agent_blocked_long: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -431,6 +433,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         ),
         agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
         agent_recap_read: counter("harold.agent.recap_read", "{read}"),
+        agent_blocked_long: counter("harold.agent.blocked_long", "{event}"),
     }
 }
 
@@ -537,6 +540,26 @@ pub(crate) fn register_recap_counters(provider_ids: &[&str]) {
             );
         }
     }
+}
+
+/// Records 0 once on the blocked-long counter for each provider in `provider_ids`. HyperDX
+/// reads the first point of a running total as 0, so without this the first agent blocked
+/// long after a start would be lost by the `agent-blocked-long` alert. `main` calls it once,
+/// after `init_telemetry`, when export is on, for every configured provider.
+pub(crate) fn register_blocked_long_counters(provider_ids: &[&str]) {
+    for provider_id in provider_ids {
+        instruments().agent_blocked_long.add(
+            0,
+            &[KeyValue::new("provider_id", (*provider_id).to_owned())],
+        );
+    }
+}
+
+/// Counts one agent that stayed blocked for 15 minutes.
+pub(crate) fn record_blocked_long(provider_id: &str) {
+    instruments()
+        .agent_blocked_long
+        .add(1, &[KeyValue::new("provider_id", provider_id.to_owned())]);
 }
 
 /// The `host` of Harold's own machine: the empty string.

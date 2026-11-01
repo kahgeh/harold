@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_nine_alerts_are_the_ones_in_the_specs() {
+fn the_ten_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -115,8 +115,13 @@ fn the_nine_alerts_are_the_ones_in_the_specs() {
             "machine-past-normal",
             "disk-low",
             "multiplexer-calls-failing",
-            "agent-recaps-stopped"
+            "agent-recaps-stopped",
+            "agent-blocked-long"
         ]
+    );
+    assert_eq!(
+        alert_line(br#"{"alert":"agent-blocked-long","state":"firing"}"#),
+        Ok("harold alert: agent-blocked-long firing".into())
     );
     // The local model is gone, and so is its alert.
     assert!(alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#).is_err());

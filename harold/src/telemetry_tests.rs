@@ -1983,6 +1983,7 @@ const METRICS: &[&str] = &[
     "harold.agent.state.duration",
     "harold.agent.state_observed",
     "harold.agent.recap_read",
+    "harold.agent.blocked_long",
     "harold.multiplexer.sessions",
     "harold.multiplexer.panes",
 ];
@@ -2310,6 +2311,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
     assert_eq!(
         files,
         [
+            "alert-agent-blocked-long.json",
             "alert-agent-recaps-stopped.json",
             "alert-disk-low.json",
             "alert-machine-past-normal.json",
@@ -2322,6 +2324,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "dashboard.json",
             "machine.json",
             "trends.json",
+            "webhook-agent-blocked-long.json",
             "webhook-agent-recaps-stopped.json",
             "webhook-disk-low.json",
             "webhook-machine-past-normal.json",
@@ -2979,6 +2982,15 @@ fn the_alert_files_carry_the_spec_thresholds() {
             "below",
             4320,
         ),
+        (
+            "agent-blocked-long",
+            METRICS_SOURCE,
+            "harold.agent.blocked_long",
+            "sum",
+            0.0,
+            "above_exclusive",
+            5,
+        ),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
@@ -3239,6 +3251,39 @@ fn the_recap_read_counter_is_counted_from_0_for_the_passed_providers_only() {
             &[("provider_id", "codex_not_seeded")]
         ),
         None
+    );
+}
+
+#[test]
+fn the_blocked_long_counter_exists_at_0_before_any_event_for_the_passed_providers_only() {
+    test_support::install();
+    register_blocked_long_counters(&["claude_blocked_seeded"]);
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.agent.blocked_long",
+            &[("provider_id", "claude_blocked_seeded")]
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        test_support::counter_value(
+            "harold.agent.blocked_long",
+            &[("provider_id", "codex_blocked_not_seeded")]
+        ),
+        None
+    );
+}
+
+#[test]
+fn the_blocked_long_counter_has_provider_id() {
+    test_support::install();
+    record_blocked_long("blocked_probe");
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.agent.blocked_long",
+            &[("provider_id", "blocked_probe")]
+        ),
+        Some(1)
     );
 }
 
@@ -3807,8 +3852,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -3822,8 +3867,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -3999,8 +4044,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the seven created.
-    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
+    // The old webhook, the two kept, and the eight created.
+    assert_eq!(stand_in.objects("webhooks").len(), 11, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -4010,7 +4055,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 7, "{calls:?}");
+    assert_eq!(posts, 8, "{calls:?}");
 }
 
 #[test]
@@ -4352,7 +4397,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
     stand_in
 }
 
@@ -4361,7 +4406,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 9 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 10 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),

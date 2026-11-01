@@ -330,6 +330,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `idle`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |
+| `harold.agent.blocked_long` | counter, `{event}` | `provider_id` |
 | `harold.multiplexer.sessions` | gauge, `{session}` | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | gauge, `{pane}` | `multiplexer`, `host` |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
@@ -372,6 +373,7 @@ These agent monitor lines carry the fields below:
 |---|---|
 | `agent monitor pane found` | `pane_id`, `provider_id` (the named provider), `program` (the file name of the matched program) |
 | `agent monitor read retried` | `component`, `pane_id` (for a screen read), `elapsed_ms` (from the first try's start to the retry's success) |
+| `agent blocked long` | `pane_id`, `provider_id`. Logged at `warn` once for each blocked spell, 15 minutes after the first sample that showed `blocked` |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
 | `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
 | `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
@@ -608,6 +610,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
+- `harold.agent.blocked_long`, for each configured provider;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 8 x 4 = 32 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
@@ -700,6 +703,7 @@ The disk is the one that holds the home folder. No path is sent.
 | `machine-past-normal` | Memory, swap or CPU use stayed past the normal range of its machine and local hour for 30 minutes. Severity: warn. Action: open the "Machine resources" dashboard, find the metric, and stop or fix the process that the `machine use past normal` line names. Expected rate: about 1 a week at most, by machine and metric (a guess until the first review) | `max` of `harold.machine.past_normal` over every machine and metric, not grouped, with `threshold` 1 and `thresholdType` `above`, every 15 minutes, for 2 windows in a row |
 | `multiplexer-calls-failing` | The sum of `harold.multiplexer.calls` with `outcome` `failed`, `timeout` or `malformed` (calls that failed, timed out or gave output that could not be read) is above 300 in 15 minutes. Severity: warn. Action: look at the `agent monitor degraded` lines and at the multiplexer's server. Expected rate: under 1 a week. At about 34 calls a second, 15 minutes hold about 30,000 calls, so 300 is about 1% | sum of `harold.multiplexer.calls` with `outcome` `failed`, `timeout` or `malformed` above 300, every 15 minutes. HyperDX's reading is right, because of the 0 points at start |
 | `agent-recaps-stopped` | For one `provider_id`, no read found a recap for 72 hours. Severity: warn. Action: look for `away_summary` lines in one current transcript and in Claude Code's release notes, then ask for a spec that follows the new format. Expected rate: 0. The threshold is 3 days, because 2 days of the last 16 had no recap | sum of `harold.agent.recap_read` with `result` `found`, grouped by `provider_id`, below 1 in each of 3 windows of 1 day in a row. The second condition of the spec, `none` at 100 or more, cannot be written in a HyperDX alert |
+| `agent-blocked-long` | An agent has been blocked for 15 minutes: Harold counts one for each blocked spell and logs `agent blocked long` (`warn`, fields `pane_id`, `provider_id`, no agent text) once. Severity: warn. Action: go to the agent named by `pane_id` and answer it. Expected rate: under 1 a day | sum of `harold.agent.blocked_long` above 0, every 5 minutes. HyperDX's reading is right, because of the 0 points at start. The alert reads the counter, as every other definition reads a metric; the log line is for diagnosis |
 | `disk-low` | A home disk was 90% full or more for 30 minutes. Severity: warn. Action: look today, then free space. Expected rate: 0 a month on the Mac, whose home disk was 56% full on 25 October | `max` of `system.filesystem.utilization` over every machine, not grouped, above 0.9, every 15 minutes, for 2 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
@@ -812,7 +816,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the nine alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the ten alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -933,7 +937,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -965,7 +969,7 @@ fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Mach
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -978,7 +982,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
