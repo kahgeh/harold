@@ -18,6 +18,37 @@ use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
+/// Writes a fake program: a shell script for the user only. The test starts it after the
+/// call, and the call waits until the start can work.
+///
+/// A start of a script fails with "Text file busy" (os error 26) while any process still holds
+/// the file open for writing. Another test thread can fork while this file is open, and the
+/// child keeps the write handle until it runs `exec`. So closing the file here is not enough.
+/// The script ends at once when its first argument is `--probe`. A probe run that works shows
+/// that no such child is left, and the start by the code under test then cannot meet the error.
+pub(crate) fn write_fake_program(path: &Path, body: &str) {
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::process::Command::new(path).arg("--probe").status() {
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the script stays busy: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("the probe run of the script failed: {error}"),
+        }
+    }
+}
+
 /// The id of Kokoro in this build: the MLX model on macOS, the release's repository on Linux.
 pub(crate) fn kokoro_model() -> &'static str {
     match WorkerKind::THIS_BUILD {

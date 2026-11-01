@@ -341,8 +341,7 @@ impl FakePython {
         let folder = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&folder).unwrap();
         let program = folder.join("fake-python");
-        std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_fake_program(&program, body);
         Self { folder, program }
     }
 
