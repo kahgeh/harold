@@ -1134,6 +1134,7 @@ fn the_agents_port_rows_have_no_current_step_field() {
     assert_eq!(steps.get("%7", 20).as_deref(), Some("LEAKCHECK-step-7f3a"));
     assert!(rows.contains("%7"), "{rows}");
     assert!(!rows.contains("LEAKCHECK-step-7f3a"), "{rows}");
+    assert!(!rows.contains("LEAKCHECK-recap-9c1d"), "{rows}");
     assert!(!rows.contains("step"), "{rows}");
 }
 

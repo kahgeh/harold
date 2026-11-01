@@ -189,6 +189,7 @@ async fn the_watch_facts_have_no_current_step_field() {
     assert!(recaps.get("%3", 20).is_some());
     assert!(json.contains("Plain summary"), "{json}");
     assert!(!json.contains("LEAKCHECK-step-7f3a"), "{json}");
+    assert!(!json.contains("LEAKCHECK-recap-9c1d"), "{json}");
     assert!(!json.contains("step"), "{json}");
 }
 

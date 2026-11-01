@@ -980,6 +980,10 @@ fn the_call_facts_have_no_current_step_field() {
         !facts.to_string().contains("LEAKCHECK-step-7f3a"),
         "{facts}"
     );
+    assert!(
+        !facts.to_string().contains("LEAKCHECK-recap-9c1d"),
+        "{facts}"
+    );
     assert!(!facts.to_string().contains("step"), "{facts}");
 }
 

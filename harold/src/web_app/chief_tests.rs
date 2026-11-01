@@ -272,6 +272,10 @@ fn the_phone_apps_chief_result_has_no_current_step_field() {
         !format!("{found:?}").contains("LEAKCHECK-step-7f3a"),
         "{found:?}"
     );
+    assert!(
+        !format!("{found:?}").contains("LEAKCHECK-recap-9c1d"),
+        "{found:?}"
+    );
     assert!(!format!("{found:?}").contains("step"), "{found:?}");
 }
 
