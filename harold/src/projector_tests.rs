@@ -6075,3 +6075,54 @@ async fn a_failure_before_the_limit_keeps_the_reply_and_returns_inventory_failed
     assert_eq!(outbox_row(&store, &event_id).await.attempt_count, 0);
     assert!(alert_rx.try_recv().is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_typed_but_not_marked_does_not_leave_its_wait_for_the_next_reply() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "reply A").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let logs = CapturedLogs::start();
+    let mut running = run_loop(&store, &dispatcher).await;
+    tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+
+    // A is typed, but the store cannot mark it. Then the inventory fails again for B.
+    store.fault_state_writes_for_test(Some(WriteFault::Fail));
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(dispatcher.handed_text("reply A").last().unwrap().delivered);
+    store.fault_state_writes_for_test(None);
+    tokio::time::sleep(Duration::from_secs(40)).await;
+    assert!(!store.is_failing());
+    set_inventory(&store, &dispatcher, false).await;
+    store_reply(&store, "reply B").await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(
+        dispatcher
+            .handed_text("reply A")
+            .iter()
+            .filter(|h| h.delivered)
+            .count(),
+        1
+    );
+    assert!(!dispatcher.handed_text("reply B").is_empty());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("delivery waited for the inventory").count(),
+        1,
+        "{text}"
+    );
+
+    // B gives up 15 minutes after its own first failure, not A's.
+    tokio::time::sleep(Duration::from_secs(14 * 60 - 30)).await;
+    assert!(store.next_pending_delivery().await.unwrap().is_some());
+    tokio::time::sleep(Duration::from_secs(90)).await;
+
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    let (line, _) = running.alerts.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+    assert!(running.alerts.try_recv().is_err());
+    assert_eq!(logs.text().matches("delivery given up").count(), 1);
+    running.stop().await;
+}

@@ -1407,7 +1407,10 @@ async fn run_deliveries(
             }
             Err(HandlerError::InventoryFailed { event_id, error }) => {
                 // One line for each reply, not for each try.
-                if inventory_wait.is_none() {
+                if inventory_wait
+                    .as_ref()
+                    .is_none_or(|wait| wait.event_id != event_id)
+                {
                     warn!(
                         error = %error,
                         reason = "inventory_failed",
@@ -1424,6 +1427,15 @@ async fn run_deliveries(
             }
             Err(HandlerError::NotMarkedDelivered { event_id, error }) => {
                 warn!(error = %error, "event handler cycle failed");
+                // The waiting reply was typed, so its wait is over although the mark is late.
+                if let Some(wait) = inventory_wait.take_if(|wait| wait.event_id == event_id) {
+                    info!(
+                        event_id,
+                        waited_ms =
+                            u64::try_from(wait.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "delivery waited for the inventory"
+                    );
+                }
                 unmarked = Some(event_id);
                 continue;
             }
