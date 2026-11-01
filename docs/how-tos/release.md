@@ -2,12 +2,14 @@
 
 ## Download release builds
 
-Publishing a GitHub release triggers the **Build macOS ARM64** workflow. After
+Publishing a GitHub release triggers the **Build** workflow. After
 its tests and build succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
 and its `.sha256` checksum to that release. The archive contains `harold`,
 `control-tower`, configuration templates, the gRPC schema, the source
 revision and the release version. Draft releases, pushes, and pull requests do not trigger builds.
 Re-running a release workflow replaces its matching assets.
+
+The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job only tests Harold on Linux with `linux-defaults`, and uploads nothing. If the `linux` job fails, the run fails, and `make release` does not mark the release latest.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The
