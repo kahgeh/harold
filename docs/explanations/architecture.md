@@ -283,6 +283,12 @@ When activity summaries are on, a background Claude request turns the available 
 
 An activity summary condenses supplied evidence; it does not independently verify an agent's reported outcome. Generating one also does not send a phone notification. See [activity summaries](../references/agent-monitor/activity-summaries.md) for the evidence limits and [work-summary rules](../references/agent-monitor/README.md#work-summaries) for selection and clearing behavior.
 
+### Reading recaps from transcripts
+
+Harold reads an agent's recap from the agent's transcript. It reads the tail of the transcript file through the shared tail reader. The recap adapter of the provider, named by `recap_adapter`, finds the recap in that tail. Today only `claude-transcript-v1` exists, for Claude Code.
+
+Harold checks the transcript every 10 seconds and at a turn end. It keeps the recaps in memory only. It sends them only on the `WatchAgentStates` stream, for the control-tower. A recap and a current step are not work summaries. See [recaps](../references/agent-monitor/README.md#metrics) for the counter and the log lines.
+
 ### Recovering a submitted task from scrollback
 
 A submitted instruction may scroll out of view before Harold reads it. For supported terminal formats, Harold can look through a bounded history tail to recover it. State classification continues to use the visible screen.

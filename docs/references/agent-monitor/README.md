@@ -334,7 +334,7 @@ See [provider screen adapters](screen-adapters.md) for capture timing, incarnati
 
 ## Metrics
 
-The agent monitor sends seven metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
+The agent monitor sends eight metrics to the collector when export is on. The [telemetry reference](../telemetry/README.md#metrics) gives their units and buckets. The attribute `multiplexer` is `rex` or `tmux`, from `[agent_monitor] multiplexer`. The attribute `host` is the empty string for Harold's own machine.
 
 | Metric | What it shows | Attributes |
 |---|---|---|
@@ -343,6 +343,7 @@ The agent monitor sends seven metrics to the collector when export is on. The [t
 | `harold.agents` | The agents in the snapshot, read at each export | `state`, `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state.duration` | The time an agent spent in the state it left, in s | `state`, `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state_observed` | The state observations, a count. `source` is `program_status` (a running stream), `program_status_call` (a direct call) or `screen`. `state` is `unknown` when the observation has no state | `source`, `state`, `provider_id`, `multiplexer` |
+| `harold.agent.recap_read` | The transcript reads, a count. `result` is `found` (a new recap), `none` (new lines with no new recap) or `failed` | `result`, `provider_id` |
 | `harold.multiplexer.sessions` | The sessions in the last inventory listing that worked | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | The panes in the last inventory listing that worked, with or without an agent | `multiplexer`, `host` |
 
@@ -417,6 +418,8 @@ A retry that works logs one info line, `agent monitor read retried`, with `compo
 | Line | Fields |
 |---|---|
 | `agent monitor read retried` | `component` (`inventory` or `screen`), `pane_id` (for a screen read), `elapsed_ms` |
+| `agent recap read failed` (info) | `pane_id`, `provider_id`, `reason` (`not_found`, `permission` or `io`); logged once for each path and reason |
+| `agent recap read slow` (warn) | `pane_id`, `elapsed_ms`, `bytes`; logged when a transcript read takes over 200 ms |
 | `agent monitor degraded` | `component`, `reason`, and for the screen `pane_id` and `elapsed_ms` |
 | `agent status stream` (info) | `session.id`; `event` (`started`, `ended` or `call_failed`); `reason`, on `ended` (`exit`, `read_error` or `rex_absent`) and on `call_failed` (`timeout`, `failed`, `malformed` or `rex_absent`); `records`, the number of records the stream holds (0 on `started`, the number dropped on `ended`, the number kept on `call_failed`). `started` has no `reason`. `call_failed` is logged once for each block until a call works. The line never holds a record's `msg`. |
 

@@ -329,6 +329,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
 | `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `idle`, `unknown`), `provider_id`, `multiplexer` |
+| `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |
 | `harold.multiplexer.sessions` | gauge, `{session}` | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | gauge, `{pane}` | `multiplexer`, `host` |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
@@ -535,8 +536,9 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Agents and multiplexer | Multiplexer call time, p95 and mean, by operation | `harold.multiplexer.call.duration` | SQL: the counter rule on the buckets for the p95, and the rise of the sum divided by the rise of the count for the mean. Shows which kind of call is slow |
 | Agents and multiplexer | Sessions and panes | `harold.multiplexer.sessions` and `harold.multiplexer.panes` | SQL: a gauge, no counter rule. Shows how much the multiplexer holds |
 | Agents and multiplexer | Share of state observations read from the screen, by provider and hour | `harold.agent.state_observed` | SQL: the counter rule. Shows how often the program status record is not enough. Info, not an alert |
+| Agents and multiplexer | Recap reads, found and none, by day | `harold.agent.recap_read` with `result` `found` or `none` | SQL: the counter rule. Shows how often Harold finds a recap in a transcript |
 
-The eight cards of the group "Agents and multiplexer" have no earlier tile. Each one is a single chart or table over the dashboard's time range. A quantile in the cards that read a histogram ("Time in each state" and "Multiplexer call time") can fall in the overflow bucket, above the last explicit bound. The card then shows the last explicit bound, so the number is a lower bound.
+The nine cards of the group "Agents and multiplexer" have no earlier tile. Each one is a single chart or table over the dashboard's time range. A quantile in the cards that read a histogram ("Time in each state" and "Multiplexer call time") can fall in the overflow bucket, above the last explicit bound. The card then shows the last explicit bound, so the number is a lower bound.
 
 Some cards are tables and have no earlier tile: the notifications card, the call turn card and the table cards of the group "Agents and multiplexer". Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 
@@ -694,6 +696,7 @@ The disk is the one that holds the home folder. No path is sent.
 | `watch-cost-high` | Watches spent more than $1.00 in a day. Severity: warn. Action: the chief stops or tunes the watch (`harold tool watch list` shows the spend; `watch.cost_usd` by `folder` names the folder, and the `harold.watch.run` spans with the highest `cost_usd` name the watch and run). Expected firing rate: rarely. No budget ships, so this is the only spending signal until the user sets one | sum of `watch.cost_usd` above 1.00, over 1 day |
 | `machine-past-normal` | Memory, swap or CPU use stayed past the normal range of its machine and local hour for 30 minutes. Severity: warn. Action: open the "Machine resources" dashboard, find the metric, and stop or fix the process that the `machine use past normal` line names. Expected rate: about 1 a week at most, by machine and metric (a guess until the first review) | `max` of `harold.machine.past_normal` over every machine and metric, not grouped, with `threshold` 1 and `thresholdType` `above`, every 15 minutes, for 2 windows in a row |
 | `multiplexer-calls-failing` | The sum of `harold.multiplexer.calls` with `outcome` `failed`, `timeout` or `malformed` is above 300 in 15 minutes. Severity: warn. Action: look at the `agent monitor degraded` lines and at the multiplexer's server. Expected rate: under 1 a week. At about 34 calls a second, 15 minutes hold about 30,000 calls, so 300 is about 1% | sum of `harold.multiplexer.calls` with `outcome` `failed`, `timeout` or `malformed` above 300, every 15 minutes. HyperDX's reading is right, because of the 0 points at start |
+| `agent-recaps-stopped` | For one `provider_id`, no read found a recap for 72 hours. Severity: warn. Action: look for `away_summary` lines in one current transcript and in Claude Code's release notes, then ask for a spec that follows the new format. Expected rate: 0. The threshold is 3 days, because 2 days of the last 16 had no recap | sum of `harold.agent.recap_read` with `result` `found`, grouped by `provider_id`, below 1 in each of 3 windows of 1 day in a row. The second condition of the spec, `none` at 100 or more, cannot be written in a HyperDX alert |
 | `disk-low` | A home disk was 90% full or more for 30 minutes. Severity: warn. Action: look today, then free space. Expected rate: 0 a month on the Mac, whose home disk was 56% full on 25 October | `max` of `system.filesystem.utilization` over every machine, not grouped, above 0.9, every 15 minutes, for 2 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
@@ -806,7 +809,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the eight alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the nine alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -927,7 +930,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -959,7 +962,7 @@ fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Mach
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -972,7 +975,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'

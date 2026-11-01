@@ -1160,6 +1160,22 @@
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT ts, provider_id, sumIf(rise, source = 'screen') / sum(rise) AS screen_share FROM (SELECT toStartOfInterval(TimeUnix, INTERVAL 1 HOUR) AS ts, Attributes['provider_id'] AS provider_id, Attributes['source'] AS source, rise FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.agent.state_observed') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix)) GROUP BY ts, provider_id HAVING sum(rise) > 0 ORDER BY ts, provider_id"
       }
+    },
+    {
+      "id": "recap-reads-by-day",
+      "name": "Recap reads, found and none, by day",
+      "x": 0,
+      "y": 72,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(TimeUnix) AS day, Attributes['result'] AS result, sum(rise) AS reads FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.agent.recap_read') AND Attributes['result'] IN ('found', 'none') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY day, result ORDER BY day, result"
+      }
     }
   ]
 }

@@ -1,0 +1,33 @@
+{
+  "name": "agent-recaps-stopped",
+  "note": "agent-recaps-stopped",
+  "message": "No agent recap was found for 72 hours for one provider. Look for away_summary lines in one current transcript and in Claude Code's release notes.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "agent-recaps-stopped",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.agent.recap_read",
+        "metricType": "sum",
+        "where": "Attributes['result'] = 'found'",
+        "whereLanguage": "sql"
+      }
+    ],
+    "groupBy": "Attributes['provider_id']"
+  },
+  "threshold": 1,
+  "thresholdType": "below",
+  "interval": "1d",
+  "numConsecutiveWindows": 3,
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

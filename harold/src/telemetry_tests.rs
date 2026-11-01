@@ -1965,6 +1965,7 @@ const METRICS: &[&str] = &[
     "harold.agents",
     "harold.agent.state.duration",
     "harold.agent.state_observed",
+    "harold.agent.recap_read",
     "harold.multiplexer.sessions",
     "harold.multiplexer.panes",
 ];
@@ -2292,6 +2293,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
     assert_eq!(
         files,
         [
+            "alert-agent-recaps-stopped.json",
             "alert-disk-low.json",
             "alert-machine-past-normal.json",
             "alert-multiplexer-calls-failing.json",
@@ -2303,6 +2305,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "dashboard.json",
             "machine.json",
             "trends.json",
+            "webhook-agent-recaps-stopped.json",
             "webhook-disk-low.json",
             "webhook-machine-past-normal.json",
             "webhook-multiplexer-calls-failing.json",
@@ -2550,7 +2553,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 8] = [
+const AGENT_CARDS: [&str; 9] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2559,6 +2562,7 @@ const AGENT_CARDS: [&str; 8] = [
     "Multiplexer call time, p95 and mean, by operation",
     "Sessions and panes",
     "Share of state observations read from the screen, by provider and hour",
+    "Recap reads, found and none, by day",
 ];
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
@@ -2779,7 +2783,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // notifications card, the browser spans not forwarded card and three trends panels.
     // The agents group adds five: calls, failed calls, time in each state, call time and
     // the share of observations read from the screen.
-    assert_eq!(counted, 28);
+    // The recap card makes one more.
+    assert_eq!(counted, 29);
 }
 
 #[test]
@@ -2947,6 +2952,15 @@ fn the_alert_files_carry_the_spec_thresholds() {
             300.0,
             "above_exclusive",
             15,
+        ),
+        (
+            "agent-recaps-stopped",
+            METRICS_SOURCE,
+            "harold.agent.recap_read",
+            "sum",
+            1.0,
+            "below",
+            4320,
         ),
     ];
     assert_eq!(
@@ -3600,8 +3614,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -3615,8 +3629,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -3792,8 +3806,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the six created.
-    assert_eq!(stand_in.objects("webhooks").len(), 9, "{stderr}");
+    // The old webhook, the two kept, and the seven created.
+    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -3803,7 +3817,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 6, "{calls:?}");
+    assert_eq!(posts, 7, "{calls:?}");
 }
 
 #[test]
@@ -4145,7 +4159,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 8, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 9, "{stderr}");
     stand_in
 }
 
@@ -4154,7 +4168,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 8 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 9 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),
