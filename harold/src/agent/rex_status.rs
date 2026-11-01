@@ -300,9 +300,19 @@ impl Shared {
 
     /// Stores a record for stream `generation`, unless the stream was asked to stop. The
     /// check and the write happen under the records lock, which `drop_stream` also takes.
-    fn store(&self, generation: u64, stop: &AtomicBool, block_id: &str, record: StatusRecord) {
+    ///
+    /// `closed` runs under the lock too. The reader marks a block closed before it takes the
+    /// lock to remove the record, so a store either comes before the removal or sees the mark.
+    fn store(
+        &self,
+        generation: u64,
+        stop: &AtomicBool,
+        block_id: &str,
+        record: StatusRecord,
+        closed: impl FnOnce() -> bool,
+    ) {
         let mut records = lock(&self.records);
-        if stop.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || closed() {
             return;
         }
         let step = match record.state {
@@ -636,7 +646,8 @@ fn read_event_line(
     }
 }
 
-/// The blocks that wait for a `program_status` call, and the blocks that closed.
+/// The blocks that wait for a `program_status` call, and the state of the blocks the call
+/// thread works on.
 #[derive(Default)]
 struct Pending {
     state: Mutex<PendingState>,
@@ -646,46 +657,81 @@ struct Pending {
 #[derive(Default)]
 struct PendingState {
     /// In arrival order. A block is here once, however many events came.
-    blocks: Vec<String>,
+    queue: Vec<String>,
+    /// The blocks the call thread has taken and not finished.
+    in_hand: HashSet<String>,
+    /// The in-hand blocks that closed. A mark lasts until the call thread finishes the block.
     closed: HashSet<String>,
+    /// The blocks whose last call failed. A block logs `call_failed` once until a call works.
+    failed: HashSet<String>,
     done: bool,
 }
 
 impl Pending {
+    /// Puts the blocks of the first read in hand, so a close that comes first still counts.
+    fn seed(&self, blocks: &[String]) {
+        lock(&self.state).in_hand.extend(blocks.iter().cloned());
+    }
+
     fn add(&self, block_id: &str) {
         let mut state = lock(&self.state);
-        if !state.closed.contains(block_id) && !state.blocks.iter().any(|b| b == block_id) {
-            state.blocks.push(block_id.to_string());
+        if state.closed.contains(block_id) {
+            return;
+        }
+        if !state.queue.iter().any(|b| b == block_id) {
+            state.queue.push(block_id.to_string());
             self.wake.notify_one();
         }
     }
 
-    /// Marks the block closed and cancels a waiting call.
+    /// Cancels a waiting call. When the call thread holds the block, it marks the block
+    /// closed, so the answer of a call in flight is not stored.
     fn close(&self, block_id: &str) {
         let mut state = lock(&self.state);
-        state.blocks.retain(|b| b != block_id);
-        state.closed.insert(block_id.to_string());
+        state.queue.retain(|b| b != block_id);
+        state.failed.remove(block_id);
+        if state.in_hand.contains(block_id) {
+            state.closed.insert(block_id.to_string());
+        }
     }
 
     fn is_closed(&self, block_id: &str) -> bool {
         lock(&self.state).closed.contains(block_id)
     }
 
-    fn finish(&self) {
+    /// The call thread is done with the block, and the mark of a close can go.
+    fn finish(&self, block_id: &str) {
+        let mut state = lock(&self.state);
+        state.in_hand.remove(block_id);
+        state.closed.remove(block_id);
+    }
+
+    /// Notes a failed call. The result is true for the first failure since a call worked.
+    fn note_failed(&self, block_id: &str) -> bool {
+        lock(&self.state).failed.insert(block_id.to_string())
+    }
+
+    fn note_worked(&self, block_id: &str) {
+        lock(&self.state).failed.remove(block_id);
+    }
+
+    fn finish_all(&self) {
         lock(&self.state).done = true;
         self.wake.notify_all();
     }
 
-    /// The next block that waits for a call. It waits until there is one. The result is
-    /// `None` when the stream is done or stopped.
+    /// The next block that waits for a call. It waits until there is one, and it puts the
+    /// block in hand. The result is `None` when the stream is done or stopped.
     fn next(&self, stop: &AtomicBool) -> Option<String> {
         let mut state = lock(&self.state);
         loop {
             if state.done || stop.load(Ordering::Acquire) {
                 return None;
             }
-            if !state.blocks.is_empty() {
-                return Some(state.blocks.remove(0));
+            if !state.queue.is_empty() {
+                let block = state.queue.remove(0);
+                state.in_hand.insert(block.clone());
+                return Some(block);
             }
             state = self
                 .wake
@@ -713,8 +759,8 @@ impl Reader {
             session_id: self.session_id.clone(),
             flags: Arc::clone(&self.flags),
             pending: Arc::clone(&pending),
-            failed: HashSet::new(),
         };
+        pending.seed(&blocks);
         // The child is already running, so events that come during the first calls wait in
         // the pipe or in `pending`.
         let worker = std::thread::Builder::new()
@@ -727,7 +773,7 @@ impl Reader {
             "read_error"
         };
         self.flags.ended.store(true, Ordering::Release);
-        pending.finish();
+        pending.finish_all();
         if let Some(worker) = worker {
             let _ = worker.join();
         }
@@ -763,6 +809,7 @@ impl Reader {
                     pending.add(&block_id);
                 }
                 Some(StatusEvent::BlockClosed { block_id }) => {
+                    // Mark first, then remove under the records lock.
                     pending.close(&block_id);
                     self.shared
                         .remove(self.generation, &self.flags.stop, &block_id);
@@ -782,12 +829,10 @@ struct Worker {
     session_id: String,
     flags: Arc<Flags>,
     pending: Arc<Pending>,
-    /// The blocks whose last call failed. A block logs `call_failed` once until a call works.
-    failed: HashSet<String>,
 }
 
 impl Worker {
-    fn run(mut self, blocks: &[String]) {
+    fn run(self, blocks: &[String]) {
         for block in blocks {
             if self.flags.stop.load(Ordering::Acquire) {
                 break;
@@ -802,38 +847,45 @@ impl Worker {
     }
 
     /// Asks Rex for the root record of the block. The answer replaces the record whole.
-    fn call(&mut self, block_id: &str) {
+    fn call(&self, block_id: &str) {
+        if self.pending.is_closed(block_id) {
+            self.pending.finish(block_id);
+            return;
+        }
         let answer = self
             .shared
             .api
             .block_call(&self.session_id, block_id, "program_status", &json!({}))
             .and_then(|value| parse_program_status(&value.to_string()));
         let stop = &self.flags.stop;
-        if self.pending.is_closed(block_id) {
-            return;
-        }
-        match answer {
-            Ok(Some(record)) => {
-                self.failed.remove(block_id);
-                self.shared.store(self.generation, stop, block_id, record);
-            }
-            Ok(None) => {
-                self.failed.remove(block_id);
-                self.shared.remove(self.generation, stop, block_id);
-            }
-            Err(error) => {
-                self.shared.remove(self.generation, stop, block_id);
-                if self.failed.insert(block_id.to_string()) && !stop.load(Ordering::Acquire) {
-                    log_stream(
-                        &self.shared.dispatch,
-                        &self.session_id,
-                        "call_failed",
-                        Some(call_failure_reason(error)),
-                        self.shared.count(self.generation),
-                    );
+        if !self.pending.is_closed(block_id) {
+            match answer {
+                Ok(Some(record)) => {
+                    self.pending.note_worked(block_id);
+                    self.shared
+                        .store(self.generation, stop, block_id, record, || {
+                            self.pending.is_closed(block_id)
+                        });
+                }
+                Ok(None) => {
+                    self.pending.note_worked(block_id);
+                    self.shared.remove(self.generation, stop, block_id);
+                }
+                Err(error) => {
+                    self.shared.remove(self.generation, stop, block_id);
+                    if self.pending.note_failed(block_id) && !stop.load(Ordering::Acquire) {
+                        log_stream(
+                            &self.shared.dispatch,
+                            &self.session_id,
+                            "call_failed",
+                            Some(call_failure_reason(error)),
+                            self.shared.count(self.generation),
+                        );
+                    }
                 }
             }
         }
+        self.pending.finish(block_id);
     }
 }
 

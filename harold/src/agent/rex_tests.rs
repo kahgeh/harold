@@ -1419,6 +1419,42 @@ fn block_closed_removes_the_block_with_no_call() {
 }
 
 #[test]
+fn a_close_between_the_check_and_the_store_does_not_bring_the_record_back() {
+    let lines = [
+        event_line("block_closed", &json!({"block_id": "block:a"})),
+        event_line("block_closed", &json!({"block_id": "block:s"})),
+    ];
+    let program = FakeProgram::new("closeheld", &lines, true);
+    let gate = Gate::new(
+        "block:a",
+        reply("working", 5, "held"),
+        reply("working", 5, "x"),
+    );
+    let api = Arc::new(FakeRex {
+        gate: Some(Arc::clone(&gate)),
+        sequences: [("block:s".to_string(), vec![Some(reply("working", 9, "s"))])].into(),
+        ..FakeRex::default()
+    });
+    let (status, steps) = status_with(Arc::clone(&api), &program, now_clock());
+    status.sync(&[
+        slot_in("session:1", "block:s"),
+        slot_in("session:1", "block:a"),
+    ]);
+    wait_until("block:s has its step", || steps.get("block:s", 9).is_some());
+    // The close of `block:s` comes after the close of `block:a`, so both are read.
+    wait_until("the reader read both closes", || {
+        steps.get("block:s", 9).is_none()
+    });
+    assert_eq!(gate.calls(), 1);
+    gate.release();
+    wait_until("the held call is done", || {
+        status.lookup("block:a") != Lookup::NoStream
+    });
+    assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
+    assert_eq!(steps.get("block:a", 5), None);
+}
+
+#[test]
 fn a_failed_call_drops_the_record_and_logs_call_failed_once_until_a_call_works() {
     let (logs, _guard) = capture_logs();
     let program = FakeProgram::new_fifo("failed");
