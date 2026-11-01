@@ -676,6 +676,8 @@ fn map_agent_snapshot(
                     last_transition_at_ms: projection.last_transition_at_ms,
                     work_summary: projection.work_summary,
                     current_step,
+                    recap: None,
+                    recap_at_ms: 0,
                 }
             })
             .collect(),

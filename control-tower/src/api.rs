@@ -805,6 +805,8 @@ mod tests {
             last_transition_at_ms: 2_000 + index as i64,
             work_summary: Some(format!("task {index}")),
             current_step: None,
+            recap: None,
+            recap_at_ms: 0,
         })
         .collect();
 
@@ -1411,6 +1413,8 @@ mod tests {
             last_transition_at_ms: 400,
             work_summary: Some("implement API".into()),
             current_step: None,
+            recap: None,
+            recap_at_ms: 0,
         }
     }
 
