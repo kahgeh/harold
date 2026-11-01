@@ -153,6 +153,8 @@ fn row(
         working_directory: working_directory.into(),
         work_summary: Some(work_summary.into()),
         current_step: None,
+        recap: None,
+        recap_at_ms: 0,
         state,
         last_transition_at_ms,
     }

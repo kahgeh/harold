@@ -854,6 +854,8 @@ mod tests {
                     working_directory: "/tmp/project".into(),
                     work_summary: Some("Task 5".into()),
                     current_step: None,
+                    recap: None,
+                    recap_at_ms: 0,
                     state: AgentState::Working,
                     last_transition_at_ms: 1,
                 }],

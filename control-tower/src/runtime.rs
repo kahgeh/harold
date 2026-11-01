@@ -1625,6 +1625,25 @@ mod tests {
     }
 
     #[test]
+    fn a_new_recap_at_the_same_version_reaches_the_row() {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(snapshot(2, MonitorHealthState::Healthy), 1_000);
+        let mut next = snapshot(2, MonitorHealthState::Healthy);
+        next.rows[0].recap = Some("Goal: ship it".into());
+        next.rows[0].recap_at_ms = 1_500;
+
+        assert_eq!(core.accept_snapshot(next, 2_000), StreamControl::Continue);
+
+        assert_eq!(
+            core.app.snapshot.rows[0].recap.as_deref(),
+            Some("Goal: ship it")
+        );
+        assert_eq!(core.app.snapshot.rows[0].recap_at_ms, 1_500);
+        assert_eq!(core.app.last_snapshot_received_at_ms(), Some(2_000));
+    }
+
+    #[test]
     fn first_snapshot_is_authoritative_records_local_time_and_resets_retry() {
         let mut core = RuntimeCore::new(Some("client-7".into()));
         assert_eq!(core.retry_after("unavailable"), Duration::from_millis(250));
@@ -3923,6 +3942,8 @@ mod tests {
                 working_directory: "/work".into(),
                 work_summary: Some("runtime work".into()),
                 current_step: None,
+                recap: None,
+                recap_at_ms: 0,
                 state: AgentState::Working,
                 last_transition_at_ms: 73,
             }],

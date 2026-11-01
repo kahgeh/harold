@@ -638,7 +638,11 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                     Style::default().fg(MUTED),
                 )),
             ];
-            let summary = display_work_summary(agent.work_summary.as_deref());
+            let summary = agent
+                .recap
+                .as_deref()
+                .filter(|recap| !recap.is_empty())
+                .unwrap_or_else(|| display_work_summary(agent.work_summary.as_deref()));
             cells.push(match app.call.as_ref() {
                 Some(view) if chief == Some(&agent.incarnation) => {
                     let work = call_work(view);
@@ -1434,6 +1438,18 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
         fact("AGE", age(now_ms, agent.last_transition_at_ms)),
         Line::raw(""),
     ];
+    if let Some(recap) = agent.recap.as_deref().filter(|recap| !recap.is_empty()) {
+        lines.push(Line::styled(
+            "RECAP",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(recap, Style::default().fg(INK)));
+        lines.push(Line::styled(
+            age(now_ms, agent.recap_at_ms),
+            Style::default().fg(MUTED),
+        ));
+        lines.push(Line::raw(""));
+    }
     if let Some(step) = agent
         .current_step
         .as_deref()
@@ -3150,6 +3166,95 @@ mod tests {
         assert!(content.contains("Build the panel"));
     }
 
+    fn recap_app(recap: Option<&str>, step: Option<&str>) -> App {
+        let selected = incarnation("%17", 91700, 91844, "claude");
+        let mut agent = row(
+            selected.clone(),
+            AgentState::Working,
+            "Claude",
+            "control-tower:2.17",
+            "Build the panel",
+            90_000,
+        );
+        agent.current_step = step.map(str::to_string);
+        agent.recap = recap.map(str::to_string);
+        agent.recap_at_ms = if recap.is_some() {
+            100_000 - 12 * 60_000
+        } else {
+            0
+        };
+        live_app(vec![agent], Some(selected))
+    }
+
+    #[test]
+    fn the_row_shows_the_recap_when_there_is_one() {
+        for width in [80, 120] {
+            let content = rendered_lines(
+                &recap_app(Some("Goal: ship the recap"), None),
+                width,
+                44,
+                100_000,
+            );
+            let list = content.lines().take(20).collect::<Vec<_>>().join("\n");
+            assert!(list.contains("Goal: ship the recap"), "width {width}");
+            assert!(!list.contains("Build the panel"), "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_row_shows_the_work_summary_when_there_is_no_recap() {
+        for width in [80, 120] {
+            let content = rendered_lines(&recap_app(None, None), width, 44, 100_000);
+            let list = content.lines().take(20).collect::<Vec<_>>().join("\n");
+            assert!(list.contains("Build the panel"), "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_detail_panel_shows_recap_with_age_current_step_and_work_summary_in_order() {
+        let content = rendered(
+            &recap_app(Some("Goal: ship the recap"), Some("Running the tests")),
+            140,
+            44,
+            100_000,
+        );
+
+        let recap_label = content.find("RECAP").expect("recap label");
+        let recap_text = content.rfind("Goal: ship the recap").expect("recap text");
+        let age_line = content.find("12m").expect("recap age");
+        let step_label = content.find("CURRENT STEP").expect("step label");
+        let summary_label = content.rfind("WORK SUMMARY").expect("summary label");
+        assert!(recap_label < recap_text);
+        assert!(recap_text < age_line);
+        assert!(age_line < step_label);
+        assert!(step_label < summary_label);
+    }
+
+    #[test]
+    fn the_detail_panel_without_a_recap_shows_as_today() {
+        let content = rendered(
+            &recap_app(None, Some("Running the tests")),
+            140,
+            44,
+            100_000,
+        );
+
+        assert!(!content.contains("RECAP"));
+        assert!(content.contains("CURRENT STEP"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 2);
+    }
+
+    #[test]
+    fn an_older_snapshot_without_the_new_fields_shows_as_today() {
+        let app = recap_app(None, None);
+        assert_eq!(app.snapshot.rows[0].recap, None);
+        assert_eq!(app.snapshot.rows[0].recap_at_ms, 0);
+        let content = rendered(&app, 140, 44, 100_000);
+
+        assert!(!content.contains("RECAP"));
+        assert!(content.contains("Build the panel"));
+    }
+
     fn row(
         incarnation: AgentIncarnation,
         state: AgentState,
@@ -3168,6 +3273,8 @@ mod tests {
             working_directory: format!("/Users/you/code/{provider_display_name}"),
             work_summary: Some(work_summary.into()),
             current_step: None,
+            recap: None,
+            recap_at_ms: 0,
             state,
             last_transition_at_ms,
         }

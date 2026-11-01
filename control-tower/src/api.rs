@@ -46,6 +46,7 @@ const CALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
+const RECAP_LIMIT: usize = 400;
 const MONITOR_FIELD_LIMIT: usize = 64;
 pub const HAROLD_VERSION_LIMIT: usize = 32;
 const TRANSCRIPT_LIMIT: usize = 1_024;
@@ -678,6 +679,11 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
             .current_step
             .map(|step| sanitize_display(&step, SUMMARY_LIMIT))
             .filter(|step| !step.is_empty()),
+        recap: pane
+            .recap
+            .map(|recap| sanitize_display(&recap, RECAP_LIMIT))
+            .filter(|recap| !recap.is_empty()),
+        recap_at_ms: pane.recap_at_ms,
         state: map_agent_state(pane.state),
         last_transition_at_ms: pane.last_transition_at_ms,
     })
@@ -968,6 +974,52 @@ mod tests {
                 .chars()
                 .all(|c| c == '界')
         );
+    }
+
+    #[test]
+    fn a_recap_with_control_characters_is_shown_clean() {
+        let row = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
+            tts_muted: false,
+            messaging_paused: false,
+            through_event_version: 1,
+            server_time_ms: 2,
+            monitor_health: Vec::new(),
+            panes: vec![AgentPaneState {
+                recap: Some("Goal:\u{1b}[31m red\u{7} done".into()),
+                recap_at_ms: 1_234,
+                ..proto_pane("%1")
+            }],
+        })
+        .expect("snapshot")
+        .rows
+        .remove(0);
+
+        let recap = row.recap.expect("recap");
+        assert!(!recap.chars().any(char::is_control));
+        assert!(recap.starts_with("Goal:"));
+        assert_eq!(row.recap_at_ms, 1_234);
+    }
+
+    #[test]
+    fn a_long_recap_keeps_up_to_400_characters() {
+        let row = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
+            tts_muted: false,
+            messaging_paused: false,
+            through_event_version: 1,
+            server_time_ms: 2,
+            monitor_health: Vec::new(),
+            panes: vec![AgentPaneState {
+                recap: Some("x".repeat(500)),
+                ..proto_pane("%1")
+            }],
+        })
+        .expect("snapshot")
+        .rows
+        .remove(0);
+
+        assert_eq!(row.recap.unwrap().chars().count(), 400);
     }
 
     #[test]

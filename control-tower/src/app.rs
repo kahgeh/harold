@@ -61,6 +61,9 @@ pub struct AgentRow {
     pub working_directory: String,
     pub work_summary: Option<String>,
     pub current_step: Option<String>,
+    /// Claude Code's own recap of the session, when Harold has read one.
+    pub recap: Option<String>,
+    pub recap_at_ms: i64,
     pub state: AgentState,
     pub last_transition_at_ms: i64,
 }
@@ -287,7 +290,7 @@ pub struct App {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchableRow {
-    fields: [String; 5],
+    fields: [String; 6],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -840,7 +843,7 @@ impl App {
 
     pub fn apply_later_snapshot(&mut self, snapshot: Snapshot) -> Result<bool, SnapshotError> {
         if snapshot.through_event_version == self.snapshot.through_event_version
-            && !self.current_step_changed_in(&snapshot)
+            && !self.detail_text_changed_in(&snapshot)
         {
             return Ok(false);
         }
@@ -857,15 +860,17 @@ impl App {
         Ok(true)
     }
 
-    /// A current-step change does not raise the event version, so a snapshot at the
-    /// same version still counts when a pane it shares with the current snapshot
-    /// (same pane id and agent pid) has another step.
-    fn current_step_changed_in(&self, snapshot: &Snapshot) -> bool {
+    /// A current-step or recap change does not raise the event version, so a snapshot
+    /// at the same version still counts when a pane it shares with the current
+    /// snapshot (same pane id and agent pid) has another step or recap.
+    fn detail_text_changed_in(&self, snapshot: &Snapshot) -> bool {
         snapshot.rows.iter().any(|new| {
             self.snapshot.rows.iter().any(|old| {
                 old.incarnation.pane_id == new.incarnation.pane_id
                     && old.incarnation.agent_pid == new.incarnation.agent_pid
-                    && old.current_step != new.current_step
+                    && (old.current_step != new.current_step
+                        || old.recap != new.recap
+                        || old.recap_at_ms != new.recap_at_ms)
             })
         })
     }
@@ -1312,6 +1317,7 @@ impl From<&AgentRow> for SearchableRow {
                 normalize_search(&row.provider_display_name),
                 normalize_search(row.work_summary.as_deref().unwrap_or_default()),
                 normalize_search(row.current_step.as_deref().unwrap_or_default()),
+                normalize_search(row.recap.as_deref().unwrap_or_default()),
                 normalize_search(&row.tmux_target),
                 normalize_search(&row.working_directory),
             ],
@@ -1874,6 +1880,8 @@ mod tests {
             working_directory: "/Users/example/Project-Zeta".into(),
             work_summary: Some("Map Harold snapshots".into()),
             current_step: None,
+            recap: None,
+            recap_at_ms: 0,
             state: AgentState::Working,
             last_transition_at_ms: 1,
         };
@@ -1904,6 +1912,29 @@ mod tests {
                 "query {query:?} should match"
             );
         }
+    }
+
+    #[test]
+    fn the_filter_matches_the_recap() {
+        let mut recapped = row(
+            incarnation("%1", 1, 2, 0, "claude"),
+            AgentState::Working,
+            "one",
+            0,
+            0,
+        );
+        recapped.work_summary = Some("nothing here".into());
+        recapped.recap = Some("Goal: find the NEEDLE".into());
+        let other = row(
+            incarnation("%2", 3, 4, 0, "claude"),
+            AgentState::Idle,
+            "two",
+            0,
+            0,
+        );
+
+        assert!(SearchableRow::from(&recapped).matches("needle"));
+        assert!(!SearchableRow::from(&other).matches("needle"));
     }
 
     #[test]
@@ -2256,6 +2287,8 @@ mod tests {
             working_directory: format!("/work/{session_name}"),
             work_summary: Some(format!("work in {session_name}")),
             current_step: None,
+            recap: None,
+            recap_at_ms: 0,
             incarnation,
             state,
             last_transition_at_ms: 10,

@@ -339,10 +339,17 @@ eligible, and for the first second after start; while it is off, an agent stops
 waiting only on `Enter` or when it goes Working.
 
 The detail panel (the `SELECTED SIGNAL` box) shows the lines `STATE`, `TARGET`, `PANE ID`,
-`DIRECTORY` and `AGE`. Then it shows `CURRENT STEP`, only when the agent reports a step, and
-`WORK SUMMARY`. `CURRENT STEP` is above `WORK SUMMARY`. The step is the line the agent
-reports in its Rex status. Harold cuts it to 160 characters and removes control characters, as
-it does for the work summary. The agent row in the list does not show the step.
+`DIRECTORY` and `AGE`. Then it shows `RECAP`, only when Harold has read a recap for the agent.
+`RECAP` shows the recap text and, on the next line, the age of the recap, for example `12m`.
+Next comes `CURRENT STEP`, only when the agent reports a step, and then `WORK SUMMARY`. The order
+is `RECAP`, `CURRENT STEP`, `WORK SUMMARY`. The step is the line the agent reports in its Rex
+status. Harold cuts it to 160 characters and removes control characters, as it does for the work
+summary. Harold cuts the recap to 400 characters.
+
+The work summary column of an agent row shows the recap, cut to the column, when the agent has a
+recap. Otherwise it shows the work summary. The row does not show the step. The filter `f`
+matches the recap and the current step, as well as the other fields. An older Harold sends no
+recap. Then the control-tower shows the row and the panel as before.
 
 An absent or empty work summary is displayed exactly as:
 
