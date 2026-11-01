@@ -302,9 +302,9 @@ impl RexVisibleScreen {
             // A failed trigger call leaves no record, so the observer asks once itself.
             // A block with no stream yet also gives its current step, as a stream does.
             Lookup::NoStream => {
-                let record = self.record_by_call(block_id)?;
-                self.status.note_direct(block_id, &record);
-                (record, StateSource::ProgramStatusCall)
+                let record = self.record_by_call(block_id);
+                self.status.note_direct(block_id, record.as_ref());
+                (record?, StateSource::ProgramStatusCall)
             }
             Lookup::CallFailed => (
                 self.record_by_call(block_id)?,

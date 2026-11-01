@@ -1016,6 +1016,39 @@ mod rex_observer {
         assert_eq!(steps.get(block, 20).as_deref(), Some("a step"));
     }
 
+    /// A screen over a status with no stream, and the steps it keeps.
+    fn screen_without_stream(api: &Arc<CountingRex>) -> (RexVisibleScreen, CurrentSteps) {
+        let steps = CurrentSteps::default();
+        let status = Arc::new(RexStatus::new(
+            api.clone(),
+            Arc::new(|| Err(RexError::Absent)),
+            steps.clone(),
+        ));
+        (RexVisibleScreen::with_status(api.clone(), status), steps)
+    }
+
+    #[test]
+    fn a_direct_call_that_gives_no_record_clears_the_step() {
+        let block = "block:obs-direct-none";
+        // `state=clear` leaves no root record.
+        let none = json!({"records": [{"id": "c", "state": "idle", "owner": {"pid": 20}}]});
+        let api = api_with(block, Some(none));
+        let (screen, steps) = screen_without_stream(&api);
+        steps.set(block, 20, Some("old step".to_string()));
+        observe(&screen, block);
+        assert_eq!(steps.get(block, 20), None);
+    }
+
+    #[test]
+    fn a_failed_direct_call_clears_the_step() {
+        let block = "block:obs-direct-failed";
+        let api = api_failing_first(block, Some(reply("working", 20)), 1);
+        let (screen, steps) = screen_without_stream(&api);
+        steps.set(block, 20, Some("old step".to_string()));
+        observe(&screen, block);
+        assert_eq!(steps.get(block, 20), None);
+    }
+
     #[test]
     fn a_failed_trigger_call_makes_one_direct_call_and_no_screen_read_when_it_works() {
         let block = "block:obs-call-failed";

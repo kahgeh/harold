@@ -257,6 +257,9 @@ impl CurrentSteps {
     }
 }
 
+/// The most blocks a stream remembers as closed.
+const GONE_LIMIT: usize = 1024;
+
 /// The least time between two starts of the event stream of one session.
 pub(crate) const RESTART_GAP: Duration = Duration::from_secs(5);
 
@@ -681,14 +684,18 @@ impl RexStatus {
         }
     }
 
-    /// Notes the current step of a record that a direct call read, for a block with no
-    /// stream yet. A stream stores the step of its records the same way.
-    pub(crate) fn note_direct(&self, block_id: &str, record: &StatusRecord) {
+    /// Notes the current step of what a direct call read, for a block with no stream yet. A
+    /// stream does the same: a record gives its step, and no record or a failed call clears it.
+    pub(crate) fn note_direct(&self, block_id: &str, record: Option<&StatusRecord>) {
         // A stream that holds a record for the block is newer than the direct call, which
         // can have been in flight while the stream made its first read.
         let records = lock(&self.shared.records);
-        if !records.contains_key(block_id) {
-            self.shared.steps.set(block_id, record.pid, record.step());
+        if records.contains_key(block_id) {
+            return;
+        }
+        match record {
+            Some(record) => self.shared.steps.set(block_id, record.pid, record.step()),
+            None => self.shared.steps.clear_block(block_id),
         }
     }
 }
@@ -774,6 +781,13 @@ struct PendingState {
     closed: HashSet<String>,
     /// The blocks whose last call failed. A block logs `call_failed` once until a call works.
     failed: HashSet<String>,
+    /// The blocks the reader saw closed. An event for such a block can come late, after the
+    /// close. A failed call for it leaves no mark, no entry and no log. A call that works
+    /// means the block is back, and takes it out. The set is cleared at `GONE_LIMIT`.
+    /// An entry covers one failed late call. A second late event, after that call, can leave
+    /// a mark and an entry again until the stream ends. A block that comes back and whose
+    /// first call fails also shows no mark for that one call.
+    gone: HashSet<String>,
     done: bool,
 }
 
@@ -800,6 +814,10 @@ impl Pending {
         let mut state = lock(&self.state);
         state.queue.retain(|b| b != block_id);
         state.failed.remove(block_id);
+        if state.gone.len() >= GONE_LIMIT {
+            state.gone.clear();
+        }
+        state.gone.insert(block_id.to_string());
         if state.in_hand.contains(block_id) {
             state.closed.insert(block_id.to_string());
         }
@@ -827,7 +845,18 @@ impl Pending {
     }
 
     fn note_worked(&self, block_id: &str) {
-        lock(&self.state).failed.remove(block_id);
+        let mut state = lock(&self.state);
+        state.failed.remove(block_id);
+        // A close that came while the call was in hand keeps the block gone.
+        if !state.closed.contains(block_id) {
+            state.gone.remove(block_id);
+        }
+    }
+
+    /// Whether the failed call was for a block the reader saw closed. The mark goes, so a
+    /// late event costs one call and leaves nothing.
+    fn take_gone(&self, block_id: &str) -> bool {
+        lock(&self.state).gone.remove(block_id)
     }
 
     fn finish_all(&self) {
@@ -997,6 +1026,7 @@ impl Worker {
                     self.pending.note_worked(block_id);
                     self.shared.remove(self.generation, stop, block_id);
                 }
+                Err(_) if self.pending.take_gone(block_id) => {}
                 Err(error) => {
                     self.shared.fail(self.generation, stop, block_id, || {
                         self.pending.is_closed(block_id)

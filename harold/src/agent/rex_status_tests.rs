@@ -80,6 +80,14 @@ impl Drop for GateGuard {
 struct Api {
     replies: HashMap<String, Result<Value, RexError>>,
     gate: Option<Arc<Gate>>,
+    /// The `program_status` calls for each block.
+    calls: Mutex<HashMap<String, usize>>,
+}
+
+impl Api {
+    fn calls_for(&self, block: &str) -> usize {
+        lock(&self.calls).get(block).copied().unwrap_or(0)
+    }
 }
 
 impl RexApi for Api {
@@ -97,6 +105,7 @@ impl RexApi for Api {
     }
     fn block_call(&self, _: &str, block: &str, method: &str, _: &Value) -> Result<Value, RexError> {
         assert_eq!(method, "program_status");
+        *lock(&self.calls).entry(block.to_string()).or_insert(0) += 1;
         if let Some(gate) = self.gate.as_ref().filter(|gate| gate.block == block) {
             return gate.call();
         }
@@ -157,6 +166,49 @@ impl Script {
             &format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{ending}"),
         );
         Self { dir }
+    }
+
+    /// A program that copies what `feed` sends to its output, as it comes.
+    fn fifo(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "harold-rex-status-private-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("events");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        install_script(
+            &dir.join("rex"),
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nexec cat '{}'\n",
+                fifo.display()
+            ),
+        );
+        Self { dir }
+    }
+
+    /// Sends one event line to a program from `fifo`. The write end stays open for the next
+    /// line, so `cat` does not see the end of its input.
+    fn feed(&self, line: &str) {
+        use std::io::Write;
+        static WRITERS: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
+        let path = self.dir.join("events");
+        let mut writers = lock(&WRITERS);
+        if !writers.iter().any(|(owner, _)| *owner == path) {
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            writers.push((path.clone(), file));
+        }
+        let (_, file) = writers
+            .iter_mut()
+            .find(|(owner, _)| *owner == path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
     }
 
     fn program(&self) -> Program {
@@ -524,10 +576,13 @@ fn the_started_line_holds_the_number_of_records_the_first_read_found() {
 fn a_direct_call_gives_the_current_step_as_a_stream_does() {
     let script = Script::new("direct", true);
     let (status, steps) = status_of(Api::default(), &script);
-    status.note_direct("block:a", &record(RecordState::Working, 7, Some("step")));
+    status.note_direct(
+        "block:a",
+        Some(&record(RecordState::Working, 7, Some("step"))),
+    );
     assert_eq!(steps.get("block:a", 7).as_deref(), Some("step"));
     // A record that is not working or blocked gives no step.
-    status.note_direct("block:a", &record(RecordState::Done, 7, None));
+    status.note_direct("block:a", Some(&record(RecordState::Done, 7, None)));
     assert_eq!(steps.get("block:a", 7), None);
 }
 
@@ -539,7 +594,10 @@ fn a_direct_call_does_not_replace_the_step_of_a_stream_record() {
     let newer = record(RecordState::Working, 7, Some("newer"));
     status.shared.store(1, &running, "block:a", newer, || false);
     // A direct call that was in flight during the first read brings an older answer.
-    status.note_direct("block:a", &record(RecordState::Working, 7, Some("older")));
+    status.note_direct(
+        "block:a",
+        Some(&record(RecordState::Working, 7, Some("older"))),
+    );
     assert_eq!(steps.get("block:a", 7).as_deref(), Some("newer"));
 }
 
@@ -561,4 +619,93 @@ fn a_live_removal_when_the_program_exits_triggers_a_call_for_the_block() {
     // The same line with a child record removed, and not the root, triggers nothing.
     let child_only = LIVE_REMOVED_AT_EXIT.replace(r#""ids":[""]"#, r#""ids":["child"]"#);
     assert_eq!(parse_event_line(&child_only), None);
+}
+
+#[test]
+fn a_direct_call_that_gives_no_record_or_fails_clears_the_step() {
+    let script = Script::new("directclear", true);
+    let (status, steps) = status_of(Api::default(), &script);
+    let working = record(RecordState::Working, 7, Some("step"));
+    status.note_direct("block:a", Some(&working));
+    assert_eq!(steps.get("block:a", 7).as_deref(), Some("step"));
+    // The next direct call gives no record (after `state=clear`), or it fails.
+    status.note_direct("block:a", None);
+    assert_eq!(steps.get("block:a", 7), None);
+    status.note_direct("block:a", Some(&working));
+    status.note_direct("block:a", None);
+    assert_eq!(steps.get("block:a", 7), None);
+}
+
+// -- events for a block that is gone ---------------------------------------------------
+
+fn event_line(kind: &str, payload: &Value) -> String {
+    json!({
+        "type": "session_event",
+        "payload": {"session_id": "session:1", "event": {"type": kind, "payload": payload}}
+    })
+    .to_string()
+}
+
+fn changed_line(block: &str) -> String {
+    event_line(
+        "program_status_changed",
+        &json!({"block_id": block, "id": "", "reason": "report", "record": {"state": "working"}}),
+    )
+}
+
+#[test]
+fn a_late_event_for_a_closed_block_leaves_no_mark_no_entry_and_no_log() {
+    let (logs, _guard) = capture_logs();
+    let script = Script::fifo("lateevent");
+    // `block:a` answers once and then fails, as a block that is gone does. `block:b` works.
+    let gate = Gate::new(
+        "block:a",
+        Ok(reply("working", 5, "a")),
+        Err(RexError::Failed),
+    );
+    let api = Arc::new(Api {
+        replies: [("block:b".to_string(), Ok(reply("working", 6, "b")))].into(),
+        gate: Some(Arc::clone(&gate)),
+        ..Api::default()
+    });
+    let steps = CurrentSteps::default();
+    let status = RexStatus::new(Arc::clone(&api) as Arc<dyn RexApi>, script.program(), steps);
+    let _open = gate.guard();
+    status.sync(&[slot("session:1", "block:a"), slot("session:1", "block:b")]);
+    gate.release();
+    wait_until("both blocks have a record", || {
+        status.lookup("block:b") == Lookup::Stream(Some(record(RecordState::Working, 6, Some("b"))))
+    });
+    // The block closes. Then an event for it arrives late, and its call fails.
+    script.feed(&event_line("block_closed", &json!({"block_id": "block:a"})));
+    script.feed(&changed_line("block:a"));
+    // One call thread works in order, so the second call for `block:b` comes after the
+    // late call for `block:a`.
+    script.feed(&changed_line("block:b"));
+    wait_until("the late call and the call after it are done", || {
+        gate.calls() == 2 && api.calls_for("block:b") == 2
+    });
+    assert_eq!(status.lookup("block:a"), Lookup::Stream(None));
+    assert!(lock(&status.shared.call_failed).is_empty());
+    assert!(
+        logs.with("agent status stream")
+            .iter()
+            .all(|line| !line.contains("event=\"call_failed\"")),
+        "{:?}",
+        logs.with("agent status stream")
+    );
+}
+
+#[test]
+fn a_call_that_works_while_the_block_closes_keeps_the_block_gone() {
+    let pending = Pending::default();
+    pending.seed(&["block:a".to_string()]);
+    // The close comes after the answer passed the closed check and before `note_worked`.
+    pending.close("block:a");
+    pending.note_worked("block:a");
+    assert!(lock(&pending.state).gone.contains("block:a"));
+    // The call thread is done with the block. A call that works now means it is back.
+    pending.finish("block:a");
+    pending.note_worked("block:a");
+    assert!(!lock(&pending.state).gone.contains("block:a"));
 }
