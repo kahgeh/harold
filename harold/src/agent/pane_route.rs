@@ -3,9 +3,6 @@
 //! A pane id from another Rex host has the form `rex:<label>/block:<id>`.
 //! No writer accepts that form, so a host pane id never reaches a terminal.
 
-// The callers arrive in later tasks. Remove this allow when they land.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -26,7 +23,8 @@ pub(crate) fn valid_host_label(label: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-/// Builds the pane id of a block on another Rex host.
+/// Builds the pane id of a block on another Rex host. Only the tests call it until Task 3.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn host_pane_id(label: &str, block_id: &str) -> String {
     format!("{HOST_PREFIX}{label}/block:{block_id}")
 }

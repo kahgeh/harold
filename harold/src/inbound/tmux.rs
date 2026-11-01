@@ -3,6 +3,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::agent::domain::AgentPaneObservation;
+use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::rex;
 use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::get_settings;
@@ -144,27 +145,51 @@ fn press_enter_with(program: &str, pane_id: &str) -> Result<(), String> {
 
 /// Types `text` into the pane (a tmux pane as literal keys, a Rex block as one paste), without
 /// Enter. Writes no log line: the
-/// caller decides whether the text may be logged.
+/// caller decides whether the text may be logged. A pane id on another Rex host is refused.
 pub(crate) fn type_text_into_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
-    if pane_id.starts_with(rex::BLOCK_PREFIX) {
+    type_text_routed(TMUX, pane_id, text, rex::type_text)
+}
+
+fn type_text_routed(
+    program: &str,
+    pane_id: &str,
+    text: &str,
+    rex_type: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    match route_pane(pane_id) {
         // One paste keeps a line break as a line break; only `press_enter` submits.
-        return rex::type_text(pane_id, &strip_control(text));
+        Ok(PaneRoute::Rex) => rex_type(pane_id, &strip_control(text)),
+        Ok(PaneRoute::Tmux) => type_text_with(program, pane_id, text),
+        Err(refusal) => Err(refuse_write(pane_id, "pane_typing", refusal)),
     }
-    type_text_with(TMUX, pane_id, text)
 }
 
 /// Sends Enter to the pane.
 pub(crate) fn press_enter_in_tmux_pane(pane_id: &str) -> Result<(), String> {
-    if pane_id.starts_with(rex::BLOCK_PREFIX) {
-        return rex::press_key(pane_id, "Enter");
+    press_enter_routed(TMUX, pane_id, rex::press_key)
+}
+
+fn press_enter_routed(
+    program: &str,
+    pane_id: &str,
+    rex_key: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    match route_pane(pane_id) {
+        Ok(PaneRoute::Rex) => rex_key(pane_id, "Enter"),
+        Ok(PaneRoute::Tmux) => press_enter_with(program, pane_id),
+        Err(refusal) => Err(refuse_write(pane_id, "pane_enter", refusal)),
     }
-    press_enter_with(TMUX, pane_id)
 }
 
 /// Types `text` into the pane and presses Enter, holding the pane's lock so a timed prompt
 /// or an alert never puts its keys in between. There is no idle check. Blocks: call it from
 /// sync code, such as inside `spawn_blocking`, never from an async task.
+///
+/// A pane id on another Rex host is refused before the log line and before the lock.
 pub(crate) fn relay_to_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
+    if let Err(refusal) = route_pane(pane_id) {
+        return Err(refuse_write(pane_id, "phone_reply", refusal));
+    }
     info!(pane_id, text, "relay_to_tmux_pane");
     relay_holding_lock(&pane_lock(pane_id), || {
         type_text_into_tmux_pane(pane_id, text)?;

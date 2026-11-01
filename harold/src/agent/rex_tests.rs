@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -2209,4 +2210,78 @@ fn a_rex_setting_gives_the_inventory_the_status() {
         inert_status()
     });
     assert!(asked.get());
+}
+
+// -- a pane id on another Rex host reaches no API call ---------------------------------------
+
+#[test]
+fn find_session_refuses_a_host_pane_id_without_listing() {
+    struct CountingRex(AtomicUsize, FakeRex);
+    impl RexApi for CountingRex {
+        fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.sessions()
+        }
+        fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.session_view(session)
+        }
+        fn process(&self, s: &str, b: &str) -> Result<RexProcess, RexError> {
+            self.1.process(s, b)
+        }
+        fn start_time_ms(&self, pid: u32) -> Option<i64> {
+            self.1.start_time_ms(pid)
+        }
+        fn block_call(&self, s: &str, b: &str, m: &str, a: &Value) -> Result<Value, RexError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.block_call(s, b, m, a)
+        }
+        fn paste(&self, s: &str, b: &str, t: &str) -> Result<(), RexError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.paste(s, b, t)
+        }
+        fn send_key(&self, s: &str, b: &str, k: &str) -> Result<(), RexError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.send_key(s, b, k)
+        }
+    }
+    let api = CountingRex(
+        AtomicUsize::new(0),
+        fake(&[("block:abc", Ok(claude_process()))]),
+    );
+
+    for id in ["rex:omarchy/block:abc", "main:0.1", "%7"] {
+        assert_eq!(find_session(&api, id), Ok(None), "{id}");
+    }
+    assert!(
+        type_text_with(&api, "rex:omarchy/block:abc", "x")
+            .unwrap_err()
+            .contains("on_rex_host")
+    );
+    assert!(
+        press_key_with(&api, "rex:omarchy/block:abc", "Enter")
+            .unwrap_err()
+            .contains("on_rex_host")
+    );
+    assert!(
+        type_text_with(&api, "main:0.1", "x")
+            .unwrap_err()
+            .contains("invalid_pane_id")
+    );
+    assert!(
+        press_key_with(&api, "main:0.1", "Enter")
+            .unwrap_err()
+            .contains("invalid_pane_id")
+    );
+    assert_eq!(api.0.load(Ordering::SeqCst), 0);
+    assert!(api.1.calls.lock().unwrap().is_empty());
+    assert!(api.1.pastes.lock().unwrap().is_empty());
+    assert!(api.1.keys.lock().unwrap().is_empty());
+
+    // A block id of this host works as before.
+    type_text_with(&api, "block:abc", "hello").unwrap();
+    press_key_with(&api, "block:abc", "Enter").unwrap();
+    assert_eq!(api.1.pastes.lock().unwrap().len(), 1);
+    assert_eq!(api.1.keys.lock().unwrap().len(), 1);
+    assert!(api.0.load(Ordering::SeqCst) > 0);
 }

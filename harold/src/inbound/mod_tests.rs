@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 
 use crate::inbound::ownership::Ownership;
+use crate::inbound::type_into_pane_quietly;
 use crate::inbound::{
     AgentAddress, ChiefRouting, RouteReport, RoutingEnv, clear_routing_state, parse_tag,
     resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
@@ -571,4 +572,16 @@ fn a_reply_to_the_chief_is_never_logged() {
     assert_eq!(typer.typed().len(), 1);
     let text = logs.text();
     assert!(!text.contains("APP-CANARY-7731"), "{text}");
+}
+
+#[test]
+fn quiet_typing_into_a_host_pane_takes_no_lock() {
+    let pane = "rex:quiet-host/block:quiet1";
+    let error = type_into_pane_quietly(pane, "QUIET-CANARY-1180").unwrap_err();
+    assert!(error.contains("on_rex_host"), "{error}");
+    assert!(!crate::timed_prompts::has_pane_lock(pane));
+
+    let error = type_into_pane_quietly("main:0.1", "QUIET-CANARY-1180").unwrap_err();
+    assert!(error.contains("invalid_pane_id"), "{error}");
+    assert!(!crate::timed_prompts::has_pane_lock("main:0.1"));
 }

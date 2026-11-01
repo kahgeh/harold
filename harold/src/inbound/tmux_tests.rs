@@ -133,3 +133,81 @@ fn typed_text_and_enter_are_counted_as_type_and_key_calls() {
     assert!(relay_rise("key", "failed", || drop(press_enter_with(&bad, "%1"))) >= 1);
     assert!(relay_rise("key", "absent", || drop(press_enter_with(missing, "%1"))) >= 1);
 }
+
+// -- a pane id on another Rex host reaches no writer ---------------------------------------
+
+const NO_TMUX: &str = "/nonexistent/harold-test-tmux";
+const HOST_PANE: &str = "rex:omarchy/block:abc";
+
+fn never_rex(_: &str, _: &str) -> Result<(), String> {
+    panic!("the Rex writer must not run");
+}
+
+#[test]
+fn typing_into_a_host_pane_is_refused_with_no_tmux_or_rex_call() {
+    let error = type_text_routed(NO_TMUX, HOST_PANE, "text", never_rex).unwrap_err();
+    assert!(error.contains("on_rex_host"), "{error}");
+}
+
+#[test]
+fn typing_into_an_unknown_pane_id_is_invalid_pane_id() {
+    let error = type_text_routed(NO_TMUX, "main:0.1", "text", never_rex).unwrap_err();
+    assert!(error.contains("invalid_pane_id"), "{error}");
+}
+
+#[test]
+fn enter_in_a_host_pane_is_refused_with_no_tmux_or_rex_call() {
+    let error = press_enter_routed(NO_TMUX, HOST_PANE, never_rex).unwrap_err();
+    assert!(error.contains("on_rex_host"), "{error}");
+    let error = press_enter_routed(NO_TMUX, "main:0.1", never_rex).unwrap_err();
+    assert!(error.contains("invalid_pane_id"), "{error}");
+}
+
+#[test]
+fn a_tmux_pane_id_still_reaches_tmux_and_a_block_id_reaches_rex() {
+    // The program does not exist: the error shows the call reached tmux.
+    let error = type_text_routed(NO_TMUX, "%7", "text", never_rex).unwrap_err();
+    assert!(error.contains("failed to start tmux"), "{error}");
+    let error = press_enter_routed(NO_TMUX, "%7", never_rex).unwrap_err();
+    assert!(error.contains("failed to start tmux"), "{error}");
+
+    let mut pasted = None;
+    type_text_routed(NO_TMUX, "block:abc", "a\x01b", |pane, text| {
+        pasted = Some((pane.to_string(), text.to_string()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(pasted, Some(("block:abc".into(), "ab".into())));
+    let mut key = None;
+    press_enter_routed(NO_TMUX, "block:abc", |pane, k| {
+        key = Some((pane.to_string(), k.to_string()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(key, Some(("block:abc".into(), "Enter".into())));
+}
+
+#[test]
+fn relaying_to_a_host_pane_takes_no_lock_and_logs_no_text() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let pane = "rex:relay-host/block:relay1";
+
+    let error = relay_to_tmux_pane(pane, "RELAY-CANARY-5521").unwrap_err();
+
+    assert!(error.contains("on_rex_host"), "{error}");
+    assert!(!crate::timed_prompts::has_pane_lock(pane));
+    assert!(
+        !logs.text().contains("RELAY-CANARY-5521"),
+        "{}",
+        logs.text()
+    );
+    assert!(
+        !logs.text().contains("relay_to_tmux_pane"),
+        "{}",
+        logs.text()
+    );
+
+    let error = relay_to_tmux_pane("main:0.1", "RELAY-CANARY-5521").unwrap_err();
+    assert!(error.contains("invalid_pane_id"), "{error}");
+    assert!(!crate::timed_prompts::has_pane_lock("main:0.1"));
+}

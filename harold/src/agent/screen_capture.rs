@@ -4,6 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::runtime::valid_pane_id;
 use crate::telemetry::{
     MultiplexerOperation, MultiplexerOutcome, outcome_of_io, record_multiplexer_call,
@@ -72,6 +73,15 @@ impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
         pane_id: &str,
         request: CaptureRequest,
     ) -> Result<StyledPaneCapture, ScreenError> {
+        // Only a tmux pane id reaches tmux. A pane id on another Rex host is refused.
+        match route_pane(pane_id) {
+            Ok(PaneRoute::Tmux) => {}
+            Ok(PaneRoute::Rex) => return Err(ScreenError::CaptureFailed),
+            Err(refusal) => {
+                refuse_write(pane_id, "screen_capture", refusal);
+                return Err(ScreenError::CaptureFailed);
+            }
+        }
         let start = match request.scope {
             CaptureScope::Visible => "0".to_string(),
             CaptureScope::RecentHistory { lines } if (1..=10_000).contains(&lines) => {
@@ -219,5 +229,40 @@ mod tests {
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    struct CountingRunner(std::sync::atomic::AtomicUsize);
+
+    impl CommandRunner for CountingRunner {
+        fn output(&self, _: &str, _: &[&str]) -> io::Result<CommandOutput> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CommandOutput {
+                success: true,
+                stdout: b"screen".to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_tmux_capture_of_a_host_pane_id_runs_no_command() {
+        let capture = TmuxPaneCapture {
+            runner: CountingRunner(Default::default()),
+        };
+        let request = CaptureRequest {
+            scope: CaptureScope::Visible,
+            preserve_styles: false,
+        };
+        for id in ["rex:omarchy/block:cap1", "main:0.1", "block:abc"] {
+            assert!(capture.capture(id, request).is_err(), "{id}");
+        }
+        assert_eq!(
+            capture.runner.0.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(capture.capture("%7", request).unwrap().text, "screen");
+        assert_eq!(
+            capture.runner.0.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }

@@ -10,6 +10,7 @@ use opentelemetry::Context;
 use time::OffsetDateTime;
 use tracing::{info, warn};
 
+use crate::agent::pane_route::{refuse_write, route_pane};
 use crate::outbound::{DeliveryOutcome, send_reply};
 use crate::settings::get_settings;
 use crate::telemetry::{self, ResolvedBy, Routing, StartedBy};
@@ -440,6 +441,10 @@ pub(crate) fn route_to_chief_in(
 /// relay_holding_lock(pane_lock(pane), type_text_into_tmux_pane + press_enter_in_tmux_pane): the iMessage
 /// reply path's typing, without relay_to_tmux_pane's log line that holds the text.
 pub(crate) fn type_into_pane_quietly(pane_id: &str, text: &str) -> Result<(), String> {
+    // A pane id on another Rex host is refused before the lock.
+    if let Err(refusal) = route_pane(pane_id) {
+        return Err(refuse_write(pane_id, "phone_reply", refusal));
+    }
     tmux::relay_holding_lock(&pane_lock(pane_id), || {
         tmux::type_text_into_tmux_pane(pane_id, text)?;
         tmux::press_enter_in_tmux_pane(pane_id)

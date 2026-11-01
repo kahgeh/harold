@@ -21,6 +21,7 @@ use super::domain::{AgentIncarnation, AgentPaneObservation};
 use super::inventory::{
     AgentInventoryPort, InventoryError, ProviderResolution, program_from_words, resolve_provider,
 };
+use super::pane_route::{PaneRoute, refuse_write, route_pane};
 use super::screen::{StopSignal, current_stop, run_stoppable, stop_requested};
 
 /// The start of a Rex pane id.
@@ -591,6 +592,15 @@ fn list_slots_counted(api: &dyn RexApi) -> Result<(usize, Vec<RexBlockSlot>), Re
 /// The session that holds the block: the last scan knows it, and a new listing finds it.
 /// `Ok(None)` means a listing that succeeded does not hold the block.
 pub(crate) fn find_session(api: &dyn RexApi, block_id: &str) -> Result<Option<String>, RexError> {
+    // Only a block id of this host has a session here. Any other id lists nothing.
+    match route_pane(block_id) {
+        Ok(PaneRoute::Rex) => {}
+        Ok(PaneRoute::Tmux) => return Ok(None),
+        Err(refusal) => {
+            refuse_write(block_id, "rex_lookup", refusal);
+            return Ok(None);
+        }
+    }
     if let Some(session) = directory_get(block_id) {
         return Ok(Some(session));
     }
@@ -644,16 +654,30 @@ fn typing_error(what: &str, block_id: &str, error: RexError) -> String {
 
 /// Pastes `text` into the block as one paste, without Enter.
 pub(crate) fn type_text(block_id: &str, text: &str) -> Result<(), String> {
-    let api = system();
-    let session = session_of(&*api, block_id).map_err(|e| typing_error("paste", block_id, e))?;
+    type_text_with(&*system(), block_id, text)
+}
+
+/// `type_text` through `api`. A pane id on another Rex host is refused before any API call.
+pub(crate) fn type_text_with(api: &dyn RexApi, block_id: &str, text: &str) -> Result<(), String> {
+    if let Err(refusal) = route_pane(block_id) {
+        return Err(refuse_write(block_id, "rex_paste", refusal));
+    }
+    let session = session_of(api, block_id).map_err(|e| typing_error("paste", block_id, e))?;
     api.paste(&session, block_id, text)
         .map_err(|e| typing_error("paste", block_id, e))
 }
 
 /// Sends one key to the block by its tmux name, such as `i` or `BSpace`.
 pub(crate) fn press_key(block_id: &str, key: &str) -> Result<(), String> {
-    let api = system();
-    let session = session_of(&*api, block_id).map_err(|e| typing_error("key", block_id, e))?;
+    press_key_with(&*system(), block_id, key)
+}
+
+/// `press_key` through `api`. A pane id on another Rex host is refused before any API call.
+pub(crate) fn press_key_with(api: &dyn RexApi, block_id: &str, key: &str) -> Result<(), String> {
+    if let Err(refusal) = route_pane(block_id) {
+        return Err(refuse_write(block_id, "rex_key", refusal));
+    }
+    let session = session_of(api, block_id).map_err(|e| typing_error("key", block_id, e))?;
     api.send_key(&session, block_id, &rex_key_name(key))
         .map_err(|e| typing_error("key", block_id, e))
 }

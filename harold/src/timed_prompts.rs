@@ -15,6 +15,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
+use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
 use crate::outbound::left_out::{
@@ -659,6 +660,16 @@ fn reads_idle(view: &AgentsView, pane_id: &str) -> bool {
         .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Idle)
 }
 
+#[cfg(test)]
+/// Whether the daemon's pane locks hold an entry for the pane. Reading it takes no lock.
+pub(crate) fn has_pane_lock(pane_id: &str) -> bool {
+    TMUX_PANE_LOCKS
+        .panes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains_key(pane_id)
+}
+
 /// The daemon's pane locks, shared by the timed prompts, the alerts and the phone relay.
 static TMUX_PANE_LOCKS: LazyLock<PaneLocks> = LazyLock::new(PaneLocks::default);
 
@@ -1276,6 +1287,11 @@ pub(crate) async fn type_line_once<P: Ports>(
     pane_id: &str,
     text: &str,
 ) -> LineOutcome {
+    // A pane id on another Rex host has no pane here: nothing is read, locked or typed.
+    if let Err(refusal) = route_pane(pane_id) {
+        refuse_write(pane_id, "timed_prompt", refusal);
+        return LineOutcome::NoPane;
+    }
     let view = ports.agents();
     // A failed listing says nothing about the pane: try again later.
     if view.listing_failed {
@@ -1365,10 +1381,21 @@ fn capture_args(pane_id: &str) -> [&str; 5] {
 
 /// Sends one key to the pane by its tmux name.
 fn press_key_in_tmux_pane(pane_id: &str, key: &str) -> Result<(), String> {
-    if pane_id.starts_with(crate::agent::rex::BLOCK_PREFIX) {
-        return crate::agent::rex::press_key(pane_id, key);
+    press_key_routed("tmux", pane_id, key, crate::agent::rex::press_key)
+}
+
+/// Sends the key to the writer that owns the pane id. A pane id on another Rex host is refused.
+fn press_key_routed(
+    program: &str,
+    pane_id: &str,
+    key: &str,
+    rex_key: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    match route_pane(pane_id) {
+        Ok(PaneRoute::Rex) => rex_key(pane_id, key),
+        Ok(PaneRoute::Tmux) => press_key_with(program, pane_id, key),
+        Err(refusal) => Err(refuse_write(pane_id, "pane_key", refusal)),
     }
-    press_key_with("tmux", pane_id, key)
 }
 
 fn press_key_with(program: &str, pane_id: &str, key: &str) -> Result<(), String> {
@@ -1389,6 +1416,30 @@ fn press_key_with(program: &str, pane_id: &str, key: &str) -> Result<(), String>
         ));
     }
     Ok(())
+}
+
+/// Reads the screen through the writer that owns the pane id. A pane id on another Rex host
+/// reads as no screen.
+async fn read_screen_routed(
+    program: &str,
+    pane_id: &str,
+    rex_read: impl FnOnce(&str) -> Option<String> + Send + 'static,
+) -> Option<String> {
+    match route_pane(pane_id) {
+        Ok(PaneRoute::Rex) => {
+            let pane_id = pane_id.to_string();
+            let read = tokio::task::spawn_blocking(move || rex_read(&pane_id));
+            tokio::time::timeout(COMMAND_TIMEOUT, read)
+                .await
+                .ok()?
+                .ok()?
+        }
+        Ok(PaneRoute::Tmux) => read_tmux_screen(program, pane_id, COMMAND_TIMEOUT).await,
+        Err(refusal) => {
+            refuse_write(pane_id, "screen_read", refusal);
+            None
+        }
+    }
 }
 
 /// Runs one of the blocking typing steps off the async threads.
@@ -1446,17 +1497,7 @@ impl Ports for TmuxPorts {
     }
 
     async fn read_screen(&self, pane_id: &str) -> Option<String> {
-        if pane_id.starts_with(crate::agent::rex::BLOCK_PREFIX) {
-            let pane_id = pane_id.to_string();
-            let read = tokio::task::spawn_blocking(move || {
-                crate::agent::rex::read_screen_styled(&pane_id)
-            });
-            return tokio::time::timeout(COMMAND_TIMEOUT, read)
-                .await
-                .ok()?
-                .ok()?;
-        }
-        read_tmux_screen("tmux", pane_id, COMMAND_TIMEOUT).await
+        read_screen_routed("tmux", pane_id, crate::agent::rex::read_screen_styled).await
     }
 
     async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {

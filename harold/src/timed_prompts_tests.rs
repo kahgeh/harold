@@ -2952,3 +2952,69 @@ async fn timed_prompt_tmux_calls_are_counted_as_screen_read_and_key() {
     assert!(press_key_with("/nonexistent/harold-test-tmux", "%1", "Up").is_err());
     assert!(multiplexer_calls("key", "absent") - before >= 1);
 }
+
+// -- a pane id on another Rex host reaches no writer -----------------------------------------
+
+#[tokio::test]
+async fn type_line_once_into_a_host_pane_touches_nothing() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let pane = "rex:timed-host/block:timed1";
+    // The listing holds both ids as idle agent panes, so only the route stops the typing.
+    fake.set(|state| state.view = view(vec![chief(pane), chief("main:0.1")]));
+
+    for id in [pane, "main:0.1"] {
+        let outcome = type_line_once(&fake, Writer::Tool("questions"), id, "Q25 revise: no").await;
+        assert_eq!(outcome, LineOutcome::NoPane, "{id}");
+    }
+
+    assert!(fake.keys().is_empty());
+    assert_eq!(fake.screen_reads(), 0);
+    assert_eq!(fake.now_reads(), 0);
+    assert!(!has_pane_lock(pane));
+    assert!(!has_pane_lock("main:0.1"));
+}
+
+#[test]
+fn press_key_routed_refuses_a_host_pane_id_and_keeps_the_other_routes() {
+    const NO_TMUX: &str = "/nonexistent/harold-test-tmux";
+    let rex = |_: &str, _: &str| -> Result<(), String> { panic!("the Rex writer must not run") };
+    let error = press_key_routed(NO_TMUX, "rex:omarchy/block:abc", "Up", rex).unwrap_err();
+    assert!(error.contains("on_rex_host"), "{error}");
+    let error = press_key_routed(NO_TMUX, "main:0.1", "Up", rex).unwrap_err();
+    assert!(error.contains("invalid_pane_id"), "{error}");
+    let error = press_key_routed(NO_TMUX, "%7", "Up", rex).unwrap_err();
+    assert!(error.contains("failed to start tmux"), "{error}");
+    let mut seen = None;
+    press_key_routed(NO_TMUX, "block:abc", "Up", |pane, key| {
+        seen = Some((pane.to_string(), key.to_string()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, Some(("block:abc".into(), "Up".into())));
+}
+
+#[tokio::test]
+async fn read_screen_routed_reads_nothing_for_a_host_pane_id() {
+    use crate::telemetry::test_support::fake_program;
+    // A program that would answer with a screen, so only the route stops the read.
+    let no_tmux = fake_program("route-screen", "printf screen");
+    let no_tmux = no_tmux.as_str();
+    let rex = |_: &str| -> Option<String> { panic!("the Rex reader must not run") };
+    assert_eq!(
+        read_screen_routed(no_tmux, "rex:omarchy/block:abc", rex).await,
+        None
+    );
+    assert_eq!(read_screen_routed(no_tmux, "main:0.1", rex).await, None);
+    assert_eq!(
+        read_screen_routed(no_tmux, "block:abc", |pane| Some(format!(
+            "screen of {pane}"
+        )))
+        .await,
+        Some("screen of block:abc".to_string())
+    );
+    // A tmux pane id still reaches the program.
+    assert_eq!(
+        read_screen_routed(no_tmux, "%7", rex).await,
+        Some("screen".to_string())
+    );
+}
