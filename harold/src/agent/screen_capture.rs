@@ -5,6 +5,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::agent::runtime::valid_pane_id;
+use crate::telemetry::{
+    MultiplexerOperation, MultiplexerOutcome, outcome_of_io, record_multiplexer_call,
+};
 
 use super::{CommandOutput, CommandRunner, ScreenError, stop_requested};
 
@@ -48,7 +51,15 @@ impl<R: CommandRunner> TmuxPaneCapture<R> {
         }
         let filter = format!("#{{==:#{{pane_id}},{pane_id}}}");
         let args = ["list-panes", "-a", "-F", "#{pane_id}", "-f", &filter];
-        match self.runner.output("tmux", &args) {
+        let started = Instant::now();
+        let result = self.runner.output("tmux", &args);
+        let outcome = match &result {
+            Ok(output) if output.success => MultiplexerOutcome::Ok,
+            Ok(_) => MultiplexerOutcome::Failed,
+            Err(error) => outcome_of_io(error),
+        };
+        record_multiplexer_call(MultiplexerOperation::List, outcome, started.elapsed());
+        match result {
             Ok(output) if output.success && output.stdout.is_empty() => ScreenError::PaneDeparted,
             _ => ScreenError::CaptureFailed,
         }
@@ -73,7 +84,15 @@ impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
             args.push("-e");
         }
         args.extend(["-S", &start, "-t", pane_id]);
-        let output = self.runner.output("tmux", &args).map_err(|error| {
+        let started = Instant::now();
+        let result = self.runner.output("tmux", &args);
+        let outcome = match &result {
+            Ok(output) if output.success => MultiplexerOutcome::Ok,
+            Ok(_) => MultiplexerOutcome::Failed,
+            Err(error) => outcome_of_io(error),
+        };
+        record_multiplexer_call(MultiplexerOperation::ScreenRead, outcome, started.elapsed());
+        let output = result.map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ScreenError::CaptureUnavailable
             } else {

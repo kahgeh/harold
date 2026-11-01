@@ -1318,6 +1318,16 @@ async fn record(store: &HaroldStore, event: TimedPromptHandled, reports: &mut Ve
 /// What `program` prints, or `None` when it cannot start, fails, prints text that is not
 /// UTF-8, or takes longer than `timeout`. A command that runs out of time is killed.
 async fn bounded_stdout(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    bounded_run(program, args, timeout).await.ok()
+}
+
+/// `bounded_stdout` with the reason for a failure, as the outcome of a multiplexer call.
+async fn bounded_run(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, crate::telemetry::MultiplexerOutcome> {
+    use crate::telemetry::{MultiplexerOutcome, outcome_of_io};
     let mut command = tokio::process::Command::new(program);
     command
         .args(args)
@@ -1326,12 +1336,25 @@ async fn bounded_stdout(program: &str, args: &[&str], timeout: Duration) -> Opti
         .kill_on_drop(true);
     let output = tokio::time::timeout(timeout, command.output())
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| MultiplexerOutcome::Timeout)?
+        .map_err(|error| outcome_of_io(&error))?;
     if !output.status.success() {
-        return None;
+        return Err(MultiplexerOutcome::Failed);
     }
-    String::from_utf8(output.stdout).ok()
+    String::from_utf8(output.stdout).map_err(|_| MultiplexerOutcome::Malformed)
+}
+
+/// Reads the pane with `program` and counts the call as a `screen_read` call. Only the
+/// tmux read comes here: `bounded_stdout` also runs `/bin/date`, which is not counted.
+async fn read_tmux_screen(program: &str, pane_id: &str, timeout: Duration) -> Option<String> {
+    use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_multiplexer_call};
+    let started = std::time::Instant::now();
+    let result = bounded_run(program, &capture_args(pane_id), timeout).await;
+    let outcome = result
+        .as_ref()
+        .map_or_else(|o| *o, |_| MultiplexerOutcome::Ok);
+    record_multiplexer_call(MultiplexerOperation::ScreenRead, outcome, started.elapsed());
+    result.ok()
 }
 
 /// The visible screen of one pane, with the escape codes that say which text is dim or in
@@ -1345,10 +1368,21 @@ fn press_key_in_tmux_pane(pane_id: &str, key: &str) -> Result<(), String> {
     if pane_id.starts_with(crate::agent::rex::BLOCK_PREFIX) {
         return crate::agent::rex::press_key(pane_id, key);
     }
-    let status = std::process::Command::new("tmux")
+    press_key_with("tmux", pane_id, key)
+}
+
+fn press_key_with(program: &str, pane_id: &str, key: &str) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let status = std::process::Command::new(program)
         .args(["send-keys", "-t", pane_id, key])
-        .status()
-        .map_err(|error| format!("failed to start tmux key {key} for {pane_id}: {error}"))?;
+        .status();
+    crate::inbound::tmux::record_status(
+        crate::telemetry::MultiplexerOperation::Key,
+        &status,
+        started,
+    );
+    let status =
+        status.map_err(|error| format!("failed to start tmux key {key} for {pane_id}: {error}"))?;
     if !status.success() {
         return Err(format!(
             "tmux send-keys {key} failed for {pane_id}: {status}"
@@ -1422,7 +1456,7 @@ impl Ports for TmuxPorts {
                 .ok()?
                 .ok()?;
         }
-        bounded_stdout("tmux", &capture_args(pane_id), COMMAND_TIMEOUT).await
+        read_tmux_screen("tmux", pane_id, COMMAND_TIMEOUT).await
     }
 
     async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {

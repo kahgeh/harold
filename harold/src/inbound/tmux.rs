@@ -6,6 +6,9 @@ use crate::agent::domain::AgentPaneObservation;
 use crate::agent::rex;
 use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::get_settings;
+use crate::telemetry::{
+    MultiplexerOperation, MultiplexerOutcome, outcome_of_io, record_multiplexer_call,
+};
 use crate::timed_prompts::{PaneLock, Writer, pane_lock};
 
 const INBOUND_PANE_LABEL_MAX_SCALARS: usize = 256;
@@ -94,12 +97,29 @@ fn enter_args(pane_id: &str) -> [&str; 4] {
     ["send-keys", "-t", pane_id, "Enter"]
 }
 
+/// Counts one tmux call that ran to an exit status or did not start.
+pub(crate) fn record_status(
+    operation: MultiplexerOperation,
+    status: &std::io::Result<std::process::ExitStatus>,
+    started: std::time::Instant,
+) {
+    let outcome = match status {
+        Ok(status) if status.success() => MultiplexerOutcome::Ok,
+        Ok(_) => MultiplexerOutcome::Failed,
+        Err(error) => outcome_of_io(error),
+    };
+    record_multiplexer_call(operation, outcome, started.elapsed());
+}
+
 fn type_text_with(program: &str, pane_id: &str, text: &str) -> Result<(), String> {
     let safe = strip_control(text);
+    let started = std::time::Instant::now();
     let status = Command::new(program)
         .args(literal_text_args(pane_id, &safe))
-        .status()
-        .map_err(|error| format!("failed to start tmux send-keys for {pane_id}: {error}"))?;
+        .status();
+    record_status(MultiplexerOperation::Type, &status, started);
+    let status =
+        status.map_err(|error| format!("failed to start tmux send-keys for {pane_id}: {error}"))?;
     if !status.success() {
         return Err(format!(
             "tmux send-keys text failed for {pane_id}: {status}"
@@ -109,10 +129,11 @@ fn type_text_with(program: &str, pane_id: &str, text: &str) -> Result<(), String
 }
 
 fn press_enter_with(program: &str, pane_id: &str) -> Result<(), String> {
-    let status = Command::new(program)
-        .args(enter_args(pane_id))
-        .status()
-        .map_err(|error| format!("failed to start tmux Enter for {pane_id}: {error}"))?;
+    let started = std::time::Instant::now();
+    let status = Command::new(program).args(enter_args(pane_id)).status();
+    record_status(MultiplexerOperation::Key, &status, started);
+    let status =
+        status.map_err(|error| format!("failed to start tmux Enter for {pane_id}: {error}"))?;
     if !status.success() {
         return Err(format!(
             "tmux send-keys Enter failed for {pane_id}: {status}"

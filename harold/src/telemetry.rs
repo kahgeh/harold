@@ -593,6 +593,16 @@ impl MultiplexerOutcome {
     }
 }
 
+/// The outcome of a call whose program could not run or answer: a missing program is
+/// `absent`, a call that ran out of time is `timeout`, any other error is `failed`.
+pub(crate) fn outcome_of_io(error: &std::io::Error) -> MultiplexerOutcome {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => MultiplexerOutcome::Absent,
+        std::io::ErrorKind::TimedOut => MultiplexerOutcome::Timeout,
+        _ => MultiplexerOutcome::Failed,
+    }
+}
+
 /// The multiplexer name from the settings: `tmux` when the settings are not set yet.
 fn configured_multiplexer() -> &'static str {
     crate::settings::try_get_settings().map_or("tmux", |settings| {
@@ -2360,6 +2370,27 @@ pub(crate) mod test_support {
                 })
                 .map(|point| point.value())
         })
+    }
+
+    /// How many `harold.multiplexer.calls` carry this `operation` and `outcome` so far.
+    pub(crate) fn multiplexer_calls(operation: &str, outcome: &str) -> u64 {
+        counter_value(
+            "harold.multiplexer.calls",
+            &[("operation", operation), ("outcome", outcome)],
+        )
+        .unwrap_or(0)
+    }
+
+    /// Writes an executable `sh` script with this body and returns its path. The test meter
+    /// is shared, so a caller compares counts before and after its own call.
+    pub(crate) fn fake_program(tag: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("harold-fake-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("tmux");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.to_string_lossy().into_owned()
     }
 
     /// The total of the counter `name` over the data points that carry every attribute

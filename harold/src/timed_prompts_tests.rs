@@ -2910,3 +2910,44 @@ async fn a_lone_i_in_the_same_try_is_removed_with_bspace_without_the_footer() {
     keys.extend(text_keys());
     assert_eq!(fake.keys(), keys);
 }
+
+#[tokio::test]
+async fn timed_prompt_tmux_calls_are_counted_as_screen_read_and_key() {
+    use crate::telemetry::test_support::{fake_program, multiplexer_calls};
+    let good = fake_program("timed-ok", "printf screen");
+    let bad = fake_program("timed-bad", "exit 1");
+    let slow = fake_program("timed-slow", "sleep 5");
+    let second = Duration::from_secs(1);
+
+    let before = multiplexer_calls("screen_read", "ok");
+    assert_eq!(
+        read_tmux_screen(&good, "%1", second).await,
+        Some("screen".to_string())
+    );
+    assert!(multiplexer_calls("screen_read", "ok") - before >= 1);
+    let before = multiplexer_calls("screen_read", "failed");
+    assert_eq!(read_tmux_screen(&bad, "%1", second).await, None);
+    assert!(multiplexer_calls("screen_read", "failed") - before >= 1);
+    let before = multiplexer_calls("screen_read", "timeout");
+    assert_eq!(
+        read_tmux_screen(&slow, "%1", Duration::from_millis(50)).await,
+        None
+    );
+    assert!(multiplexer_calls("screen_read", "timeout") - before >= 1);
+    let before = multiplexer_calls("screen_read", "absent");
+    assert_eq!(
+        read_tmux_screen("/nonexistent/harold-test-tmux", "%1", second).await,
+        None
+    );
+    assert!(multiplexer_calls("screen_read", "absent") - before >= 1);
+
+    let before = multiplexer_calls("key", "ok");
+    assert!(press_key_with(&good, "%1", "Up").is_ok());
+    assert!(multiplexer_calls("key", "ok") - before >= 1);
+    let before = multiplexer_calls("key", "failed");
+    assert!(press_key_with(&bad, "%1", "Up").is_err());
+    assert!(multiplexer_calls("key", "failed") - before >= 1);
+    let before = multiplexer_calls("key", "absent");
+    assert!(press_key_with("/nonexistent/harold-test-tmux", "%1", "Up").is_err());
+    assert!(multiplexer_calls("key", "absent") - before >= 1);
+}

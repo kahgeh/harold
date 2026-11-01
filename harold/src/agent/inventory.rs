@@ -605,7 +605,11 @@ pub(super) fn read_tty_table(
 }
 
 pub(super) fn tmux_panes_command() -> Command {
-    let mut command = Command::new("tmux");
+    tmux_panes_command_for("tmux")
+}
+
+fn tmux_panes_command_for(program: &str) -> Command {
+    let mut command = Command::new(program);
     // Tabs survive tmux's output escaping; -u avoids locale-dependent sanitizing.
     command.args([
         "-u",
@@ -618,20 +622,51 @@ pub(super) fn tmux_panes_command() -> Command {
 }
 
 fn read_tmux_panes() -> Result<Vec<TmuxPaneInfo>, InventoryError> {
-    let stdout = command_stdout(&mut tmux_panes_command())?;
-    parse_tmux_panes(&stdout)
+    read_tmux_panes_with("tmux")
+}
+
+/// Lists the panes with `program` and counts the call as a `list` call, timed from just
+/// before the spawn.
+pub(super) fn read_tmux_panes_with(program: &str) -> Result<Vec<TmuxPaneInfo>, InventoryError> {
+    use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, outcome_of_io};
+    let started = std::time::Instant::now();
+    let result = stoppable_output(&mut tmux_panes_command_for(program))
+        .map_err(|error| (command_error(&error), outcome_of_io(&error)))
+        .and_then(|output| {
+            if !output.status.success() {
+                return Err((InventoryError::CommandFailed, MultiplexerOutcome::Failed));
+            }
+            String::from_utf8(output.stdout).map_err(|_| {
+                (
+                    InventoryError::MalformedOutput,
+                    MultiplexerOutcome::Malformed,
+                )
+            })
+        })
+        .and_then(|stdout| {
+            parse_tmux_panes(&stdout).map_err(|error| (error, MultiplexerOutcome::Malformed))
+        });
+    let outcome = result
+        .as_ref()
+        .map_or_else(|(_, outcome)| *outcome, |_| MultiplexerOutcome::Ok);
+    crate::telemetry::record_multiplexer_call(
+        MultiplexerOperation::List,
+        outcome,
+        started.elapsed(),
+    );
+    result.map_err(|(error, _)| error)
 }
 
 /// A stopped command (a timed-out scan about to be retried) is killed and fails.
 pub(super) fn command_stdout(command: &mut Command) -> Result<String, InventoryError> {
-    let output = stoppable_output(command).map_err(command_error)?;
+    let output = stoppable_output(command).map_err(|error| command_error(&error))?;
     if !output.status.success() {
         return Err(InventoryError::CommandFailed);
     }
     String::from_utf8(output.stdout).map_err(|_| InventoryError::MalformedOutput)
 }
 
-fn command_error(error: io::Error) -> InventoryError {
+fn command_error(error: &io::Error) -> InventoryError {
     if error.kind() == io::ErrorKind::NotFound {
         InventoryError::CommandUnavailable
     } else {

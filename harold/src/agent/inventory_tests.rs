@@ -872,3 +872,23 @@ fn a_pane_with_an_empty_tty_is_not_asked_of_ps() {
     assert_eq!(rows, Ok(Vec::new()));
     assert_eq!(*asked.borrow(), vec![vec!["ttys001".to_string()]]);
 }
+
+fn listing_rise(program: &str, outcome: &str) -> u64 {
+    let before = crate::telemetry::test_support::multiplexer_calls("list", outcome);
+    let _ = super::inventory::read_tmux_panes_with(program);
+    crate::telemetry::test_support::multiplexer_calls("list", outcome) - before
+}
+
+#[test]
+fn a_tmux_listing_is_counted_under_list_with_its_outcome() {
+    let good = crate::telemetry::test_support::fake_program(
+        "inv-ok",
+        "printf '%%1\\tmain\\t0\\t0\\t123\\t/dev/ttys001\\t/tmp\\n'",
+    );
+    assert!(listing_rise(&good, "ok") >= 1);
+    let failing = crate::telemetry::test_support::fake_program("inv-fail", "exit 1");
+    assert!(listing_rise(&failing, "failed") >= 1);
+    let garbled = crate::telemetry::test_support::fake_program("inv-bad", "printf '\\377'");
+    assert!(listing_rise(&garbled, "malformed") >= 1);
+    assert!(listing_rise("/nonexistent/harold-test-tmux", "absent") >= 1);
+}
