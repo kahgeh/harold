@@ -37,14 +37,14 @@ Both commands take these options on the `make` command line:
 
 Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and, when it exists, `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When it prints steps for macOS permissions instead of saying they carry over, follow them; [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
 
+A rollback to an install from before that move returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before that move. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
+
 ### Roll back across the agent state rename
 
 The agent state rename changes the events Harold writes. An older Harold cannot read the events that this Harold writes.
 
 To roll back, put back the old bundle and its copied data folder as `ROLLBACK.md` says. The installer copies `data/store` and `data/events` into the backup folder. The old Harold reads that copy. The new data stays in the folder you move aside.
 
-Replies and events from after the install are lost on a rollback. If the copy fails, the installer prints that no copy exists. The install then goes on.
+Replies and events from after the install are lost on a rollback. If the copy fails, the installer prints that no copy exists. The install then goes on. In that case the old Harold cannot use the migrated store: it refuses the store with `incompatible state schema`. The old data is not in the backup. `ROLLBACK.md` states this.
 
 The old name `AGENT_STATE_BUSY` stays readable through the proto alias. Refresh the opencode plugin after this install.
-
-A rollback to an install from before that move returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before that move. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
