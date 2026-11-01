@@ -2132,6 +2132,8 @@ mod tests {
             assert!(content.contains(expected), "missing {expected:?}");
         }
         assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("CURRENT WORK"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 1);
     }
 
     #[test]
@@ -2164,6 +2166,7 @@ mod tests {
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
         }
+        assert!(!content.contains("CURRENT WORK"));
     }
 
     fn plus_eleven() -> chrono::FixedOffset {
@@ -2599,6 +2602,8 @@ mod tests {
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("Build responsive dashboard"));
         assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("CURRENT WORK"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(!content.contains("/Users/you/code/Codex"));
     }
 
@@ -2789,6 +2794,8 @@ mod tests {
 
         assert!(content.contains(&summary));
         assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("CURRENT WORK"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(!content.contains(&directory));
     }
 
@@ -2826,6 +2833,8 @@ mod tests {
         let content = rendered(&app, 140, 29, 100_000);
 
         assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("CURRENT WORK"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 1);
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("▶ ● WORKING"));
         assert!(content.contains("cx"));
@@ -3120,6 +3129,17 @@ mod tests {
         assert!(content.contains("SELECTED SIGNAL"));
         assert_eq!(content.matches("WORK SUMMARY").count(), 2);
         assert!(!content.contains("CURRENT WORK"));
+    }
+
+    #[test]
+    fn a_panel_that_does_not_fit_is_hidden_whole_even_with_a_step() {
+        let content = rendered(&step_app(Some("Running the tests")), 140, 20, 100_000);
+
+        assert!(!content.contains("SELECTED SIGNAL"));
+        assert!(!content.contains("CURRENT STEP"));
+        assert!(!content.contains("Running the tests"));
+        assert!(!content.contains("CURRENT WORK"));
+        assert_eq!(content.matches("WORK SUMMARY").count(), 1);
     }
 
     #[test]
