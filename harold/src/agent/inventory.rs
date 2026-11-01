@@ -604,6 +604,7 @@ pub(super) fn read_tty_table(
     }
 }
 
+#[cfg(test)]
 pub(super) fn tmux_panes_command() -> Command {
     tmux_panes_command_for("tmux")
 }
