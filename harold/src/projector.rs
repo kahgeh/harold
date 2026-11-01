@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use tracing::{info, info_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+use crate::agent::domain::AgentSnapshot;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::alerts::AlertQueue;
 use crate::inbound::ownership::agent_message_text;
@@ -30,6 +31,7 @@ use crate::store::{
     TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
+use crate::timed_prompts::agents_view;
 use crate::voice_input::{Speaker, without_hand_over_tag};
 use crate::web_app::chief::{ChiefPane, find_chief, is_chief_pane};
 
@@ -850,6 +852,14 @@ const MAX_TRIES: i64 = 10;
 /// The longest wait between two tries of a delivery.
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
 
+/// The longest a phone reply waits for the inventory to work. After it, the reply is
+/// given up.
+pub(crate) const LONGEST_INVENTORY_WAIT: Duration = Duration::from_secs(15 * 60);
+
+/// How often a waiting reply is tried again when the snapshot does not show that the
+/// inventory works.
+const INVENTORY_RECHECK: Duration = Duration::from_secs(5);
+
 /// The wait after a delivery's `failures`-th failure: 1 second, doubling up to a minute.
 fn retry_wait(failures: i64) -> Duration {
     let doublings = u32::try_from(failures.saturating_sub(1))
@@ -858,8 +868,19 @@ fn retry_wait(failures: i64) -> Duration {
     Duration::from_secs(1_u64 << doublings).min(LONGEST_RETRY_WAIT)
 }
 
+/// A phone reply that waits for the inventory to work.
+#[derive(Debug, Clone)]
+pub(crate) struct InventoryWait {
+    pub(crate) event_id: String,
+    pub(crate) since: tokio::time::Instant,
+    pub(crate) reply_due: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HandlerError {
+    #[error("delivery waits for the inventory: {error}")]
+    InventoryFailed { event_id: String, error: String },
+
     #[error(transparent)]
     Store(#[from] StoreError),
 
@@ -880,7 +901,7 @@ pub(crate) async fn handle_next_delivery(
     store: &HaroldStore,
     dispatcher: Arc<dyn DeliveryDispatcher>,
 ) -> Result<bool, HandlerError> {
-    handle_next_delivery_inner(store, dispatcher, None, None).await
+    handle_next_delivery_inner(store, dispatcher, None, None, None).await
 }
 
 /// `handle_next_delivery` with the alert address on, queueing into `alerts`.
@@ -890,7 +911,7 @@ pub(crate) async fn handle_next_delivery_alerting(
     dispatcher: Arc<dyn DeliveryDispatcher>,
     alerts: &AlertQueue,
 ) -> Result<bool, HandlerError> {
-    handle_next_delivery_inner(store, dispatcher, None, Some(alerts)).await
+    handle_next_delivery_inner(store, dispatcher, None, Some(alerts), None).await
 }
 
 async fn handle_next_delivery_inner(
@@ -898,15 +919,25 @@ async fn handle_next_delivery_inner(
     dispatcher: Arc<dyn DeliveryDispatcher>,
     snapshots: Option<&AgentSnapshotHub>,
     alerts: Option<&AlertQueue>,
+    wait: Option<&InventoryWait>,
 ) -> Result<bool, HandlerError> {
     project(store, snapshots).await?;
-    let Some(delivery) = store.next_pending_delivery().await? else {
+    // While a reply waits and is not due, the next row is the first one that is not a reply.
+    let next = match wait {
+        Some(wait) if !wait.reply_due => store.next_pending_delivery_without_replies().await?,
+        _ => store.next_pending_delivery().await?,
+    };
+    let Some(delivery) = next else {
         return Ok(false);
     };
 
     let event_id = delivery.event_id.clone();
     let attempt_count = delivery.attempt_count;
     let last_try = attempt_count + 1 >= MAX_TRIES;
+    // The wait of this row, if it is the reply that waits for the inventory.
+    let waiting_reply = wait.filter(|wait| wait.event_id == event_id);
+    let wait_ended =
+        waiting_reply.is_some_and(|wait| wait.since.elapsed() >= LONGEST_INVENTORY_WAIT);
     let event_version = delivery.event_version;
     let event_type = delivery.event_type.clone();
     let trace_id = delivery.trace_id.clone();
@@ -930,6 +961,7 @@ async fn handle_next_delivery_inner(
             origin.as_ref(),
             &span,
             last_try,
+            wait_ended,
         )
     })
     .await?;
@@ -938,6 +970,13 @@ async fn handle_next_delivery_inner(
         Ok(outcome) => {
             if let Err(error) = store.mark_delivered(&event_id).await {
                 return Err(HandlerError::NotMarkedDelivered { event_id, error });
+            }
+            if let (Some(wait), DeliveryOutcome::Delivered) = (waiting_reply, &outcome) {
+                info!(
+                    event_id,
+                    waited_ms = u64::try_from(wait.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "delivery waited for the inventory"
+                );
             }
             if matches!(
                 outcome,
@@ -968,8 +1007,7 @@ async fn handle_next_delivery_inner(
                 });
                 Ok(true)
             }
-            // Task 3 gives InventoryFailed its own wait. Until then it acts as Retryable.
-            DispatchError::Retryable(error) | DispatchError::InventoryFailed(error) => {
+            DispatchError::Retryable(error) => {
                 if !last_try {
                     store.record_delivery_failure(&event_id, &error).await?;
                     return Err(HandlerError::Delivery {
@@ -977,28 +1015,76 @@ async fn handle_next_delivery_inner(
                         retry_in: retry_wait(attempt_count + 1),
                     });
                 }
-                // Stored before anything is said, so a give-up that was not stored is
-                // tried again and said then.
-                store.mark_undeliverable(&event_id, &error).await?;
-                if let Some(origin) = &given_up_origin {
-                    finish_given_up_request(&event_id, origin);
+                give_up(
+                    store,
+                    alerts,
+                    &event_id,
+                    &error,
+                    given_up_origin.as_ref(),
+                    delivering.as_ref(),
+                    (&event_type, event_version),
+                    "too_many_tries",
+                )
+                .await?;
+                Ok(true)
+            }
+            // The try is not counted: nothing is stored until the wait is over.
+            DispatchError::InventoryFailed(error) => {
+                if !wait_ended {
+                    return Err(HandlerError::InventoryFailed { event_id, error });
                 }
-                in_delivery(delivering.as_ref(), || {
-                    warn!(
-                        event_type,
-                        event_version = event_version.get(),
-                        outcome = "given_up",
-                        reason = "too_many_tries",
-                        "delivery given up"
-                    );
-                });
-                if let Some(alerts) = alerts {
-                    alerts.firing(crate::alerts::DELIVERY_GIVEN_UP);
-                }
+                give_up(
+                    store,
+                    alerts,
+                    &event_id,
+                    &error,
+                    given_up_origin.as_ref(),
+                    delivering.as_ref(),
+                    (&event_type, event_version),
+                    "inventory_failed",
+                )
+                .await?;
                 Ok(true)
             }
         },
     }
+}
+
+/// Marks the row undeliverable, logs `delivery given up` with `reason`, and queues the
+/// alert.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call for both give-up reasons"
+)]
+async fn give_up(
+    store: &HaroldStore,
+    alerts: Option<&AlertQueue>,
+    event_id: &str,
+    error: &str,
+    origin: Option<&ReplyOrigin>,
+    delivering: Option<&tracing::Span>,
+    (event_type, event_version): (&str, EventVersion),
+    reason: &'static str,
+) -> Result<(), HandlerError> {
+    // Stored before anything is said, so a give-up that was not stored is tried again
+    // and said then.
+    store.mark_undeliverable(event_id, error).await?;
+    if let Some(origin) = origin {
+        finish_given_up_request(event_id, origin);
+    }
+    in_delivery(delivering, || {
+        warn!(
+            event_type,
+            event_version = event_version.get(),
+            outcome = "given_up",
+            reason,
+            "delivery given up"
+        );
+    });
+    if let Some(alerts) = alerts {
+        alerts.firing(crate::alerts::DELIVERY_GIVEN_UP);
+    }
+    Ok(())
 }
 
 /// Dispatches `delivery` inside `event_span` and, for a turn end, inside
@@ -1018,6 +1104,7 @@ fn dispatch_in_spans(
     origin: Option<&ReplyOrigin>,
     event_span: &tracing::Span,
     last_try: bool,
+    wait_ended: bool,
 ) -> (
     Result<DeliveryOutcome, DispatchError>,
     Option<tracing::Span>,
@@ -1059,16 +1146,18 @@ fn dispatch_in_spans(
             delivering.record("reason", *reason);
             "held_back"
         }
-        // Task 3 gives InventoryFailed its own wait. Until then it acts as Retryable.
-        Err(DispatchError::Retryable(_) | DispatchError::InventoryFailed(_)) if last_try => {
-            "given_up"
-        }
+        Err(DispatchError::Retryable(_)) if last_try => "given_up",
+        Err(DispatchError::InventoryFailed(_)) if wait_ended => "given_up",
         Err(_) => "failed",
     };
     delivering.record("outcome", outcome);
-    if !last_try
-        && let (Some(turn), Err(DispatchError::Retryable(_) | DispatchError::InventoryFailed(_))) =
-            (turn, &result)
+    let kept = match &result {
+        Err(DispatchError::Retryable(_)) => !last_try,
+        Err(DispatchError::InventoryFailed(_)) => !wait_ended,
+        _ => false,
+    };
+    if kept
+        && let Some(turn) = turn
         && let Ok(event_id) = uuid::Uuid::parse_str(&delivery.event_id)
     {
         telemetry::keep_turn_delivery(event_id, turn);
@@ -1198,6 +1287,12 @@ pub async fn run_event_handler_with_app(
 /// meanwhile. Events are still projected during the wait, every POLL_INTERVAL, so the
 /// agent snapshots stay current.
 ///
+/// A phone reply that fails because the inventory fails waits differently. The wait is not
+/// counted and has no growing pause. The reply is tried again when the snapshot shows that
+/// the inventory works, or every INVENTORY_RECHECK, and it is given up after
+/// LONGEST_INVENTORY_WAIT. Later rows that are not replies go ahead meanwhile. Later
+/// replies wait behind it. The wait is kept in memory, so it starts again after a restart.
+///
 /// While the store is failing, nothing is projected or sent: the loop only waits
 /// POLL_INTERVAL between checks. A row that was sent but could not be marked delivered is
 /// marked later, before anything else, and never sent again.
@@ -1209,7 +1304,12 @@ async fn run_deliveries(
     mut shutdown: watch::Receiver<()>,
 ) {
     let mut retry_at: Option<tokio::time::Instant> = None;
+    // Whether the row that waits on `retry_at` is the reply that waits for the inventory.
+    let mut retry_is_reply = false;
     let mut unmarked: Option<String> = None;
+    let mut inventory_wait: Option<InventoryWait> = None;
+    let mut inventory_try = InventoryTry::default();
+    let mut snapshot_receiver = snapshots.as_ref().map(AgentSnapshotHub::subscribe);
     loop {
         if shutdown.has_changed().unwrap_or(true) {
             break;
@@ -1232,7 +1332,9 @@ async fn run_deliveries(
         }
         if let Some(at) = retry_at {
             let now = tokio::time::Instant::now();
-            if now < at {
+            if now >= at {
+                retry_at = None;
+            } else if inventory_wait.is_none() || retry_is_reply {
                 let pause = match project(&store, snapshots.as_ref()).await {
                     Ok(()) => POLL_INTERVAL,
                     Err(error) => {
@@ -1245,21 +1347,79 @@ async fn run_deliveries(
                 }
                 continue;
             }
-            retry_at = None;
         }
+        // With no wait, the reply is the next row like any other row.
+        let mut reply_due = true;
+        if inventory_wait.is_some() {
+            if let Err(error) = project(&store, snapshots.as_ref()).await {
+                warn!(error = %error, "event handler cycle failed");
+                if wait_or_shutdown(&mut shutdown, ERROR_PAUSE).await {
+                    break;
+                }
+                continue;
+            }
+            reply_due = inventory_try.reply_is_due(snapshot_receiver.as_mut());
+            // A row that is not a reply and waits for its own retry also holds the loop.
+            if !reply_due && let Some(at) = retry_at {
+                let pause =
+                    POLL_INTERVAL.min(at.saturating_duration_since(tokio::time::Instant::now()));
+                if wait_for_snapshot(&mut snapshot_receiver, &mut shutdown, pause).await {
+                    break;
+                }
+                continue;
+            }
+        }
+        let wait = inventory_wait.as_ref().map(|wait| InventoryWait {
+            reply_due,
+            ..wait.clone()
+        });
         let handled = handle_next_delivery_inner(
             &store,
             Arc::clone(&dispatcher),
             snapshots.as_ref(),
             alerts.as_ref(),
+            wait.as_ref(),
         )
         .await;
         let pause = match handled {
-            Ok(true) => continue,
-            Ok(false) => POLL_INTERVAL,
+            Ok(true) => {
+                if reply_due {
+                    // The reply was typed or given up.
+                    inventory_wait = None;
+                }
+                continue;
+            }
+            Ok(false) if inventory_wait.is_some() && !reply_due => {
+                if wait_for_snapshot(&mut snapshot_receiver, &mut shutdown, POLL_INTERVAL).await {
+                    break;
+                }
+                continue;
+            }
+            Ok(false) => {
+                inventory_wait = None;
+                POLL_INTERVAL
+            }
             Err(HandlerError::Delivery { error, retry_in }) => {
                 warn!(error = %error, "event handler cycle failed");
                 retry_at = Some(tokio::time::Instant::now() + retry_in);
+                retry_is_reply = reply_due;
+                continue;
+            }
+            Err(HandlerError::InventoryFailed { event_id, error }) => {
+                // One line for each reply, not for each try.
+                if inventory_wait.is_none() {
+                    warn!(
+                        error = %error,
+                        reason = "inventory_failed",
+                        "event handler cycle failed"
+                    );
+                    inventory_wait = Some(InventoryWait {
+                        event_id,
+                        since: tokio::time::Instant::now(),
+                        reply_due: true,
+                    });
+                }
+                inventory_try.record(snapshot_receiver.as_ref());
                 continue;
             }
             Err(HandlerError::NotMarkedDelivered { event_id, error }) => {
@@ -1275,6 +1435,58 @@ async fn run_deliveries(
         if wait_or_shutdown(&mut shutdown, pause).await {
             break;
         }
+    }
+}
+
+/// When the waiting reply was last tried, and the version of the snapshot then.
+#[derive(Default)]
+struct InventoryTry {
+    at: Option<tokio::time::Instant>,
+    snapshot_version: Option<u64>,
+}
+
+impl InventoryTry {
+    fn record(&mut self, receiver: Option<&watch::Receiver<AgentSnapshot>>) {
+        self.at = Some(tokio::time::Instant::now());
+        self.snapshot_version =
+            receiver.map(|receiver| receiver.borrow().through_event_version.get());
+    }
+
+    /// Whether the waiting reply is tried now: the snapshot is new and shows that the
+    /// inventory works, or INVENTORY_RECHECK has passed since the last try. A snapshot
+    /// that the last try already used does not count, so one that shows a working
+    /// inventory but fails again is not tried at each turn of the loop.
+    fn reply_is_due(&self, receiver: Option<&mut watch::Receiver<AgentSnapshot>>) -> bool {
+        let rechecks = self.at.is_none_or(|at| at.elapsed() >= INVENTORY_RECHECK);
+        let Some(receiver) = receiver else {
+            return rechecks;
+        };
+        let snapshot = receiver.borrow_and_update();
+        let works = !agents_view(&snapshot, &[]).listing_failed;
+        let is_new = self.snapshot_version != Some(snapshot.through_event_version.get());
+        rechecks || (works && is_new)
+    }
+}
+
+/// Waits for `delay`, for a new agent snapshot, or for shutdown, whichever comes first.
+/// Returns true on shutdown.
+async fn wait_for_snapshot(
+    receiver: &mut Option<watch::Receiver<AgentSnapshot>>,
+    shutdown: &mut watch::Receiver<()>,
+    delay: Duration,
+) -> bool {
+    let changed = async {
+        if let Some(receiver) = receiver
+            && receiver.changed().await.is_ok()
+        {
+            return;
+        }
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        _ = shutdown.changed() => true,
+        () = tokio::time::sleep(delay) => false,
+        () = changed => false,
     }
 }
 

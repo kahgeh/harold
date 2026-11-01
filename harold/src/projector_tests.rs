@@ -1481,7 +1481,7 @@ async fn drain(
     snapshots: &AgentSnapshotHub,
     dispatcher: &Arc<dyn DeliveryDispatcher>,
 ) {
-    while handle_next_delivery_inner(store, Arc::clone(dispatcher), Some(snapshots), None)
+    while handle_next_delivery_inner(store, Arc::clone(dispatcher), Some(snapshots), None, None)
         .await
         .unwrap()
     {}
@@ -1794,9 +1794,15 @@ async fn listed_agents_message_whose_send_failed_is_sent_on_the_retry() {
     request_message(&store, "%1", "Pod 3 is blocked").await;
 
     environment.set_fail_sends(true);
-    let error = handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots), None)
-        .await
-        .unwrap_err();
+    let error = handle_next_delivery_inner(
+        &store,
+        Arc::clone(&dispatcher),
+        Some(&snapshots),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("channel down"));
     assert!(store.next_pending_delivery().await.unwrap().is_some());
 
@@ -2774,6 +2780,7 @@ fn dispatch_turn_end(
         None,
         &event,
         false,
+        false,
     )
     .0
 }
@@ -2854,6 +2861,7 @@ fn a_given_up_turn_end_records_given_up_and_keeps_no_trace() {
         None,
         &event,
         true,
+        false,
     );
 
     assert!(matches!(result, Err(DispatchError::Retryable(_))));
@@ -2879,6 +2887,7 @@ fn a_turn_end_delivery_span_carries_text_cut() {
             None,
             &event,
             true,
+            false,
         );
         assert!(result.is_ok());
         // The channel records it inside the span; the span declares the field.
@@ -3098,6 +3107,7 @@ fn only_a_turn_end_gets_a_delivery_span() {
             &away_delivery(json!(pod_message("Pod 3 is blocked"))),
             None,
             &event,
+            false,
             false,
         )
         .0
@@ -5490,4 +5500,578 @@ async fn a_stored_web_app_reply_with_no_chief_pane_is_counted_unavailable() {
     );
 
     assert!(web_app_requests("unavailable") > before);
+}
+
+// Phone replies that wait for the inventory.
+
+/// Fails a phone reply with `InventoryFailed` while `inventory_ok` is false. Fails the
+/// rows of `retryable_type` with `Retryable`. Delivers every other row. Records each row
+/// handed to it: its type, its text, when, and whether it was delivered.
+struct InventoryDispatcher {
+    inventory_ok: std::sync::atomic::AtomicBool,
+    retryable_type: Option<&'static str>,
+    handed: Mutex<Vec<InventoryHandOver>>,
+}
+
+#[derive(Clone, Debug)]
+struct InventoryHandOver {
+    event_type: String,
+    text: String,
+    at: tokio::time::Instant,
+    delivered: bool,
+}
+
+impl InventoryDispatcher {
+    fn new(retryable_type: Option<&'static str>) -> Arc<Self> {
+        Arc::new(Self {
+            inventory_ok: std::sync::atomic::AtomicBool::new(false),
+            retryable_type,
+            handed: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn set_inventory_ok(&self, ok: bool) {
+        self.inventory_ok
+            .store(ok, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn handed(&self) -> Vec<InventoryHandOver> {
+        self.handed.lock().unwrap().clone()
+    }
+
+    fn handed_of(&self, event_type: &str) -> Vec<InventoryHandOver> {
+        self.handed()
+            .into_iter()
+            .filter(|hand_over| hand_over.event_type == event_type)
+            .collect()
+    }
+
+    fn handed_text(&self, text: &str) -> Vec<InventoryHandOver> {
+        self.handed()
+            .into_iter()
+            .filter(|hand_over| hand_over.text == text)
+            .collect()
+    }
+}
+
+impl DeliveryDispatcher for InventoryDispatcher {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        let ok = self.inventory_ok.load(std::sync::atomic::Ordering::SeqCst);
+        let is_reply = delivery.event_type == "InboundMessageReceived";
+        let result = if is_reply && !ok {
+            Err(DispatchError::InventoryFailed(
+                crate::inbound::CHIEF_PANE_UNKNOWN.into(),
+            ))
+        } else if Some(delivery.event_type.as_str()) == self.retryable_type {
+            Err(DispatchError::Retryable("send failed".into()))
+        } else {
+            Ok(DeliveryOutcome::Delivered)
+        };
+        self.handed.lock().unwrap().push(InventoryHandOver {
+            event_type: delivery.event_type.clone(),
+            text: delivery
+                .payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            at: tokio::time::Instant::now(),
+            delivered: result.is_ok(),
+        });
+        result
+    }
+}
+
+async fn store_reply(store: &HaroldStore, text: &str) {
+    append_inbound_message(store, &InboundMessage { text: text.into() })
+        .await
+        .unwrap();
+}
+
+async fn store_turn_end(store: &HaroldStore) {
+    append_turn_completed(store, &crate::outbound::fake::turn("%4", "Run the task"))
+        .await
+        .unwrap();
+}
+
+fn inventory_health(healthy: bool) -> AgentEvent {
+    AgentEvent::MonitorHealthChanged(AgentMonitorHealthChanged {
+        component: "inventory".into(),
+        healthy,
+        reason_code: if healthy { "ok" } else { "timeout" }.into(),
+        observed_at_ms: 200,
+    })
+}
+
+/// Makes the inventory fail or work, for the snapshot and for the dispatcher.
+async fn set_inventory(store: &HaroldStore, dispatcher: &InventoryDispatcher, ok: bool) {
+    dispatcher.set_inventory_ok(ok);
+    append_agent_events(store, vec![inventory_health(ok)])
+        .await
+        .unwrap();
+}
+
+/// A running delivery loop over `store`, with a hub, an alert queue and a shutdown sender.
+struct RunningLoop {
+    shutdown: tokio::sync::watch::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+    alerts: tokio::sync::mpsc::Receiver<crate::alerts::Queued>,
+}
+
+async fn run_loop(store: &Arc<HaroldStore>, dispatcher: &Arc<InventoryDispatcher>) -> RunningLoop {
+    let hub = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let (alerts, alert_rx) = crate::alerts::AlertQueue::new();
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(store),
+        dispatcher.clone(),
+        Some(hub),
+        Some(alerts),
+        shutdown_rx,
+    ));
+    RunningLoop {
+        shutdown,
+        task,
+        alerts: alert_rx,
+    }
+}
+
+impl RunningLoop {
+    async fn stop(self) {
+        drop(self.shutdown);
+        self.task.await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reply_is_tried_within_2s_after_the_inventory_works() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "carry on").await;
+    store.project_unhandled_events(10).await.unwrap();
+    let event_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    // Five earlier failed tries: `retry_wait` would be 32 s.
+    for _ in 0..5 {
+        store
+            .record_delivery_failure(&event_id, "earlier")
+            .await
+            .unwrap();
+    }
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let running = run_loop(&store, &dispatcher).await;
+
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(
+        dispatcher
+            .handed()
+            .iter()
+            .all(|hand_over| !hand_over.delivered)
+    );
+    let works_at = tokio::time::Instant::now();
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let handed = dispatcher.handed();
+    let last = handed.last().unwrap();
+    assert!(last.delivered, "{handed:?}");
+    assert!(last.at - works_at < Duration::from_secs(2), "{handed:?}");
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn inventory_failed_tries_do_not_count() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "carry on").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let logs = CapturedLogs::start();
+    let mut running = run_loop(&store, &dispatcher).await;
+
+    tokio::time::sleep(Duration::from_secs(150)).await;
+
+    assert!(dispatcher.handed().len() >= 20, "{:?}", dispatcher.handed());
+    let pending = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(pending.attempt_count, 0);
+    let text = logs.text();
+    assert!(!text.contains("delivery given up"), "{text}");
+    assert!(running.alerts.try_recv().is_err());
+    // One line for the reply, not one for each try.
+    let cycle_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("event handler cycle failed"))
+        .collect();
+    assert_eq!(cycle_lines.len(), 1, "{text}");
+    assert!(
+        cycle_lines[0].contains("reason=\"inventory_failed\""),
+        "{text}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reply_gives_up_after_longest_inventory_wait() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "secret reply").await;
+    store.project_unhandled_events(10).await.unwrap();
+    let event_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let logs = CapturedLogs::start();
+    let mut running = run_loop(&store, &dispatcher).await;
+
+    tokio::time::sleep(super::LONGEST_INVENTORY_WAIT - Duration::from_secs(30)).await;
+    assert!(store.next_pending_delivery().await.unwrap().is_some());
+    assert!(!logs.text().contains("delivery given up"));
+    tokio::time::sleep(Duration::from_secs(40)).await;
+
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    let row = outbox_row(&store, &event_id).await;
+    assert!(row.delivered_at_ms.is_some());
+    assert_eq!(row.attempt_count, 1);
+    assert!(
+        dispatcher
+            .handed()
+            .iter()
+            .all(|hand_over| !hand_over.delivered)
+    );
+    let (line, _) = running.alerts.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+    assert!(running.alerts.try_recv().is_err());
+    let text = logs.text();
+    assert_eq!(text.matches("delivery given up").count(), 1, "{text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("delivery given up"))
+        .unwrap();
+    assert!(line.contains("reason=\"inventory_failed\""), "{line}");
+    assert!(line.contains("outcome=\"given_up\""), "{line}");
+    assert!(!line.contains("secret reply"), "{line}");
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn later_turn_end_goes_ahead_and_later_reply_waits() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "reply A").await;
+    store_turn_end(&store).await;
+    store_reply(&store, "reply B").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let running = run_loop(&store, &dispatcher).await;
+
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    // The turn end is handed over while A waits. B is never handed over before A is typed.
+    let turn_ends = dispatcher.handed_of("TurnCompleted");
+    assert_eq!(turn_ends.len(), 1);
+    assert!(turn_ends[0].delivered);
+    assert!(dispatcher.handed_text("reply B").is_empty());
+    assert!(dispatcher.handed_text("reply A").len() >= 5);
+
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let a = dispatcher.handed_text("reply A");
+    let b = dispatcher.handed_text("reply B");
+    assert!(a.last().unwrap().delivered);
+    assert_eq!(b.len(), 1);
+    assert!(b[0].delivered);
+    assert!(b[0].at >= a.last().unwrap().at);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn retryable_row_behind_a_waiting_reply_keeps_its_waits_and_its_ten_tries() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "reply A").await;
+    store_turn_end(&store).await;
+    let dispatcher = InventoryDispatcher::new(Some("TurnCompleted"));
+    set_inventory(&store, &dispatcher, false).await;
+    let logs = CapturedLogs::start();
+    let running = run_loop(&store, &dispatcher).await;
+
+    tokio::time::sleep(Duration::from_secs(300)).await;
+
+    let turn_ends = dispatcher.handed_of("TurnCompleted");
+    assert_eq!(turn_ends.len(), 10, "{turn_ends:?}");
+    let gaps: Vec<Duration> = turn_ends
+        .windows(2)
+        .map(|pair| pair[1].at - pair[0].at)
+        .collect();
+    for (gap, expected) in gaps.iter().zip([1, 2, 4, 8, 16, 32, 60, 60, 60]) {
+        let expected = Duration::from_secs(expected);
+        assert!(
+            *gap >= expected && *gap < expected + Duration::from_millis(300),
+            "gaps {gaps:?}"
+        );
+    }
+    // The reply is checked again in the 32 s wait of the turn end.
+    let replies = dispatcher.handed_text("reply A");
+    let inside_long_wait = replies
+        .iter()
+        .filter(|hand_over| hand_over.at > turn_ends[5].at && hand_over.at < turn_ends[6].at)
+        .count();
+    assert!(inside_long_wait >= 5, "{inside_long_wait}");
+    let text = logs.text();
+    assert_eq!(text.matches("delivery given up").count(), 1, "{text}");
+    assert!(text.contains("reason=\"too_many_tries\""), "{text}");
+    let given_up = text
+        .lines()
+        .find(|line| line.contains("delivery given up"))
+        .unwrap();
+    assert!(given_up.contains("reason=\"too_many_tries\""), "{given_up}");
+
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(dispatcher.handed_text("reply A").last().unwrap().delivered);
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn retryable_row_waiting_does_not_block_the_replys_recheck() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "reply A").await;
+    store_turn_end(&store).await;
+    let dispatcher = InventoryDispatcher::new(Some("TurnCompleted"));
+    set_inventory(&store, &dispatcher, false).await;
+    let running = run_loop(&store, &dispatcher).await;
+
+    // The turn end has failed 6 times and now waits 32 s.
+    tokio::time::sleep(Duration::from_secs(70)).await;
+    assert_eq!(dispatcher.handed_of("TurnCompleted").len(), 7);
+    let works_at = tokio::time::Instant::now();
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let a = dispatcher.handed_text("reply A");
+    assert!(a.last().unwrap().delivered);
+    assert!(a.last().unwrap().at - works_at < Duration::from_secs(2));
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_ends_the_inventory_wait_at_once() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "carry on").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let running = run_loop(&store, &dispatcher).await;
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert!(dispatcher.handed().len() >= 2);
+
+    let before = tokio::time::Instant::now();
+    running.stop().await;
+
+    assert!(tokio::time::Instant::now() - before < Duration::from_millis(10));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovery_logs_delivery_waited_for_the_inventory() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "secret reply").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let logs = CapturedLogs::start();
+    let running = run_loop(&store, &dispatcher).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(!logs.text().contains("delivery waited for the inventory"));
+
+    set_inventory(&store, &dispatcher, true).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let text = logs.text();
+    assert_eq!(
+        text.matches("delivery waited for the inventory").count(),
+        1,
+        "{text}"
+    );
+    let line = text
+        .lines()
+        .find(|line| line.contains("delivery waited for the inventory"))
+        .unwrap();
+    assert!(line.contains("waited_ms="), "{line}");
+    assert!(line.contains("event_id="), "{line}");
+    assert!(!line.contains("secret reply"), "{line}");
+    running.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wait_clock_keeps_the_first_failure_time_when_the_inventory_fails_again() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    store_reply(&store, "carry on").await;
+    let dispatcher = InventoryDispatcher::new(None);
+    set_inventory(&store, &dispatcher, false).await;
+    let mut running = run_loop(&store, &dispatcher).await;
+
+    // The snapshot shows that the inventory works, but the next try fails again.
+    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+    assert!(store.next_pending_delivery().await.unwrap().is_some());
+    append_agent_events(&store, vec![inventory_health(true)])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let tries_at_recovery = dispatcher.handed().len();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // One try for the snapshot change, not one for each loop turn.
+    assert!(dispatcher.handed().len() <= tries_at_recovery + 1);
+    append_agent_events(&store, vec![inventory_health(false)])
+        .await
+        .unwrap();
+
+    // 15 minutes after the first failure, not after the second.
+    tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    let (line, _) = running.alerts.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+    running.stop().await;
+}
+
+/// The handler with a wait that began `waited` ago.
+async fn handle_with_wait(
+    store: &HaroldStore,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+    alerts: &crate::alerts::AlertQueue,
+    event_id: &str,
+    waited: Duration,
+) -> Result<bool, super::HandlerError> {
+    let wait = super::InventoryWait {
+        event_id: event_id.to_string(),
+        since: tokio::time::Instant::now() - waited,
+        reply_due: true,
+    };
+    handle_next_delivery_inner(store, dispatcher, None, Some(alerts), Some(&wait)).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovery_at_the_limit_types_the_reply_and_does_not_give_it_up() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    store_reply(&store, "carry on").await;
+    store.project_unhandled_events(10).await.unwrap();
+    let event_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    let dispatcher = InventoryDispatcher::new(None);
+    dispatcher.set_inventory_ok(true);
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+    let logs = CapturedLogs::start();
+
+    let handled = handle_with_wait(
+        &store,
+        dispatcher.clone(),
+        &alerts,
+        &event_id,
+        super::LONGEST_INVENTORY_WAIT,
+    )
+    .await;
+
+    assert!(handled.unwrap());
+    let row = outbox_row(&store, &event_id).await;
+    assert!(row.delivered_at_ms.is_some());
+    assert_eq!(row.attempt_count, 0);
+    assert_eq!(dispatcher.handed().len(), 1);
+    assert!(dispatcher.handed()[0].delivered);
+    assert!(alert_rx.try_recv().is_err());
+    let text = logs.text();
+    assert!(!text.contains("delivery given up"), "{text}");
+    assert_eq!(text.matches("delivery waited for the inventory").count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_at_the_limit_gives_the_reply_up_once() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    store_reply(&store, "carry on").await;
+    store.project_unhandled_events(10).await.unwrap();
+    let event_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    let dispatcher = InventoryDispatcher::new(None);
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+    let logs = CapturedLogs::start();
+
+    let handled = handle_with_wait(
+        &store,
+        dispatcher.clone(),
+        &alerts,
+        &event_id,
+        super::LONGEST_INVENTORY_WAIT,
+    )
+    .await;
+    assert!(handled.unwrap());
+    // Nothing is left to hand over, so a second call cannot give it up again.
+    assert!(
+        !handle_with_wait(
+            &store,
+            dispatcher.clone(),
+            &alerts,
+            &event_id,
+            super::LONGEST_INVENTORY_WAIT
+        )
+        .await
+        .unwrap()
+    );
+
+    assert_eq!(dispatcher.handed().len(), 1);
+    assert_eq!(logs.text().matches("delivery given up").count(), 1);
+    assert!(alert_rx.try_recv().is_ok());
+    assert!(alert_rx.try_recv().is_err());
+    assert_eq!(outbox_row(&store, &event_id).await.attempt_count, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_before_the_limit_keeps_the_reply_and_returns_inventory_failed() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    store_reply(&store, "carry on").await;
+    store.project_unhandled_events(10).await.unwrap();
+    let event_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    let dispatcher = InventoryDispatcher::new(None);
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+
+    let error = handle_with_wait(
+        &store,
+        dispatcher.clone(),
+        &alerts,
+        &event_id,
+        super::LONGEST_INVENTORY_WAIT - Duration::from_secs(1),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, super::HandlerError::InventoryFailed { .. }));
+    assert_eq!(outbox_row(&store, &event_id).await.attempt_count, 0);
+    assert!(alert_rx.try_recv().is_err());
 }
