@@ -398,15 +398,19 @@ impl RecapReader {
         let path = target.transcript_path.clone();
         let session_id = target.session_id.clone();
         let mut tail = target.tail;
-        let limit = (tail.offset == 0).then_some(FIRST_READ_LIMIT);
         let started = Instant::now();
         let joined = tokio::task::spawn_blocking(move || {
             let mut last = None;
-            let bytes = read_new_lines(Path::new(&path), &mut tail, limit, |line| {
-                if let Some(recap) = read_recap_line(adapter, line, &session_id) {
-                    last = Some(recap);
-                }
-            })?;
+            let bytes = read_new_lines(
+                Path::new(&path),
+                &mut tail,
+                Some(FIRST_READ_LIMIT),
+                |line| {
+                    if let Some(recap) = read_recap_line(adapter, line, &session_id) {
+                        last = Some(recap);
+                    }
+                },
+            )?;
             Ok::<_, std::io::Error>((bytes, tail, last))
         })
         .await;
@@ -421,7 +425,8 @@ impl RecapReader {
             );
         }
         let (_, tail, last) = read?;
-        let found = last.is_some();
+        // Only a recap that differs from the stored one is new.
+        let found = last.is_some() && last != self.recaps.get(&target.pane_id, target.agent_pid);
         self.recaps.update_read(
             &target.pane_id,
             target.agent_pid,

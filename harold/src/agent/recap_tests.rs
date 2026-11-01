@@ -87,6 +87,13 @@ fn a_recap_of_345_chars_stays_whole() {
 }
 
 #[test]
+fn a_recap_of_400_chars_stays_whole() {
+    let text = "a".repeat(400);
+    let got = read(&line("away_summary", "s1", &text), "s1").unwrap();
+    assert_eq!(got.text, text);
+}
+
+#[test]
 fn a_recap_of_401_chars_is_cut_to_400() {
     let text = "a".repeat(401);
     let got = read(&line("away_summary", "s1", &text), "s1").unwrap();
@@ -524,6 +531,59 @@ mod reader {
         assert_eq!(logs.count("agent recap read failed"), 1);
         assert_eq!(logs.count("agent recap read slow"), 1);
         assert!(logs.text().contains("bytes=0"), "{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn a_shrunk_file_is_read_again_with_the_first_read_limit() {
+        test_support::install();
+        let provider_id = id();
+        let scratch = Scratch::new();
+        let limit = crate::transcript::FIRST_READ_LIMIT as usize;
+        let filler = line("user", "s1", &"x".repeat(1000));
+        let pad = |bytes: usize| filler.repeat(bytes / filler.len());
+        let mut first = pad(limit + 4 * 1024 * 1024);
+        first.extend(line("away_summary", "s1", "Recap A."));
+        scratch.append(&first);
+        let recaps = Recaps::default();
+        recaps.note_turn_end("%1", PID, &provider_id, "s1", &scratch.file());
+        let mut reader = reader(&recaps, &provider_id, RecapAdapter::ClaudeTranscriptV1);
+        let snap = snapshot("%1", &provider_id);
+        reader.check_once(&snap).await;
+        assert_eq!(recaps.get("%1", PID).unwrap().text, "Recap A.");
+        // The file is rewritten smaller, but still longer than the limit. Its recap lies
+        // before the limit window.
+        std::fs::remove_file(scratch.file()).unwrap();
+        let mut second = line("away_summary", "s1", "Recap B.");
+        second.extend(pad(limit + 1024 * 1024));
+        scratch.append(&second);
+        reader.check_once(&snap).await;
+        assert_eq!(recaps.get("%1", PID).unwrap().text, "Recap A.");
+        assert_eq!(count(&provider_id, "found"), 1);
+        assert_eq!(count(&provider_id, "none"), 1);
+        // A recap inside the window is found.
+        scratch.append(&line("away_summary", "s1", "Recap C."));
+        reader.check_once(&snap).await;
+        assert_eq!(recaps.get("%1", PID).unwrap().text, "Recap C.");
+    }
+
+    #[tokio::test]
+    async fn a_recap_read_again_counts_none() {
+        test_support::install();
+        let provider_id = id();
+        let scratch = Scratch::new();
+        scratch.append(&line("away_summary", "s1", "Same."));
+        let other = scratch.0.join("copy.jsonl");
+        std::fs::copy(scratch.file(), &other).unwrap();
+        let recaps = Recaps::default();
+        recaps.note_turn_end("%1", PID, &provider_id, "s1", &scratch.file());
+        let mut reader = reader(&recaps, &provider_id, RecapAdapter::ClaudeTranscriptV1);
+        let snap = snapshot("%1", &provider_id);
+        reader.check_once(&snap).await;
+        recaps.note_turn_end("%1", PID, &provider_id, "s1", &other.to_string_lossy());
+        reader.check_once(&snap).await;
+        assert_eq!(count(&provider_id, "found"), 1);
+        assert_eq!(count(&provider_id, "none"), 1);
+        assert_eq!(recaps.get("%1", PID).unwrap().text, "Same.");
     }
 
     #[tokio::test]
