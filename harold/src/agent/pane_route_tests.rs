@@ -39,6 +39,10 @@ fn route_pane_by_shape() {
         route_pane("rex:omarchy/block:abc"),
         Err(PaneRefusal::OnRexHost)
     );
+    assert_eq!(
+        route_pane("rex:a_b/block:x"),
+        Err(PaneRefusal::InvalidPaneId)
+    );
     assert_eq!(route_pane("main:0.1"), Err(PaneRefusal::InvalidPaneId));
     assert_eq!(route_pane(""), Err(PaneRefusal::InvalidPaneId));
     assert_eq!(PaneRefusal::OnRexHost.reason(), "on_rex_host");
@@ -49,7 +53,7 @@ fn route_pane_by_shape() {
 fn valid_host_label_shape() {
     assert!(valid_host_label("omarchy"));
     assert!(valid_host_label("a.b-c1"));
-    for bad in ["a/b", "a:b", "a b", ""] {
+    for bad in ["a/b", "a:b", "a b", "a_b", ""] {
         assert!(!valid_host_label(bad), "{bad:?}");
     }
     assert!(!valid_host_label(&"x".repeat(33)));

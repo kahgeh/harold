@@ -17,13 +17,13 @@ const MAX_LABEL_LEN: usize = 32;
 /// The most pane id and writer pairs that `refuse_write` remembers for its log.
 const MAX_LOGGED_REFUSALS: usize = 256;
 
-/// Whether a host label is 1 to 32 characters of letters, digits, `.`, `_` or `-`.
+/// Whether a host label is 1 to 32 characters of letters, digits, `.` or `-`.
 pub(crate) fn valid_host_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= MAX_LABEL_LEN
         && label
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
 /// Builds the pane id of a block on another Rex host.
