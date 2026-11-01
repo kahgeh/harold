@@ -16,6 +16,7 @@ use tracing::info;
 use super::domain::ObservedAgentState;
 use super::rex::RexError;
 use super::rex_hosts::{HostAgentState, HostClock, HostScan, RexHostAgent, RexHostInventory};
+use super::screen::{StopSignal, run_stoppable};
 use crate::settings::{Multiplexer, Settings};
 use crate::telemetry::AgentCount;
 
@@ -401,6 +402,8 @@ async fn run_host(
     mut shutdown: watch::Receiver<()>,
 ) {
     let label = source.label().to_string();
+    // The reads stop with the task: at shutdown, the child command of a read ends at once.
+    let stop = StopOnDrop(StopSignal::default());
     let mut failures = 0_u32;
     // A read that went past the budget. The next read starts only after it ends.
     let mut late: Option<JoinHandle<HostReport>> = None;
@@ -416,7 +419,10 @@ async fn run_host(
             }
         }
         let reader = Arc::clone(&source);
-        let mut read = tokio::task::spawn_blocking(move || read_host(reader.as_ref()));
+        let signal = stop.0.clone();
+        let mut read = tokio::task::spawn_blocking(move || {
+            run_stoppable(signal, || read_host(reader.as_ref()))
+        });
         let report = tokio::select! {
             biased;
             _ = shutdown.changed() => break,
@@ -444,6 +450,15 @@ async fn run_host(
             _ = shutdown.changed() => break,
             () = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+/// Asks the reads of a host task to stop when the task ends.
+struct StopOnDrop(StopSignal);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.request();
     }
 }
 

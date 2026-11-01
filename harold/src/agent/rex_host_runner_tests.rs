@@ -44,6 +44,8 @@ enum Step {
     Fail(RexError),
     /// The scan waits until the test lets it go, then fails.
     Block,
+    /// The scan runs until the stop signal of its thread is requested.
+    UntilStopped,
 }
 
 /// A host that answers each scan from a script. The last step repeats.
@@ -55,6 +57,7 @@ struct FakeHost {
     last: Mutex<Option<Step>>,
     calls: AtomicUsize,
     started: Notify,
+    stopped: Notify,
     released: (Mutex<bool>, Condvar),
 }
 
@@ -68,6 +71,7 @@ impl FakeHost {
             last: Mutex::new(None),
             calls: AtomicUsize::new(0),
             started: Notify::new(),
+            stopped: Notify::new(),
             released: (Mutex::new(false), Condvar::new()),
         })
     }
@@ -110,6 +114,14 @@ impl HostSource for FakeHost {
                 outcome: Ok(()),
             },
             Step::Fail(error) => failed(error),
+            Step::UntilStopped => {
+                self.started.notify_one();
+                while !super::screen::stop_requested() {
+                    std::thread::yield_now();
+                }
+                self.stopped.notify_one();
+                failed(RexError::Failed)
+            }
             Step::Block => {
                 self.started.notify_one();
                 let (lock, ready) = &self.released;
@@ -448,4 +460,26 @@ async fn a_host_that_fails_and_recovers_moves_the_transition_time_and_logs_the_p
         ["reachable", "unreachable", "reachable"],
         "{lines:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_stops_a_host_read_in_progress() {
+    let host = FakeHost::new("omarchy", vec![Step::UntilStopped]);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (_agents, tasks) = spawn_hosts(
+        vec![Arc::clone(&host) as Arc<dyn HostSource>],
+        INTERVAL,
+        virtual_clock(),
+        shutdown_rx,
+    );
+    host.started.notified().await;
+    shutdown.send(()).unwrap();
+    for task in tasks {
+        task.await.expect("the task does not panic");
+    }
+    // The paused clock moves on only when every task waits. A read that does not stop
+    // would let the budget pass first.
+    tokio::time::timeout(SCAN_BUDGET, host.stopped.notified())
+        .await
+        .expect("shutdown stops the read before its call limit");
 }
