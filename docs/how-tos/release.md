@@ -35,7 +35,7 @@ Both commands take these options on the `make` command line:
 | `PREFIX=<folder>` | Install under that folder instead of `~/bin`. |
 | `SIGNING_IDENTITY="<certificate>"` | Sign with that certificate. Needed once per Mac, on the first install that should use it; the installer saves the name for later installs. |
 
-Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and, when it exists, `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When it prints steps for macOS permissions when they carry over without steps, follow them; [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
+Every install, by these commands or by `./scripts/install.sh`, moves the previous Harold to `~/bin/harold.backup-<time>` with copies of `haroldctl` and, when it exists, `tmx-agent-dash`, and writes `ROLLBACK.md` there with the commands that put it back. The installer prints that folder. When the installer prints steps for macOS permissions, follow them. When the permissions carry over, no steps appear. [Keep permissions across installs](setup.md#keep-permissions-across-installs) explains why.
 
 A rollback to an install from before that move returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before that move. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
 

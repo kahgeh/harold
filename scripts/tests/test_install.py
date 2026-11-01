@@ -232,6 +232,20 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
         self.assertEqual(list(bundle.glob('data-*')), [])
 
+    def test_a_stray_marker_in_the_live_data_does_not_cost_the_live_store(self):
+        bundle, stage = self.old_bundle_with_data()
+        (bundle / 'data' / self.install.COPY_MARKER).write_text('harold.backup-other-run')
+
+        def interrupted(source, target):
+            raise KeyboardInterrupt
+
+        with patch.object(self.install, 'copy_data_to_backup', interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install.replace_bundle(stage, bundle, False)
+        self.assertEqual((bundle / 'data/store/state.db').read_bytes(), b'live')
+        self.assertEqual((bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual(list(bundle.glob('data-*')), [])
+
     def test_an_interrupt_after_a_failed_copy_cleanup_keeps_the_live_store(self):
         bundle, stage = self.old_bundle_with_data()
         real_rmtree = shutil.rmtree
