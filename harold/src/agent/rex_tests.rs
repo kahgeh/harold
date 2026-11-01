@@ -1261,6 +1261,28 @@ fn a_bad_line_and_an_unknown_event_are_skipped() {
 }
 
 #[test]
+fn an_over_long_line_is_discarded_and_the_stream_goes_on() {
+    let program = FakeProgram::new(
+        "toolong",
+        &[
+            "x".repeat(2 * 1024 * 1024),
+            changed_line("block:a", "working", 5, "after the long line"),
+        ],
+        true,
+    );
+    let (status, _) = status_with(FakeRex::default(), &program, now_clock());
+    status.sync(&[slot_in("session:1", "block:a")]);
+    wait_until("the line after the long one applies", || {
+        status.lookup("block:a")
+            == Lookup::Stream(Some(record(
+                RecordState::Working,
+                5,
+                Some("after the long line"),
+            )))
+    });
+}
+
+#[test]
 fn a_stream_that_ends_drops_the_sessions_records_and_restarts_after_five_seconds() {
     let (logs, _guard) = capture_logs();
     let program = FakeProgram::new(
@@ -1331,8 +1353,8 @@ fn a_session_that_leaves_the_listing_has_its_child_killed() {
     let pid = program.pid();
     assert!(process_exists(&pid));
     status.sync(&[]);
-    // `sync` waits for the reader thread, which reaps the child: no zombie remains.
-    assert!(!process_exists(&pid));
+    // The reader reaps the child on its own thread: wait for it, no zombie remains.
+    wait_until("the child is reaped", || !process_exists(&pid));
     assert_eq!(status.lookup("block:a"), Lookup::NoStream);
     assert_eq!(steps.get("block:a", 5), None);
 }

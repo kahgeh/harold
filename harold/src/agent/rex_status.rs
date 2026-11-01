@@ -5,7 +5,7 @@
 //! maps the record state to an agent state, and keeps each agent's current step in memory.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -291,6 +291,28 @@ struct Shared {
     dispatch: Dispatch,
 }
 
+impl Shared {
+    /// Drops the records and steps of the session. The result is the number of records.
+    fn drop_session(&self, session_id: &str) -> usize {
+        let blocks: Vec<String> = {
+            let mut records = lock(&self.records);
+            let blocks: Vec<String> = records
+                .iter()
+                .filter(|(_, (session, _))| *session == session_id)
+                .map(|(block, _)| block.clone())
+                .collect();
+            for block in &blocks {
+                records.remove(block);
+            }
+            blocks
+        };
+        for block in &blocks {
+            self.steps.clear_block(block);
+        }
+        blocks.len()
+    }
+}
+
 #[derive(Default)]
 struct Flags {
     /// The first read is done.
@@ -321,15 +343,14 @@ impl Stream {
         }
     }
 
-    /// Kills the child and waits for the reader thread, which reaps it.
-    fn stop(mut self) {
+    /// Asks the reader to stop and kills the child. The reader reaps the child. The result
+    /// is the reader thread, so the caller can wait for it outside any lock.
+    fn stop(mut self) -> Option<JoinHandle<()>> {
         self.flags.stop.store(true, Ordering::Release);
         if let Some(child) = lock(&self.child).as_mut() {
             let _ = child.kill();
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.thread.take()
     }
 }
 
@@ -424,7 +445,9 @@ impl RexStatus {
             .collect();
         for id in gone {
             if let Some(stream) = registry.streams.remove(&id) {
-                stream.stop();
+                // The reader reaps its own child. `sync` does not wait for it.
+                drop(stream.stop());
+                self.shared.drop_session(&id);
             }
         }
         for (id, blocks) in sessions {
@@ -434,7 +457,10 @@ impl RexStatus {
                     continue;
                 }
                 if let Some(old) = registry.streams.remove(id) {
-                    old.stop();
+                    // The reader has ended, so the join returns at once.
+                    if let Some(thread) = old.stop() {
+                        let _ = thread.join();
+                    }
                 }
             }
             let stream = self.start(id, blocks, now);
@@ -490,6 +516,7 @@ impl RexStatus {
             .spawn(move || reader.run(&blocks, stdout))
             .ok();
         if thread.is_none() {
+            log_stream(dispatch, session_id, "ended", Some("read_error"), 0);
             flags.ended.store(true, Ordering::Release);
             if let Some(mut child) = lock(&child).take() {
                 let _ = child.kill();
@@ -532,8 +559,9 @@ impl RexStatus {
             .drain()
             .map(|(_, stream)| stream)
             .collect();
-        for stream in streams {
-            stream.stop();
+        let threads: Vec<_> = streams.into_iter().filter_map(Stream::stop).collect();
+        for thread in threads {
+            let _ = thread.join();
         }
     }
 }
@@ -548,6 +576,41 @@ fn spawn_reason(error: RexError) -> &'static str {
     match error {
         RexError::Absent => "rex_absent",
         _ => "read_error",
+    }
+}
+
+/// The most bytes of one event line. Harold discards the rest of a longer line.
+const MAX_EVENT_LINE_BYTES: usize = 1024 * 1024;
+
+enum Line {
+    Text,
+    TooLong,
+    End,
+}
+
+/// Reads one line into `line`. A line over `MAX_EVENT_LINE_BYTES` is read to its end and
+/// dropped.
+fn read_event_line(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Line> {
+    line.clear();
+    let mut limited = reader.by_ref().take(MAX_EVENT_LINE_BYTES as u64);
+    let read = limited.read_until(b'\n', line)?;
+    if read == 0 {
+        return Ok(Line::End);
+    }
+    if line.ends_with(b"\n") || read < MAX_EVENT_LINE_BYTES {
+        return Ok(Line::Text);
+    }
+    loop {
+        line.clear();
+        let mut limited = reader.by_ref().take(MAX_EVENT_LINE_BYTES as u64);
+        let read = limited.read_until(b'\n', line)?;
+        if read == 0 || line.ends_with(b"\n") {
+            line.clear();
+            return Ok(Line::TooLong);
+        }
     }
 }
 
@@ -573,11 +636,14 @@ impl Reader {
         let mut reader = BufReader::new(stdout);
         let mut line = Vec::new();
         let reason = loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => break "exit",
+            if self.flags.stop.load(Ordering::Acquire) {
+                break "exit";
+            }
+            match read_event_line(&mut reader, &mut line) {
+                Ok(Line::End) => break "exit",
                 Err(_) => break "read_error",
-                Ok(_) => {}
+                Ok(Line::TooLong) => continue,
+                Ok(Line::Text) => {}
             }
             if let Some(event) = parse_event_line(&String::from_utf8_lossy(&line)) {
                 self.apply(event);
@@ -588,7 +654,7 @@ impl Reader {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let dropped = self.drop_records();
+        let dropped = self.shared.drop_session(&self.session_id);
         log_stream(
             &self.shared.dispatch,
             &self.session_id,
@@ -642,25 +708,5 @@ impl Reader {
     fn remove(&self, block_id: &str) {
         lock(&self.shared.records).remove(block_id);
         self.shared.steps.clear_block(block_id);
-    }
-
-    /// Drops the records and steps of the session. The result is the number of records.
-    fn drop_records(&self) -> usize {
-        let blocks: Vec<String> = {
-            let mut records = lock(&self.shared.records);
-            let blocks: Vec<String> = records
-                .iter()
-                .filter(|(_, (session, _))| *session == self.session_id)
-                .map(|(block, _)| block.clone())
-                .collect();
-            for block in &blocks {
-                records.remove(block);
-            }
-            blocks
-        };
-        for block in &blocks {
-            self.shared.steps.clear_block(block);
-        }
-        blocks.len()
     }
 }
