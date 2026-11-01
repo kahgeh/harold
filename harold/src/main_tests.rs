@@ -1777,9 +1777,50 @@ async fn turn_complete_with_a_host_pane_id_stores_nothing() {
         .await
         .unwrap();
     assert!(events.is_empty(), "a refused report stores nothing");
-    assert_eq!(logs.count("pane write refused"), 2);
-    assert_eq!(logs.count("writer=\"turn_complete\""), 2);
+    // The host id logs once, by its text. The id with no known form logs the fixed text:
+    // once for the process, so an earlier test may have used that line.
+    assert_eq!(logs.count(&host_id), 1);
+    assert_eq!(logs.count(&session_id), 0);
+    assert!(logs.count("pane_id=<invalid-pane-id>") <= 1);
+    assert!(logs.count("writer=\"turn_complete\"") >= 1);
     assert_eq!(logs.count("turn complete received"), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn turn_complete_with_a_hostile_pane_id_logs_and_keeps_none_of_it() {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = WarnLogs::default();
+    let writer = logs.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    );
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    let hostile = format!("rex:\nHOSTILE\u{1b}[31m{}", "x".repeat(10_000));
+    let response = service
+        .turn_complete(Request::new(TurnCompleteRequest {
+            pane_id: hostile,
+            assistant_message: "report text".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.accepted);
+    assert_eq!(logs.count("HOSTILE"), 0);
+    assert_eq!(logs.count("xxxx"), 0);
+    assert!(
+        crate::agent::pane_route::kept_ids()
+            .iter()
+            .all(|id| id.len() <= 128 && !id.contains("HOSTILE"))
+    );
     task.abort();
 }
 
