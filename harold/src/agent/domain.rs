@@ -28,6 +28,18 @@ pub(crate) enum ObservedAgentState {
     Idle,
 }
 
+impl ObservedAgentState {
+    /// True while the agent works.
+    pub(crate) fn is_working(self) -> bool {
+        matches!(self, Self::Working)
+    }
+
+    /// True while the agent rests.
+    pub(crate) fn is_at_rest(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
 /// Reads an observed state from an event. A word that is not `Working`, the old `Busy` or
 /// `Idle` (for example a later stage's word) reads as no observation.
 pub(crate) fn lenient_observed_state<'de, D>(
@@ -54,6 +66,16 @@ pub(crate) enum EffectiveAgentState {
 }
 
 impl EffectiveAgentState {
+    /// True while the agent works.
+    pub(crate) fn is_working(self) -> bool {
+        matches!(self, Self::Working)
+    }
+
+    /// True while the agent rests. `Unknown` is neither working nor at rest.
+    pub(crate) fn is_at_rest(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
     /// The `state` attribute word of the agent metrics.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -206,4 +228,28 @@ pub(crate) struct AgentSnapshot {
     pub panes: Vec<AgentPaneProjection>,
     pub tts_muted: bool,
     pub messaging_paused: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EffectiveAgentState, ObservedAgentState};
+
+    #[test]
+    fn the_two_functions_follow_the_state_table() {
+        let observed = [
+            (ObservedAgentState::Working, (true, false)),
+            (ObservedAgentState::Idle, (false, true)),
+        ];
+        for (state, expected) in observed {
+            assert_eq!((state.is_working(), state.is_at_rest()), expected);
+        }
+        let effective = [
+            (EffectiveAgentState::Working, (true, false)),
+            (EffectiveAgentState::Idle, (false, true)),
+            (EffectiveAgentState::Unknown, (false, false)),
+        ];
+        for (state, expected) in effective {
+            assert_eq!((state.is_working(), state.is_at_rest()), expected);
+        }
+    }
 }
