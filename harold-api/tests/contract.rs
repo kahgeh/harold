@@ -134,6 +134,22 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
         assert_eq!(decoded.work_summary, work_summary);
     }
 
+    for recap in [None, Some(String::new()), Some("plan done".to_string())] {
+        for recap_at_ms in [0, 1_234] {
+            let pane = AgentPaneState {
+                pane_id: "%9".to_string(),
+                recap: recap.clone(),
+                recap_at_ms,
+                ..Default::default()
+            };
+
+            let decoded = round_trip(&pane);
+
+            assert_eq!(decoded.recap, recap);
+            assert_eq!(decoded.recap_at_ms, recap_at_ms);
+        }
+    }
+
     assert_eq!(
         message_fields("AgentPaneState"),
         [
@@ -151,7 +167,8 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("state".to_string(), 12),
             ("last_transition_at_ms".to_string(), 13),
             ("work_summary".to_string(), 14),
-            // 15 and 16 stay free.
+            ("recap".to_string(), 15),
+            ("recap_at_ms".to_string(), 16),
             ("current_step".to_string(), 17),
         ]
     );
