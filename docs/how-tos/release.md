@@ -11,7 +11,7 @@ Re-running a release workflow replaces its matching assets.
 
 The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job only tests Harold on Linux with `linux-defaults`, and uploads nothing. If the `linux` job fails, the run fails, and `make release` does not mark the release latest.
 
-The **Linux tests** workflow (`linux-tests.yml`) runs the same Linux tests on each push to `main`. `make release` makes a release only when that workflow passed on the commit it releases ([ADR 0025](../adr/0025-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a Linux failure stops a release before anything is public.
+The **Linux tests** workflow (`linux-tests.yml`) runs the same Linux tests on each push to `main`. `make release` makes a release only when that workflow passed on the commit it releases ([ADR 0026](../adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a Linux failure stops a release before anything is public.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The

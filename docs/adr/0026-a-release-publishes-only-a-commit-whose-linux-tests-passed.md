@@ -1,4 +1,4 @@
-# 25. A release publishes only a commit whose Linux tests passed
+# 26. A release publishes only a commit whose Linux tests passed
 
 Date: 2026-11-02
 Status: Proposed (rex-state-stage1-cleanup).
