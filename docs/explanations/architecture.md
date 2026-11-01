@@ -281,7 +281,7 @@ Each source answers a different question:
 
 A **screen adapter** interprets the terminal format used by a particular agent. It returns observations for the agent monitor to record; it does not edit the state database.
 
-After a hook fires, Harold gives the terminal a short grace period to repaint. During that period, the hook wins. Afterward, conclusive screen evidence can correct stale state. An unreadable or inconclusive screen preserves earlier evidence; without any conclusive evidence, the state is `unknown`. CPU use and elapsed silence do not determine working or idle.
+After a hook fires, Harold gives the terminal a short grace period to repaint. During that period, the hook wins. Afterward, conclusive screen evidence can correct stale state. Inside the grace period, the agent's own Rex record can refine the hook's report: a blocked record refines a working report, and an error record refines a done or idle report. A hook report does not clear that record. One reduction gives the state to every reader, the blocked timer included. An unreadable or inconclusive screen preserves earlier evidence; without any conclusive evidence, the state is `unknown`. CPU use and elapsed silence do not determine working or idle.
 
 Recording the evidence before applying these rules makes the result reproducible. A failed capture does not erase known state, and replaying the same history applies the same decisions. The [reconciliation contract](../references/agent-monitor/README.md#reconciliation-contract) defines the exact timing and precedence rules.
 

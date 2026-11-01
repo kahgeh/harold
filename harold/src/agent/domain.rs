@@ -52,6 +52,15 @@ impl ObservedAgentState {
             Self::Error => EffectiveAgentState::Error,
         }
     }
+
+    /// True when this state of the agent's own record refines the hook report `hook` of the
+    /// same kind: blocked refines working, and error refines done or idle.
+    pub(crate) fn refines(self, hook: ObservedAgentState) -> bool {
+        matches!(
+            (self, hook),
+            (Self::Blocked, Self::Working) | (Self::Error, Self::Done | Self::Idle)
+        )
+    }
 }
 
 /// Reads an observed state from an event. A word that is not one of the five states or the old
@@ -256,6 +265,21 @@ pub(crate) struct AgentSnapshot {
 #[cfg(test)]
 mod tests {
     use super::{EffectiveAgentState, ObservedAgentState};
+
+    #[test]
+    fn blocked_refines_working_and_error_refines_done_or_idle_only() {
+        use ObservedAgentState::{Blocked, Done, Error, Idle, Working};
+        let all = [Working, Blocked, Done, Idle, Error];
+        for record in all {
+            for hook in all {
+                let expected = matches!(
+                    (record, hook),
+                    (Blocked, Working) | (Error, Done) | (Error, Idle)
+                );
+                assert_eq!(record.refines(hook), expected, "{record:?} {hook:?}");
+            }
+        }
+    }
 
     #[test]
     fn the_two_functions_follow_the_state_table() {

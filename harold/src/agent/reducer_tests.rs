@@ -1448,3 +1448,187 @@ fn a_change_to_working_from_a_record_still_counts_as_new_activity() {
     assert!(new_work.generated_work_summary.is_none());
     assert_eq!(new_work.work_summary.as_deref(), Some("Fix parser"));
 }
+
+// A record refines a hook report of the same kind (spec rev 15, stage 3).
+
+#[test]
+fn a_blocked_record_refines_each_working_report_at_once() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let blocked = apply_report_30_s(
+        reported,
+        record_reading(ObservedAgentState::Blocked, 2_000),
+        3,
+    );
+    assert_eq!(blocked.effective_state, EffectiveAgentState::Blocked);
+    assert_eq!(blocked.last_transition_at_ms, 2_000);
+
+    // The mod repeats its working report every 10 s. Each report keeps the record.
+    let mut projection = blocked;
+    for (index, at) in [11_000, 21_000, 31_000, 41_000].into_iter().enumerate() {
+        projection = apply_report_30_s(
+            projection,
+            mod_report(ObservedAgentState::Working, at),
+            4 + index as u64,
+        );
+        assert_eq!(projection.effective_state, EffectiveAgentState::Blocked);
+        assert_eq!(projection.screen_state, Some(ObservedAgentState::Blocked));
+        assert_eq!(projection.screen_observed_at_ms, Some(2_000));
+    }
+    assert_eq!(projection.last_transition_at_ms, 2_000);
+}
+
+#[test]
+fn an_error_record_refines_a_done_or_idle_report_and_a_later_done_report_keeps_it() {
+    for hook in [ObservedAgentState::Done, ObservedAgentState::Idle] {
+        let reported = apply_report_30_s(observed_pane(), mod_report(hook, 1_000), 2);
+        let error = apply_report_30_s(
+            reported,
+            record_reading(ObservedAgentState::Error, 2_000),
+            3,
+        );
+        assert_eq!(
+            error.effective_state,
+            EffectiveAgentState::Error,
+            "{hook:?}"
+        );
+        let later = apply_report_30_s(error, mod_report(ObservedAgentState::Done, 5_000), 4);
+        assert_eq!(
+            later.effective_state,
+            EffectiveAgentState::Error,
+            "{hook:?}"
+        );
+    }
+}
+
+#[test]
+fn an_error_record_refines_the_done_of_a_turn_complete() {
+    let completed = upsert(reduce_turn_completed(
+        Some(observed_pane()),
+        &incarnation(1_000),
+        &WorkSummaryUpdate::Unchanged,
+        1_000,
+        version(2),
+        GraceWindows::default(),
+    ));
+    let error = apply_default(
+        Some(completed),
+        record_reading(ObservedAgentState::Error, 1_500),
+        3,
+    );
+    assert_eq!(error.effective_state, EffectiveAgentState::Error);
+    let again = upsert(reduce_turn_completed(
+        Some(error),
+        &incarnation(1_000),
+        &WorkSummaryUpdate::Unchanged,
+        1_700,
+        version(4),
+        GraceWindows::default(),
+    ));
+    assert_eq!(again.effective_state, EffectiveAgentState::Error);
+}
+
+#[test]
+fn a_record_that_does_not_refine_the_report_loses_until_the_window_ends() {
+    for (hook, record) in [
+        (ObservedAgentState::Working, ObservedAgentState::Idle),
+        (ObservedAgentState::Working, ObservedAgentState::Done),
+        (ObservedAgentState::Working, ObservedAgentState::Error),
+        (ObservedAgentState::Done, ObservedAgentState::Blocked),
+        (ObservedAgentState::Idle, ObservedAgentState::Blocked),
+        (ObservedAgentState::Done, ObservedAgentState::Working),
+        (ObservedAgentState::Idle, ObservedAgentState::Done),
+    ] {
+        let reported = apply_report_30_s(observed_pane(), mod_report(hook, 1_000), 2);
+        let inside = apply_report_30_s(reported, record_reading(record, 2_000), 3);
+        assert_eq!(
+            inside.effective_state,
+            hook.effective(),
+            "{hook:?} {record:?}"
+        );
+        let at_end = apply_report_30_s(inside, record_reading(record, 31_000), 4);
+        assert_eq!(
+            at_end.effective_state,
+            record.effective(),
+            "{hook:?} {record:?}"
+        );
+    }
+}
+
+#[test]
+fn a_blocked_reading_that_is_not_the_agents_record_refines_nothing() {
+    // Only a `program_status` observation is a record of the agent's pid. A screen reading
+    // (for example after a record of another pid) is held back as before.
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let blocked = apply_report_30_s(
+        reported,
+        screen_reading(ObservedAgentState::Blocked, 2_000),
+        3,
+    );
+    assert_eq!(blocked.effective_state, EffectiveAgentState::Working);
+    let repeated = apply_report_30_s(blocked, mod_report(ObservedAgentState::Working, 11_000), 4);
+    assert_eq!(repeated.screen_state, None);
+    assert_eq!(repeated.effective_state, EffectiveAgentState::Working);
+}
+
+#[test]
+fn when_the_record_stops_refining_the_state_returns_to_the_report() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let blocked = apply_report_30_s(
+        reported,
+        record_reading(ObservedAgentState::Blocked, 2_000),
+        3,
+    );
+    assert_eq!(blocked.effective_state, EffectiveAgentState::Blocked);
+    let idle = apply_report_30_s(blocked, record_reading(ObservedAgentState::Idle, 3_000), 4);
+    assert_eq!(idle.effective_state, EffectiveAgentState::Working);
+    // The next report clears the record that does not refine it.
+    let repeated = apply_report_30_s(idle, mod_report(ObservedAgentState::Working, 11_000), 5);
+    assert_eq!(repeated.screen_state, None);
+    assert_eq!(repeated.effective_state, EffectiveAgentState::Working);
+}
+
+#[test]
+fn a_blocked_record_does_not_survive_a_done_report() {
+    let reported = apply_report_30_s(
+        observed_pane(),
+        mod_report(ObservedAgentState::Working, 1_000),
+        2,
+    );
+    let blocked = apply_report_30_s(
+        reported,
+        record_reading(ObservedAgentState::Blocked, 2_000),
+        3,
+    );
+    let done = apply_report_30_s(blocked, mod_report(ObservedAgentState::Done, 5_000), 4);
+    assert_eq!(done.screen_state, None);
+    assert_eq!(done.effective_state, EffectiveAgentState::Done);
+}
+
+#[test]
+fn a_blocked_record_after_a_blocked_screen_reading_becomes_the_record() {
+    // Without a hook report the screen decides, so the screen's blocked is stored first.
+    let screen = apply_report_30_s(
+        observed_pane(),
+        screen_reading(ObservedAgentState::Blocked, 500),
+        2,
+    );
+    let record = apply_report_30_s(screen, record_reading(ObservedAgentState::Blocked, 600), 3);
+    assert_eq!(
+        record.screen_classifier_id.as_deref(),
+        Some("program_status")
+    );
+    let reported = apply_report_30_s(record, mod_report(ObservedAgentState::Working, 1_000), 4);
+    assert_eq!(reported.effective_state, EffectiveAgentState::Blocked);
+}

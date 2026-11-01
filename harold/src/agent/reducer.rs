@@ -50,6 +50,70 @@ impl Default for GraceWindows {
     }
 }
 
+/// A hook report: its state and when Harold received it.
+pub(crate) type HookEvidence = (ObservedAgentState, i64);
+
+/// A screen observation the reduction reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScreenEvidence {
+    pub state: ObservedAgentState,
+    pub observed_at_ms: i64,
+    /// True for the agent's own record: a `program_status` observation, which Harold makes
+    /// only for a record of the agent's pid.
+    pub is_record: bool,
+}
+
+impl ScreenEvidence {
+    pub(crate) fn new(state: ObservedAgentState, observed_at_ms: i64, classifier_id: &str) -> Self {
+        Self {
+            state,
+            observed_at_ms,
+            is_record: classifier_id == super::screen::PROGRAM_STATUS_CLASSIFIER_ID,
+        }
+    }
+
+    /// True when this is the agent's record and it refines the hook's report.
+    pub(crate) fn refines(self, hook_state: ObservedAgentState) -> bool {
+        self.is_record && self.state.refines(hook_state)
+    }
+}
+
+/// True when the screen evidence decides the state against the hook report: with no report,
+/// when the record refines the report, or when the grace window of the report has ended.
+pub(crate) fn screen_decides(
+    hook: Option<HookEvidence>,
+    screen: ScreenEvidence,
+    grace_ms: i64,
+) -> bool {
+    let Some((hook_state, hook_observed_at_ms)) = hook else {
+        return true;
+    };
+    screen.refines(hook_state)
+        || screen.observed_at_ms >= hook_observed_at_ms.saturating_add(grace_ms)
+}
+
+/// The one reduction of the hook report and the screen evidence to the agent's state. The
+/// projection, the blocked timer and every other reader take the state from here.
+pub(crate) fn reduce_state(
+    hook: Option<HookEvidence>,
+    screen: Option<ScreenEvidence>,
+    grace_ms: i64,
+) -> EffectiveAgentState {
+    match screen {
+        Some(screen) if screen_decides(hook, screen, grace_ms) => screen.state.effective(),
+        _ => hook.map_or(EffectiveAgentState::Unknown, |(state, _)| state.effective()),
+    }
+}
+
+/// True when a new hook report with `hook_state` keeps the stored screen evidence: only the
+/// agent's record that refines the report stays. A new record replaces it.
+pub(crate) fn hook_keeps_screen(
+    hook_state: ObservedAgentState,
+    screen: Option<ScreenEvidence>,
+) -> bool {
+    screen.is_some_and(|screen| screen.refines(hook_state))
+}
+
 /// This classifier certifies a new submitted occurrence, including identical repeated text.
 pub(crate) const SUBMITTED_PROMPT_CLASSIFIER_ID: &str = "tmux-submitted-prompt-v1";
 
@@ -123,9 +187,14 @@ pub(crate) fn reduce_agent_event(
                 invalidate_generated(&mut projection, event_version);
             }
             if let Some(state) = screen.state {
+                let is_record =
+                    ScreenEvidence::new(state, screen.observed_at_ms, &screen.classifier_id)
+                        .is_record;
                 let state_needs_revalidation = projection.screen_state != Some(state)
                     || projection.effective_state != state.effective()
-                    || revalidates_hook_epoch(&projection, screen.observed_at_ms, graces);
+                    || revalidates_hook_epoch(&projection, screen.observed_at_ms, graces)
+                    || screen_evidence(&projection)
+                        .is_some_and(|stored| stored.is_record != is_record);
                 if state_needs_revalidation {
                     projection.screen_state = Some(state);
                     projection.screen_classifier_id = Some(screen.classifier_id.clone());
@@ -187,17 +256,41 @@ fn apply_work_summary(
     }
 }
 
-/// A report replaces the hook state and starts a new epoch for the screen reading.
+/// A report replaces the hook state and starts a new epoch for the screen reading. The agent's
+/// record that refines the report stays: only a new record replaces it.
 fn set_hook_state(
     projection: &mut AgentPaneProjection,
     state: ObservedAgentState,
     observed_at_ms: i64,
 ) {
+    let keeps_screen = hook_keeps_screen(state, screen_evidence(projection));
     projection.hook_state = Some(state);
     projection.hook_observed_at_ms = Some(observed_at_ms);
+    if keeps_screen {
+        return;
+    }
     projection.screen_state = None;
     projection.screen_classifier_id = None;
     projection.screen_observed_at_ms = None;
+}
+
+/// The stored screen evidence of the projection.
+pub(crate) fn screen_evidence(projection: &AgentPaneProjection) -> Option<ScreenEvidence> {
+    let state = projection.screen_state?;
+    Some(ScreenEvidence::new(
+        state,
+        projection.screen_observed_at_ms.unwrap_or(i64::MIN),
+        projection
+            .screen_classifier_id
+            .as_deref()
+            .unwrap_or_default(),
+    ))
+}
+
+/// The stored hook report of the projection.
+pub(crate) fn hook_evidence(projection: &AgentPaneProjection) -> Option<HookEvidence> {
+    let state = projection.hook_state?;
+    Some((state, projection.hook_observed_at_ms.unwrap_or(i64::MAX)))
 }
 
 /// A turn-complete from the Stop hook. It sets the pane idle only while no lifecycle adapter
@@ -326,21 +419,11 @@ fn reconcile(
 }
 
 fn effective_state(projection: &AgentPaneProjection, graces: GraceWindows) -> EffectiveAgentState {
-    let Some(hook_state) = projection.hook_state else {
-        return projection
-            .screen_state
-            .map_or(EffectiveAgentState::Unknown, ObservedAgentState::effective);
-    };
-    let hook_observed_at_ms = projection.hook_observed_at_ms.unwrap_or(i64::MAX);
-    let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
-    let hook_grace_ends_at_ms = hook_observed_at_ms.saturating_add(grace_ms);
-    if let (Some(screen_state), Some(screen_observed_at_ms)) =
-        (projection.screen_state, projection.screen_observed_at_ms)
-        && screen_observed_at_ms >= hook_grace_ends_at_ms
-    {
-        return screen_state.effective();
-    }
-    hook_state.effective()
+    reduce_state(
+        hook_evidence(projection),
+        screen_evidence(projection),
+        graces.for_pane(projection.lifecycle_adapter_id.is_some()),
+    )
 }
 
 fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: EventVersion) {

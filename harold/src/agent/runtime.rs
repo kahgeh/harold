@@ -23,7 +23,7 @@ use super::domain::{
     ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
-use super::reducer::GraceWindows;
+use super::reducer::{GraceWindows, ScreenEvidence};
 use super::screen::{
     PromptScan, ScreenError, StopSignal, VisibleScreenPort, normalize_fallback_summary,
     run_stoppable,
@@ -205,7 +205,9 @@ struct TrackedPane {
     /// The lifecycle adapter that last reported for this agent process.
     lifecycle_adapter_id: Option<String>,
     explicit_summary: Option<String>,
-    screen_state: Option<ObservedAgentState>,
+    /// The screen evidence that counts in the reduction: the agent's record that refines the
+    /// hook report, or a reading after the report's grace window. None while the hook decides.
+    screen: Option<ScreenEvidence>,
     /// When the unbroken busy reading began, for a pane whose adapter reported idle.
     screen_busy_since_ms: Option<i64>,
     screen_summary: Option<String>,
@@ -232,7 +234,7 @@ impl TrackedPane {
             last_hook: None,
             lifecycle_adapter_id: None,
             explicit_summary: None,
-            screen_state: None,
+            screen: None,
             screen_busy_since_ms: None,
             screen_summary: None,
             summary_basis_version: EventVersion::start(),
@@ -261,6 +263,28 @@ impl TrackedPane {
         }
         self.blocked_long_logged = true;
         true
+    }
+
+    /// The agent's state from the reducer's one reduction, with `screen` as the screen
+    /// evidence.
+    fn reduced_state(
+        &self,
+        screen: Option<ScreenEvidence>,
+        graces: GraceWindows,
+    ) -> super::domain::EffectiveAgentState {
+        super::reducer::reduce_state(
+            self.last_hook,
+            screen,
+            graces.for_pane(self.lifecycle_adapter_id.is_some()),
+        )
+    }
+
+    /// A new hook report: the agent's record that refines it stays, other evidence goes.
+    fn set_hook(&mut self, state: ObservedAgentState, observed_at_ms: i64) {
+        self.last_hook = Some((state, observed_at_ms));
+        if !super::reducer::hook_keeps_screen(state, self.screen) {
+            self.screen = None;
+        }
     }
 }
 
@@ -709,7 +733,7 @@ fn panes_from_snapshot(
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
                 lifecycle_adapter_id: projection.lifecycle_adapter_id.clone(),
                 explicit_summary: projection.explicit_work_summary.clone(),
-                screen_state: seeded_screen_state(projection, graces),
+                screen: seeded_screen(projection, graces),
                 screen_busy_since_ms: None,
                 screen_summary: projection.screen_work_summary.clone(),
                 summary_basis_version: projection.summary_basis_version,
@@ -722,17 +746,18 @@ fn panes_from_snapshot(
         .collect()
 }
 
-fn seeded_screen_state(
+/// The stored screen evidence, when it counts in the reduction.
+fn seeded_screen(
     projection: &super::domain::AgentPaneProjection,
     graces: GraceWindows,
-) -> Option<ObservedAgentState> {
-    let screen_state = projection.screen_state?;
-    let Some(hook_observed_at_ms) = projection.hook_observed_at_ms else {
-        return Some(screen_state);
-    };
-    let screen_observed_at_ms = projection.screen_observed_at_ms?;
-    let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
-    (screen_observed_at_ms >= hook_observed_at_ms.saturating_add(grace_ms)).then_some(screen_state)
+) -> Option<ScreenEvidence> {
+    let screen = super::reducer::screen_evidence(projection)?;
+    super::reducer::screen_decides(
+        super::reducer::hook_evidence(projection),
+        screen,
+        graces.for_pane(projection.lifecycle_adapter_id.is_some()),
+    )
+    .then_some(screen)
 }
 
 fn health_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, HealthState> {
@@ -960,10 +985,9 @@ impl AgentMonitorRuntime {
         } else {
             tracked.pane = pane;
         }
-        tracked.last_hook = Some((state, observed_at_ms));
         tracked.lifecycle_adapter_id = Some(adapter_id);
+        tracked.set_hook(state, observed_at_ms);
         tracked.explicit_summary = next_explicit_summary;
-        tracked.screen_state = None;
         tracked.screen_busy_since_ms = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
         if state.is_working() {
@@ -1069,8 +1093,7 @@ impl AgentMonitorRuntime {
             tracked.explicit_summary = next_explicit_summary;
             // The Stop hook sets the state only for a pane no lifecycle adapter reports on.
             if tracked.lifecycle_adapter_id.is_none() {
-                tracked.last_hook = Some((ObservedAgentState::Done, observed_at_ms));
-                tracked.screen_state = None;
+                tracked.set_hook(ObservedAgentState::Done, observed_at_ms);
             }
             let pane_id = tracked.pane.incarnation.pane_id.clone();
             if let Some(basis) = source_version(&result, &["TurnCompleted"]) {
@@ -1407,20 +1430,24 @@ impl AgentMonitorRuntime {
             else {
                 continue;
             };
-            let state = screen_state_delta(
-                tracked,
-                observation.state,
-                observation.observed_at_ms,
-                self.graces,
-            );
-            // The effective state of this sample: the state about to be stored, else the one
-            // already stored, else the last hook report.
-            let effective = state
-                .or(tracked.screen_state)
-                .or(tracked.last_hook.map(|(hook, _)| hook))
-                .map_or(super::domain::EffectiveAgentState::Unknown, |state| {
-                    state.effective()
-                });
+            let observed = observation.state.map(|state| {
+                ScreenEvidence::new(
+                    state,
+                    observation.observed_at_ms,
+                    &observation.classifier_id,
+                )
+            });
+            let state = screen_state_delta(tracked, observed, self.graces);
+            // The state of this sample, from the reducer's reduction: with the state about to
+            // be sent, else with the evidence already stored.
+            let screen_after = state.map_or(tracked.screen, |state| {
+                Some(ScreenEvidence::new(
+                    state,
+                    observation.observed_at_ms,
+                    &observation.classifier_id,
+                ))
+            });
+            let effective = tracked.reduced_state(screen_after, self.graces);
             if tracked.blocked_long_due(effective, observation.observed_at_ms) {
                 let provider_id = tracked.pane.incarnation.provider_id.as_str();
                 tracing::warn!(
@@ -1455,12 +1482,7 @@ impl AgentMonitorRuntime {
                 fallback_summary: summary.clone(),
                 observed_at_ms: observation.observed_at_ms,
             };
-            let previous_state = tracked
-                .screen_state
-                .or(tracked.last_hook.map(|(state, _)| state))
-                .map_or(super::domain::EffectiveAgentState::Unknown, |state| {
-                    state.effective()
-                });
+            let previous_state = tracked.reduced_state(tracked.screen, self.graces);
             let changes_activity = super::reducer::screen_changes_activity(
                 previous_state,
                 tracked.screen_summary.as_deref(),
@@ -1486,8 +1508,16 @@ impl AgentMonitorRuntime {
                 tracked.prompt_checkpoint = checkpoint;
             }
             tracked.prompt_checkpoint.observe_state(observation.state);
-            if let Some(state) = state {
-                tracked.screen_state = Some(state);
+            if state.is_some() {
+                // Keep only evidence that counts: a reading the hook still holds back goes.
+                let graces = self.graces;
+                tracked.screen = screen_after.filter(|screen| {
+                    super::reducer::screen_decides(
+                        tracked.last_hook,
+                        *screen,
+                        graces.for_pane(tracked.lifecycle_adapter_id.is_some()),
+                    )
+                });
             }
             if summary.is_some() {
                 tracked.screen_summary = summary.clone();
@@ -1702,26 +1732,51 @@ fn matches_configured_placeholder_for_provider<'a>(
     providers.any(|provider| matches_configured_placeholder(summary, &provider.idle_all))
 }
 
-/// The screen state to store for this sample, if any.
+/// The screen state to send for this sample, if any.
 fn screen_state_delta(
     tracked: &mut TrackedPane,
-    observed: Option<ObservedAgentState>,
-    observed_at_ms: i64,
+    observed: Option<ScreenEvidence>,
     graces: GraceWindows,
 ) -> Option<ObservedAgentState> {
+    let stored = tracked.screen.map(|screen| screen.state);
     let Some((hook_state, hook_observed_at_ms)) = tracked.last_hook else {
-        return observed.filter(|state| tracked.screen_state != Some(*state));
+        return observed
+            .map(|screen| screen.state)
+            .filter(|state| stored != Some(*state));
     };
     let has_adapter = tracked.lifecycle_adapter_id.is_some();
     let grace = graces.for_pane(has_adapter);
 
+    // The agent's record that refines the hook report counts at once.
+    if let Some(screen) = observed
+        && screen.refines(hook_state)
+    {
+        let is_new = tracked
+            .screen
+            .is_none_or(|previous| previous.state != screen.state || !previous.is_record);
+        return is_new.then_some(screen.state);
+    }
+    // The record no longer refines the report: send the new reading, so that the reducer
+    // replaces the refining record and the hook report decides again.
+    if let (Some(screen), Some(previous)) = (observed, tracked.screen)
+        && previous.refines(hook_state)
+        && previous.state != screen.state
+    {
+        tracked.screen = None;
+        return Some(screen.state);
+    }
+    let observed_at_ms = observed.map(|screen| screen.observed_at_ms);
+    let observed = observed.map(|screen| screen.state);
+
     // An adapter's idle report has no repeats to keep it fresh. It stands until the screen
     // has read busy for the whole grace without a break; then the screen decides.
-    if has_adapter && hook_state.is_at_rest() && tracked.screen_state.is_none() {
-        if !observed.is_some_and(ObservedAgentState::is_working) {
+    if has_adapter && hook_state.is_at_rest() && tracked.screen.is_none() {
+        let Some(observed_at_ms) =
+            observed_at_ms.filter(|_| observed.is_some_and(ObservedAgentState::is_working))
+        else {
             tracked.screen_busy_since_ms = None;
             return None;
-        }
+        };
         if tracked.screen_busy_since_ms.is_none() {
             crate::telemetry::pane_turned_working(
                 &tracked.pane.incarnation.pane_id,
@@ -1735,10 +1790,11 @@ fn screen_state_delta(
     }
 
     let state = observed?;
+    let observed_at_ms = observed_at_ms?;
     if observed_at_ms < hook_observed_at_ms.saturating_add(grace) {
         return None;
     }
-    (tracked.screen_state != Some(state)).then_some(state)
+    (stored != Some(state)).then_some(state)
 }
 
 fn same_pane_metadata(left: &AgentPaneObservation, right: &AgentPaneObservation) -> bool {

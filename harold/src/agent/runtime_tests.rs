@@ -6446,3 +6446,219 @@ async fn error_clears_the_blocked_timer_and_a_new_turn_starts_again() {
     assert_eq!(blocked_long_lines(&logged(&captured)), 0);
     assert_eq!(blocked_long_count(&provider_id), 0);
 }
+
+// ---------------------------------------------------------------------------
+// A record refines a hook report of the same kind, and one reduction feeds every reader.
+//
+// As in the blocked timer tests above, the sample and report stamps drive the time.
+// ---------------------------------------------------------------------------
+
+/// A fixture with the default graces (30 s for a reported pane) and a provider of its own.
+async fn refine_fixture(provider_id: &str) -> Fixture {
+    crate::telemetry::test_support::install();
+    Fixture::with_graces_and_provider(
+        FakeInventory::default(),
+        GraceWindows::default(),
+        blocked_provider(provider_id),
+    )
+    .await
+}
+
+/// One `harold accept` from the mod for `observed`, received at `observed_at_ms`.
+async fn report_on(
+    fixture: &Fixture,
+    observed: &AgentPaneObservation,
+    state: ObservedAgentState,
+    observed_at_ms: i64,
+) {
+    let mut resolved = observed.clone();
+    resolved.observed_at_ms = observed_at_ms;
+    fixture.inventory.push_resolution(Ok(Some(resolved)));
+    fixture
+        .handle
+        .report_lifecycle(
+            observed.incarnation.pane_id.clone(),
+            state,
+            "claude.lifecycle".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+}
+
+/// One screen tick that gives the Rex record of the agent's pid.
+async fn sample_record(
+    fixture: &Fixture,
+    observed: &AgentPaneObservation,
+    state: ObservedAgentState,
+    at_ms: i64,
+) {
+    fixture.screen.push(Ok(ScreenObservation {
+        classifier_id: "program_status".into(),
+        ..screen(observed, Some(state), None, at_ms)
+    }));
+    fixture.handle.screen_tick().await.unwrap();
+}
+
+/// One screen tick that reads the screen (no record of the agent's pid).
+async fn sample_screen(
+    fixture: &Fixture,
+    observed: &AgentPaneObservation,
+    state: ObservedAgentState,
+    at_ms: i64,
+) {
+    fixture
+        .screen
+        .push(Ok(screen(observed, Some(state), None, at_ms)));
+    fixture.handle.screen_tick().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_blocked_record_refines_each_working_report_at_once_and_stays() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Blocked
+    );
+    for at in [11_000, 21_000, 31_000, 41_000] {
+        report_on(&fixture, &observed, ObservedAgentState::Working, at).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Blocked,
+            "after the report at {at}"
+        );
+        sample_record(&fixture, &observed, ObservedAgentState::Blocked, at + 1_000).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Blocked,
+            "after the sample at {}",
+            at + 1_000
+        );
+    }
+
+    // The record changes to working: the state returns to the report at once.
+    sample_record(&fixture, &observed, ObservedAgentState::Working, 43_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+    sample_record(&fixture, &observed, ObservedAgentState::Blocked, 44_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Blocked
+    );
+}
+
+#[tokio::test]
+async fn an_error_record_refines_a_done_report_and_a_later_done_report_keeps_it() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Done, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Error, 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Error
+    );
+    report_on(&fixture, &observed, ObservedAgentState::Done, 5_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Error, 6_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Error
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_screen_reading_does_not_refine_a_working_report() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
+    sample_screen(&fixture, &observed, ObservedAgentState::Blocked, 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+}
+
+#[tokio::test]
+async fn an_idle_record_during_a_working_report_gives_working_until_the_window_ends() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    report_on(&fixture, &observed, ObservedAgentState::Working, 1_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Idle, 2_000).await;
+    sample_record(&fixture, &observed, ObservedAgentState::Idle, 30_999).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+    sample_record(&fixture, &observed, ObservedAgentState::Idle, 31_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn working_reports_every_10_seconds_and_a_blocked_record_log_blocked_long_once() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    report_on(&fixture, &observed, ObservedAgentState::Working, start).await;
+    // The first blocked sample is at start + 5 s, so the timer is due at start + 15 min + 5 s.
+    let mut at = start;
+    while at <= start + BLOCKED_LONG_MS + 30_000 {
+        sample_record(&fixture, &observed, ObservedAgentState::Blocked, at + 5_000).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Blocked,
+            "after the sample at {}",
+            at + 5_000
+        );
+        at += 10_000;
+        report_on(&fixture, &observed, ObservedAgentState::Working, at).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Blocked,
+            "after the report at {at}"
+        );
+        // The last sample was at `at - 5 s`.
+        let due = at - 5_000 >= start + 5_000 + BLOCKED_LONG_MS;
+        if !due {
+            assert_eq!(blocked_long_lines(&logged(&captured)), 0, "at {at}");
+        }
+    }
+    assert_eq!(blocked_long_lines(&logged(&captured)), 1);
+    assert_eq!(blocked_long_count(&provider_id), 1);
+}
+
+#[tokio::test]
+async fn a_blocked_reading_the_reducer_does_not_take_logs_no_blocked_long() {
+    let provider_id = format!("p{}", uuid::Uuid::new_v4().simple());
+    let observed = blocked_pane(&provider_id, 800);
+    let fixture = refine_fixture(&provider_id).await;
+    let (captured, _guard) = capture_logs();
+
+    let start = 1_000;
+    report_on(&fixture, &observed, ObservedAgentState::Working, start).await;
+    let mut at = start;
+    while at <= start + 2 * BLOCKED_LONG_MS {
+        sample_screen(&fixture, &observed, ObservedAgentState::Blocked, at + 5_000).await;
+        at += 10_000;
+        report_on(&fixture, &observed, ObservedAgentState::Working, at).await;
+    }
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Working
+    );
+    assert_eq!(blocked_long_lines(&logged(&captured)), 0);
+    assert_eq!(blocked_long_count(&provider_id), 0);
+}

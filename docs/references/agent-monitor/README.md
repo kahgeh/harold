@@ -144,15 +144,19 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 ### State
 
 1. Inventory owns presence. A pane is departed only after two complete successful scans omit it and a fresh lookup confirms the exact incarnation is no longer current.
-2. A lifecycle observation supplies `Working`, `Blocked`, `Done`, `Idle` or `Error`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. A new incarnation starts with no lifecycle adapter.
-3. A turn-complete supplies `Done` only for a pane with no lifecycle adapter. That state wins during `agent_monitor.hook_grace_ms` (2 seconds); at or after it, a conclusive screen observation can replace it.
-4. For a pane with a lifecycle adapter, a `Working` or `Blocked` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again.
-5. For a pane with a lifecycle adapter, a `Done`, `Idle` or `Error` report wins with no repeats. When the screen has read `Working` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not.
+2. A lifecycle observation supplies `Working`, `Blocked`, `Done`, `Idle` or `Error`, records its adapter as the pane's lifecycle adapter, and clears the prior screen-state epoch. It does not clear a `program_status` record that refines it (rules 3 to 5): only the next record replaces that record. A new incarnation starts with no lifecycle adapter.
+3. A turn-complete supplies `Done` only for a pane with no lifecycle adapter. That state wins during `agent_monitor.hook_grace_ms` (2 seconds); at or after it, a conclusive screen observation can replace it. Inside the grace, an `Error` record of the agent's pid refines the `Done`: the agent is `Error`.
+4. For a pane with a lifecycle adapter, a `Working` or `Blocked` report wins while it is under `agent_monitor.report_grace_ms` (30 seconds) old. Each repeated report restarts that period. At or after it, a conclusive screen observation replaces the report until the adapter reports again. Inside the grace, a `Blocked` record of the agent's pid refines a `Working` report: the agent is `Blocked`. Any other record still loses to the report until the grace ends.
+5. For a pane with a lifecycle adapter, a `Done`, `Idle` or `Error` report wins with no repeats. When the screen has read `Working` for `agent_monitor.report_grace_ms` without a break, the screen observation replaces the report until the adapter reports again. An `Idle` reading and an inconclusive reading both break the run; a failed capture does not. An `Error` record of the agent's pid refines a `Done` or `Idle` report at once: the agent is `Error`.
 6. Within one visible grid, a matching working clause wins over a matching idle clause.
 7. Inconclusive screen state preserves existing evidence. With no conclusive lifecycle or screen evidence, effective state is `Unknown`.
 8. `last_transition_at_ms` changes only when effective state changes.
 
 The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Work summary changes remain independent and can append during a grace period.
+
+A record refines a report only when it is a `program_status` observation, because Harold makes that observation only for a record of the agent's pid. A screen reading refines nothing. When the record changes to a state that does not refine the report, the runtime appends it at once, and the report decides again.
+
+One reduction (`reduce_state` in `harold/src/agent/reducer.rs`) gives the agent's state from the report and the screen evidence. The projection and the `agent blocked long` timer use it, so the timer fires only for an agent that the control-tower shows as `BLOCKED`.
 
 The Claude Code mod reports `Working` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
 
