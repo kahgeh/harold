@@ -261,6 +261,15 @@ impl Recaps {
     }
 }
 
+/// The ids of the providers that have a recap adapter.
+pub(crate) fn recap_provider_ids(providers: &[AgentProviderSettings]) -> Vec<&str> {
+    providers
+        .iter()
+        .filter(|provider| provider.recap_adapter != RecapAdapter::None)
+        .map(|provider| provider.id.as_str())
+        .collect()
+}
+
 /// What the loop remembers of one pane between checks.
 struct Seen {
     agent_pid: u32,

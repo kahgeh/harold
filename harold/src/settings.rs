@@ -2412,6 +2412,16 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     }
 
     #[test]
+    fn the_shipped_providers_with_a_recap_adapter_are_claude_only() {
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        let AgentSettings(providers) = shipped.agents;
+        assert_eq!(
+            crate::agent::recap::recap_provider_ids(&providers),
+            ["claude"]
+        );
+    }
+
+    #[test]
     fn screen_history_rejects_zero_and_excessive_limits() {
         for limit in [0, 10001] {
             let text = format!(

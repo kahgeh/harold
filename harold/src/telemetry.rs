@@ -516,6 +516,25 @@ pub(crate) fn register_phone_counters() {
     }
 }
 
+/// Records 0 once for each result of the recap-read counter, for each provider in
+/// `provider_ids`. HyperDX reads the first point of a running total as 0, so without this
+/// the first `found` after a start would be lost, and a provider that never finds a recap
+/// would have no `found` series for the `agent-recaps-stopped` alert to read. `main` calls
+/// it once, after `init_telemetry`, when export is on, for the providers with a recap adapter.
+pub(crate) fn register_recap_counters(provider_ids: &[&str]) {
+    for provider_id in provider_ids {
+        for result in ["found", "none", "failed"] {
+            instruments().agent_recap_read.add(
+                0,
+                &[
+                    KeyValue::new("result", result),
+                    KeyValue::new("provider_id", (*provider_id).to_owned()),
+                ],
+            );
+        }
+    }
+}
+
 /// The `host` of Harold's own machine: the empty string.
 pub(crate) const HOST_OWN_MACHINE: &str = "";
 

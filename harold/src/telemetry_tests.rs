@@ -3205,6 +3205,27 @@ fn a_build_without_imessage_judges_phone_requests_as_unknown_only() {
 }
 
 #[test]
+fn the_recap_read_counter_is_counted_from_0_for_the_passed_providers_only() {
+    test_support::install();
+    register_recap_counters(&["claude_seeded"]);
+    for result in ["found", "none", "failed"] {
+        let set = [("result", result), ("provider_id", "claude_seeded")];
+        assert_eq!(
+            test_support::exact_counter_value("harold.agent.recap_read", &set),
+            Some(0),
+            "{result}"
+        );
+    }
+    assert_eq!(
+        test_support::counter_value(
+            "harold.agent.recap_read",
+            &[("provider_id", "codex_not_seeded")]
+        ),
+        None
+    );
+}
+
+#[test]
 fn the_web_app_phone_request_series_are_exported_from_zero_but_never_wrong() {
     test_support::install();
     register_phone_counters();
