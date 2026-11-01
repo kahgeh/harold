@@ -405,26 +405,41 @@ impl Scratch {
             worker: WorkerKind::THIS_BUILD,
             phase: Phase::Checking,
             size: 100,
-            voices: Vec::new(),
+            // The MLX registry reads the voices from the snapshot. The ONNX worker reports
+            // them after it loads, so an ONNX row starts with the names the worker would report.
+            voices: match WorkerKind::THIS_BUILD {
+                WorkerKind::Mlx => Vec::new(),
+                WorkerKind::Onnx => vec!["af_heart".to_string(), "am_adam".to_string()],
+            },
             asked: false,
+        }
+    }
+
+    /// The names of the model file and of the two voice files in a snapshot of this build: the MLX
+    /// worker loads `model.safetensors` and a `voices` folder, and the ONNX worker loads one
+    /// `.onnx` file and one `voices*` file.
+    fn snapshot_files() -> (&'static str, [&'static str; 2]) {
+        match WorkerKind::THIS_BUILD {
+            WorkerKind::Mlx => (
+                "model.safetensors",
+                ["voices/af_heart.safetensors", "voices/am_adam.safetensors"],
+            ),
+            WorkerKind::Onnx => ("model.onnx", ["voices.bin", "extra.json"]),
         }
     }
 
     /// A snapshot of `model` with a file of `size` bytes, and a record that lists it.
     pub(crate) fn cached(&self, model: &str, revision: &str, size: usize) {
-        let snapshot = snapshot_dir(&self.cache(), model, revision);
-        std::fs::create_dir_all(snapshot.join("voices")).unwrap();
-        std::fs::write(snapshot.join("model.safetensors"), vec![0u8; size]).unwrap();
-        std::fs::write(snapshot.join("voices/af_heart.safetensors"), b"v").unwrap();
-        std::fs::write(snapshot.join("voices/am_adam.safetensors"), b"v").unwrap();
+        self.snapshot(model, revision, size);
+        let (model_file, voice_files) = Self::snapshot_files();
         std::fs::create_dir_all(self.folder()).unwrap();
         let record = json!({
             "model": model,
             "commit": revision,
             "files": [
-                {"path": "model.safetensors", "size": size},
-                {"path": "voices/af_heart.safetensors", "size": 1},
-                {"path": "voices/am_adam.safetensors", "size": 1},
+                {"path": model_file, "size": size},
+                {"path": voice_files[0], "size": 1},
+                {"path": voice_files[1], "size": 1},
             ],
         });
         std::fs::write(
@@ -432,6 +447,23 @@ impl Scratch {
             record.to_string(),
         )
         .unwrap();
+    }
+
+    /// The files of a snapshot of `model`, with no record: what a finished download leaves.
+    pub(crate) fn snapshot(&self, model: &str, revision: &str, size: usize) {
+        let snapshot = snapshot_dir(&self.cache(), model, revision);
+        let (model_file, voice_files) = Self::snapshot_files();
+        // The ONNX worker takes exactly one `voices*` entry, so only the MLX snapshot has a
+        // `voices` folder.
+        std::fs::create_dir_all(match WorkerKind::THIS_BUILD {
+            WorkerKind::Mlx => snapshot.join("voices"),
+            WorkerKind::Onnx => snapshot.clone(),
+        })
+        .unwrap();
+        std::fs::write(snapshot.join(model_file), vec![0u8; size]).unwrap();
+        for voice in voice_files {
+            std::fs::write(snapshot.join(voice), b"v").unwrap();
+        }
     }
 
     pub(crate) fn safe_files(&self) {

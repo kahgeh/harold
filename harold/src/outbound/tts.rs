@@ -382,9 +382,11 @@ mod tests {
         ));
     }
 
-    /// A `[tts]` that writes its last argument to `out`.
+    /// A `[tts]` that writes its last argument to `out`. It sets the command engine, because the
+    /// default engine on Linux is the server.
     fn writes_last_argument_to(out: &std::path::Path) -> TtsSettings {
         TtsSettings {
+            engine: TtsEngine::Command,
             model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "/bin/sh".into(),
             voice: None,

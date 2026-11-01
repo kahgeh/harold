@@ -20,7 +20,7 @@ key_file=${HYPERDX_API_KEY_FILE:-$HOME/.config/harold/hyperdx-access-key}
 [ -e "$key_file" ] || cannot_check "$key_file: missing"
 [ -f "$key_file" ] || cannot_check "$key_file: not a regular file"
 [ -s "$key_file" ] || cannot_check "$key_file: empty"
-mode=$(stat -L -f %Lp "$key_file" 2>/dev/null || stat -L -c %a "$key_file") || cannot_check "$key_file: cannot read its mode"
+mode=$(stat -L -c %a "$key_file" 2>/dev/null || stat -L -f %Lp "$key_file") || cannot_check "$key_file: cannot read its mode"
 [ $((8#$mode & 8#077)) -eq 0 ] || cannot_check "$key_file: readable by group or others (mode $mode), run chmod 600"
 git -C "$(dirname "$key_file")" rev-parse >/dev/null 2>&1 && cannot_check "$key_file: inside a git checkout"
 IFS= read -r key <"$key_file" || [ -n "$key" ] || cannot_check "$key_file: cannot read it"

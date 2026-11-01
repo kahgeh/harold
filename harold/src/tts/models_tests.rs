@@ -134,6 +134,8 @@ async fn until_kokoro_is_checked_a_request_is_told_it_is_downloading() {
         }
     );
 
+    // The fake download writes nothing, and the ONNX worker needs its files in the snapshot.
+    scratch.snapshot(KOKORO_MLX, KOKORO_REVISION, 100);
     gate.notify_one();
     until(&registry, kokoro_ready).await;
     assert!(registry.resolve("", "").is_ok());
