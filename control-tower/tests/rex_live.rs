@@ -1,8 +1,8 @@
 //! One live Enter on a Rex block. It is ignored by default. Run it with a throwaway Rex
 //! session that you made: `REX_LIVE_SESSION=<label> REX_LIVE_BLOCK=<block id> cargo test
-//! -p tmx-agent-dash --test rex_live -- --ignored --nocapture`.
+//! -p control-tower --test rex_live -- --ignored --nocapture`.
 
-use tmx_agent_dash::navigation::{PaneNavigator, TmuxNavigator};
+use control_tower::navigation::{PaneNavigator, TmuxNavigator};
 
 #[test]
 #[ignore = "needs a Rex app and a throwaway Rex block"]

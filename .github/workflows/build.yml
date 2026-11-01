@@ -53,7 +53,7 @@ jobs:
       - name: Build release binaries
         env:
           HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}
-        run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p tmx-agent-dash
+        run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p control-tower
 
       - name: Check no OpenSSL library is linked
         run: |
@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           package="harold-aarch64-apple-darwin"
           mkdir -p "dist/$package/config" "dist/$package/scripts" "dist/$package/hooks" "dist/$package/skills/send-message-to-away-device"
-          for binary in harold tmx-agent-dash; do
+          for binary in harold control-tower; do
             source="target/aarch64-apple-darwin/release/$binary"
             lipo "$source" -verify_arch arm64
             cp "$source" "dist/$package/$binary"

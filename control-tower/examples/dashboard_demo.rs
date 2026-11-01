@@ -9,11 +9,11 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tmx_agent_dash::app::{
+use control_tower::app::{
     AgentIncarnation, AgentRow, AgentState, App, ConnectionState, Effect, MonitorHealth,
     MonitorHealthState, SearchState, Snapshot,
 };
-use tmx_agent_dash::ui;
+use control_tower::ui;
 
 const NOW_MS: i64 = 1_777_000_000_000;
 
@@ -85,8 +85,8 @@ fn demo_app() -> App {
                     selected.clone(),
                     AgentState::Busy,
                     "Codex",
-                    "tmx-agent-dash:0.1",
-                    "/Users/you/code/tmx-agent-dash",
+                    "control-tower:0.1",
+                    "/Users/you/code/control-tower",
                     "Build event snapshot dashboard",
                     NOW_MS - 8_000,
                 ),

@@ -1,16 +1,16 @@
 use std::process::ExitCode;
 
-use tmx_agent_dash::api::AgentStateSource;
-use tmx_agent_dash::cli;
-use tmx_agent_dash::navigation::TmuxNavigator;
-use tmx_agent_dash::runtime;
+use control_tower::api::AgentStateSource;
+use control_tower::cli;
+use control_tower::navigation::TmuxNavigator;
+use control_tower::runtime;
 use tonic::transport::Endpoint;
 
 fn main() -> ExitCode {
     match start() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("tmx-agent-dash: {error}");
+            eprintln!("control-tower: {error}");
             ExitCode::FAILURE
         }
     }

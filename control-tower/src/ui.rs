@@ -1910,7 +1910,7 @@ mod tests {
                         selected.clone(),
                         AgentState::Busy,
                         "Codex",
-                        "tmx-agent-dash:0.1",
+                        "control-tower:0.1",
                         "Build event snapshot dashboard",
                         1_776_999_992_000,
                     ),
@@ -1988,7 +1988,7 @@ mod tests {
                     selected.clone(),
                     state,
                     "Codex",
-                    "tmx-agent-dash:0.1",
+                    "control-tower:0.1",
                     "Keep status accessible without colour",
                     90_000,
                 )],
@@ -2787,7 +2787,7 @@ mod tests {
 
         assert!(content.contains("SELECTED SIGNAL"));
         assert!(content.contains("CURRENT WORK"));
-        assert!(content.contains("/Users/you/code/tmx-agent-dash"));
+        assert!(content.contains("/Users/you/code/control-tower"));
         assert!(content.contains("current-feature"));
         assert!(content.contains("Complete the responsive renderer"));
         assert!(content.contains("operator-facing signal"));
@@ -2801,11 +2801,11 @@ mod tests {
             selected.clone(),
             AgentState::Busy,
             "Codex",
-            "tmx-agent-dash:2.17",
+            "control-tower:2.17",
             &summary,
             90_000,
         );
-        agent.working_directory = "/Users/you/code/dev/tmx-agent-dash".into();
+        agent.working_directory = "/Users/you/code/dev/control-tower1".into();
         let app = live_app(vec![agent], Some(selected));
 
         let content = rendered(&app, 140, 29, 100_000);
@@ -2815,7 +2815,7 @@ mod tests {
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("▶ ● BUSY"));
         assert!(content.contains("cx"));
-        assert!(!content.contains("tmx-agent-dash:2.17"));
+        assert!(!content.contains("control-tower:2.17"));
         // The work column takes whatever width the fixed columns leave, and
         // the current layout leaves it wider than before (40 -> 42 glyphs).
         assert_eq!(content.matches('界').count(), 42);
@@ -2918,7 +2918,7 @@ mod tests {
             selected,
             AgentState::Busy,
             "Codex",
-            "tmx-agent-dash:2.17",
+            "control-tower:2.17",
             "Keep detail text borrowed across measurement and rendering",
             90_000,
         );
@@ -3014,7 +3014,7 @@ mod tests {
     fn long_detail_app() -> (App, String, String) {
         let selected = incarnation("%17", 91700, 91844, "codex");
         let directory =
-            "/Users/you/code/tmx-agent-dash/worktrees/responsive-dashboard/current-feature"
+            "/Users/you/code/control-tower/worktrees/responsive-dashboard/current-feature"
                 .to_owned();
         let summary =
             "Complete the responsive renderer while retaining every operator-facing signal"
@@ -3023,7 +3023,7 @@ mod tests {
             selected.clone(),
             AgentState::Busy,
             "Codex",
-            "tmx-agent-dash:2.17",
+            "control-tower:2.17",
             &summary,
             90_000,
         );
@@ -4052,7 +4052,7 @@ mod tests {
                 selected.clone(),
                 AgentState::Busy,
                 "Codex",
-                "tmx-agent-dash:0.1",
+                "control-tower:0.1",
                 "Build the question block",
                 90_000,
             )],
@@ -4099,7 +4099,7 @@ mod tests {
                 selected.clone(),
                 AgentState::Busy,
                 "Codex",
-                "tmx-agent-dash:0.1",
+                "control-tower:0.1",
                 "Build the question block",
                 90_000,
             )],

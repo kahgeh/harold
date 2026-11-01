@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use tmx_agent_dash::terminal::{FaultScenario, run_terminal_fault_harness};
+use control_tower::terminal::{FaultScenario, run_terminal_fault_harness};
 
 fn main() -> ExitCode {
     let Some(argument) = std::env::args().nth(1) else {

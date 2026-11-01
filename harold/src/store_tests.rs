@@ -1843,7 +1843,7 @@ fn no_code_outside_tests_pauses_or_advances_tokio_time() {
     // daemon. Test files are `*_tests.rs` and `tests/`; everything else is daemon code.
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut offenders = Vec::new();
-    for crate_dir in ["harold/src", "harold-api/src", "tmx-agent-dash/src"] {
+    for crate_dir in ["harold/src", "harold-api/src", "control-tower/src"] {
         let mut pending = vec![workspace.join(crate_dir)];
         while let Some(dir) = pending.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {

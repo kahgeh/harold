@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn defaults_to_loopback_harold() {
         assert_eq!(
-            parse_args(["tmx-agent-dash"]).unwrap().endpoint,
+            parse_args(["control-tower"]).unwrap().endpoint,
             "http://127.0.0.1:50060"
         );
     }
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn accepts_one_explicit_endpoint() {
         assert_eq!(
-            parse_args(["tmx-agent-dash", "--endpoint", "http://127.0.0.1:6000",])
+            parse_args(["control-tower", "--endpoint", "http://127.0.0.1:6000",])
                 .unwrap()
                 .endpoint,
             "http://127.0.0.1:6000"
@@ -87,12 +87,12 @@ mod tests {
 
     #[test]
     fn rejects_missing_or_unknown_arguments() {
-        assert!(parse_args(["tmx-agent-dash", "--endpoint"]).is_err());
-        assert!(parse_args(["tmx-agent-dash", "--wat"]).is_err());
+        assert!(parse_args(["control-tower", "--endpoint"]).is_err());
+        assert!(parse_args(["control-tower", "--wat"]).is_err());
     }
 
     #[test]
     fn rejects_invalid_endpoint_syntax() {
-        assert!(parse_args(["tmx-agent-dash", "--endpoint", "://bad"]).is_err());
+        assert!(parse_args(["control-tower", "--endpoint", "://bad"]).is_err());
     }
 }
