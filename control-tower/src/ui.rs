@@ -438,7 +438,9 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
 
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
-    let detail_lines = app.selected_row().map(|agent| detail_lines(agent, now_ms));
+    let detail_lines = app
+        .selected_row()
+        .map(|agent| detail_lines(agent, now_ms, detail.width.saturating_sub(2)));
     if !detail_fits(detail, detail_lines.as_deref()) {
         render_inventory(frame, area, app, now_ms);
         return;
@@ -1419,7 +1421,11 @@ fn detail_paragraph<'a>(lines: Vec<Line<'a>>) -> Paragraph<'a> {
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }
 
-fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a>> {
+fn detail_lines<'a>(
+    agent: &'a crate::app::AgentRow,
+    now_ms: i64,
+    inner_width: u16,
+) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::styled(
             format!(
@@ -1439,15 +1445,19 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
         Line::raw(""),
     ];
     if let Some(recap) = agent.recap.as_deref().filter(|recap| !recap.is_empty()) {
-        lines.push(Line::styled(
-            "RECAP",
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-        ));
-        lines.push(Line::styled(recap, Style::default().fg(INK)));
-        lines.push(Line::styled(
-            age(now_ms, agent.recap_at_ms),
-            Style::default().fg(MUTED),
-        ));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "RECAP",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", age(now_ms, agent.recap_at_ms)),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+        for line in wrap_capped(recap, usize::from(inner_width), RECAP_PANEL_LINES) {
+            lines.push(Line::styled(line, Style::default().fg(INK)));
+        }
         lines.push(Line::raw(""));
     }
     if let Some(step) = agent
@@ -1470,6 +1480,51 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
         display_work_summary(agent.work_summary.as_deref()),
         Style::default().fg(INK),
     ));
+    lines
+}
+
+/// The most wrapped lines the recap takes in the detail panel.
+const RECAP_PANEL_LINES: usize = 4;
+
+/// Wrap `text` at word breaks into lines of at most `width` characters. When the text
+/// needs more than `max_lines`, the last line ends with an ellipsis.
+fn wrap_capped(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let width = width.max(2);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        while !word.is_empty() {
+            let gap = usize::from(count > 0);
+            if count + gap + word.len() <= width {
+                if gap == 1 {
+                    current.push(' ');
+                }
+                current.extend(word.drain(..));
+                count = current.chars().count();
+                break;
+            }
+            if count > 0 {
+                lines.push(std::mem::take(&mut current));
+                count = 0;
+                continue;
+            }
+            current.extend(word.drain(..width));
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if count > 0 {
+        lines.push(current);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        let last = lines.last_mut().expect("at least one line");
+        while last.chars().count() + 1 > width {
+            last.pop();
+        }
+        last.push('…');
+    }
     lines
 }
 
@@ -2962,7 +3017,7 @@ mod tests {
             90_000,
         );
 
-        let lines = super::detail_lines(&agent, 100_000);
+        let lines = super::detail_lines(&agent, 100_000, 40);
 
         for (line_index, span_index) in [(3, 1), (4, 1), (5, 1), (9, 0)] {
             assert!(
@@ -3220,14 +3275,32 @@ mod tests {
         );
 
         let recap_label = content.find("RECAP").expect("recap label");
-        let recap_text = content.rfind("Goal: ship the recap").expect("recap text");
         let age_line = content.find("12m").expect("recap age");
+        let recap_text = content.rfind("Goal: ship the recap").expect("recap text");
         let step_label = content.find("CURRENT STEP").expect("step label");
         let summary_label = content.rfind("WORK SUMMARY").expect("summary label");
-        assert!(recap_label < recap_text);
-        assert!(recap_text < age_line);
-        assert!(age_line < step_label);
+        assert!(recap_label < age_line);
+        assert!(age_line < recap_text);
+        assert!(recap_text < step_label);
         assert!(step_label < summary_label);
+    }
+
+    #[test]
+    fn a_long_recap_never_hides_the_detail_panel() {
+        let recap = "Goal: ship the recap to the control tower. ".repeat(8);
+        assert!(recap.chars().count() > 300);
+        for (width, height) in [(140, 44), (120, 44)] {
+            let mut app = recap_app(Some(recap.trim()), Some("Running the tests"));
+            app.snapshot.rows[0].work_summary = Some("w".repeat(160));
+            let content = rendered(&app, width, height, 100_000);
+
+            assert!(content.contains("SELECTED SIGNAL"), "width {width}");
+            assert_eq!(content.matches("RECAP").count(), 1, "width {width}");
+            assert_eq!(content.matches("CURRENT STEP").count(), 1, "width {width}");
+            assert_eq!(content.matches("WORK SUMMARY").count(), 2, "width {width}");
+            assert!(content.contains("12m"), "width {width}");
+            assert!(content.contains('…'), "width {width}");
+        }
     }
 
     #[test]

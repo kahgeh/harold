@@ -107,7 +107,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | unknown | An agent runs in the pane, and no evidence gives its state yet | "Unknown" with a capital, "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
-| work summary | Short text that names what an agent is working on. A recap and a current step are not work summaries. | "task description", "current work", "dashboard description", "summary" alone |
+| work summary | Short text that names what an agent is working on. A recap and a current step are not work summaries | "task description", "current work", "dashboard description", "summary" alone |
 | activity summary | A work summary that Claude Code writes from the agent's evidence, when `[activity_summary]` is on | "generated description" |
 | program status record | What a terminal keeps for a pane from the program's `OSC 7501` reports: the state, `app`, `msg` and the `owner` pid. Harold reads the root record only | "tab status" |
 | recap | An agent's own short text of what its session is doing and what comes next, which the provider writes into the session's transcript. Today only Claude Code writes one, after you were away. The control-tower shows the latest one under the label `RECAP` | "away summary", "summary" alone |

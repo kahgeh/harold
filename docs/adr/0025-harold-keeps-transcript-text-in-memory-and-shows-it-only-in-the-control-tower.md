@@ -14,7 +14,7 @@ Claude Code writes a recap of a session into the session's transcript after the 
 3. The recap, and the current step from a Rex program status record, stay in memory. A Harold restart forgets them.
 4. They reach only the `WatchAgentStates` stream that the control-tower reads. They are not part of the agent projection or of `AgentSnapshot`. They never go to a model, the store, a log line, a span, a metric, the phone app or a phone message.
 5. A counter and an alert (`alert-agent-recaps-stopped`) tell the owner when Claude Code stops writing recaps or changes the line's format.
-6. The current step (`msg`) is not a work summary. This corrects 0024 point 5.
+6. The current step (`msg`) is not a work summary. ADR 0024 point 5 states the same.
 7. The user said yes on 2026-11-01 (Q142) to Harold keeping transcript text in memory. The standards list it as an exception.
 
 ## Consequences

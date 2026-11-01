@@ -340,7 +340,7 @@ waiting only on `Enter` or when it goes Working.
 
 The detail panel (the `SELECTED SIGNAL` box) shows the lines `STATE`, `TARGET`, `PANE ID`,
 `DIRECTORY` and `AGE`. Then it shows `RECAP`, only when Harold has read a recap for the agent.
-`RECAP` shows the recap text and, on the next line, the age of the recap, for example `12m`.
+`RECAP` shows the age of the recap on its label line, for example `12m`. Below it, the recap text takes at most four lines and ends with `…` when it is longer.
 Next comes `CURRENT STEP`, only when the agent reports a step, and then `WORK SUMMARY`. The order
 is `RECAP`, `CURRENT STEP`, `WORK SUMMARY`. The step is the line the agent reports in its Rex
 status. Harold cuts it to 160 characters and removes control characters, as it does for the work

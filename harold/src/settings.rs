@@ -2394,7 +2394,17 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
 
     #[test]
     fn an_unknown_recap_adapter_is_refused() {
-        assert!(serde_json::from_str::<super::RecapAdapter>(r#""unknown-v1""#).is_err());
+        let shipped = include_str!("../config/default.toml");
+        assert!(shipped.contains(r#"recap_adapter = "claude-transcript-v1""#));
+        let bogus = shipped.replace(
+            r#"recap_adapter = "claude-transcript-v1""#,
+            r#"recap_adapter = "bogus-v1""#,
+        );
+        let loaded: Result<AgentConfigFixture, _> = Config::builder()
+            .add_source(File::from_str(&bogus, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize);
+        assert!(loaded.is_err());
     }
 
     #[test]
