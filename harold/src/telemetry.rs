@@ -1715,19 +1715,19 @@ pub(crate) struct TurnStart {
     pub started_by: StartedBy,
 }
 
-/// The spec's order: the hook's transcript time, then Harold's typing, then first busy.
+/// The spec's order: the hook's transcript time, then Harold's typing, then first working.
 /// A hook time that is not RFC 3339 counts as absent, and any time after `hook_reached`
 /// is skipped. `started_by` is the typing's when Harold typed the prompt at or before
 /// `hook_reached`; otherwise `Desk` when the start is known, and `Unknown` when it is not.
 pub(crate) fn turn_start(
     hook_time: Option<&str>,
     typed: Option<(OffsetDateTime, StartedBy)>,
-    busy_since: Option<OffsetDateTime>,
+    working_since: Option<OffsetDateTime>,
     hook_reached: OffsetDateTime,
 ) -> TurnStart {
     let hook = hook_time.and_then(|text| OffsetDateTime::parse(text, &Rfc3339).ok());
     let typed = typed.filter(|(at, _)| *at <= hook_reached);
-    let at = [hook, typed.map(|(at, _)| at), busy_since]
+    let at = [hook, typed.map(|(at, _)| at), working_since]
         .into_iter()
         .flatten()
         .find(|at| *at <= hook_reached);
@@ -1743,8 +1743,8 @@ pub(crate) fn turn_start(
 // Turns
 // ---------------------------------------------------------------------------
 
-/// When each pane first turned busy since its last turn end, with when that was kept.
-static BUSY_SINCE: Mutex<BTreeMap<String, (OffsetDateTime, OffsetDateTime)>> =
+/// When each pane first turned working since its last turn end, with when that was kept.
+static WORKING_SINCE: Mutex<BTreeMap<String, (OffsetDateTime, OffsetDateTime)>> =
     Mutex::new(BTreeMap::new());
 
 /// Each turn end waiting to be delivered, by its event id: the `harold.turn_complete`
@@ -1759,22 +1759,22 @@ static TURN_DELIVERIES: Mutex<BTreeMap<String, (OffsetDateTime, Context)>> =
 static PENDING_TURNS: Mutex<BTreeMap<String, Vec<(OffsetDateTime, Context)>>> =
     Mutex::new(BTreeMap::new());
 
-/// Records that the agent monitor saw `pane_id` busy at `at_ms` (milliseconds since the
+/// Records that the agent monitor saw `pane_id` working at `at_ms` (milliseconds since the
 /// Unix epoch). Only the first since the pane's last turn end is kept.
-pub(crate) fn pane_turned_busy(pane_id: &str, at_ms: i64) {
+pub(crate) fn pane_turned_working(pane_id: &str, at_ms: i64) {
     let Ok(at) = OffsetDateTime::from_unix_timestamp_nanos(i128::from(at_ms) * 1_000_000) else {
         return;
     };
     let now = OffsetDateTime::now_utc();
-    let mut busy = locked(&BUSY_SINCE);
-    busy.retain(|_, (kept_at, _)| !expired(*kept_at, now));
-    busy.entry(pane_id.to_string()).or_insert((now, at));
+    let mut working = locked(&WORKING_SINCE);
+    working.retain(|_, (kept_at, _)| !expired(*kept_at, now));
+    working.entry(pane_id.to_string()).or_insert((now, at));
 }
 
-/// When `pane_id` first turned busy since its last turn end, if that was kept within
+/// When `pane_id` first turned working since its last turn end, if that was kept within
 /// `PROMPT_KEPT`. It is taken once: the turn end that takes it starts the next run.
-pub(crate) fn take_busy_since(pane_id: &str) -> Option<OffsetDateTime> {
-    let (kept_at, at) = locked(&BUSY_SINCE).remove(pane_id)?;
+pub(crate) fn take_working_since(pane_id: &str) -> Option<OffsetDateTime> {
+    let (kept_at, at) = locked(&WORKING_SINCE).remove(pane_id)?;
     (!expired(kept_at, OffsetDateTime::now_utc())).then_some(at)
 }
 
@@ -1788,7 +1788,7 @@ pub(crate) struct TurnTrace {
 /// on it.
 ///
 /// - The start is the first known of the hook's transcript time, the prompt Harold typed
-///   into the pane, and when the pane first turned busy (`turn_start`).
+///   into the pane, and when the pane first turned working (`turn_start`).
 /// - `harold.turn` continues the typed prompt's trace when it has one, and starts a new
 ///   trace otherwise. A prompt typed after `hook_reached` belongs to the next turn: it is
 ///   kept for that turn and this one does not join it.
@@ -1814,7 +1814,7 @@ pub(crate) fn begin_turn_complete(
         Some((typed_at, started_by, cx)) => (Some((typed_at, started_by)), cx),
         None => (None, None),
     };
-    let start = turn_start(hook_time, typed, take_busy_since(pane_id), hook_reached);
+    let start = turn_start(hook_time, typed, take_working_since(pane_id), hook_reached);
 
     // Exported as harold.log writes it, so a malformed pane id cannot grow the metric's
     // labels without bound.

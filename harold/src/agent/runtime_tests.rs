@@ -4357,7 +4357,7 @@ async fn a_second_idle_report_restarts_the_working_run() {
 }
 
 // ---------------------------------------------------------------------------
-// When a pane turned busy, for the turn's start
+// When a pane turned working, for the turn's start
 // ---------------------------------------------------------------------------
 
 /// A valid pane id (`%` and digits) no other test uses, so this test's busy time is its
@@ -4388,7 +4388,7 @@ async fn a_pane_whose_screen_turns_working_reports_the_first_working_reading() {
         )
         .await
         .unwrap();
-    assert_eq!(crate::telemetry::take_busy_since(&pane_id), None);
+    assert_eq!(crate::telemetry::take_working_since(&pane_id), None);
 
     for observed_at_ms in [5_000, 6_000] {
         fixture.screen.push(Ok(screen(
@@ -4400,9 +4400,12 @@ async fn a_pane_whose_screen_turns_working_reports_the_first_working_reading() {
         fixture.handle.screen_tick().await.unwrap();
     }
 
-    assert_eq!(crate::telemetry::take_busy_since(&pane_id), Some(ms(5_000)));
     assert_eq!(
-        crate::telemetry::take_busy_since(&pane_id),
+        crate::telemetry::take_working_since(&pane_id),
+        Some(ms(5_000))
+    );
+    assert_eq!(
+        crate::telemetry::take_working_since(&pane_id),
         None,
         "taken once"
     );
@@ -4428,7 +4431,10 @@ async fn a_working_report_from_the_hook_reports_the_pane_working() {
             .unwrap();
     }
 
-    assert_eq!(crate::telemetry::take_busy_since(&pane_id), Some(ms(2_000)));
+    assert_eq!(
+        crate::telemetry::take_working_since(&pane_id),
+        Some(ms(2_000))
+    );
 }
 
 fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
