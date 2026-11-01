@@ -2516,3 +2516,98 @@ async fn the_current_step_is_not_in_the_stored_rows() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+#[tokio::test]
+async fn a_turn_end_of_a_pane_in_the_snapshot_keeps_its_agent_pid_and_provider() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
+
+    service.note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
+
+    let targets = service.recaps.targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].pane_id, "%8");
+    assert_eq!(targets[0].agent_pid, 82);
+    assert_eq!(targets[0].provider_id, "codex");
+    assert_eq!(targets[0].session_id, "s-1");
+    assert_eq!(targets[0].transcript_path, "/t/s-1.jsonl");
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_turn_end_with_no_session_id_or_no_transcript_path_keeps_nothing() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
+
+    service.note_recap_turn_end("%8", "", "/t/s-1.jsonl");
+    service.note_recap_turn_end("%8", "s-1", "");
+
+    assert!(service.recaps.targets().is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_turn_end_of_a_pane_absent_from_the_snapshot_keeps_nothing() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
+
+    service.note_recap_turn_end("%99", "s-1", "/t/s-1.jsonl");
+
+    assert!(service.recaps.targets().is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_turn_end_with_a_new_session_id_replaces_the_entry_and_its_recap() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
+    service.note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
+    let target = service.recaps.targets().remove(0);
+    service.recaps.update_read(
+        "%8",
+        82,
+        "s-1",
+        "/t/s-1.jsonl",
+        target.tail,
+        Some(crate::agent::recap::RecapLine {
+            text: "Old recap.".into(),
+            at_ms: 1,
+        }),
+    );
+    assert!(service.recaps.get("%8", 82).is_some());
+
+    service.note_recap_turn_end("%8", "s-2", "/t/s-2.jsonl");
+
+    let targets = service.recaps.targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].session_id, "s-2");
+    assert!(service.recaps.get("%8", 82).is_none());
+    task.abort();
+}
+
+#[tokio::test]
+async fn turn_complete_keeps_the_session_and_transcript_for_the_recap_reader() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
+
+    service
+        .turn_complete(Request::new(TurnCompleteRequest {
+            pane_id: "%8".into(),
+            session_id: "s-1".into(),
+            transcript_path: "/t/s-1.jsonl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+
+    let targets = service.recaps.targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].agent_pid, 82);
+    assert_eq!(targets[0].transcript_path, "/t/s-1.jsonl");
+    task.abort();
+}

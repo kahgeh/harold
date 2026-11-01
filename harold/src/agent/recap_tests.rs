@@ -509,6 +509,24 @@ mod reader {
     }
 
     #[tokio::test]
+    async fn a_slow_read_that_then_fails_logs_slow_with_zero_bytes() {
+        test_support::install();
+        let (logs, _guard) = capture_logs();
+        let provider_id = id();
+        let scratch = Scratch::new();
+        // A folder opens and has a length, but a read of it fails.
+        let recaps = Recaps::default();
+        recaps.note_turn_end("%1", PID, &provider_id, "s1", &scratch.0.to_string_lossy());
+        let providers = vec![provider(&provider_id, RecapAdapter::ClaudeTranscriptV1)];
+        let mut reader = RecapReader::new(recaps, providers, Duration::ZERO);
+        reader.check_once(&snapshot("%1", &provider_id)).await;
+        assert_eq!(count(&provider_id, "failed"), 1);
+        assert_eq!(logs.count("agent recap read failed"), 1);
+        assert_eq!(logs.count("agent recap read slow"), 1);
+        assert!(logs.text().contains("bytes=0"), "{}", logs.text());
+    }
+
+    #[tokio::test]
     async fn the_recap_text_is_not_in_the_captured_logs() {
         test_support::install();
         let (logs, _guard) = capture_logs();

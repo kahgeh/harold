@@ -395,16 +395,17 @@ impl RecapReader {
             Ok::<_, std::io::Error>((bytes, tail, last))
         })
         .await;
-        let (bytes, tail, last) = joined.map_err(std::io::Error::other)??;
         let elapsed = started.elapsed();
+        let read = joined.map_err(std::io::Error::other).and_then(|read| read);
         if elapsed > self.slow_after {
             tracing::warn!(
                 pane_id = %target.pane_id,
                 elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                bytes,
+                bytes = read.as_ref().map_or(0, |(bytes, ..)| *bytes),
                 "agent recap read slow"
             );
         }
+        let (_, tail, last) = read?;
         let found = last.is_some();
         self.recaps.update_read(
             &target.pane_id,
