@@ -68,7 +68,7 @@ A stop adapter must select the most recent substantive submitted user instructio
 A lifecycle adapter calls `ReportAgentState` with:
 
 - the current `TMUX_PANE`, such as `%22`;
-- `AGENT_STATE_BUSY` or `AGENT_STATE_IDLE`;
+- `AGENT_STATE_WORKING` or `AGENT_STATE_IDLE`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING`, for installed plugins;
 - a bounded adapter identifier;
 - an optional `workSummary`.
 
@@ -85,14 +85,14 @@ grpcurl -plaintext \
   harold.Harold/ReportAgentState <<'JSON'
 {
   "paneId": "%22",
-  "state": "AGENT_STATE_BUSY",
+  "state": "AGENT_STATE_WORKING",
   "adapterId": "custom.lifecycle",
   "workSummary": "Review the projector"
 }
 JSON
 ```
 
-Replace `%22` with the adapter's inherited `TMUX_PANE`; do not hard-code it in a real hook. Send `AGENT_STATE_WORKING` when submitted work starts and `AGENT_STATE_IDLE` when the provider reports completion. On an Idle report, omit `workSummary` to preserve the explicit candidate and its timestamp:
+Replace `%22` with the adapter's inherited `TMUX_PANE`; do not hard-code it in a real hook. Send `AGENT_STATE_WORKING` when submitted work starts and `AGENT_STATE_IDLE` when the provider reports completion. On an `idle` report, omit `workSummary` to preserve the explicit candidate and its timestamp:
 
 ```json
 {
@@ -185,7 +185,7 @@ The first response is a complete snapshot. Confirm that the test pane includes a
 Submit a distinctive prompt through the configured agent and verify this sequence:
 
 1. Working appears with the normalized work summary.
-2. Idle appears after completion while the work summary remains present.
+2. The `idle` state appears after completion while the work summary remains present.
 3. Stopping and reconnecting the watcher immediately returns the current complete snapshot.
 4. Restarting Harold returns the same projected state before later observations arrive.
 
@@ -264,7 +264,7 @@ Fixtures and fake provider processes do not satisfy this check. Use the real ins
    - each row carries the expected pane, provider, agent PID, and process start time;
    - every provider changes from working to idle;
    - each working row shows its own current task, with no work summary copied from another pane;
-   - Idle placeholder or work summary absence retains that pane's current substantive work summary;
+   - `idle` placeholder or work summary absence retains that pane's current substantive work summary;
    - a later substantive working screen prompt replaces an older completion candidate;
    - an exact normalized placeholder is rejected, while a real prompt that merely mentions the placeholder phrase remains valid.
 

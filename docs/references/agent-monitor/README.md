@@ -4,7 +4,7 @@ The agent monitor discovers configured agent processes in tmux panes or Rex bloc
 
 ## Problem
 
-A pane name does not answer whether its current agent process is busy, idle, or newly replaced. Operators need concrete answers to questions such as: which process does this row describe, which input wins when a hook and the terminal disagree, what survives a restart, and what does a reconnecting consumer receive? They also need those answers without storing terminal history or exposing raw pane content.
+A pane name does not answer whether its current agent process is working, idle, or newly replaced. Operators need concrete answers to questions such as: which process does this row describe, which input wins when a hook and the terminal disagree, what survives a restart, and what does a reconnecting consumer receive? They also need those answers without storing terminal history or exposing raw pane content.
 
 ## Architecture
 
@@ -219,7 +219,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 
-`ReportAgentState.state` accepts only `AGENT_STATE_BUSY` and `AGENT_STATE_IDLE`. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
+`ReportAgentState.state` accepts only `AGENT_STATE_WORKING` and `AGENT_STATE_IDLE`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING` for installed plugins. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
 
 ### `AgentStateSnapshot`
 

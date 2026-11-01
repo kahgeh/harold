@@ -39,12 +39,12 @@ tmux capture-pane -p -e -S -2000 -t <pane-id>
 | Trigger | History behavior |
 | --- | --- |
 | Newly observed incarnation | Capture immediately to establish its baseline; emit no existing prompt. |
-| Baseline capture failed | Retry no more than once every 30 seconds while present, including while Idle. The first success still establishes only a baseline. |
+| Baseline capture failed | Retry no more than once every 30 seconds while present, including while `idle`. The first success still establishes only a baseline. |
 | Transition into Working after baseline | Capture even if an older work summary exists. |
-| Working-to-Idle after an inconclusive Working recovery | Retry once for a newly submitted prompt. |
+| `working`-to-`idle` after an inconclusive `working` recovery | Retry once for a newly submitted prompt. |
 | Sustained Working | Retry no more than once every 30 seconds. |
-| Recovered prompt could not be appended | Keep the checkpoint unchanged. Retry on the next Working-to-Idle edge; if an Idle retry also fails, retry no more than once every 30 seconds while the source append remains pending. |
-| Ordinary Idle after baseline | Do not capture history. |
+| Recovered prompt could not be appended | Keep the checkpoint unchanged. Retry on the next `working`-to-`idle` edge; if an `idle` retry also fails, retry no more than once every 30 seconds while the source append remains pending. |
+| Ordinary `idle` after baseline | Do not capture history. |
 | Explicit work summary clear | Permit recovery at the next eligible trigger; clearing does not make old history new. |
 
 Visible-state evidence remains independent of prompt recovery. A history failure preserves existing work summary evidence and uses the agent monitor's existing bounded health reasons. Hook grace controls conflicting state evidence; it does not suppress an independently recovered prompt.
@@ -68,7 +68,7 @@ That row is Working when it starts with a spinner glyph (`·`, `✢`, `✳`, `�
 ✻ No response from the API after 3m · retrying once, waiting up to 10m
 ```
 
-A finished turn keeps the glyph without an ellipsis (`✻ Worked for 20s · done 8:32 am`). Any other row leaves the decision to `busy_all` and `idle_all`. The shipped `❯` idle clause matches whenever the input box is visible, so a pane without a running status is Idle. Claude Code 2.1.295 in vim mode does not draw `esc to interrupt` while working; the shipped `busy_all` keeps it for renderings that do.
+A finished turn keeps the glyph without an ellipsis (`✻ Worked for 20s · done 8:32 am`). Any other row leaves the decision to `busy_all` and `idle_all`. The shipped `❯` idle clause matches whenever the input box is visible, so a pane without a running status is `idle`. Claude Code 2.1.295 in vim mode does not draw `esc to interrupt` while working; the shipped `busy_all` keeps it for renderings that do.
 
 ## Acquisition checkpoint and selection
 
