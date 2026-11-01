@@ -538,7 +538,8 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
             "002_web_app",
             "003_app_photo",
             "004_app_message_trace",
-            "005_tts_default"
+            "005_tts_default",
+            "006_agent_states"
         ]
     );
 }
@@ -677,7 +678,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&6)
+        Some(&7)
     );
 }
 
@@ -2821,6 +2822,13 @@ fn lifecycle_json(state: serde_json::Value) -> NewEvent {
     )
 }
 
+/// The same event with a different `observed_at_ms`.
+fn at_time(event: NewEvent, observed_at_ms: i64) -> NewEvent {
+    let mut payload = event.payload;
+    payload["observed_at_ms"] = json!(observed_at_ms);
+    NewEvent { payload, ..event }
+}
+
 fn screen_json(state: serde_json::Value) -> NewEvent {
     NewEvent::new(
         "AgentScreenObserved",
@@ -2940,7 +2948,7 @@ async fn a_lifecycle_event_with_no_state_leaves_the_hook_state_as_it_was() {
         .append([
             pane_observed_event(),
             lifecycle_json(json!("Working")),
-            lifecycle_json(json!("Done")),
+            at_time(lifecycle_json(json!("Done")), 150),
         ])
         .await
         .unwrap();
@@ -2973,4 +2981,106 @@ fn an_unknown_effective_state_word_reads_as_unknown_and_busy_reads_as_working() 
         super::parse_observed_state("working".into()).unwrap(),
         Some(ObservedAgentState::Working)
     );
+}
+
+/// Inserts one `agent_panes` row with the given state words and the other columns filled.
+fn agent_pane_row_sql(pane_id: &str, hook: &str, screen: &str, effective: &str) -> String {
+    let hook_time = if hook == "NULL" { "NULL" } else { "1" };
+    let (classifier, screen_time) = if screen == "NULL" {
+        ("NULL", "NULL")
+    } else {
+        ("'screen-v1'", "2")
+    };
+    format!(
+        "INSERT INTO agent_panes (pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id, \
+         tmux_target, session_name, window_index, pane_index, working_directory, \
+         provider_display_name, pane_observed_at_ms, hook_state, hook_observed_at_ms, \
+         screen_state, screen_classifier_id, screen_observed_at_ms, effective_state, \
+         last_transition_at_ms, last_event_version) \
+         VALUES ('{pane_id}', 1, 2, 3, 'claude-code', 't', 's', 0, 0, '/w', 'Claude', 4, \
+         {hook}, {hook_time}, {screen}, {classifier}, {screen_time}, '{effective}', 5, 6)"
+    )
+}
+
+async fn raw_states(conn: &turso::Connection, pane_id: &str) -> (String, String, String) {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE(hook_state, '-'), COALESCE(screen_state, '-'), effective_state \
+             FROM agent_panes WHERE pane_id = ?1",
+            (pane_id,),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("the row stays");
+    let text = |index| row.get_value(index).unwrap().as_text().cloned().unwrap();
+    (text(0), text(1), text(2))
+}
+
+#[tokio::test]
+async fn migration_moves_busy_rows_to_working_and_takes_six_states() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    // Take the store back to what the build before 006 left: the old table and no record.
+    let old_sql = include_str!("store/migrations/001_initial.sql");
+    let start = old_sql.find("CREATE TABLE agent_panes (").unwrap();
+    let end = start + old_sql[start..].find(");").unwrap() + 2;
+    let conn = store.state.connect().unwrap();
+    conn.execute_batch(&format!(
+        "DELETE FROM _migrations WHERE name = '006_agent_states'; \
+         DROP TABLE agent_panes; {}",
+        &old_sql[start..end]
+    ))
+    .await
+    .unwrap();
+    for (pane, hook, screen, effective) in [
+        ("%1", "'busy'", "'busy'", "busy"),
+        ("%2", "'idle'", "'idle'", "idle"),
+        ("%3", "NULL", "NULL", "unknown"),
+    ] {
+        conn.execute(&agent_pane_row_sql(pane, hook, screen, effective), ())
+            .await
+            .unwrap();
+    }
+    drop(conn);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = reopened.state.connect().unwrap();
+    let words = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    assert_eq!(
+        raw_states(&conn, "%1").await,
+        words("working", "working", "working")
+    );
+    assert_eq!(raw_states(&conn, "%2").await, words("idle", "idle", "idle"));
+    assert_eq!(raw_states(&conn, "%3").await, words("-", "-", "unknown"));
+
+    for state in ["working", "blocked", "done", "idle", "error"] {
+        let sql = agent_pane_row_sql(
+            &format!("%{state}"),
+            &format!("'{state}'"),
+            &format!("'{state}'"),
+            state,
+        );
+        conn.execute(&sql, ())
+            .await
+            .unwrap_or_else(|e| panic!("{state}: {e}"));
+    }
+    for bad in [
+        agent_pane_row_sql("%b1", "'bogus'", "NULL", "idle"),
+        agent_pane_row_sql("%b2", "NULL", "'bogus'", "idle"),
+        agent_pane_row_sql("%b3", "NULL", "NULL", "bogus"),
+        agent_pane_row_sql("%b4", "'unknown'", "NULL", "idle"),
+    ] {
+        assert!(conn.execute(&bad, ()).await.is_err(), "{bad}");
+    }
+    drop(conn);
+    drop(reopened);
+
+    let again = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = again.state.connect().unwrap();
+    assert_eq!(
+        raw_states(&conn, "%1").await,
+        words("working", "working", "working")
+    );
+    assert_eq!(raw_states(&conn, "%3").await, words("-", "-", "unknown"));
 }

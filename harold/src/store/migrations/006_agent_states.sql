@@ -1,0 +1,83 @@
+-- Widens the agent state CHECK rules and renames the state word busy to working.
+-- Turso cannot alter a CHECK, so the table is rebuilt.
+CREATE TABLE agent_panes_new (
+    pane_id TEXT PRIMARY KEY,
+    pane_pid INTEGER NOT NULL,
+    agent_pid INTEGER NOT NULL,
+    agent_started_at_ms INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    tmux_target TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    window_index INTEGER NOT NULL,
+    pane_index INTEGER NOT NULL,
+    working_directory TEXT NOT NULL,
+    provider_display_name TEXT NOT NULL,
+    pane_observed_at_ms INTEGER NOT NULL,
+    hook_state TEXT,
+    hook_observed_at_ms INTEGER,
+    lifecycle_adapter_id TEXT,
+    screen_state TEXT,
+    screen_classifier_id TEXT,
+    screen_observed_at_ms INTEGER,
+    effective_state TEXT NOT NULL,
+    explicit_work_summary TEXT,
+    explicit_work_summary_updated_at_ms INTEGER,
+    screen_work_summary TEXT,
+    screen_work_summary_updated_at_ms INTEGER,
+    work_summary TEXT,
+    summary_basis_version INTEGER NOT NULL DEFAULT 0 CHECK (summary_basis_version >= 0),
+    generated_work_summary TEXT
+        CHECK (generated_work_summary IS NULL OR length(generated_work_summary) BETWEEN 1 AND 160),
+    generated_summary_basis_version INTEGER
+        CHECK (generated_summary_basis_version IS NULL OR generated_summary_basis_version >= 0),
+    last_transition_at_ms INTEGER NOT NULL,
+    last_event_version INTEGER NOT NULL,
+    CHECK ((generated_work_summary IS NULL) = (generated_summary_basis_version IS NULL)),
+    CHECK (hook_state IS NULL OR hook_state IN ('working', 'blocked', 'done', 'idle', 'error')),
+    CHECK (screen_state IS NULL OR screen_state IN ('working', 'blocked', 'done', 'idle', 'error')),
+    CHECK (effective_state IN ('working', 'blocked', 'done', 'idle', 'error', 'unknown')),
+    CHECK ((hook_state IS NULL) = (hook_observed_at_ms IS NULL)),
+    CHECK ((screen_state IS NULL) = (screen_classifier_id IS NULL)),
+    CHECK ((screen_state IS NULL) = (screen_observed_at_ms IS NULL)),
+    CHECK ((explicit_work_summary IS NULL) = (explicit_work_summary_updated_at_ms IS NULL)),
+    CHECK ((screen_work_summary IS NULL) = (screen_work_summary_updated_at_ms IS NULL)),
+    CHECK (explicit_work_summary IS NULL OR length(explicit_work_summary) <= 160),
+    CHECK (screen_work_summary IS NULL OR length(screen_work_summary) <= 160),
+    CHECK (work_summary IS NULL OR length(work_summary) <= 160)
+);
+
+INSERT INTO agent_panes_new (pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id, tmux_target, session_name, window_index, pane_index, working_directory, provider_display_name, pane_observed_at_ms, hook_state, hook_observed_at_ms, lifecycle_adapter_id, screen_state, screen_classifier_id, screen_observed_at_ms, effective_state, explicit_work_summary, explicit_work_summary_updated_at_ms, screen_work_summary, screen_work_summary_updated_at_ms, work_summary, summary_basis_version, generated_work_summary, generated_summary_basis_version, last_transition_at_ms, last_event_version)
+SELECT
+    pane_id,
+    pane_pid,
+    agent_pid,
+    agent_started_at_ms,
+    provider_id,
+    tmux_target,
+    session_name,
+    window_index,
+    pane_index,
+    working_directory,
+    provider_display_name,
+    pane_observed_at_ms,
+    CASE hook_state WHEN 'busy' THEN 'working' ELSE hook_state END,
+    hook_observed_at_ms,
+    lifecycle_adapter_id,
+    CASE screen_state WHEN 'busy' THEN 'working' ELSE screen_state END,
+    screen_classifier_id,
+    screen_observed_at_ms,
+    CASE effective_state WHEN 'busy' THEN 'working' ELSE effective_state END,
+    explicit_work_summary,
+    explicit_work_summary_updated_at_ms,
+    screen_work_summary,
+    screen_work_summary_updated_at_ms,
+    work_summary,
+    summary_basis_version,
+    generated_work_summary,
+    generated_summary_basis_version,
+    last_transition_at_ms,
+    last_event_version
+FROM agent_panes;
+
+DROP TABLE agent_panes;
+ALTER TABLE agent_panes_new RENAME TO agent_panes;

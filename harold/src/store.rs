@@ -34,7 +34,7 @@ const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
 const LOCK_FILE: &str = "harold.lock";
-const MIGRATIONS: [(&str, &str); 5] = [
+const MIGRATIONS: [(&str, &str); 6] = [
     (
         "001_initial",
         include_str!("store/migrations/001_initial.sql"),
@@ -54,6 +54,10 @@ const MIGRATIONS: [(&str, &str); 5] = [
     (
         "005_tts_default",
         include_str!("store/migrations/005_tts_default.sql"),
+    ),
+    (
+        "006_agent_states",
+        include_str!("store/migrations/006_agent_states.sql"),
     ),
 ];
 
@@ -1957,10 +1961,9 @@ async fn pause_snapshot_read_after_query(gate: &std::sync::Mutex<Option<Snapshot
     }
 }
 
-// TODO(task 2): write "working" once migration 007 widens the CHECK rules; 001 allows only 'busy'.
 fn observed_state_text(state: ObservedAgentState) -> &'static str {
     match state {
-        ObservedAgentState::Working => "busy",
+        ObservedAgentState::Working => "working",
         ObservedAgentState::Idle => "idle",
     }
 }
@@ -1976,7 +1979,7 @@ fn parse_observed_state(value: String) -> Result<Option<ObservedAgentState>> {
 
 fn effective_state_text(state: EffectiveAgentState) -> &'static str {
     match state {
-        EffectiveAgentState::Working => "busy",
+        EffectiveAgentState::Working => "working",
         EffectiveAgentState::Idle => "idle",
         EffectiveAgentState::Unknown => "unknown",
     }
