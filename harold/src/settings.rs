@@ -697,7 +697,7 @@ pub(crate) struct AgentMonitorSettings {
     pub multiplexer: String,
     /// The path to the `rex` program, when it is not found by the usual search.
     pub rex: Option<String>,
-    /// The labels of other Rex hosts whose panes Harold also works with. Needs `multiplexer = "rex"`.
+    /// The labels of other Rex hosts whose agents Harold reads (read-only). Needs `multiplexer = "rex"`.
     pub rex_hosts: Vec<String>,
     /// A mark for a host in `rex_hosts`: `"arch"`, `"linux"` or `"mac"`. A host with no entry has none.
     pub rex_host_marks: BTreeMap<String, String>,

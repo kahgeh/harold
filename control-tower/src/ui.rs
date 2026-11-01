@@ -3462,6 +3462,17 @@ mod tests {
     /// A local row and a row on the host `omarchy`, both in the `harold` group, with the
     /// same work summary so the tests can compare the WORK SUMMARY column.
     fn host_app(marker: HostMarker, icon: &str, host_dir: &str, selected: Option<&str>) -> App {
+        host_app_labeled(marker, icon, host_dir, selected, "omarchy")
+    }
+
+    /// Like `host_app`, with the host label `label`.
+    fn host_app_labeled(
+        marker: HostMarker,
+        icon: &str,
+        host_dir: &str,
+        selected: Option<&str>,
+        label: &str,
+    ) -> App {
         let local = located(
             "%1",
             AgentState::Working,
@@ -3478,7 +3489,7 @@ mod tests {
             host_dir,
             "SUMMARYX",
         );
-        remote.host = "omarchy".into();
+        remote.host = label.into();
         remote.host_icon = icon.into();
         let selected = selected.map(|pane_id| {
             if pane_id == "%1" {
@@ -3615,6 +3626,30 @@ mod tests {
         let rows = buffer_rows(&rendered_buffer(&app, 60, 20, 100_000));
         let host = text_row_with(&rows, "omarchy \u{b7} brave");
         assert!(host.contains("omarchy \u{b7} brave-s\u{2026}"), "{host:?}");
+    }
+
+    #[test]
+    fn a_long_host_label_in_text_mode_keeps_the_where_column_width_and_ends_in_an_ellipsis() {
+        let label = "a-host-label-of-exactly-32-chars";
+        assert_eq!(label.chars().count(), 32);
+        for (width, height) in [(60, 20), (80, 24), (120, 30)] {
+            let app = host_app_labeled(HostMarker::Text, "", "/w/harold", None, label);
+            let rows = buffer_rows(&rendered_buffer(&app, width, height, 100_000));
+            let summary_at = cell_column(text_row_with(&rows, "main"), "SUMMARYX");
+            let host = text_row_with(&rows, "a-host-label");
+            assert_eq!(
+                cell_column(host, "SUMMARYX"),
+                summary_at,
+                "{width}: {host:?}"
+            );
+            let before = &host[..host.find("SUMMARYX").unwrap()];
+            assert!(before.contains('\u{2026}'), "{width}: {host:?}");
+            assert!(
+                !before.contains(label),
+                "the whole label is cut: {width}: {host:?}"
+            );
+            assert_eq!(Line::raw(host).width(), usize::from(width), "{width}");
+        }
     }
 
     #[test]

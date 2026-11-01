@@ -363,7 +363,7 @@ Harold only reads on a Rex host. It types nothing there, and it reads no screen 
 
 ### The route that takes only local forms
 
-Every writer calls `rex::route_pane(pane_id)` before it acts. The route looks at the shape of the id and reads no map and no setting.
+Every writer calls `pane_route::route_pane(pane_id)` before it acts. The route looks at the shape of the id and reads no map and no setting.
 
 | Pane id | Result |
 | --- | --- |

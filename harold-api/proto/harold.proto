@@ -108,7 +108,8 @@ message AgentPaneState {
   // The pane id. It has one of three forms: "%<n>" (tmux, this Mac), "block:<id>" (Rex,
   // this Mac) or "rex:<label>/block:<id>" (a block on another Rex host, read only).
   string pane_id = 1;
-  // The pane label, <session>:<window>.<pane>, for tmux and Rex.
+  // The pane label, <session>:<window>.<pane>, for tmux and Rex. A row of a Rex host
+  // holds the session name only.
   string tmux_target = 2;
   string session_name = 3;
   uint32 window_index = 4;

@@ -1756,7 +1756,7 @@ async fn turn_complete_with_a_host_pane_id_stores_nothing() {
     // The refusal log is once for each pane id, so each id here is new to the process.
     let unique = uuid::Uuid::new_v4().simple().to_string();
     let host_id = format!("rex:omarchy/block:{unique}");
-    let session_id = format!("main:0.{}", unique.len());
+    let session_id = format!("main:0.{unique}");
 
     for pane_id in [host_id.as_str(), session_id.as_str()] {
         let response = service
