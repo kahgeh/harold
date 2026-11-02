@@ -19,9 +19,9 @@ use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
 use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, GetHaroldStateRequest, MonitorHealthState, ReportAgentStateRequest,
-    SendMessageToAwayDeviceRequest, SetMessagingPausedRequest, SetTtsMutedRequest,
-    SpeakLineRequest, WatchAgentStatesRequest,
+    AgentState, GetHaroldStateRequest, GetRemoteOrderRequest, MonitorHealthState,
+    ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SetMessagingPausedRequest,
+    SetRemoteOrderRequest, SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
 };
 use super::{
     HAROLD_VERSION, HaroldService, HaroldStateView, Request, RoleSources, TurnCompleteRequest,
@@ -3634,4 +3634,66 @@ fn a_pane_named_in_two_products_takes_the_role_of_the_first_product() {
 
     assert_eq!(roles["%1"], role("coordinator", "alpha"));
     assert_eq!(roles["%2"], role("pnem", "alpha"));
+}
+
+async fn get(service: &HaroldService) -> Vec<String> {
+    service
+        .get_remote_order(Request::new(GetRemoteOrderRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .products
+}
+
+#[tokio::test]
+async fn the_service_calls_round_trip() {
+    let directory = TestDirectory::new();
+    let registry = directory.0.join("products.toml");
+    let mut text = String::new();
+    for name in ["alpha", "beta", "gamma"] {
+        text.push_str(&format!(
+            "[products.{name}]\nrepo = \"/work/{name}\"\nbase = \"main\"\nslots = 1\n\n"
+        ));
+    }
+    std::fs::write(&registry, text).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, _task) = test_service(store, populated_snapshot(1, None));
+    service.state_view.remote_order = Some(crate::remote_order::RemoteOrder::new(&directory.0));
+    service.state_view.roles.registry = Some(registry);
+    assert_eq!(get(&service).await, ["alpha", "beta", "gamma"]);
+    let products = ["gamma", "gone", "alpha"].map(String::from).to_vec();
+    service
+        .set_remote_order(Request::new(SetRemoteOrderRequest { products }))
+        .await
+        .unwrap();
+    assert_eq!(get(&service).await, ["gamma", "alpha", "beta"]);
+}
+
+#[tokio::test]
+async fn the_remote_order_is_empty_with_no_registry() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, _task) = test_service(store, populated_snapshot(1, None));
+    service.state_view.remote_order = Some(crate::remote_order::RemoteOrder::new(&directory.0));
+    let reply = service
+        .get_remote_order(Request::new(GetRemoteOrderRequest {}))
+        .await
+        .unwrap();
+    assert!(reply.into_inner().products.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_write_gives_an_internal_status() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, _task) = test_service(store, populated_snapshot(1, None));
+    service.state_view.remote_order = Some(crate::remote_order::RemoteOrder::new(
+        &directory.0.join("no-such-folder"),
+    ));
+    let error = service
+        .set_remote_order(Request::new(SetRemoteOrderRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "remote order write failed");
 }

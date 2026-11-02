@@ -12,6 +12,7 @@ mod machine_stats;
 mod outbound;
 mod pod_stats;
 mod projector;
+mod remote_order;
 mod restart_reminder;
 mod settings;
 mod store;
@@ -36,7 +37,7 @@ use telemetry::init_telemetry;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
-use tracing::{Instrument, info, info_span};
+use tracing::{Instrument, info, info_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 pub use harold_api::harold;
@@ -107,6 +108,8 @@ struct HaroldStateView {
     chief_session: String,
     /// Where the role of each pane comes from.
     roles: RoleSources,
+    /// The order of the PnEMs in the remote control. `None` when the data folder is unknown.
+    remote_order: Option<remote_order::RemoteOrder>,
 }
 
 impl HaroldStateView {
@@ -138,6 +141,9 @@ impl HaroldStateView {
             .to_owned(),
             chief_session: settings.notify.chief_session.clone().unwrap_or_default(),
             roles: RoleSources::from_settings(settings),
+            remote_order: remote_order::RemoteOrder::in_data_folder_of(
+                &settings.store.resolved_path(),
+            ),
         }
     }
 }
@@ -157,6 +163,18 @@ impl RoleSources {
             chief_folder: settings.notify.chief.clone(),
             chief_session: settings.notify.chief_session.clone(),
             registry: settings.telemetry.pod_registry_path(),
+        }
+    }
+
+    /// The product names of the registry. No registry, or one that cannot be read, gives
+    /// none.
+    fn product_names(&self) -> Vec<String> {
+        let Some(path) = &self.registry else {
+            return Vec::new();
+        };
+        match pod_stats::read_registry(path) {
+            Ok(products) => products.into_iter().map(|product| product.name).collect(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -348,20 +366,32 @@ impl HaroldService {
 impl Harold for HaroldService {
     type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
 
-    // Task 1 stub: a later task fills in the remote order calls.
     async fn get_remote_order(
         &self,
         _: Request<GetRemoteOrderRequest>,
     ) -> Result<Response<GetRemoteOrderResponse>, Status> {
-        Ok(Response::new(GetRemoteOrderResponse::default()))
+        let registry = self.state_view.roles.product_names();
+        let products = match &self.state_view.remote_order {
+            Some(order) => order.get(&registry),
+            None => registry,
+        };
+        Ok(Response::new(GetRemoteOrderResponse { products }))
     }
 
-    // Task 1 stub: a later task fills in the remote order calls.
     async fn set_remote_order(
         &self,
-        _: Request<SetRemoteOrderRequest>,
+        request: Request<SetRemoteOrderRequest>,
     ) -> Result<Response<SetRemoteOrderResponse>, Status> {
-        Ok(Response::new(SetRemoteOrderResponse::default()))
+        let products = request.into_inner().products;
+        let saved = match &self.state_view.remote_order {
+            Some(order) => order.set(&products),
+            None => Err(std::io::Error::other("no data folder")),
+        };
+        if let Err(error) = saved {
+            warn!(%error, "remote order write failed");
+            return Err(Status::internal("remote order write failed"));
+        }
+        Ok(Response::new(SetRemoteOrderResponse {}))
     }
 
     async fn get_harold_state(
