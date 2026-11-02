@@ -235,6 +235,8 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 
 `AgentStateSnapshot.tts_muted` is a plain proto3 `bool`. Proto3 does not write a `false` scalar on the wire, so a client such as `grpcurl` omits it unless it uses `-emit-defaults`. An absent `tts_muted` means `false`: the voice mute is off. To read the voice mute without this rule, run `harold get voice`. It calls `GetHaroldState`, which always writes both flags.
 
+`harold get voice` and `harold get messaging` read the published agent snapshot. For about 20 ms after a switch changes, they can still show the old value. A caller that has just changed a switch must wait a short time and read it again.
+
 `ReportAgentState.state` accepts `AGENT_STATE_WORKING`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_DONE`, `AGENT_STATE_IDLE` and `AGENT_STATE_ERROR`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING` for installed plugins. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
 
 ### `GetHaroldState`

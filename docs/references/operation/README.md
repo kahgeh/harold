@@ -247,6 +247,7 @@ For `voice` and `messaging`, `off` always means that the switch stops the thing.
 | --- | --- | --- |
 | No thing, extra words, or a name that is not in the table | `unknown thing "NAME": voice, messaging, version, machine, multiplexer, hosts, chief` | 2 |
 | The daemon does not answer within 3 seconds | `the Harold daemon did not answer within 3 seconds` | 1 |
+| The configuration holds an invalid daemon address | `invalid configuration` | 1 |
 | No daemon on the address | `the Harold daemon is not reachable` | 1 |
 | An older Harold without the call (`Unimplemented`) | `this Harold is too old for harold get` | 1 |
 | Another gRPC error | `the Harold daemon refused the call` | 1 |
