@@ -328,7 +328,7 @@ impl TmuxNavigator {
         let [session] = sessions.as_slice() else {
             return Ok(None);
         };
-        let request = format!("{{\"session_id\":\"{session}\"}}");
+        let request = session_view_request(session);
         let view = self.run_rex(
             "read Rex session",
             &["api", "call", "session.view", &request],
@@ -458,7 +458,7 @@ impl PaneNavigator for TmuxNavigator {
                 detail: "no Rex session has this name".into(),
             });
         };
-        let request = format!("{{\"session_id\":\"{session_id}\"}}");
+        let request = session_view_request(&session_id);
         let view = self.run_rex_on(
             host,
             None,
@@ -539,6 +539,23 @@ impl PaneNavigator for TmuxNavigator {
         )?;
         Ok(())
     }
+}
+
+/// The JSON request of `session.view` for one session id. A quote, a backslash or a control
+/// character in the id is escaped, so the id can never break the request.
+fn session_view_request(session_id: &str) -> String {
+    let mut escaped = String::new();
+    for character in session_id.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            control if control.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", u32::from(control)));
+            }
+            other => escaped.push(other),
+        }
+    }
+    format!("{{\"session_id\":\"{escaped}\"}}")
 }
 
 /// The string value of the first `"key"` at or after `from`: its text and the offset after it.
@@ -661,7 +678,7 @@ fn sanitize_detail(detail: &str) -> String {
 mod tests {
     use super::{
         CommandOutput, CommandRunner, HostJump, NavigationError, PaneNavigator, ProcessContext,
-        TmuxNavigator, is_tmux_pane_id,
+        TmuxNavigator, is_tmux_pane_id, rex_window_of_block, session_view_request,
     };
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, ConnectionState, SearchState, Snapshot,
@@ -1455,7 +1472,7 @@ mod tests {
     }
 
     fn one_app() -> String {
-        clients_of(&[("cli", ""), ("app", "PasM4MBP")])
+        clients_of(&[("cli", ""), ("app", "laptop-mac")])
     }
 
     #[test]
@@ -1602,15 +1619,15 @@ mod tests {
 
     #[test]
     fn no_call_for_a_host_row_runs_without_the_host_flag() {
-        let clients = clients_of(&[("app", "PasM4MBP"), ("app", "Other")]);
+        let clients = clients_of(&[("app", "laptop-mac"), ("app", "Other")]);
         for (block, outputs) in [
             (
                 "block:two",
-                vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", ""],
+                vec![SESSIONS, HOST_VIEW, &clients, "laptop-mac\n", ""],
             ),
             (
                 "block:three",
-                vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", "", ""],
+                vec![SESSIONS, HOST_VIEW, &clients, "laptop-mac\n", "", ""],
             ),
         ] {
             let (navigator, runner) = rex_navigator(vec![REX_SERVER], outputs);
@@ -1641,10 +1658,10 @@ mod tests {
 
     #[test]
     fn several_apps_use_the_one_labelled_with_the_short_host_name() {
-        let clients = clients_of(&[("app", "Other"), ("app", "PasM4MBP"), ("app", "Third")]);
+        let clients = clients_of(&[("app", "Other"), ("app", "laptop-mac"), ("app", "Third")]);
         let (navigator, runner) = rex_navigator(
             vec![REX_SERVER],
-            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", ""],
+            vec![SESSIONS, HOST_VIEW, &clients, "laptop-mac\n", ""],
         );
 
         let jump = navigator
@@ -1663,7 +1680,7 @@ mod tests {
         let clients = clients_of(&[("app", "Other"), ("app", "Third")]);
         let (navigator, runner) = rex_navigator(
             vec![REX_SERVER],
-            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n"],
+            vec![SESSIONS, HOST_VIEW, &clients, "laptop-mac\n"],
         );
 
         let jump = navigator
@@ -1677,10 +1694,10 @@ mod tests {
 
     #[test]
     fn several_apps_with_two_matching_gives_many_apps() {
-        let clients = clients_of(&[("app", "PasM4MBP"), ("app", "PasM4MBP")]);
+        let clients = clients_of(&[("app", "laptop-mac"), ("app", "laptop-mac")]);
         let (navigator, runner) = rex_navigator(
             vec![REX_SERVER],
-            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n"],
+            vec![SESSIONS, HOST_VIEW, &clients, "laptop-mac\n"],
         );
 
         let jump = navigator
@@ -1818,5 +1835,89 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|call| args(call)[0] != "-S"));
+    }
+
+    /// A `session.view` result in the real Rex key order. A window lists `window_id`, `label`,
+    /// `focused_block_id`, `layers`. A layer lists `layer_id`, `kind`, `bounds`, `layout`,
+    /// `blocks`. A block lists `block_id`, `label`, `creator_name`, `flavor`, `host_id` and
+    /// sometimes `owner`. Window 2 has two layers, and `block:deep` sits in the second one.
+    const REAL_SHAPE_VIEW: &str = r#"{"revision":9,"session_id":"session:bbb","label":"harold","active_window_id":"window:2","windows":[{"window_id":"window:1","label":"pod","focused_block_id":"block:first","layers":[{"layer_id":"layer:1","kind":"tiled","bounds":{"x":0,"y":0,"w":80,"h":24},"layout":{"kind":"leaf"},"blocks":[{"block_id":"block:first","label":"shell one","creator_name":"com.superlogical.terminal","flavor":"terminal","host_id":"host:a"},{"block_id":"block:side","label":"notes","creator_name":"com.superlogical.terminal","flavor":"terminal","host_id":"host:a","owner":"user"}]}]},{"window_id":"window:2","label":"linux-satellite-2b","focused_block_id":"block:top","layers":[{"layer_id":"layer:2","kind":"tiled","bounds":{"x":0,"y":0,"w":80,"h":24},"layout":{"kind":"leaf"},"blocks":[{"block_id":"block:top","label":"shell two","creator_name":"com.superlogical.terminal","flavor":"terminal","host_id":"host:b"}]},{"layer_id":"layer:3","kind":"floating","bounds":{"x":4,"y":2,"w":40,"h":10},"layout":{"kind":"leaf"},"blocks":[{"block_id":"block:deep","label":"agent","creator_name":"com.superlogical.terminal","flavor":"terminal","host_id":"host:b"}]}]}]}"#;
+
+    #[test]
+    fn the_real_shape_gives_the_window_and_its_focused_block_for_a_block_in_the_second_layer() {
+        assert_eq!(
+            rex_window_of_block(REAL_SHAPE_VIEW, "block:deep"),
+            Some(("window:2".to_string(), Some("block:top".to_string())))
+        );
+    }
+
+    #[test]
+    fn the_real_shape_gives_window_one_for_a_block_of_window_one() {
+        for block in ["block:first", "block:side"] {
+            assert_eq!(
+                rex_window_of_block(REAL_SHAPE_VIEW, block),
+                Some(("window:1".to_string(), Some("block:first".to_string()))),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_real_shape_gives_none_for_a_block_in_no_window() {
+        assert_eq!(rex_window_of_block(REAL_SHAPE_VIEW, "block:nowhere"), None);
+        // A window label is not a block.
+        assert_eq!(rex_window_of_block(REAL_SHAPE_VIEW, "pod"), None);
+    }
+
+    #[test]
+    fn enter_on_a_block_in_no_window_of_the_real_shape_runs_no_select() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![SESSIONS, REAL_SHAPE_VIEW]);
+
+        let error = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:nowhere")
+            .unwrap_err();
+
+        assert!(matches!(error, NavigationError::CommandFailed { .. }));
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls
+                .iter()
+                .all(|call| !args(call).contains(&"session.select"))
+        );
+    }
+
+    #[test]
+    fn enter_on_the_block_in_the_second_layer_selects_window_two() {
+        let clients = one_app();
+        let (navigator, runner) = rex_navigator(
+            vec![REX_SERVER],
+            vec![SESSIONS, REAL_SHAPE_VIEW, &clients, "", ""],
+        );
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:deep")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::Moved);
+        let calls = runner.calls();
+        let last = args(calls.last().unwrap());
+        assert_eq!(
+            &last[last.len() - 2..],
+            ["session_id=session:bbb", "window_id=window:2"]
+        );
+    }
+
+    #[test]
+    fn a_session_id_with_a_quote_or_a_backslash_is_escaped_in_the_request() {
+        assert_eq!(
+            session_view_request(r#"a"b\c"#),
+            r#"{"session_id":"a\"b\\c"}"#
+        );
+        assert_eq!(session_view_request("a\nb"), r#"{"session_id":"a\u000ab"}"#);
+        assert_eq!(
+            session_view_request("session:bbb"),
+            r#"{"session_id":"session:bbb"}"#
+        );
     }
 }

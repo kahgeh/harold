@@ -1010,6 +1010,28 @@ fn a_failed_tmux_scan_leaves_the_names() {
 }
 
 #[test]
+fn a_tmux_scan_that_ends_by_timeout_leaves_the_names() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+    let version = *names.subscribe().borrow();
+
+    // The process read is slow (a short real sleep, no busy loop) and then gives up.
+    let timed_out = inventory.scan_with(
+        || Ok(vec![named_pane("%1", 10, "ttys001", "other")]),
+        |_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Err(InventoryError::CommandFailed)
+        },
+        std::time::Duration::from_millis(5),
+    );
+
+    assert_eq!(timed_out, Err(InventoryError::CommandFailed));
+    assert_eq!(names.get("%1"), Some("work".to_string()));
+    assert_eq!(*names.subscribe().borrow(), version);
+}
+
+#[test]
 fn a_rename_of_a_pane_with_no_agent_raises_no_version() {
     let names = WindowNames::default();
     let inventory = TmuxAgentInventory::new(named_settings(), names.clone());

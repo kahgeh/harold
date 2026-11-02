@@ -3300,6 +3300,63 @@ mod tests {
     }
 
     #[test]
+    fn a_colliding_row_keeps_its_pane_suffix_with_a_window_name() {
+        let name = "voice-mute-palette-extended";
+        let mut first = row(
+            incarnation("%1", 1, 2, "codex"),
+            AgentState::Working,
+            "Codex",
+            "work:0.3",
+            "a",
+            90_000,
+        );
+        first.working_directory = format!("/w/{name}");
+        first.pane_index = 3;
+        first.window_name = "linux-satellite-2b".into();
+        let mut second = row(
+            incarnation("%2", 4, 5, "codex"),
+            AgentState::Idle,
+            "Codex",
+            "work:0.4",
+            "b",
+            90_000,
+        );
+        second.working_directory = format!("/w/{name}");
+        second.pane_index = 4;
+        second.window_name = "linux-satellite-2b".into();
+        let app = live_app(vec![first, second], None);
+        for width in [70, 84, 100, 140] {
+            let content = rendered(&app, width, 29, 100_000);
+            assert!(content.contains(" :0.3"), "{width}: {content}");
+            assert!(content.contains(" :0.4"), "{width}: {content}");
+        }
+    }
+
+    #[test]
+    fn the_window_line_follows_the_host_line() {
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        agent.host = "omarchy".into();
+        agent.window_name = "linux-satellite-2b".into();
+        let lines = super::detail_lines(&agent, 100_000, 60, super::StepMode::Full);
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let at = |label: &str| text.iter().position(|l| l.starts_with(label));
+        let (state, host, window) = (at("STATE"), at("HOST"), at("WINDOW"));
+        assert!(
+            state.is_some() && host.is_some() && window.is_some(),
+            "{text:?}"
+        );
+        assert!(state < host && host < window, "{text:?}");
+        assert_eq!(host.map(|n| n + 1), window, "{text:?}");
+    }
+
+    #[test]
     fn the_detail_panel_shows_a_window_line() {
         let mut agent = row(
             incarnation("%1", 10, 20, "claude"),
@@ -3344,8 +3401,8 @@ mod tests {
     }
 
     #[test]
-    fn a_window_name_with_control_characters_is_cleaned() {
-        // The clean-up is in api.rs. Here a long name must never overflow the cell.
+    fn a_very_long_window_name_never_overflows_the_cell() {
+        // The clean-up of control characters is in api.rs. Here a long name must not overflow.
         let mut agent = row(
             incarnation("%1", 10, 20, "claude"),
             AgentState::Working,

@@ -3065,3 +3065,42 @@ fn a_failed_rex_scan_leaves_the_names() {
     assert_eq!(names.get(&pane_id), Some("pod".to_string()));
     assert_eq!(*names.subscribe().borrow(), version);
 }
+
+#[test]
+fn a_gone_rex_agent_pane_leaves_the_names() {
+    let _directory = directory_test_lock();
+    let mut api = fake(&[("block:a", Ok(claude_process()))]);
+    api.labels = vec!["pod".into()];
+    let names = WindowNames::default();
+    let first = RexAgentInventory::new(Arc::new(api), settings(), inert_status(), names.clone());
+    let pane_id = first.scan().unwrap()[0].incarnation.pane_id.clone();
+    assert_eq!(names.get(&pane_id), Some("pod".to_string()));
+
+    // The agent exits: the block stays, and it holds only a shell.
+    let gone = fake(&[("block:a", Ok(shell_process()))]);
+    let second = RexAgentInventory::new(Arc::new(gone), settings(), inert_status(), names.clone());
+    assert!(second.scan().unwrap().is_empty());
+
+    assert_eq!(names.get(&pane_id), None);
+}
+
+#[test]
+fn a_rename_of_a_rex_window_with_no_agent_raises_no_version() {
+    let _directory = directory_test_lock();
+    let names = WindowNames::default();
+    let build = |shell_window: &str| {
+        let mut api = fake(&[
+            ("block:a", Ok(claude_process())),
+            ("block:b", Ok(shell_process())),
+        ]);
+        api.windows = vec![vec!["block:a".into()], vec!["block:b".into()]];
+        api.labels = vec!["pod".into(), shell_window.into()];
+        RexAgentInventory::new(Arc::new(api), settings(), inert_status(), names.clone())
+    };
+    build("shell").scan().unwrap();
+    let version = *names.subscribe().borrow();
+
+    build("renamed").scan().unwrap();
+
+    assert_eq!(*names.subscribe().borrow(), version);
+}
