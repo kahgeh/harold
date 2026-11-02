@@ -1691,8 +1691,55 @@ class LinuxInstallTests(unittest.TestCase):
         self.assertNotIn('command = ""', text)
         self.assertEqual(text.count('[agent_monitor]'), 1, text)
         self.assertEqual(text.count('[telemetry]'), 1, text)
-        self.assertEqual(output.count('[tts]'), 1, output)
+        # One "left as written" line and one warning, because "x" is not the value Linux needs.
+        self.assertEqual(output.count('[tts]'), 2, output)
         self.assertIn('[tts] is already in the configuration', output)
+        self.assertIn('Warning: [tts] command', output)
+
+    def kept(self, base, rex='/usr/bin/rex'):
+        """linux_config of `base`: (the text, the printed lines)."""
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            text = self.install.linux_config(base.encode(), rex).decode()
+        return text, printed.getvalue().splitlines()
+
+    def warnings(self, lines):
+        return [line for line in lines if line.startswith('Warning: ')]
+
+    def test_a_kept_table_without_the_needed_key_warns(self):
+        text, lines = self.kept('[agent_monitor]\nrex = "/usr/bin/rex"\n')
+        self.assertEqual(self.warnings(lines), [
+            'Warning: [agent_monitor] multiplexer is not set to the value Harold on Linux needs: '
+            'multiplexer = "rex". Edit config/local.toml.'])
+        self.assertIn('[agent_monitor] is already in the configuration; left as written.', lines)
+        self.assertEqual(text.count('[agent_monitor]'), 1, text)
+
+    def test_a_kept_table_with_another_value_warns(self):
+        for base, needed in (('[agent_monitor]\nmultiplexer = "tmux"\nrex = "/usr/bin/rex"\n', 'multiplexer = "rex"'),
+                             ('[agent_monitor]\nmultiplexer = "rex"\nrex = "/old/rex"\n', 'rex = "/usr/bin/rex"'),
+                             ('[tts]\ncommand = "x"\n', 'command = ""'),
+                             ('[telemetry]\nexport = true\n', 'export = false'),
+                             ('tts.command = "say"\n', 'command = ""')):
+            with self.subTest(base=base):
+                text, lines = self.kept(base)
+                warnings = self.warnings(lines)
+                self.assertEqual(len(warnings), 1, lines)
+                self.assertIn(needed, warnings[0])
+                self.assertTrue(text.startswith(base), text)
+
+    def test_a_kept_table_with_the_needed_values_prints_no_warning(self):
+        base = ('[agent_monitor]\nmultiplexer = "rex"  # comment\nrex = \'/usr/bin/rex\'\n'
+                '[tts]\n command="" \n[telemetry]\nexport = false\n')
+        text, lines = self.kept(base)
+        self.assertEqual(self.warnings(lines), [])
+        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(text, base)
+        for name in ('agent_monitor', 'tts', 'telemetry'):
+            self.assertEqual(text.count('[{}]'.format(name)), 1, text)
+
+    def test_a_key_in_another_table_does_not_count(self):
+        _, lines = self.kept('[tts]\n[notify]\ncommand = ""\n')
+        self.assertIn('command = ""', ' '.join(self.warnings(lines)))
 
     def test_each_existing_table_is_kept_as_the_user_wrote_it(self):
         rex = '/opt/my rex/rex'
@@ -1707,8 +1754,11 @@ class LinuxInstallTests(unittest.TestCase):
                     text = self.install.linux_config(table.encode(), rex).decode()
                 self.assertTrue(text.startswith(table), text)
                 self.assertEqual(text.count('[{}]'.format(name)), 1 if '[{}]'.format(name) in table else 0, text)
-                self.assertEqual(printed.getvalue(),
-                                 '[{}] is already in the configuration; left as written.\n'.format(name))
+                # Each of these tables lacks a value Linux needs, so a warning follows the line.
+                lines = printed.getvalue().splitlines()
+                self.assertEqual(lines[0], '[{}] is already in the configuration; left as written.'.format(name))
+                self.assertTrue(lines[1:], lines)
+                self.assertTrue(all(line.startswith('Warning: [{}] '.format(name)) for line in lines[1:]), lines)
                 try:
                     import tomllib
                 except ImportError:  # Python before 3.11

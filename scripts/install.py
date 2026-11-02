@@ -389,20 +389,64 @@ def has_table(text, name):
     return name in TOML_TOP_KEY.findall(text[:first.start()] if first else text)
 
 
+def toml_scalar(raw):
+    """The value of a TOML string or boolean at the start of `raw`, or None when it is another
+    kind of value or cannot be read. A line check only: Python 3.9 has no tomllib."""
+    raw = raw.strip()
+    if raw.startswith('"'):
+        match = re.match(r'"((?:[^"\\]|\\.)*)"', raw)
+        try:
+            return json.loads('"{}"'.format(match.group(1))) if match else None
+        except ValueError:
+            return None
+    if raw.startswith("'"):
+        end = raw.find("'", 1)
+        return raw[1:end] if end > 0 else None
+    word = re.match(r'(true|false)\b', raw)
+    return (word.group(1) == 'true') if word else None
+
+
+def table_value(text, name, key):
+    """The value of `key` in the table `name` of the TOML `text`: from the lines under a `[name]`
+    header up to the next header, or from a top-level `name.key = ...` line before the first
+    header. Returns (found, value); value is None when it is not a string or boolean."""
+    header = re.compile(r'^[ \t]*\[[ \t]*{}[ \t]*\][ \t]*(#.*)?$'.format(re.escape(name)))
+    any_header = re.compile(r'^[ \t]*\[')
+    inside = re.compile(r'^[ \t]*{}[ \t]*=(.*)$'.format(re.escape(key)))
+    top = re.compile(r'^[ \t]*{}[ \t]*\.[ \t]*{}[ \t]*=(.*)$'.format(re.escape(name), re.escape(key)))
+    section = None
+    for line in text.splitlines():
+        if any_header.match(line):
+            section = name if header.match(line) else ''
+            continue
+        match = inside.match(line) if section == name else top.match(line) if section is None else None
+        if match:
+            return True, toml_scalar(match.group(1))
+    return False, None
+
+
 def linux_config(base, rex):
     """`base` with the Linux settings appended: [agent_monitor] for Rex, [tts] with no command and
-    [telemetry] with no export. A table already in `base` is left as written, with one line said."""
+    [telemetry] with no export. A table already in `base` is left as written, with one line said,
+    and a warning for each setting in it that is missing or holds another value."""
     try:
         text = base.decode('utf-8')
     except UnicodeDecodeError:
         raise RuntimeError('The configuration is not UTF-8 text') from None
-    tables = (('agent_monitor', 'multiplexer = "rex"\nrex = {}\n'.format(json.dumps(rex, ensure_ascii=False))),
-              ('tts', 'command = ""\n'),
-              ('telemetry', 'export = false\n'))
+    rex_value = json.dumps(rex, ensure_ascii=False)
+    tables = (('agent_monitor', 'multiplexer = "rex"\nrex = {}\n'.format(rex_value),
+               (('multiplexer', 'rex', '"rex"'), ('rex', rex, rex_value))),
+              ('tts', 'command = ""\n', (('command', '', '""'),)),
+              ('telemetry', 'export = false\n', (('export', False, 'false'),)))
     added = []
-    for name, body in tables:
+    for name, body, settings in tables:
         if has_table(text, name):
             print('[{}] is already in the configuration; left as written.'.format(name), flush=True)
+            for key, needed, shown_value in settings:
+                found, value = table_value(text, name, key)
+                if not (found and type(value) is type(needed) and value == needed):
+                    print('Warning: [{0}] {1} is not set to the value Harold on Linux needs: {1} = {2}. '
+                          'Edit config/local.toml.'.format(name, key, shown_value), flush=True)
         else:
             added.append('[{}]\n{}'.format(name, body))
     if added:
