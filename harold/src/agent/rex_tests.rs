@@ -804,6 +804,8 @@ fn scan_stopped_during_process_calls_logs_no_unreadable() {
     let signal = StopSignal::default();
     signal.request();
     let result = run_stoppable(signal, || inventory.scan());
+    // One block fails and two answer. Only the stop check turns this into a failed scan
+    // that logs nothing per block.
     assert_eq!(result, Err(InventoryError::RexFailed));
     assert!(logs.with("agent pane unreadable").is_empty());
 }
