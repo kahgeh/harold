@@ -198,6 +198,12 @@ class FakeGitHub:
         return done(argv, 0)
 
 
+class PackagesTests(unittest.TestCase):
+    def test_packages_list_both_archives(self):
+        self.assertEqual(release.PACKAGES, ('harold-aarch64-apple-darwin',
+                                            'harold-x86_64-unknown-linux-gnu'))
+
+
 class ReleaseTestCase(unittest.TestCase):
     """A checkout whose `origin` is a local bare repository standing in for kahgeh/harold.
 

@@ -24,6 +24,7 @@ DEFAULT_PREFIX = Path.home() / 'bin'
 WORKFLOW = 'build.yml'
 LINUX_WORKFLOW = 'linux-tests.yml'
 PACKAGE = 'harold-aarch64-apple-darwin'
+PACKAGES = (PACKAGE, 'harold-x86_64-unknown-linux-gnu')
 ARCHIVE = PACKAGE + '.tar.gz'
 CHECKSUM = ARCHIVE + '.sha256'
 # The tests the build workflow runs, in its order.
