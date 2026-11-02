@@ -1519,6 +1519,9 @@ class ServiceTests(unittest.TestCase):
     def setUp(self):
         import harold_service
         self.service = harold_service
+        patcher = patch.object(sys, 'platform', 'darwin')  # these tests cover the launchd backend
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_managed_environment_clears_inherited_overrides_and_locale(self):
         inherited = {'HAROLD__GRPC__PORT': '9999', 'HAROLD_ENV': 'evil',

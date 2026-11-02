@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-user launchd service control, copied into the installed Harold bundle."""
+"""Per-user launchd (macOS) or systemd (Linux) service control, copied into the installed Harold bundle."""
 
 import argparse
 from contextlib import contextmanager
@@ -31,6 +31,8 @@ def target(metadata):
 
 
 def launch_pid(metadata):
+    if sys.platform == 'linux':
+        return _linux_launch_pid(metadata)
     result = run(['launchctl', 'print', target(metadata)])
     if result.returncode:
         return None
@@ -91,6 +93,8 @@ def stop_unmanaged(metadata):
 def unload(metadata):
     """Boots the job out of launchd and waits for its process to end. It stays enabled, so
     launchd loads it again at the next login."""
+    if sys.platform == 'linux':
+        return _linux_unload(metadata)
     pid = launch_pid(metadata)
     loaded = run(['launchctl', 'print', target(metadata)]).returncode == 0
     if loaded:
@@ -106,6 +110,8 @@ def unload(metadata):
 
 def stop(metadata):
     """Disables the job, so launchd leaves it off across logins until `start`, then unloads it."""
+    if sys.platform == 'linux':
+        return _linux_stop(metadata)
     result = run(['launchctl', 'disable', target(metadata)])
     if result.returncode:
         raise RuntimeError('Cannot disable service: ' + result.stderr.strip())
@@ -129,6 +135,8 @@ def gave_up(metadata):
 def disabled(metadata):
     """Whether `haroldctl stop` disabled the job. macOS prints `=> disabled` or, before
     macOS 14, `=> true`."""
+    if sys.platform == 'linux':
+        return _linux_disabled(metadata)
     result = run(['launchctl', 'print-disabled', 'gui/{}'.format(os.getuid())])
     if result.returncode:
         raise RuntimeError('Cannot read disabled services: ' + result.stderr.strip())
@@ -174,6 +182,8 @@ def validated_metadata(metadata):
 def launch(metadata, timeout=30):
     """Loads the job if needed, starts it, and waits until it is ready. It loads the LaunchAgents
     copy, or the bundle's plist when that copy was deleted to turn off start at login."""
+    if sys.platform == 'linux':
+        return _linux_launch(metadata, timeout)
     pid = launch_pid(metadata)
     listeners = listener_pids(metadata)
     if listeners and listeners != {pid}:
@@ -208,6 +218,8 @@ def launch(metadata, timeout=30):
 
 def start(metadata, timeout=30):
     """Enables the job, forgets any crash loop, and launches it."""
+    if sys.platform == 'linux':
+        return _linux_start(metadata, timeout)
     result = run(['launchctl', 'enable', target(metadata)])
     if result.returncode:
         raise RuntimeError('Cannot enable service: ' + result.stderr.strip())
@@ -222,6 +234,95 @@ def ensure(metadata, timeout=30):
     if gave_up(metadata):
         raise Off('gave up after a crash loop; haroldctl start clears it')
     return launch(metadata, timeout)
+
+
+# ---- systemd backend (Linux) ----
+# These functions never read metadata['label'] and never call launchctl.
+
+UNIT = 'harold.service'
+
+
+def systemctl(*args):
+    return run(['systemctl', '--user', *args])
+
+
+def _systemctl_checked(failure, *args):
+    result = systemctl(*args)
+    if result.returncode:
+        raise RuntimeError('{}: systemctl --user {}: {}'.format(
+            failure, ' '.join(args), result.stderr.strip()))
+    return result
+
+
+def _show(*properties):
+    result = _systemctl_checked('Cannot read unit state', 'show', UNIT,
+                                *[arg for name in properties for arg in ('-p', name)])
+    values = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition('=')
+        if separator:
+            values[key] = value
+    return values
+
+
+def unit_state():
+    values = _show('ActiveState', 'NRestarts')
+    return {'ActiveState': values.get('ActiveState', ''), 'NRestarts': values.get('NRestarts', '')}
+
+
+def main_pid():
+    value = _show('MainPID').get('MainPID', '0')
+    return int(value) if value.isdigit() and int(value) else None
+
+
+def _linux_launch_pid(metadata):
+    return main_pid()
+
+
+def _linux_disabled(metadata):
+    return systemctl('is-enabled', UNIT).stdout.strip() == 'disabled'
+
+
+def _linux_unload(metadata):
+    """Stops the unit and waits for its process to end. It stays enabled for the next login."""
+    _systemctl_checked('Cannot unload service', 'stop', UNIT)
+
+
+def _linux_stop(metadata):
+    _systemctl_checked('Cannot disable service', 'disable', '--now', UNIT)
+
+
+def _linux_launch(metadata, timeout=30):
+    pid = main_pid()
+    listeners = listener_pids(metadata)
+    if listeners and listeners != {pid}:
+        raise RuntimeError('Port {} has an unrelated listener; use the installer to migrate an old daemon'.format(
+            metadata['grpc_addr']))
+    if not pid:
+        result = systemctl('start', UNIT)
+        if result.returncode:
+            _linux_unload(metadata)
+            raise RuntimeError('Cannot start service: systemctl --user start {}: {}'.format(
+                UNIT, result.stderr.strip()))
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            pid = main_pid()
+            if pid and listener_pids(metadata) == {pid} and probe_ready(metadata):
+                if main_pid() == pid and listener_pids(metadata) == {pid}:
+                    return pid
+            time.sleep(0.2)
+        raise RuntimeError('Service failed readiness within {} seconds'.format(timeout))
+    except Exception:
+        # Stop only: a failed start must not leave the unit disabled.
+        _linux_unload(metadata)
+        raise
+
+
+def _linux_start(metadata, timeout=30):
+    _systemctl_checked('Cannot enable service', 'enable', UNIT)
+    crash_file(metadata).unlink(missing_ok=True)
+    return _linux_launch(metadata, timeout)
 
 
 @contextmanager
@@ -280,8 +381,12 @@ def main():
             if args.command == 'status':
                 pid = launch_pid(metadata)
                 ready = bool(pid and listener_pids(metadata) == {pid} and probe_ready(metadata))
-                print(json.dumps({'ready': ready, 'pid': pid, 'grpc_addr': metadata['grpc_addr'],
-                                  'autostart': autostart(metadata)}))
+                status = {'ready': ready, 'pid': pid, 'grpc_addr': metadata['grpc_addr'],
+                          'autostart': autostart(metadata)}
+                if sys.platform == 'linux':
+                    state = unit_state()
+                    status.update(active_state=state['ActiveState'], n_restarts=state['NRestarts'])
+                print(json.dumps(status))
                 return 0 if ready else 1
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:

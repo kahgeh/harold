@@ -88,6 +88,67 @@ class FakeLaunchctl:
         return [call[0] for call in self.calls]
 
 
+class FakeSystemctl:
+    """Stands in for every command harold_service runs on Linux: systemctl --user, lsof and the
+    readiness check. It records each systemctl call (without `--user`) and keeps the unit's state."""
+
+    def __init__(self, enabled=True, active=False, n_restarts=2, ready=True, fail=None, config=None):
+        self.enabled = enabled
+        self.active = active
+        self.n_restarts = n_restarts
+        self.ready = ready
+        self.fail = fail or {}
+        self.config = config
+        self.calls = []
+
+    def __call__(self, args, **kwargs):
+        args = [str(arg) for arg in args]
+        if args[0] == 'systemctl':
+            assert args[1] == '--user', args
+            self.calls.append(args[2:])
+            return self.systemctl(args, args[2:])
+        if args[0] == 'lsof' and any(arg.startswith('-iTCP:') for arg in args):
+            if self.active:
+                return subprocess.CompletedProcess(args, 0, 'p{}\n'.format(PID), '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+        if args[-1] == '--check-config' and self.config is not None:
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.config), '')
+        if args[-1] == '--check-ready':
+            return subprocess.CompletedProcess(
+                args, 0, '{{"ready": {}}}'.format('true' if self.ready else 'false'), '')
+        raise AssertionError('unexpected command: {}'.format(args))
+
+    def systemctl(self, args, rest):
+        command = rest[0]
+        if command in self.fail:
+            return subprocess.CompletedProcess(args, 1, '', self.fail[command])
+        ok = subprocess.CompletedProcess(args, 0, '', '')
+        if command == 'show' and rest[2:] == ['-p', 'ActiveState', '-p', 'NRestarts']:
+            return subprocess.CompletedProcess(args, 0, 'ActiveState={}\nNRestarts={}\n'.format(
+                'active' if self.active else 'inactive', self.n_restarts), '')
+        if command == 'show' and rest[2:] == ['-p', 'MainPID']:
+            return subprocess.CompletedProcess(args, 0, 'MainPID={}\n'.format(PID if self.active else 0), '')
+        if command == 'is-enabled':
+            return subprocess.CompletedProcess(
+                args, 0 if self.enabled else 1, 'enabled\n' if self.enabled else 'disabled\n', '')
+        if command == 'enable':
+            self.enabled = True
+        elif command == 'start':
+            self.active = True
+        elif command == 'stop':
+            self.active = False
+        elif command == 'disable':
+            self.enabled = False
+            if '--now' in rest:
+                self.active = False
+        else:
+            raise AssertionError('unexpected systemctl command: {}'.format(args))
+        return ok
+
+    def commands(self):
+        return [call[0] for call in self.calls]
+
+
 class ServiceControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -102,6 +163,9 @@ class ServiceControlTests(unittest.TestCase):
                          'env': {}}
         Path(self.metadata['launch_agent']).parent.mkdir(parents=True)
         Path(self.metadata['launch_agent']).write_text('plist')
+        patcher = patch.object(sys, 'platform', 'darwin')  # these tests cover the launchd backend
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.target = 'gui/{}/com.harold.agent.test'.format(os.getuid())
         for name, value in (('pid_alive', lambda pid: False), ('time', FakeTime())):
             patcher = patch.object(service, name, value)
@@ -206,6 +270,130 @@ class ServiceControlTests(unittest.TestCase):
         self.assertEqual(service.autostart(self.metadata), 'off (gave up after a crash loop)')
 
 
+class SystemdServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name).resolve()
+        self.bundle = root / 'bin/harold'
+        (self.bundle / 'data').mkdir(parents=True)
+        # Linux metadata has no `label` key.
+        self.metadata = {'bundle': str(self.bundle), 'unit': 'harold.service',
+                         'unit_file': str(root / 'home/.config/systemd/user/harold.service'),
+                         'grpc_addr': '127.0.0.1:50060', 'env': {}}
+        (self.bundle / 'service.json').write_text(json.dumps(self.metadata))
+        shutil.copyfile(service.__file__, self.bundle / 'service.py')
+        spec = importlib.util.spec_from_file_location('installed_harold_service_linux', self.bundle / 'service.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        for module in (service, self.module):
+            for name, value in (('pid_alive', lambda pid: False), ('time', FakeTime())):
+                patcher = patch.object(module, name, value)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+        patcher = patch.object(sys, 'platform', 'linux')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake(self, **state):
+        systemctl = FakeSystemctl(**state)
+        patcher = patch.object(service, 'run', systemctl)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return systemctl
+
+    def haroldctl(self, command, **state):
+        systemctl = FakeSystemctl(config={
+            'grpc_addr': '127.0.0.1:50060', 'store_path': str(self.bundle / 'data/store')}, **state)
+        printed, errors = io.StringIO(), io.StringIO()
+        with patch.object(self.module, 'run', systemctl), \
+             patch.object(sys, 'argv', ['service.py', command]), \
+             patch.dict(os.environ), \
+             contextlib.redirect_stdout(printed), \
+             contextlib.redirect_stderr(errors):
+            code = self.module.main()
+        return systemctl, code, printed.getvalue(), errors.getvalue()
+
+    def test_start_enables_then_starts_and_waits_ready(self):
+        systemctl = self.fake(enabled=False)
+        (self.bundle / 'data/crashes').write_text('gave-up\n')
+        self.assertEqual(service.start(self.metadata), PID)
+        enable, start = ['enable', service.UNIT], ['start', service.UNIT]
+        self.assertIn(enable, systemctl.calls)
+        self.assertIn(start, systemctl.calls)
+        self.assertLess(systemctl.calls.index(enable), systemctl.calls.index(start))
+        self.assertFalse((self.bundle / 'data/crashes').exists())
+
+    def test_stop_disables_and_stops(self):
+        systemctl = self.fake(active=True)
+        service.stop(self.metadata)
+        self.assertIn(['disable', '--now', service.UNIT], systemctl.calls)
+        self.assertFalse(systemctl.enabled)
+        self.assertFalse(systemctl.active)
+
+    def test_unload_stops_but_stays_enabled(self):
+        systemctl = self.fake(active=True)
+        service.unload(self.metadata)
+        self.assertEqual(systemctl.calls, [['stop', service.UNIT]])
+        self.assertTrue(systemctl.enabled)
+
+    def test_restart_stops_then_starts(self):
+        systemctl, code, printed, _ = self.haroldctl('restart', active=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(printed, 'Harold ready (PID {})\n'.format(PID))
+        stop, start = ['stop', service.UNIT], ['start', service.UNIT]
+        self.assertLess(systemctl.calls.index(stop), systemctl.calls.index(start))
+        self.assertNotIn('disable', systemctl.commands())
+
+    def test_status_prints_active_state_and_n_restarts(self):
+        _, code, printed, _ = self.haroldctl('status', active=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(printed), {
+            'ready': True, 'pid': PID, 'grpc_addr': '127.0.0.1:50060', 'autostart': 'on',
+            'active_state': 'active', 'n_restarts': '2'})
+
+    def test_unit_state_and_main_pid(self):
+        self.fake(active=True)
+        self.assertEqual(service.unit_state(), {'ActiveState': 'active', 'NRestarts': '2'})
+        self.assertEqual(service.main_pid(), PID)
+        self.fake(active=False)
+        self.assertIsNone(service.main_pid())
+
+    def test_ensure_refuses_when_stopped_by_haroldctl(self):
+        systemctl = self.fake(enabled=False)
+        with self.assertRaisesRegex(service.Off, 'stopped with haroldctl stop'):
+            service.ensure(self.metadata)
+        self.assertNotIn('start', systemctl.commands())
+        self.assertEqual(service.autostart(self.metadata), 'off (stopped with haroldctl stop)')
+
+    def test_ensure_starts_an_enabled_unit(self):
+        systemctl = self.fake()
+        self.assertEqual(service.ensure(self.metadata), PID)
+        self.assertNotIn('enable', systemctl.commands())
+
+    def test_a_failed_readiness_stops_but_leaves_the_unit_enabled(self):
+        systemctl = self.fake(ready=False)
+        with self.assertRaisesRegex(RuntimeError, 'readiness'):
+            service.start(self.metadata, timeout=0)
+        self.assertIn('stop', systemctl.commands())
+        self.assertNotIn('disable', systemctl.commands())
+        self.assertTrue(systemctl.enabled)
+
+    def test_systemctl_failure_names_the_command(self):
+        systemctl, code, _, errors = self.haroldctl('start', fail={'start': 'Failed to connect to bus'})
+        self.assertEqual(code, 1)
+        self.assertIn('Failed to connect to bus', errors)
+        self.assertIn('start', errors)
+
+    def test_darwin_still_uses_launchctl(self):
+        launchctl = FakeLaunchctl('com.harold.agent.test')
+        metadata = dict(self.metadata, label='com.harold.agent.test',
+                        launch_agent=str(self.bundle / 'a.plist'), plist=str(self.bundle / 'b.plist'))
+        with patch.object(sys, 'platform', 'darwin'), patch.object(service, 'run', launchctl):
+            self.assertEqual(service.start(metadata), PID)
+        self.assertIn('kickstart', launchctl.commands())
+
+
 class CommandTests(unittest.TestCase):
     """haroldctl's commands through main(), from a copy of service.py in a temporary bundle."""
 
@@ -226,6 +414,9 @@ class CommandTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('installed_harold_service', self.bundle / 'service.py')
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
+        patcher = patch.object(sys, 'platform', 'darwin')  # these tests cover the launchd backend
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.target = 'gui/{}/com.harold.agent.test'.format(os.getuid())
         for name, value in (('pid_alive', lambda pid: False), ('time', FakeTime())):
             patcher = patch.object(self.module, name, value)
