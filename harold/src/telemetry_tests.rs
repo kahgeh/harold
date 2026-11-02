@@ -2725,9 +2725,9 @@ fn the_unreadable_blocks_card_counts_the_unreadable_lines_by_pane_over_24_hours(
         "Body = 'agent pane unreadable'",
         "Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now()",
         "LogAttributes['pane_id'] AS pane_id",
-        "LogAttributes['reason'] AS reason",
+        "groupUniqArray(LogAttributes['reason'])",
         "count() AS lines",
-        "GROUP BY pane_id, reason",
+        "GROUP BY pane_id ORDER BY lines DESC",
     ] {
         assert!(sql.contains(piece), "{piece} in {sql}");
     }

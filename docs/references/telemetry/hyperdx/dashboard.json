@@ -1206,7 +1206,7 @@
         "displayType": "table",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT LogAttributes['pane_id'] AS pane_id, LogAttributes['reason'] AS reason, count() AS lines FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'agent pane unreadable' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now() GROUP BY pane_id, reason ORDER BY lines DESC, pane_id"
+        "sqlTemplate": "SELECT LogAttributes['pane_id'] AS pane_id, count() AS lines, arrayStringConcat(groupUniqArray(LogAttributes['reason']), ', ') AS reasons FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'agent pane unreadable' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now() GROUP BY pane_id ORDER BY lines DESC, pane_id"
       }
     }
   ]

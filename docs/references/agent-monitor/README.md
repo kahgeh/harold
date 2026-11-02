@@ -518,7 +518,7 @@ An unreadable block is a block whose `process` answer failed, timed out or could
 
 Harold logs each line once for each change. A block that stays unreadable logs one `agent pane unreadable` line, not one for each scan. A host scan leaves an unreadable block out and writes no log line for it. It fails only when no block answered.
 
-One unreadable block does not degrade the inventory. Two cases degrade it. In the first case, the listing (`ls` or `session.view`) fails. In the second case, the scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory`. The `reason` is the reason of the first error: `rex_failed`, `rex_timeout` or `malformed_output`. A scan with no blocks is not degraded. A degraded scan returns no old rows.
+One unreadable block does not degrade the inventory. Two cases degrade it. In the first case, the listing (`ls` or `session.view`) fails. In the second case, the scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory`. The `reason` is the reason of the first error: `rex_failed`, `rex_timeout`, `rex_absent` or `malformed_output`. A scan with no blocks is not degraded. A degraded scan returns no old rows.
 
 When the inventory is degraded, `harold speak` cannot find the pane of its caller. The daemon answers `unavailable`. The command prints `the agent lookup is not available now; try again`. The same line covers a failed event append and a stopped monitor runtime. A failed write of the line keeps `the Harold daemon could not store the spoken line`.
 
