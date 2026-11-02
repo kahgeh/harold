@@ -78,8 +78,8 @@ Such a row has a pane id of the form `rex:<label>/block:<id>`, and the fields `h
 | Place | An agent on a Rex host |
 | --- | --- |
 | Group | The first word of its session name, as for every agent. |
-| WHERE column | The host mark, a space, then the name. The column keeps its fixed width, and a longer text is cut with `…`. |
-| Detail panel | A `HOST` line with the label. |
+| WHERE column | The host mark, a space, then the session name. When the window has a name, ` · ` and the window name follow the session name. The column keeps its fixed width, and a longer text is cut with `…`. The pane address of a colliding row stays visible. |
+| Detail panel | A `HOST` line with the label. A `WINDOW` line with the window name, when the window has a name (this applies to every agent). |
 | Enter | The status line shows `on <label>`. No `rex` or `tmux` command runs. |
 | Filter (`f`) | Also matches the host label. |
 

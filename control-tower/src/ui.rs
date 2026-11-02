@@ -699,14 +699,17 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                     ),
                     state_style(agent.state),
                 )),
-                Cell::from(format!(
-                    "  {}",
-                    fit_with_suffix(
-                        &host_prefix(agent, app.host_marker, pad),
-                        app.label_parts(agent),
-                        usize::from(where_width) - 2
+                Cell::from({
+                    let (name, suffix) = app.label_parts(agent);
+                    format!(
+                        "  {}",
+                        fit_with_suffix(
+                            &host_prefix(agent, app.host_marker, pad),
+                            (&where_name(name, &agent.window_name), suffix),
+                            usize::from(where_width) - 2
+                        )
                     )
-                )),
+                }),
                 Cell::from(Line::styled(
                     if app.is_waiting(&agent.incarnation) {
                         "◆"
@@ -1467,6 +1470,14 @@ fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker, pad: bool) -> S
     String::new()
 }
 
+/// The session name, then ` · ` and the window name when the window has one.
+fn where_name(name: &str, window_name: &str) -> String {
+    if window_name.is_empty() {
+        return name.to_owned();
+    }
+    format!("{name} · {window_name}")
+}
+
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
 /// tells colliding agents apart always stays visible.
 fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> String {
@@ -1597,6 +1608,11 @@ fn detail_lines<'a>(
     if agent.is_on_host() {
         // Right after the STATE line.
         lines.insert(3, fact("HOST", &agent.host));
+    }
+    if !agent.window_name.is_empty() {
+        // Right after the STATE line, or after the HOST line when there is one.
+        let at = if agent.is_on_host() { 4 } else { 3 };
+        lines.insert(at, fact("WINDOW", &agent.window_name));
     }
     lines
 }
@@ -3235,6 +3251,118 @@ mod tests {
             assert!(content.contains(" :0.3"), "{width}: {content}");
             assert!(content.contains(" :0.4"), "{width}: {content}");
             assert!(content.contains("voice-mute"), "{width}");
+        }
+    }
+
+    #[test]
+    fn where_shows_the_window_name_after_the_session() {
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        agent.working_directory = "/w/harold".into();
+        agent.window_name = "linux-sat-2b".into();
+        let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
+        assert!(content.contains("harold · linux-sat-2b"), "{content}");
+    }
+
+    #[test]
+    fn where_cuts_the_window_name_with_the_rest_at_60_80_120_columns() {
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        agent.working_directory = "/w/harold".into();
+        agent.window_name = "a-very-long-window-name-that-never-fits-in-the-column".into();
+        let app = live_app(vec![agent], None);
+        for width in [60, 80, 120] {
+            let content = rendered_lines(&app, width, 29, 100_000);
+            assert!(content.contains("harold · "), "{width}: {content}");
+            assert!(!content.contains("never-fits-in-the-column"), "{width}");
+        }
+    }
+
+    #[test]
+    fn where_keeps_the_pane_suffix_with_a_window_name() {
+        let text = super::where_name("sre", "a-very-long-window-name");
+        assert_eq!(
+            super::fit_with_suffix("", (&text, " :0.3"), 16),
+            "sre · a-ve… :0.3"
+        );
+    }
+
+    #[test]
+    fn the_detail_panel_shows_a_window_line() {
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        agent.window_name = "linux-satellite-2b".into();
+        let lines = super::detail_lines(&agent, 100_000, 60, super::StepMode::Full);
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.iter()
+                .any(|l| l.starts_with("WINDOW") && l.ends_with("linux-satellite-2b")),
+            "{text:?}"
+        );
+        let selected = Some(agent.incarnation.clone());
+        let content = rendered(&live_app(vec![agent], selected), 140, 44, 100_000);
+        assert!(content.contains("WINDOW"), "{content}");
+    }
+
+    #[test]
+    fn an_empty_window_name_looks_as_today() {
+        let agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        let lines = super::detail_lines(&agent, 100_000, 60, super::StepMode::Full);
+        assert!(lines.iter().all(|l| !l.to_string().starts_with("WINDOW")));
+        assert_eq!(super::where_name("harold", ""), "harold");
+        let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
+        let row_line = content
+            .lines()
+            .find(|l| l.contains("WORKING     "))
+            .unwrap();
+        assert!(!row_line.contains(" · "), "{row_line}");
+    }
+
+    #[test]
+    fn a_window_name_with_control_characters_is_cleaned() {
+        // The clean-up is in api.rs. Here a long name must never overflow the cell.
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.1",
+            "SUMMARYX",
+            0,
+        );
+        agent.window_name = "w".repeat(500);
+        let app = live_app(vec![agent], None);
+        for width in [60, 80, 120] {
+            let rows = rendered_lines(&app, width, 29, 100_000);
+            assert!(
+                rows.lines()
+                    .all(|l| l.chars().count() <= usize::from(width))
+            );
+            assert!(!rows.contains(&"w".repeat(100)), "{width}");
         }
     }
 
