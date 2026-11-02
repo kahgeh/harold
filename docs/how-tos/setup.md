@@ -4,6 +4,38 @@ Install Harold and the control-tower from the latest macOS release. This is the 
 
 The installer starts Harold to verify installation, and launchd starts it again at every login; `haroldctl stop` keeps it off until `haroldctl start`. The first install shows a macOS "Background Items Added" notice naming `harold`: that is Harold starting at login.
 
+## Install on Linux
+
+This path is for Arch Linux and omarchy on x86_64. It installs the Linux package. Harold runs there as a systemd user service, as a Harold on its own.
+
+Do these steps as your normal user, in a login session. The steps that use `sudo pacman` and the AUR are yours to run. The installer does not run them.
+
+1. Install the programs Harold needs from the Arch repositories:
+   ```sh
+   sudo pacman -S --needed python curl lsof inetutils base-devel pipewire
+   ```
+   Rex and Tailscale are already on omarchy.
+2. Install `grpcurl` from the AUR package `grpcurl-bin`. First check the package and approve it (see [dependency audits](../references/dependency-audits.md)). Then run `makepkg -si` in the package folder. The installer uses `grpcurl` to check that Harold answers.
+3. Run the one-line install:
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
+   ```
+   On Linux x86_64, `bootstrap.sh` takes the Linux package and checks its `.sha256` file with `sha256sum`.
+4. Answer the installer's questions. It asks no iMessage question and sets up no web app.
+5. Run `haroldctl status`.
+
+The installer needs `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. It stops, and installs nothing, when no Rex server answers. It sets `[agent_monitor] multiplexer = "rex"`, `[tts] command = ""` and `[telemetry] export = false`.
+
+On Linux, `haroldctl status` prints the Mac fields and two more. `active_state` is the unit's `ActiveState`. `n_restarts` is the number of times systemd started Harold again.
+
+Read the log with `journalctl --user -u harold`. Harold also writes `harold.log` in the installation.
+
+systemd stops your user services when you log out, unless lingering is on. The installer only warns you about this. To keep Harold running after logout, run `loginctl enable-linger`. The decision is yours.
+
+Linux has no speech, no web app and no line to the phone yet. Later stages add them. The agents in Rex, their states and the control-tower work now. See [Linux and the systemd user service](../references/operation/README.md#linux-and-the-systemd-user-service).
+
+The steps below describe the Mac install.
+
 ## Prerequisites
 
 - An Apple Silicon Mac running macOS 15 or newer, with an active graphical login session. Run the installer as your normal user.

@@ -30,6 +30,8 @@ The web app's todo page: answer the chief's questions from your phone.
 3. Connect your agents with the [hook setup guide](docs/how-tos/setup-agent-monitor-hooks.md).
 4. In a terminal in Rex or in tmux, start the control-tower: `~/bin/harold/harold start-control-tower`. Pane navigation for tmux agents needs tmux.
 
+On Arch Linux or omarchy (x86_64), follow [Install on Linux](docs/how-tos/setup.md#install-on-linux). Harold runs there as a systemd user service. It has no speech, no web app and no line to the phone yet.
+
 ## Docs
 
 - [Docs index](docs/README.md)

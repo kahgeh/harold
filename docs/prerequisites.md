@@ -1,6 +1,6 @@
 # Prerequisites
 
-Harold currently requires macOS for screen-lock detection and speech. Run installation as your normal user in a graphical login session.
+Harold requires macOS for screen-lock detection and speech. Linux has neither yet: see [Linux prerequisites](#linux-prerequisites). Run installation as your normal user in a graphical login session.
 
 ## Build features
 
@@ -29,6 +29,20 @@ brew install python tmux grpcurl
 ```
 
 No Rust toolchain or source checkout is needed. Follow [install or reinstall Harold](how-tos/setup.md) for the download command.
+
+## Linux prerequisites
+
+The Linux install needs Arch Linux or omarchy on x86_64, Python 3.9 or newer, and a running Rex server. Agents run in Rex. Run the installer as your normal user, in a login session.
+
+The installer checks for `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. `lsof` and `systemctl` are prerequisites. Install the others with your own `sudo pacman` and AUR steps:
+
+```sh
+sudo pacman -S --needed python curl lsof inetutils base-devel pipewire
+```
+
+Install `grpcurl` from the AUR package `grpcurl-bin`, with `makepkg -si`, after you approve its check. The installer does not run `sudo`, `pacman` or `makepkg`. See [install on Linux](how-tos/setup.md#install-on-linux).
+
+The Linux install has no speech, no web app and no line to the phone. Later stages add them. The installer does not check for `codesign`, `launchctl` or `plutil`.
 
 ## Additional tools for source builds
 

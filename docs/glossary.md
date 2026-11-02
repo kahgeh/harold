@@ -6,7 +6,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 
 | Term | Meaning | Not to use |
 | --- | --- | --- |
-| Harold | The daemon on each Mac that watches agents, notifies the user, routes replies and hosts tools | "the server" |
+| Harold | The daemon on each machine that watches agents, notifies the user, routes replies and hosts tools | "the server" |
 | feature | A Cargo feature of Harold that builds one platform part in, such as `imessage`. It is chosen when Harold is built and is not a setting | "flag" alone, "toggle". "Feature flag" stays allowed: it is your own word |
 | feature set | A named group of features: `mac-defaults` (the default) or `linux-defaults` | "profile", "preset" |
 | timing test | A test that asserts a real time, and so can fail on a busy machine. It runs only with `--features timing-tests`, locally | "flaky test" |
@@ -15,7 +15,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | `imessage` | The feature that builds in the iMessage channel. macOS only | "iMessage flag" |
 | `calls` | The feature that builds in calls, the call answerer, the call models and the echo test page. macOS only | "voice feature" |
 | Mac package | The release file `harold-aarch64-apple-darwin.tar.gz`, built with `mac-defaults` | "bundle" for the file |
-| haroldctl | The command that starts, stops and checks the installed Harold service | — |
+| Linux package | The release file `harold-x86_64-unknown-linux-gnu.tar.gz`, built with `linux-defaults` | "Omarchy build", "bundle" for the file |
+| service manager | What starts Harold and starts it again after a crash: launchd on the Mac, the systemd user manager on Linux | "launchd" for both |
+| haroldctl | The command that starts, stops and checks the installed Harold service, through the service manager | — |
 | control-tower | The terminal program beside the chief that lists the agents, holds the chief's questions and lets you act on them. `harold start-control-tower` starts it | "the controller", "the dash", "dashboard", `tmx-agent-dash`, "TUI" |
 | agent | A coding agent running in a pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |
 | echo test | The hidden web app page that measures how much of Harold's voice the phone's mic picks up while the phone plays it | "loopback test", "AEC test" |
@@ -371,6 +373,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 
 Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "coordinator" for the chief, "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
 
+- The name `HAROLD_LAUNCHD`, the function `started_by_launchd` and the parameters named `launchd` mean "the service manager started Harold", on Linux too (ADR 0019 keeps the name). The word would become: service manager. Where: `harold/src/main.rs`, `harold/src/main_tests.rs`, `harold/tests/install_checks.rs`, `scripts/install.py`, `scripts/harold_service.py`, `scripts/tests/test_install.py` and `scripts/tests/test_harold_service.py`. The comments of `harold/src/crash_guard.rs` and `harold/src/log_trim.rs` also say "launchd".
 - `tmux_target` holds the pane label, for tmux and Rex. "Target" is a word the pane entry says not to use. It would become: `pane_label`. Where: `harold/src/agent/domain.rs`, `store.rs`, `store/migrations/001_initial.sql`, `harold-api/proto/harold.proto`, `inbound/tmux.rs`, `outbound/left_out.rs`, `agent/runtime.rs`, `voice_input/answerer.rs`, `tools/watch/facts.rs`, `main.rs` and their tests.
 - `tmux_ms` in `agent inventory scan slow` is the time of the tmux listing, and `rex_ms` is its Rex twin. The pair would read better as one `listing_ms` with a `multiplexer` field. Where: `harold/src/agent/inventory.rs`, `harold/src/telemetry.rs` (`ALLOWED_FIELDS`), `docs/references/telemetry/README.md`.
 - The word `dispatcher` (variables and `fake_dispatcher`) names the delivery handler. It would become: delivery handler. Where: `harold/src/main_tests.rs`: 11 uses, lines 1913–2215; `harold/src/projector.rs`: 58 uses, lines 33–945; `harold/src/projector_tests.rs`: 307 uses, lines 8–4109; `harold/src/telemetry_tests.rs`: 383.

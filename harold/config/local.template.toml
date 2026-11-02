@@ -51,6 +51,7 @@ effort = "low"
 path = "~/bin/harold/data/store"
 
 [tts]
+# On Linux the installer writes command = "". Harold then logs a spoken line as not spoken. Speech on Linux comes in a later stage.
 command = "say"
 # voice = "Samantha"
 # Optional fallback if the primary TTS command fails:
@@ -80,6 +81,7 @@ command = "say"
 # machine_audio_output = ["/Users/you/Dev/chief-of-pods"]  # whose agents may be spoken aloud on the Mac; [] is nobody, ["*"] is everyone
 
 # Telemetry: export to the local collector is on by default (default.toml sets otlp_endpoint). Set export = false to turn it off. Leave alert_listen and pod_registry out to turn those off. Set pod_registry on one Mac only, or merges are counted twice.
+# On Linux the installer writes [telemetry] export = false, because the local collector runs on the Mac.
 # [telemetry]
 # export = false                                                   # export off: Harold sends nothing to the collector and logs no warning
 # otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address, http:// only (no TLS); Harold sends its traces, logs and metrics here

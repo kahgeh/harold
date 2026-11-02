@@ -1,6 +1,6 @@
 # Operation
 
-Harold runs as a per-user service on macOS. It starts when you log in, and launchd restarts it after a crash, within limits. The installer provides `haroldctl` to start, stop, restart, and check that service; `haroldctl stop` keeps it off, across logins too, until `haroldctl start`.
+Harold runs as a per-user service on macOS. It starts when you log in, and launchd restarts it after a crash, within limits. On Linux it runs as a systemd user service, as [Linux and the systemd user service](#linux-and-the-systemd-user-service) describes. The installer provides `haroldctl` to start, stop, restart, and check that service; `haroldctl stop` keeps it off, across logins too, until `haroldctl start`.
 
 The `imessage` and `calls` features are chosen when Harold is built. `harold --build-features` prints the features of the installed build, one on each line.
 
@@ -209,6 +209,35 @@ The first time the installer writes the LaunchAgents copy, macOS shows a "Backgr
 - Deleting `~/Library/LaunchAgents/<label>.plist` removes start at login until the next install; `haroldctl start` then loads the bundle's `service.plist` for the current login.
 
 To roll back, run the commands in the archived bundle's `ROLLBACK.md`. Before their last command, `./haroldctl start`, they put back that bundle's LaunchAgents copy, or delete the copy when that bundle does not start at login, and run `launchctl enable gui/$(id -u)/<label>`: their first command, `./haroldctl stop`, disables the label, and an older `haroldctl start` does not enable it. A `ROLLBACK.md` written by an installer without start at login lacks those two steps; run `rm -f ~/Library/LaunchAgents/<label>.plist` and the `launchctl enable` command before its `./haroldctl start`.
+
+## Linux and the systemd user service
+
+On Linux, Harold runs as a Harold on its own. The service manager is the systemd user manager. The installer writes the unit `~/.config/systemd/user/harold.service`. It then runs `systemctl --user daemon-reload` and `systemctl --user enable --now harold`.
+
+| Unit setting | Value | Meaning |
+| --- | --- | --- |
+| `Restart` | `on-failure` | systemd starts Harold again after an exit other than 0 |
+| `RestartSec` | 30 | systemd waits 30 seconds between starts |
+| `StartLimitIntervalSec` and `StartLimitBurst` | 600 and 5 | After 5 starts in 10 minutes, systemd stops starting Harold |
+| `Environment` | the managed environment plus `HAROLD_LAUNCHD=1` | Tells Harold that the service manager started it. The name stays; ADR 0019 explains why |
+| `WantedBy` | `default.target` | systemd starts Harold when the user manager starts |
+
+The `PATH` in the unit holds the folder of `rex`, `~/.local/bin`, `/usr/local/bin` and `/usr/bin`.
+
+`haroldctl` picks the backend by the operating system. On Linux it calls `systemctl --user start`, `stop`, `restart`, `status` and `is-enabled`. The readiness check is the same as on the Mac. The launchd backend does not change.
+
+`haroldctl status` on Linux prints the same JSON as on the Mac, with two more fields:
+
+| Field | Meaning |
+| --- | --- |
+| `active_state` | The unit's `ActiveState`, such as `active` or `failed` |
+| `n_restarts` | The unit's `NRestarts`: how many times systemd started Harold again |
+
+Read the log with `journalctl --user -u harold`. Harold also writes `harold.log` in the installation, as on the Mac.
+
+systemd stops the user's services when the user logs out, unless lingering is on for that user. The installer checks this and prints a warning. It never changes the setting. To keep Harold running after logout, run `loginctl enable-linger` yourself.
+
+Not yet on Linux: speech, the web app, and the line to the phone. The installer writes `[tts] command = ""`, so a `harold speak` line is logged as not spoken. It writes `[telemetry] export = false`, because the local collector runs on the Mac. The installer needs `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. It stops when no Rex server answers.
 
 ## Shutdown
 
