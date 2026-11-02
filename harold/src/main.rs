@@ -81,6 +81,8 @@ struct HaroldService {
     recaps: agent::recap::Recaps,
     /// The agents on the Rex hosts in `rex_hosts`, in memory only. Empty with no host.
     host_agents: agent::rex_host_runner::HostAgents,
+    /// The window name of each agent pane of this Mac, from the scans. In memory only.
+    window_names: agent::inventory::WindowNames,
     /// The mark name of Harold's own machine from `rex_host_marks`, or empty with no entry.
     local_icon: String,
     /// The settings values that `GetHaroldState` reports, read once at start.
@@ -150,6 +152,7 @@ fn harold_service(
     current_steps: agent::rex::CurrentSteps,
     recaps: agent::recap::Recaps,
     host_agents: agent::rex_host_runner::HostAgents,
+    window_names: agent::inventory::WindowNames,
     local_icon: String,
     state_view: HaroldStateView,
 ) -> HaroldService {
@@ -164,6 +167,7 @@ fn harold_service(
         current_steps,
         recaps,
         host_agents,
+        window_names,
         local_icon,
         state_view,
     }
@@ -496,11 +500,13 @@ impl Harold for HaroldService {
         let steps = self.current_steps.clone();
         let recaps = self.recaps.clone();
         let hosts = self.host_agents.clone();
+        let window_names = self.window_names.clone();
         tokio::spawn(forward_agent_snapshots(
             snapshots,
             steps,
             recaps,
             hosts,
+            window_names,
             self.local_icon.clone(),
             sender,
             shutdown,
@@ -694,11 +700,13 @@ fn call_response(status: &voice_input::CallStatus) -> CallResponse {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward_agent_snapshots(
     mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
     steps: agent::rex::CurrentSteps,
     recaps: agent::recap::Recaps,
     hosts: agent::rex_host_runner::HostAgents,
+    window_names: agent::inventory::WindowNames,
     local_icon: String,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
@@ -713,11 +721,14 @@ async fn forward_agent_snapshots(
     recap_versions.borrow_and_update();
     let mut host_versions = hosts.subscribe();
     host_versions.borrow_and_update();
+    let mut name_versions = window_names.subscribe();
+    name_versions.borrow_and_update();
     let initial = map_agent_snapshot(
         snapshots.borrow_and_update().clone(),
         &steps,
         &recaps,
         &hosts,
+        &window_names,
         &local_icon,
     );
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
@@ -734,7 +745,7 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot =
-                    map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &local_icon);
+                    map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -743,7 +754,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -752,7 +763,16 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = name_versions.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -761,7 +781,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -788,6 +808,7 @@ fn map_agent_snapshot(
     steps: &agent::rex::CurrentSteps,
     recaps: &agent::recap::Recaps,
     hosts: &agent::rex_host_runner::HostAgents,
+    window_names: &agent::inventory::WindowNames,
     local_icon: &str,
 ) -> AgentStateSnapshot {
     AgentStateSnapshot {
@@ -817,6 +838,9 @@ fn map_agent_snapshot(
                 let pane = projection.pane;
                 let current_step = steps.get(&pane.incarnation.pane_id, pane.incarnation.agent_pid);
                 let recap = recaps.get(&pane.incarnation.pane_id, pane.incarnation.agent_pid);
+                let window_name = window_names
+                    .get(&pane.incarnation.pane_id)
+                    .unwrap_or_default();
                 AgentPaneState {
                     pane_id: pane.incarnation.pane_id,
                     tmux_target: pane.tmux_target,
@@ -837,7 +861,7 @@ fn map_agent_snapshot(
                     recap: recap.map(|line| line.text),
                     host: String::new(),
                     host_icon: local_icon.to_owned(),
-                    window_name: String::new(),
+                    window_name,
                 }
             })
             .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
@@ -888,7 +912,7 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
         recap_at_ms: 0,
         host: agent.host,
         host_icon: row.icon,
-        window_name: String::new(),
+        window_name: agent.window_name,
     })
 }
 
@@ -1457,7 +1481,8 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let log_trim = start_log_trim(launchd, &shutdown_rx);
 
     agent::rex::log_multiplexer(cfg);
-    let inventory = agent::rex::inventory_for(cfg);
+    let window_names = agent::inventory::WindowNames::default();
+    let inventory = agent::rex::inventory_for(cfg, window_names.clone());
     let screen = agent::rex::screen_for(cfg);
     let providers = cfg.agents.0.clone();
     let initial_agent_snapshot = restore_startup_state(&store).await?;
@@ -1593,6 +1618,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         current_steps,
         recaps,
         host_agents,
+        window_names,
         cfg.agent_monitor
             .mark_for_machine(&cfg.machine_name)
             .unwrap_or_default()

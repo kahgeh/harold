@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::process::Command;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use time::{Date, Month, PrimitiveDateTime, Time};
+use tokio::sync::watch;
 
 use crate::settings::{AgentProviderSettings, AgentSettings};
 
@@ -52,6 +53,63 @@ pub(super) struct TmuxPaneInfo {
     pub(super) pane_pid: u32,
     pub(super) tty: String,
     pub(super) working_directory: String,
+    pub(super) window_name: String,
+}
+
+struct NamesInner {
+    names: Mutex<HashMap<String, String>>,
+    version: watch::Sender<u64>,
+}
+
+impl Default for NamesInner {
+    fn default() -> Self {
+        Self {
+            names: Mutex::new(HashMap::new()),
+            version: watch::channel(0).0,
+        }
+    }
+}
+
+/// The window name of each agent pane of this Mac, by pane id, in memory only. A successful
+/// scan sets it. The store keeps no window name.
+#[derive(Clone, Default)]
+pub(crate) struct WindowNames {
+    inner: Arc<NamesInner>,
+}
+
+impl WindowNames {
+    /// Replaces the whole map. The version rises only when the content changes.
+    pub(crate) fn replace_agents(&self, names: HashMap<String, String>) {
+        let changed = {
+            let mut stored = self
+                .inner
+                .names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *stored == names {
+                false
+            } else {
+                *stored = names;
+                true
+            }
+        };
+        if changed {
+            self.inner.version.send_modify(|version| *version += 1);
+        }
+    }
+
+    pub(crate) fn get(&self, pane_id: &str) -> Option<String> {
+        self.inner
+            .names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(pane_id)
+            .cloned()
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.inner.version.subscribe()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,11 +158,14 @@ pub(crate) struct TmuxAgentInventory {
     programs: Mutex<HashMap<(String, u32), String>>,
     /// Each (pane id, agent pid) pair whose full read did not join the chain to the pane's process.
     unjoined: Mutex<HashSet<(String, u32)>>,
+    /// The window names of the agent panes. A successful scan sets them.
+    names: WindowNames,
 }
 
 impl TmuxAgentInventory {
-    pub(crate) fn new(settings: AgentSettings) -> Self {
+    pub(crate) fn new(settings: AgentSettings, names: WindowNames) -> Self {
         Self {
+            names,
             settings,
             programs: Mutex::new(HashMap::new()),
             unjoined: Mutex::new(HashSet::new()),
@@ -159,6 +220,7 @@ impl TmuxAgentInventory {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clear();
+            self.names.replace_agents(HashMap::new());
             return Ok(Vec::new());
         }
         let mut ttys: Vec<String> = Vec::new();
@@ -236,6 +298,15 @@ impl TmuxAgentInventory {
             })
             .collect();
         *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
+        let agent_names = observed
+            .iter()
+            .filter_map(|observation| {
+                let pane_id = &observation.incarnation.pane_id;
+                let pane = panes.iter().find(|pane| pane.pane_id == *pane_id)?;
+                Some((pane_id.clone(), pane.window_name.clone()))
+            })
+            .collect();
+        self.names.replace_agents(agent_names);
         Ok(observed)
     }
 }
@@ -496,7 +567,7 @@ pub(super) fn parse_tmux_panes(output: &str) -> Result<Vec<TmuxPaneInfo>, Invent
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() != 7 {
+            if fields.len() != 8 {
                 return Err(InventoryError::MalformedOutput);
             }
             Ok(TmuxPaneInfo {
@@ -507,6 +578,7 @@ pub(super) fn parse_tmux_panes(output: &str) -> Result<Vec<TmuxPaneInfo>, Invent
                 pane_pid: parse_field(fields[4])?,
                 tty: normalize_tty(fields[5]).to_string(),
                 working_directory: fields[6].to_string(),
+                window_name: fields[7].to_string(),
             })
         })
         .collect()
@@ -630,7 +702,7 @@ fn tmux_panes_command_for(program: &str) -> Command {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}\t#{window_name}",
     ]);
     command
 }

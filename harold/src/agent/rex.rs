@@ -23,7 +23,8 @@ use crate::telemetry::{
 
 use super::domain::{AgentIncarnation, AgentPaneObservation};
 use super::inventory::{
-    AgentInventoryPort, InventoryError, ProviderResolution, program_from_words, resolve_provider,
+    AgentInventoryPort, InventoryError, ProviderResolution, WindowNames, program_from_words,
+    resolve_provider,
 };
 use super::pane_route::{PaneRoute, refuse_write, route_pane};
 use super::screen::{StopSignal, current_stop, run_stoppable, stop_requested};
@@ -753,6 +754,8 @@ pub(crate) struct RexAgentInventory {
     status: Arc<RexStatus>,
     /// The blocks whose `process` call failed in the last scan, by block id.
     unreadable: Mutex<HashSet<String>>,
+    /// The window names of the agent panes. A successful scan sets them.
+    names: WindowNames,
 }
 
 impl RexAgentInventory {
@@ -760,8 +763,10 @@ impl RexAgentInventory {
         api: Arc<dyn RexApi>,
         settings: AgentSettings,
         status: Arc<RexStatus>,
+        names: WindowNames,
     ) -> Self {
         Self {
+            names,
             api,
             settings,
             status,
@@ -798,6 +803,7 @@ impl RexAgentInventory {
         self.read_new_start_times(&processes);
         let mut observed = Vec::new();
         let mut programs = HashMap::new();
+        let mut agent_names = HashMap::new();
         let mut seen = HashSet::new();
         for (slot, process) in slots.into_iter().zip(&processes) {
             let result = observe_block(slot, process, &self.settings, observed_at_ms, |pid| {
@@ -812,6 +818,10 @@ impl RexAgentInventory {
                     ),
                     program,
                 );
+                agent_names.insert(
+                    observation.incarnation.pane_id.clone(),
+                    slot.window_name.clone(),
+                );
                 observed.push(observation);
             }
         }
@@ -821,6 +831,7 @@ impl RexAgentInventory {
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|pid, _| seen.contains(pid));
         *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
+        self.names.replace_agents(agent_names);
         Ok(observed)
     }
 
@@ -1392,13 +1403,17 @@ pub(crate) fn parse_lstart(text: &str) -> Option<i64> {
 }
 
 /// The inventory of the multiplexer that `[agent_monitor] multiplexer` names.
-pub(crate) fn inventory_for(settings: &crate::settings::Settings) -> Arc<dyn AgentInventoryPort> {
-    inventory_with(settings, status)
+pub(crate) fn inventory_for(
+    settings: &crate::settings::Settings,
+    names: WindowNames,
+) -> Arc<dyn AgentInventoryPort> {
+    inventory_with(settings, names, status)
 }
 
 /// Like `inventory_for`. `status` runs only for Rex, so a tmux setting never creates it.
 fn inventory_with(
     settings: &crate::settings::Settings,
+    names: WindowNames,
     status: impl FnOnce() -> Arc<RexStatus>,
 ) -> Arc<dyn AgentInventoryPort> {
     match settings.agent_monitor.multiplexer() {
@@ -1406,9 +1421,11 @@ fn inventory_with(
             system(),
             settings.agents.clone(),
             status(),
+            names,
         )),
         crate::settings::Multiplexer::Tmux => Arc::new(super::inventory::TmuxAgentInventory::new(
             settings.agents.clone(),
+            names,
         )),
     }
 }

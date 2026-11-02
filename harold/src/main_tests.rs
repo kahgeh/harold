@@ -9,7 +9,7 @@ use super::agent::domain::{
     AgentPaneProjection, AgentSnapshot, CompletionSummaryUpdate, EffectiveAgentState,
     MonitorHealthProjection, ObservedAgentState, WorkSummaryUpdate,
 };
-use super::agent::inventory::{AgentInventoryPort, InventoryError};
+use super::agent::inventory::{AgentInventoryPort, InventoryError, WindowNames};
 use super::agent::recap::Recaps;
 use super::agent::rex::CurrentSteps;
 use super::agent::rex_host_runner::{HostAgentRow, HostAgents, HostReport};
@@ -100,6 +100,7 @@ where
             current_steps: crate::agent::rex::CurrentSteps::default(),
             recaps: crate::agent::recap::Recaps::default(),
             host_agents: HostAgents::default(),
+            window_names: WindowNames::default(),
             local_icon: String::new(),
             state_view: HaroldStateView::default(),
         },
@@ -1057,6 +1058,7 @@ fn snapshot_mapping_carries_the_harold_version() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            &WindowNames::default(),
             ""
         )
         .harold_version,
@@ -1083,6 +1085,7 @@ fn snapshot_mapping_gives_each_effective_state_its_own_number() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            &WindowNames::default(),
             "",
         );
         assert_eq!(mapped.panes[0].state, expected, "{effective:?}");
@@ -1106,6 +1109,7 @@ fn snapshot_mapping_carries_tts_muted() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            &WindowNames::default(),
             "",
         )
         .tts_muted
@@ -1170,6 +1174,7 @@ fn snapshot_mapping_carries_messaging_paused() {
             &CurrentSteps::default(),
             &Recaps::default(),
             &HostAgents::default(),
+            &WindowNames::default(),
             "",
         )
         .messaging_paused
@@ -2529,6 +2534,19 @@ fn recap_stream(
     watch::Sender<()>,
     AgentSnapshotHub,
 ) {
+    named_stream(steps, recaps, &WindowNames::default())
+}
+
+/// Like `recap_stream`, with the window names the stream joins.
+fn named_stream(
+    steps: &CurrentSteps,
+    recaps: &Recaps,
+    names: &WindowNames,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+) {
     let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     let (shutdown, shutdown_rx) = watch::channel(());
@@ -2537,6 +2555,7 @@ fn recap_stream(
         steps.clone(),
         recaps.clone(),
         HostAgents::default(),
+        names.clone(),
         String::new(),
         sender,
         shutdown_rx,
@@ -2587,6 +2606,7 @@ async fn a_blocked_record_gives_its_step() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
@@ -2604,6 +2624,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(step_of(&mapped), None);
@@ -2615,6 +2636,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &steps,
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(step_of(&mapped), None);
@@ -2847,6 +2869,7 @@ async fn a_recap_reaches_the_stream_with_its_time() {
         &CurrentSteps::default(),
         &other,
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(recap_of(&mapped), (None, 0));
@@ -2859,6 +2882,7 @@ fn a_pane_without_a_recap_has_none_and_zero() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(recap_of(&mapped), (None, 0));
@@ -3083,6 +3107,7 @@ fn an_unreachable_host_shows_its_last_agents_as_unknown() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &hosts,
+        &WindowNames::default(),
         "",
     );
     assert_eq!(mapped.panes[0].state, i32::from(AgentState::Working));
@@ -3099,6 +3124,7 @@ fn own_rows_carry_the_mark_of_machine_name() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "mac",
     );
     assert_eq!(mapped.panes[0].host_icon, "mac");
@@ -3111,6 +3137,7 @@ fn own_rows_carry_the_mark_of_machine_name() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &hosts,
+        &WindowNames::default(),
         "mac",
     );
     assert_eq!(mapped.panes.len(), 2);
@@ -3125,6 +3152,7 @@ fn own_rows_carry_no_mark_without_an_entry() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(mapped.panes[0].host_icon, "");
@@ -3348,4 +3376,71 @@ async fn get_harold_state_with_no_hosts_marks_or_chief() {
     assert_eq!(response.machine_host_icon, "");
     assert_eq!(response.chief_session, "");
     assert_eq!(response.multiplexer, "tmux");
+}
+
+// -- the window name of a row ----------------------------------------------------------------
+
+fn names_for_step_pane(name: &str) -> WindowNames {
+    let names = WindowNames::default();
+    names.replace_agents(std::collections::HashMap::from([(
+        STEP_PANE.to_string(),
+        name.to_string(),
+    )]));
+    names
+}
+
+#[test]
+fn a_local_row_gets_its_window_name_from_the_map() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        &names_for_step_pane("work"),
+        "",
+    );
+    assert_eq!(mapped.panes[0].pane_id, STEP_PANE);
+    assert_eq!(mapped.panes[0].window_name, "work");
+}
+
+#[test]
+fn a_local_row_with_no_entry_in_the_map_has_an_empty_window_name() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        &WindowNames::default(),
+        "",
+    );
+    assert_eq!(mapped.panes[0].window_name, "");
+}
+
+#[tokio::test]
+async fn a_renamed_window_sends_a_new_snapshot() {
+    let names = WindowNames::default();
+    let (mut receiver, _shutdown, _hub) =
+        named_stream(&CurrentSteps::default(), &Recaps::default(), &names);
+    assert_eq!(next_item(&mut receiver).await.panes[0].window_name, "");
+    names.replace_agents(std::collections::HashMap::from([(
+        STEP_PANE.to_string(),
+        "work".to_string(),
+    )]));
+    assert_eq!(next_item(&mut receiver).await.panes[0].window_name, "work");
+    names.replace_agents(std::collections::HashMap::from([(
+        STEP_PANE.to_string(),
+        "review".to_string(),
+    )]));
+    assert_eq!(
+        next_item(&mut receiver).await.panes[0].window_name,
+        "review"
+    );
+}
+
+#[test]
+fn a_host_agent_row_gets_its_window_name() {
+    let mut row = fixed_host_agent_row();
+    row.agent.window_name = "linux-satellite-2b".into();
+    let mapped = super::map_host_agent(row).expect("a row");
+    assert_eq!(mapped.window_name, "linux-satellite-2b");
 }

@@ -3,6 +3,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::agent::domain::AgentPaneObservation;
+use crate::agent::inventory::WindowNames;
 use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::rex;
 use crate::agent::summary::sanitize_bounded_metadata;
@@ -19,7 +20,7 @@ const INBOUND_PANE_LABEL_MAX_SCALARS: usize = 256;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn scan_live_panes() -> Vec<super::directory::AgentAddress> {
-    let inventory = rex::inventory_for(get_settings());
+    let inventory = rex::inventory_for(get_settings(), WindowNames::default());
     match inventory.scan() {
         Ok(observations) => observations
             .into_iter()
@@ -33,7 +34,7 @@ pub(crate) fn scan_live_panes() -> Vec<super::directory::AgentAddress> {
 }
 
 pub(crate) fn is_pane_alive(pane_id: &str) -> bool {
-    let inventory = rex::inventory_for(get_settings());
+    let inventory = rex::inventory_for(get_settings(), WindowNames::default());
     match inventory.resolve(pane_id) {
         Ok(observation) => observation.is_some(),
         Err(error) => {

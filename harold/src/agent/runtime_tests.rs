@@ -1528,6 +1528,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
+        window_names: crate::agent::inventory::WindowNames::default(),
         local_icon: String::new(),
         state_view: crate::HaroldStateView::default(),
     };
@@ -1617,6 +1618,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         &crate::agent::rex::CurrentSteps::default(),
         &crate::agent::recap::Recaps::default(),
         &crate::agent::rex_host_runner::HostAgents::default(),
+        &crate::agent::inventory::WindowNames::default(),
         "",
     );
     assert!(!format!("{protobuf:?}").contains(&sentinel));
@@ -1675,6 +1677,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
+        window_names: crate::agent::inventory::WindowNames::default(),
         local_icon: String::new(),
         state_view: crate::HaroldStateView::default(),
     };
@@ -5447,6 +5450,7 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the
         current_steps: crate::agent::rex::CurrentSteps::default(),
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
+        window_names: crate::agent::inventory::WindowNames::default(),
         local_icon: String::new(),
         state_view: crate::HaroldStateView::default(),
     };

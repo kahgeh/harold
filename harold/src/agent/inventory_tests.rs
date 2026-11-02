@@ -2,9 +2,9 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
-    InventoryError, ProcessInfo, ProviderResolution, TmuxAgentInventory, TmuxPaneInfo,
+    InventoryError, ProcessInfo, ProviderResolution, TmuxAgentInventory, TmuxPaneInfo, WindowNames,
     command_program, command_stdout, observe_pane, parse_process_table, parse_tmux_panes,
-    read_tty_table, resolve_provider,
+    read_tty_table, resolve_provider, tmux_panes_command,
 };
 use super::screen::{StopSignal, run_stoppable};
 
@@ -34,6 +34,7 @@ fn pane() -> TmuxPaneInfo {
         pane_pid: 10,
         tty: "ttys007".to_string(),
         working_directory: "/work/harold".to_string(),
+        window_name: "main".to_string(),
     }
 }
 
@@ -201,14 +202,16 @@ fn process_and_tmux_snapshots_parse_complete_identity_fields() {
     assert_eq!(processes[0].started_at_ms, Some(1_787_479_872_000));
     assert_eq!(processes[0].command, "codex --profile local");
 
-    let panes = parse_tmux_panes("%7\tharold\t2\t1\t10\t/dev/ttys007\t/work/harold\n").unwrap();
+    let panes =
+        parse_tmux_panes("%7\tharold\t2\t1\t10\t/dev/ttys007\t/work/harold\tmain\n").unwrap();
     assert_eq!(panes, [pane()]);
 }
 
 #[test]
 fn tab_delimited_tmux_rows_preserve_spaces_unicode_and_literal_escapes() {
-    let rows = parse_tmux_panes("%7\tharold café\t2\t1\t10\t/dev/ttys007\t/work/a folder/\\037\n")
-        .unwrap();
+    let rows =
+        parse_tmux_panes("%7\tharold café\t2\t1\t10\t/dev/ttys007\t/work/a folder/\\037\tmain\n")
+            .unwrap();
     assert_eq!(rows[0].session_name, "harold café");
     assert_eq!(rows[0].working_directory, r"/work/a folder/\037");
     assert_eq!(rows[0].tty, "ttys007");
@@ -217,10 +220,10 @@ fn tab_delimited_tmux_rows_preserve_spaces_unicode_and_literal_escapes() {
 #[test]
 fn tab_delimited_tmux_rows_reject_ambiguous_or_invalid_fields() {
     for row in [
-        "%7\tharold\t2\t1\t10\t/dev/ttys007",
-        "%7\tharold\t2\t1\t10\t/dev/ttys007\t/work\textra",
-        "%7\tharold\tbad\t1\t10\t/dev/ttys007\t/work",
-        r"%7\037harold\0372\0371\03710\037/dev/ttys007\037/work",
+        "%7\tharold\t2\t1\t10\t/dev/ttys007\t/work",
+        "%7\tharold\t2\t1\t10\t/dev/ttys007\t/work\tmain\textra",
+        "%7\tharold\tbad\t1\t10\t/dev/ttys007\t/work\tmain",
+        r"%7\037harold\0372\0371\03710\037/dev/ttys007\037/work\037main",
     ] {
         assert_eq!(parse_tmux_panes(row), Err(InventoryError::MalformedOutput));
     }
@@ -483,7 +486,7 @@ fn scan_with_sleeps(
         .with_ansi(false)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let fail_ps = signal.is_some();
     let scan = || {
         inventory
@@ -617,7 +620,7 @@ fn with_log<T>(run: impl FnOnce() -> T) -> (T, String) {
 
 #[test]
 fn the_scan_reads_each_panes_tty_once_without_dev() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let panes = [
         pane_on("%1", 10, "ttys001"),
         pane_on("%2", 20, "ttys002"),
@@ -641,7 +644,7 @@ fn the_scan_reads_each_panes_tty_once_without_dev() {
 
 #[test]
 fn an_empty_pane_list_runs_no_process_read() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let reads = Reads::default();
 
     let agents = fake_scan(&inventory, &[], &[], &[], &reads).unwrap();
@@ -652,7 +655,7 @@ fn an_empty_pane_list_runs_no_process_read() {
 
 #[test]
 fn a_pane_whose_tty_the_process_read_does_not_know_does_not_fail_the_scan() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let panes = [pane_on("%1", 10, "ttys001"), pane_on("%2", 20, "ttys404")];
     let rows = [
         process_on(10, 1, "ttys001", "/bin/zsh"),
@@ -667,7 +670,7 @@ fn a_pane_whose_tty_the_process_read_does_not_know_does_not_fail_the_scan() {
 
 #[test]
 fn a_broken_chain_does_one_full_read_and_finds_the_agent() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let panes = [pane_on("%1", 10, "ttys001")];
     // The middle process has no terminal, so the tty read lacks it.
     let tty_rows = [
@@ -699,7 +702,7 @@ fn a_broken_chain_does_one_full_read_and_finds_the_agent() {
 
 #[test]
 fn a_chain_that_a_full_read_cannot_join_causes_one_full_read_only() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let panes = [pane_on("%1", 10, "ttys001")];
     let rows = [
         process_on(10, 1, "ttys001", "/bin/zsh"),
@@ -731,7 +734,7 @@ fn a_chain_that_a_full_read_cannot_join_causes_one_full_read_only() {
 
 #[test]
 fn two_broken_panes_in_one_scan_do_one_full_read_and_log_one_line() {
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let panes = [pane_on("%1", 10, "ttys001"), pane_on("%2", 20, "ttys002")];
     let rows = [
         process_on(10, 1, "ttys001", "/bin/zsh"),
@@ -886,7 +889,7 @@ fn listing_calls(program: &str, outcome: &str) -> usize {
 fn a_tmux_listing_is_counted_under_list_with_its_outcome() {
     let good = crate::telemetry::test_support::fake_program(
         "inv-ok",
-        "printf '%%1\\tmain\\t0\\t0\\t123\\t/dev/ttys001\\t/tmp\\n'",
+        "printf '%%1\\tmain\\t0\\t0\\t123\\t/dev/ttys001\\t/tmp\\tmain\\n'",
     );
     assert_eq!(listing_calls(&good, "ok"), 1);
     let failing = crate::telemetry::test_support::fake_program("inv-fail", "exit 1");
@@ -906,7 +909,7 @@ fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() 
             ..pane()
         })
         .collect();
-    let inventory = TmuxAgentInventory::new(named_settings());
+    let inventory = TmuxAgentInventory::new(named_settings(), WindowNames::default());
     let scanned = inventory.scan_with(
         || Ok(panes),
         |_| Ok(Vec::new()),
@@ -921,4 +924,152 @@ fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() 
     );
     assert!(failed.is_err());
     assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
+}
+
+// -- the window name of each agent pane ----------------------------------------------------
+
+fn named_pane(pane_id: &str, pane_pid: u32, tty: &str, window_name: &str) -> TmuxPaneInfo {
+    TmuxPaneInfo {
+        window_name: window_name.to_string(),
+        ..pane_on(pane_id, pane_pid, tty)
+    }
+}
+
+/// Two panes: `%1` holds an agent and `%2` holds only a shell.
+fn agent_and_shell_rows() -> Vec<ProcessInfo> {
+    vec![
+        process_on(10, 1, "ttys001", "/bin/zsh"),
+        process_on(11, 10, "ttys001", "codex"),
+        process_on(20, 1, "ttys002", "/bin/zsh"),
+    ]
+}
+
+fn scan_named(
+    inventory: &TmuxAgentInventory,
+    agent_window: &str,
+    shell_window: &str,
+) -> Result<Vec<u32>, InventoryError> {
+    let panes = [
+        named_pane("%1", 10, "ttys001", agent_window),
+        named_pane("%2", 20, "ttys002", shell_window),
+    ];
+    fake_scan(
+        inventory,
+        &panes,
+        &agent_and_shell_rows(),
+        &[],
+        &Reads::default(),
+    )
+}
+
+#[test]
+fn the_tmux_format_ends_with_the_window_name() {
+    let command = tmux_panes_command();
+    let format = command
+        .get_args()
+        .last()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(format.ends_with("\t#{window_name}"), "{format}");
+    assert_eq!(format.split('\t').count(), 8);
+}
+
+#[test]
+fn a_tmux_scan_fills_the_names_of_agent_panes_only() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+
+    scan_named(&inventory, "work", "zsh").unwrap();
+
+    assert_eq!(names.get("%1"), Some("work".to_string()));
+    assert_eq!(names.get("%2"), None);
+}
+
+#[test]
+fn a_failed_tmux_scan_leaves_the_names() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+    let version = *names.subscribe().borrow();
+
+    let failed = inventory.scan_with(
+        || Err(InventoryError::CommandFailed),
+        |_| Ok(Vec::new()),
+        std::time::Duration::from_secs(60),
+    );
+    let process_failed = inventory.scan_with(
+        || Ok(vec![named_pane("%1", 10, "ttys001", "other")]),
+        |_| Err(InventoryError::CommandFailed),
+        std::time::Duration::from_secs(60),
+    );
+
+    assert!(failed.is_err() && process_failed.is_err());
+    assert_eq!(names.get("%1"), Some("work".to_string()));
+    assert_eq!(*names.subscribe().borrow(), version);
+}
+
+#[test]
+fn a_rename_of_a_pane_with_no_agent_raises_no_version() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+    let version = *names.subscribe().borrow();
+
+    scan_named(&inventory, "work", "vim").unwrap();
+
+    assert_eq!(*names.subscribe().borrow(), version);
+}
+
+#[test]
+fn a_rename_of_an_agent_window_raises_the_version() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+    let version = *names.subscribe().borrow();
+
+    scan_named(&inventory, "review", "zsh").unwrap();
+
+    assert_eq!(names.get("%1"), Some("review".to_string()));
+    assert_eq!(*names.subscribe().borrow(), version + 1);
+}
+
+#[test]
+fn a_gone_agent_pane_leaves_the_names() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+
+    let only_shell = [named_pane("%2", 20, "ttys002", "zsh")];
+    fake_scan(
+        &inventory,
+        &only_shell,
+        &agent_and_shell_rows(),
+        &[],
+        &Reads::default(),
+    )
+    .unwrap();
+
+    assert_eq!(names.get("%1"), None);
+}
+
+#[test]
+fn an_empty_pane_list_clears_the_names() {
+    let names = WindowNames::default();
+    let inventory = TmuxAgentInventory::new(named_settings(), names.clone());
+    scan_named(&inventory, "work", "zsh").unwrap();
+
+    fake_scan(&inventory, &[], &[], &[], &Reads::default()).unwrap();
+
+    assert_eq!(names.get("%1"), None);
+}
+
+#[test]
+fn replacing_the_names_with_the_same_content_raises_no_version() {
+    let names = WindowNames::default();
+    let map = std::collections::HashMap::from([("%1".to_string(), "work".to_string())]);
+    names.replace_agents(map.clone());
+    let version = *names.subscribe().borrow();
+    names.replace_agents(map);
+    assert_eq!(*names.subscribe().borrow(), version);
 }

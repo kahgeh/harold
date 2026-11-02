@@ -228,7 +228,12 @@ fn is_current_is_false_for_an_exited_block() {
         vec![proc(1, "login", None)],
     );
     let api = Arc::new(fake(&[("block:a", Ok(live))]));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let incarnation = inventory.scan().unwrap()[0].incarnation.clone();
     assert!(inventory.is_current(&incarnation).unwrap());
 
@@ -358,6 +363,8 @@ struct FakeRex {
     purposes: Mutex<Vec<&'static str>>,
     /// Blocks that `session_view` leaves out.
     hidden: Mutex<Vec<String>>,
+    /// The label of each window of `session_view`, by position. A missing one is empty.
+    labels: Vec<String>,
 }
 
 /// The first `program_status` call for `block` waits and answers `first`. Later calls for
@@ -465,8 +472,9 @@ impl RexApi for FakeRex {
         }
         Ok(windows
             .into_iter()
-            .map(|blocks| RexWindow {
-                label: String::new(),
+            .enumerate()
+            .map(|(index, blocks)| RexWindow {
+                label: self.labels.get(index).cloned().unwrap_or_default(),
                 blocks,
             })
             .collect())
@@ -600,7 +608,12 @@ fn the_inventory_lists_agents_and_reads_a_start_time_once_per_pid() {
             )),
         ),
     ]));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let first = inventory.scan().unwrap();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].tmux_target, "harold-main:1.1");
@@ -631,7 +644,12 @@ fn is_current_passes_for_the_same_pid_and_start_time_in_ancestors_and_fails_othe
         vec![proc(5, "claude", None), proc(1, "login", None)],
     );
     let api = Arc::new(fake(&[("block:a", Ok(in_tool))]));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let observed = inventory.scan().unwrap();
     let incarnation = observed[0].incarnation.clone();
     assert!(inventory.is_current(&incarnation).unwrap());
@@ -665,10 +683,16 @@ fn is_current_answers_false_for_a_tmux_pane_id_without_a_rex_call() {
         Arc::new(fake(&[("block:ic1", Ok(claude_process()))])),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     let incarnation = incarnation_for(&inventory, "%2");
     api.list_error = Some(RexError::Absent);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(api),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
 }
 
@@ -679,6 +703,7 @@ fn is_current_answers_false_for_a_block_a_successful_listing_does_not_hold() {
         Arc::new(fake(&[("block:ic2", Ok(claude_process()))])),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     let incarnation = incarnation_for(&inventory, "block:ic2gone");
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
@@ -691,6 +716,7 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
         Arc::new(fake(&[("block:ic3", Ok(claude_process()))])),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     let incarnation = incarnation_for(&first, "block:ic3");
     // The listing no longer holds the block, and its process call fails.
@@ -699,7 +725,12 @@ fn is_current_answers_false_when_process_fails_and_the_block_is_gone() {
         .lock()
         .unwrap()
         .insert("block:ic3".into(), Err(RexError::Failed));
-    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(api),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.is_current(&incarnation), Ok(false));
 }
 
@@ -714,11 +745,17 @@ fn is_current_stays_an_error_when_the_listing_fails() {
             Arc::new(fake(&[("block:ic4", Ok(claude_process()))])),
             settings(),
             inert_status(),
+            WindowNames::default(),
         );
         let incarnation = incarnation_for(&first, "block:ic4unknown");
         let mut api = fake(&[]);
         api.list_error = Some(error);
-        let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+        let inventory = RexAgentInventory::new(
+            Arc::new(api),
+            settings(),
+            inert_status(),
+            WindowNames::default(),
+        );
         assert_eq!(inventory.is_current(&incarnation), Err(expected));
     }
 }
@@ -727,7 +764,12 @@ fn is_current_stays_an_error_when_the_listing_fails() {
 fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() {
     let _directory = directory_test_lock();
     let api = Arc::new(fake(&[("block:ic5", Ok(claude_process()))]));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let incarnation = incarnation_for(&inventory, "block:ic5");
     api.processes
         .lock()
@@ -767,6 +809,7 @@ fn scan_with_an_exited_block_finds_the_other_agents() {
         Arc::new(three_blocks(Ok(exited_process()))),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     let observed = inventory.scan().unwrap();
     assert_eq!(observed.len(), 2);
@@ -777,7 +820,12 @@ fn scan_with_an_exited_block_finds_the_other_agents() {
 fn scan_of_only_an_exited_block_gives_no_row_and_no_error() {
     let _directory = directory_test_lock();
     let api = fake(&[("block:a", Ok(exited_process()))]);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(api),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.scan(), Ok(Vec::new()));
 }
 
@@ -786,7 +834,12 @@ fn scan_with_one_failing_block_logs_unreadable_once() {
     let _directory = directory_test_lock();
     let (logs, _guard) = capture_logs();
     let api = Arc::new(three_blocks(Err(RexError::Failed)));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     for _ in 0..3 {
         assert_eq!(inventory.scan().unwrap().len(), 2);
     }
@@ -816,6 +869,7 @@ fn scan_reason_names_timeout_and_malformed() {
             Arc::new(three_blocks(Err(error))),
             settings(),
             inert_status(),
+            WindowNames::default(),
         );
         assert_eq!(inventory.scan().unwrap().len(), 2);
     }
@@ -833,14 +887,24 @@ fn scan_fails_when_every_process_call_fails() {
         ("block:b", Err(RexError::Failed)),
         ("block:c", Err(RexError::Failed)),
     ]);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(api),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.scan(), Err(InventoryError::RexFailed));
 }
 
 #[test]
 fn scan_with_no_blocks_succeeds_with_no_rows() {
     let _directory = directory_test_lock();
-    let inventory = RexAgentInventory::new(Arc::new(fake(&[])), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(fake(&[])),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.scan(), Ok(Vec::new()));
 }
 
@@ -852,6 +916,7 @@ fn scan_stopped_during_process_calls_logs_no_unreadable() {
         Arc::new(three_blocks(Err(RexError::Failed))),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     let signal = StopSignal::default();
     signal.request();
@@ -867,7 +932,12 @@ fn unreadable_set_drops_a_block_that_leaves_the_listing() {
     let _directory = directory_test_lock();
     let (logs, _guard) = capture_logs();
     let api = Arc::new(three_blocks(Err(RexError::Failed)));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.scan().unwrap().len(), 2);
 
     api.hidden.lock().unwrap().push("block:b".into());
@@ -889,11 +959,21 @@ fn a_failed_listing_or_an_absent_rex_fails_the_scan() {
     ] {
         let mut api = fake(&[]);
         api.list_error = Some(error);
-        let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+        let inventory = RexAgentInventory::new(
+            Arc::new(api),
+            settings(),
+            inert_status(),
+            WindowNames::default(),
+        );
         assert_eq!(inventory.scan(), Err(expected));
     }
     let api = fake(&[("block:a", Err(RexError::Timeout))]);
-    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(api),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert_eq!(inventory.scan(), Err(InventoryError::RexTimeout));
 }
 
@@ -1062,6 +1142,7 @@ fn typing_ports_use_the_session_of_the_block() {
         Arc::new(fake(&[("block:z", Ok(claude_process()))])),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     inventory.scan().unwrap();
     assert_eq!(session_of(&api, "block:z").unwrap(), "session:1");
@@ -1282,6 +1363,7 @@ fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() 
         Arc::new(fake_of_3_sessions_and_14_blocks()),
         settings(),
         inert_status(),
+        WindowNames::default(),
     );
     assert_eq!(inventory.scan().unwrap().len(), 0);
     assert_eq!(crate::telemetry::take_noted_listings(), vec![(3, 14)]);
@@ -1289,7 +1371,12 @@ fn a_good_listing_notes_its_sessions_and_panes_and_a_failed_one_notes_nothing() 
         list_error: Some(RexError::Failed),
         ..FakeRex::default()
     };
-    let inventory = RexAgentInventory::new(Arc::new(failing), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        Arc::new(failing),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     assert!(inventory.scan().is_err());
     assert_eq!(crate::telemetry::take_noted_listings(), vec![]);
 }
@@ -2411,6 +2498,7 @@ fn an_inventory_scan_starts_a_stream_for_each_listed_session() {
         Arc::new(fake_of_two_sessions(2)),
         settings(),
         Arc::clone(&status),
+        WindowNames::default(),
     );
     inventory.scan().unwrap();
     wait_until("one child for each session", || program.runs() == 2);
@@ -2442,6 +2530,7 @@ fn a_scan_after_a_stream_ended_and_the_gap_passed_changes_the_generation() {
         Arc::new(fake_of_two_sessions(1)),
         settings(),
         Arc::clone(&status),
+        WindowNames::default(),
     );
     inventory.scan().unwrap();
     let before = status.generations();
@@ -2474,6 +2563,7 @@ fn a_session_that_leaves_the_listing_has_its_stream_stopped() {
         Arc::new(fake_of_two_sessions(2)),
         settings(),
         Arc::clone(&status),
+        WindowNames::default(),
     );
     both.scan().unwrap();
     wait_until("both streams are ready", || {
@@ -2483,6 +2573,7 @@ fn a_session_that_leaves_the_listing_has_its_stream_stopped() {
         Arc::new(fake_of_two_sessions(1)),
         settings(),
         Arc::clone(&status),
+        WindowNames::default(),
     );
     one.scan().unwrap();
     assert_eq!(status.lookup("block:b"), Lookup::NoStream);
@@ -2493,7 +2584,7 @@ fn a_session_that_leaves_the_listing_has_its_stream_stopped() {
 #[test]
 fn a_tmux_setting_starts_no_stream() {
     let settings = crate::settings::settings_with("[agent_monitor]\nmultiplexer = \"tmux\"");
-    let _inventory = inventory_with(&settings, || {
+    let _inventory = inventory_with(&settings, WindowNames::default(), || {
         panic!("a tmux setting must not create the status streams")
     });
 }
@@ -2502,7 +2593,7 @@ fn a_tmux_setting_starts_no_stream() {
 fn a_rex_setting_gives_the_inventory_the_status() {
     let settings = crate::settings::settings_with("[agent_monitor]\nmultiplexer = \"rex\"");
     let asked = std::cell::Cell::new(false);
-    let _inventory = inventory_with(&settings, || {
+    let _inventory = inventory_with(&settings, WindowNames::default(), || {
         asked.set(true);
         inert_status()
     });
@@ -2886,7 +2977,12 @@ fn new_agents_start_times_are_read_in_parallel() {
     let mut api = slow_rex_of(4);
     api.ps_gate = Some(Arc::new(CallGate::new(4)));
     let api = Arc::new(api);
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let observed = inventory.scan().unwrap();
     let starts: Vec<i64> = observed
         .iter()
@@ -2907,7 +3003,12 @@ fn new_agents_start_times_are_read_in_parallel() {
 fn one_new_agent_reads_its_start_time_on_the_scan_thread() {
     let _directory = directory_test_lock();
     let api = Arc::new(slow_rex_of(1));
-    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let inventory = RexAgentInventory::new(
+        api.clone(),
+        settings(),
+        inert_status(),
+        WindowNames::default(),
+    );
     let observed = inventory.scan().unwrap();
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].incarnation.agent_started_at_ms, 1_000);
@@ -2915,4 +3016,52 @@ fn one_new_agent_reads_its_start_time_on_the_scan_thread() {
         *api.ps_threads.lock().unwrap(),
         vec![std::thread::current().id()]
     );
+}
+
+// -- the window name of each agent pane ----------------------------------------------------
+
+fn shell_process() -> RexProcess {
+    process(8, Some(proc(9, "zsh", None)), vec![proc(8, "login", None)])
+}
+
+#[test]
+fn a_rex_scan_fills_the_names_of_agent_panes_only() {
+    let _directory = directory_test_lock();
+    let mut api = fake(&[
+        ("block:a", Ok(claude_process())),
+        ("block:b", Ok(shell_process())),
+    ]);
+    api.labels = vec!["pod".into()];
+    let names = WindowNames::default();
+    let inventory =
+        RexAgentInventory::new(Arc::new(api), settings(), inert_status(), names.clone());
+
+    let agents = inventory.scan().unwrap();
+
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        names.get(&agents[0].incarnation.pane_id),
+        Some("pod".to_string())
+    );
+    assert_eq!(names.get("block:b"), None);
+}
+
+#[test]
+fn a_failed_rex_scan_leaves_the_names() {
+    let _directory = directory_test_lock();
+    let mut api = fake(&[("block:a", Ok(claude_process()))]);
+    api.labels = vec!["pod".into()];
+    let names = WindowNames::default();
+    let first = RexAgentInventory::new(Arc::new(api), settings(), inert_status(), names.clone());
+    let pane_id = first.scan().unwrap()[0].incarnation.pane_id.clone();
+    let version = *names.subscribe().borrow();
+
+    let mut failing = fake(&[("block:a", Ok(claude_process()))]);
+    failing.list_error = Some(RexError::Timeout);
+    let second =
+        RexAgentInventory::new(Arc::new(failing), settings(), inert_status(), names.clone());
+    assert!(second.scan().is_err());
+
+    assert_eq!(names.get(&pane_id), Some("pod".to_string()));
+    assert_eq!(*names.subscribe().borrow(), version);
 }
