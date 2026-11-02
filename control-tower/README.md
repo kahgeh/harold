@@ -78,9 +78,9 @@ Such a row has a pane id of the form `rex:<label>/block:<id>`, and the fields `h
 | Place | An agent on a Rex host |
 | --- | --- |
 | Group | The first word of its session name, as for every agent. |
-| WHERE column | The host mark, a space, then the session name. When the window has a name, ` · ` and the window name follow the session name. The column keeps its fixed width, and a longer text is cut with `…`. The pane address of a colliding row stays visible. |
+| WHERE column | The host mark, a space, then the name of the row. When the window has a name, ` · ` and the window name follow the name of the row. The column keeps its fixed width, and a longer text is cut with `…`. The pane address of a colliding row stays visible. |
 | Detail panel | A `HOST` line with the label. A `WINDOW` line with the window name, when the window has a name (this applies to every agent). |
-| Enter | The status line shows `on <label>`. No `rex` or `tmux` command runs. |
+| Enter | Moves your Rex app to the agent's window with `rex -S <label>` and that host's own ids. Nothing runs on this Mac's Rex, and nothing is typed into the agent. When no Rex app is connected, the status line shows `on <label>: no Rex app is connected`. With several apps and none named like this Mac, it shows `on <label>: no Rex app matches this Mac`. With several matching apps, it shows `on <label>: more than one Rex app`. A failed step shows `NAVIGATION ERROR` with the step. |
 | Filter (`f`) | Also matches the host label. |
 
 The host mark depends on `--host-marker`:
