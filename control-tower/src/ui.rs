@@ -3255,6 +3255,36 @@ mod tests {
     }
 
     #[test]
+    fn the_list_shows_coordinator_and_pnem_under_the_harold_group() {
+        let mut coordinator = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "harold:0.3",
+            "SUMMARYX",
+            0,
+        );
+        coordinator.working_directory = "/w/harold".into();
+        coordinator.role = "coordinator".into();
+        coordinator.pod_product = "harold".into();
+        let mut pnem = row(
+            incarnation("%2", 11, 21, "claude"),
+            AgentState::Idle,
+            "Claude",
+            "harold:0.4",
+            "SUMMARYY",
+            0,
+        );
+        pnem.working_directory = "/w/harold".into();
+        pnem.role = "pnem".into();
+        pnem.pod_product = "harold".into();
+        let content = rendered_lines(&live_app(vec![coordinator, pnem], None), 140, 29, 100_000);
+        assert!(content.contains("Coordinator"), "{content}");
+        assert!(content.contains("PnEM"), "{content}");
+        assert!(!content.contains(" :0.3"), "{content}");
+    }
+
+    #[test]
     fn where_shows_the_window_name_after_the_session() {
         let mut agent = row(
             incarnation("%1", 10, 20, "claude"),
@@ -4000,6 +4030,8 @@ mod tests {
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
             incarnation,
             provider_display_name: provider_display_name.into(),
             tmux_target: tmux_target.into(),

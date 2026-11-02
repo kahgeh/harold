@@ -99,6 +99,10 @@ pub struct AgentRow {
     pub host_icon: String,
     /// The name of the window that holds the pane, empty when the window has no name.
     pub window_name: String,
+    /// The role of the agent in the pod: `chief`, `coordinator` or `pnem`. Empty for other agents.
+    pub role: String,
+    /// The product of the pod that the agent serves. Empty when Harold sends none.
+    pub pod_product: String,
 }
 
 impl AgentRow {
@@ -115,8 +119,15 @@ impl AgentRow {
             .unwrap_or(&self.session_name)
     }
 
-    /// What the user calls this agent: the last component of its working directory.
+    /// What the user calls this agent: its role name, or else the last component of its
+    /// working directory.
     pub fn name(&self) -> &str {
+        match self.role.as_str() {
+            "chief" => return "Chief",
+            "coordinator" => return "Coordinator",
+            "pnem" => return "PnEM",
+            _ => {}
+        }
         if self.working_directory.is_empty() {
             return &self.tmux_target;
         }
@@ -332,7 +343,7 @@ pub struct App {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchableRow {
-    fields: [String; 7],
+    fields: [String; 9],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1371,6 +1382,8 @@ impl From<&AgentRow> for SearchableRow {
                 normalize_search(&row.tmux_target),
                 normalize_search(&row.working_directory),
                 normalize_search(&row.host),
+                normalize_search(row.name()),
+                normalize_search(&row.pod_product),
             ],
         }
     }
@@ -1925,6 +1938,8 @@ mod tests {
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
             incarnation: incarnation("%17", 17, 170, 1_700, "provider-id"),
             provider_display_name: "Codex Prime".into(),
             tmux_target: "Agents:2.7".into(),
@@ -1966,6 +1981,58 @@ mod tests {
                 "query {query:?} should match"
             );
         }
+    }
+
+    fn roled(pane_id: &str, session: &str, pane_index: u32, role: &str, product: &str) -> AgentRow {
+        let mut roled = row(
+            incarnation(pane_id, 1, 2, 3, "claude"),
+            AgentState::Idle,
+            session,
+            0,
+            pane_index,
+        );
+        roled.working_directory = "/w/harold".into();
+        roled.role = role.into();
+        roled.pod_product = product.into();
+        roled
+    }
+
+    #[test]
+    fn rows_with_a_role_show_chief_coordinator_and_pnem() {
+        assert_eq!(roled("%1", "chief", 0, "chief", "").name(), "Chief");
+        assert_eq!(
+            roled("%2", "harold", 1, "coordinator", "harold").name(),
+            "Coordinator"
+        );
+        assert_eq!(roled("%3", "harold", 2, "pnem", "harold").name(), "PnEM");
+    }
+
+    #[test]
+    fn a_row_with_no_role_keeps_its_folder_name() {
+        assert_eq!(roled("%1", "harold", 0, "", "").name(), "harold");
+        assert_eq!(roled("%2", "harold", 1, "unknown", "").name(), "harold");
+    }
+
+    #[test]
+    fn build_labels_gives_no_pane_suffix_to_coordinator_and_pnem_of_one_group() {
+        let rows = vec![
+            roled("%1", "harold", 3, "coordinator", "harold"),
+            roled("%2", "harold", 4, "pnem", "harold"),
+        ];
+        let labels = build_labels(&rows);
+        assert_eq!(labels[0].full, "Coordinator");
+        assert_eq!(labels[1].full, "PnEM");
+        assert!(labels.iter().all(|label| label.suffix_len == 0));
+    }
+
+    #[test]
+    fn search_matches_the_role_name_and_the_pod_product() {
+        let pnem = roled("%1", "harold", 0, "pnem", "keymap");
+        let plain = roled("%2", "other", 0, "", "");
+        assert!(SearchableRow::from(&pnem).matches("pnem"));
+        assert!(SearchableRow::from(&pnem).matches("keymap"));
+        assert!(!SearchableRow::from(&plain).matches("pnem"));
+        assert!(!SearchableRow::from(&plain).matches("keymap"));
     }
 
     #[test]
@@ -2371,6 +2438,8 @@ mod tests {
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
             tmux_target: format!("{session_name}:{window_index}.{pane_index}"),
             session_name: session_name.into(),
             window_index,

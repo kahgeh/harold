@@ -689,6 +689,8 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
         host: sanitize_display(&pane.host, PANE_FIELD_LIMIT),
         host_icon: sanitize_display(&pane.host_icon, PANE_FIELD_LIMIT),
         window_name: sanitize_display(&pane.window_name, PANE_FIELD_LIMIT),
+        role: sanitize_display(&pane.role, PANE_FIELD_LIMIT),
+        pod_product: sanitize_display(&pane.pod_product, PANE_FIELD_LIMIT),
     })
 }
 
@@ -1535,6 +1537,24 @@ mod tests {
                 .window_name
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_pane_role_and_pod_product_reach_the_row() {
+        let mut pane = proto_pane("%1");
+        pane.role = "pnem".into();
+        pane.pod_product = "harold".into();
+        let row = super::map_pane(pane).unwrap();
+        assert_eq!(row.role, "pnem");
+        assert_eq!(row.pod_product, "harold");
+        let mut dirty = proto_pane("%2");
+        dirty.role = "\x1b[31mchief".into();
+        dirty.pod_product = "\x1b[31mkeymap".into();
+        let row = super::map_pane(dirty).unwrap();
+        assert_eq!(row.role, "chief");
+        assert_eq!(row.pod_product, "keymap");
+        let plain = super::map_pane(proto_pane("%3")).unwrap();
+        assert!(plain.role.is_empty() && plain.pod_product.is_empty());
     }
 
     fn proto_health(
