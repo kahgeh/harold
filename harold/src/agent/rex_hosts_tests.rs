@@ -411,6 +411,16 @@ fn host_scan_survives_one_unreadable_block() {
 }
 
 #[test]
+fn host_scan_fails_when_every_process_call_fails() {
+    let fake = Fake::new("allfail");
+    fake.put("process-b1.json", "not json");
+    fake.put("process-b2.json", "not json");
+    let scan = fake.inventory("omarchy", None, clock(1)).scan();
+    assert_eq!(scan.outcome, Err(RexError::Malformed));
+    assert!(scan.agents.is_empty());
+}
+
+#[test]
 fn a_host_with_2_sessions_and_8_blocks_takes_its_slowest_call_per_step() {
     let fake = Fake::new("pool");
     fake.put(

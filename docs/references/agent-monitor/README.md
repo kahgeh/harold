@@ -516,7 +516,7 @@ An unreadable block is a block whose `process` answer failed, timed out or could
 | `agent pane unreadable` (warn) | `pane_id`, `reason` (`failed`, `timeout` or `malformed`) |
 | `agent pane readable again` (info) | `pane_id` |
 
-Harold logs each line once for each change. A block that stays unreadable logs one `agent pane unreadable` line, not one for each scan. The same rule holds for a block of a Rex host.
+Harold logs each line once for each change. A block that stays unreadable logs one `agent pane unreadable` line, not one for each scan. A host scan leaves an unreadable block out and writes no log line for it. It fails only when no block answered.
 
 One unreadable block does not degrade the inventory. Two cases degrade it. In the first case, the listing (`ls` or `session.view`) fails. In the second case, the scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory` and `reason = failed`. A scan with no blocks is not degraded. A degraded scan returns no old rows.
 

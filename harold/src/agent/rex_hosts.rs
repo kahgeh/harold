@@ -294,12 +294,25 @@ impl RexHostInventory {
                 ],
             )
         });
-        // A block that does not answer is left out. The other blocks stay.
+        // A block that does not answer is left out. The other blocks stay. The scan fails
+        // with the first error when no block answered, or when a stop ended a call.
+        let results: Vec<_> = texts
+            .into_iter()
+            .map(|text| parse_process(&text?))
+            .collect();
+        let first_error = results
+            .iter()
+            .find_map(|result| result.as_ref().err().copied());
         let answered: Vec<_> = slots
             .iter()
-            .zip(texts)
-            .filter_map(|(slot, text)| Some((slot, parse_process(&text.ok()?).ok()?)))
+            .zip(results)
+            .filter_map(|(slot, result)| Some((slot, result.ok()?)))
             .collect();
+        if let Some(error) = first_error
+            && (answered.is_empty() || stop_requested())
+        {
+            return Err(error);
+        }
         let mut hits = Vec::new();
         for (slot, process) in &answered {
             if let Some((agent, program)) = find_agent(process, &self.settings) {
