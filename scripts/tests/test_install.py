@@ -62,6 +62,9 @@ class InstallTests(unittest.TestCase):
         patcher = patch.dict('os.environ', {'HOME': str(Path(self.temp.name).resolve() / 'home')})
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = patch.object(sys, 'platform', 'darwin')  # these tests cover the Mac install
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_symlinked_managed_data_rejected_before_mutation(self):
         bundle = self.prefix / 'harold'
@@ -700,6 +703,9 @@ class InstalledServiceTests(unittest.TestCase):
         # Never the real ~/Library/LaunchAgents.
         self.home = root / 'home'
         patcher = patch.dict('os.environ', {'HOME': str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(sys, 'platform', 'darwin')  # these tests cover the Mac install
         patcher.start()
         self.addCleanup(patcher.stop)
         self.release = root / 'release'
@@ -1448,6 +1454,475 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertIn('Rollback copy incomplete (boom)', output)
         self.assertIn('Harold ready at', output)
         self.assertEqual((self.prefix / 'harold' / 'control-tower').read_text(), 'release control-tower')
+
+    def test_darwin_install_is_unchanged(self):
+        # The other tests in this class are the proof for the Mac steps. Here: no systemd on darwin.
+        self.install_existing(saved='-')
+        self.run_install('-')
+        self.assertFalse([call for call in self.calls if call and call[0] in ('systemctl', 'loginctl', 'rex')],
+                         self.calls)
+        self.assertFalse((self.home / '.config/systemd').exists())
+        self.assertIn('label', self.installed_metadata())
+
+
+class FakeLinux:
+    """Linux for an install: `sys.platform` is 'linux' and PATH holds only fake programs.
+
+    The fakes `rex`, `grpcurl`, `curl`, `lsof`, `systemctl` and `loginctl` write `<name> <args>`
+    to `state/calls`. The stubs for programs that a Linux install must never run (`pip`, `pip3`,
+    `nvidia-smi`, `codesign`, `launchctl`, `plutil`, and `loginctl enable-linger`) write the
+    marker `state/called-<name>` and exit 99. `systemctl --user start` writes PID to
+    `state/running` and `stop` empties it; `lsof` shows a listener only while it is running.
+    A flag file in `state` changes a fake: `no-rex-server`, `bus-down`, `linger-off`.
+    The context can be entered more than once; the state stays."""
+
+    FORBIDDEN = ('pip', 'pip3', 'nvidia-smi', 'codesign', 'launchctl', 'plutil')
+    PID = 4242
+
+    def __init__(self, root, bundle, missing=()):
+        self.bin = root / 'fake bin'
+        self.state = root / 'fake state'
+        self.bundle = bundle
+        self.missing = set(missing)
+
+    def write(self, name, body):
+        if name in self.missing:
+            return
+        path = self.bin / name
+        path.write_text('#!/bin/sh\nD={}\necho "{} $*" >> "$D/calls"\n'.format(
+            shlex.quote(str(self.state)), name) + body)
+        path.chmod(0o755)
+
+    def flag(self, name):
+        self.state.mkdir(exist_ok=True)
+        (self.state / name).write_text('')
+
+    def calls(self, program=None):
+        try:
+            lines = (self.state / 'calls').read_text().splitlines()
+        except FileNotFoundError:
+            return []
+        return [line for line in lines if program is None or line.split(' ', 1)[0] == program]
+
+    def markers(self):
+        return sorted(path.name for path in self.state.glob('called-*'))
+
+    def __enter__(self):
+        self.bin.mkdir(exist_ok=True)
+        self.state.mkdir(exist_ok=True)
+        for name in self.FORBIDDEN:
+            self.write(name, 'echo "$*" > "$D/called-{}"\nexit 99\n'.format(name))
+        self.write('rex', 'if [ -f "$D/no-rex-server" ]; then echo "rex: no server" >&2; exit 1; fi\n'
+                          'echo omarchy\n')
+        self.write('grpcurl', 'exit 0\n')
+        self.write('curl', 'exit 0\n')
+        self.write('systemctl', '\n'.join([
+            'if [ -f "$D/bus-down" ]; then echo "Failed to connect to bus: No medium found" >&2; exit 1; fi',
+            'case "$2" in',
+            '  start) echo {} > "$D/running" ;;'.format(self.PID),
+            '  stop) : > "$D/running" ;;',
+            '  show) if [ -s "$D/running" ]; then read pid < "$D/running"; echo "MainPID=$pid";'
+            ' else echo "MainPID=0"; fi ;;',
+            '  is-enabled) echo enabled ;;',
+            'esac', 'exit 0', '']))
+        self.write('lsof', '\n'.join([
+            'case "$*" in',
+            '  *-iTCP:*) if [ -s "$D/running" ]; then read pid < "$D/running"; echo "p$pid"; exit 0; fi; exit 1 ;;',
+            '  *"-d txt"*) echo n{} ;;'.format(shlex.quote(str(self.bundle / 'harold'))),
+            '  *) exit 1 ;;',
+            'esac', '']))
+        self.write('loginctl', '\n'.join([
+            'case "$1" in',
+            '  enable-linger) echo "$*" > "$D/called-enable-linger"; exit 99 ;;',
+            '  show-user) if [ -f "$D/linger-off" ]; then echo no; else echo yes; fi ;;',
+            'esac', '']))
+        self.stack = contextlib.ExitStack()
+        self.stack.enter_context(patch.dict('os.environ', {'PATH': str(self.bin)}))
+        self.stack.enter_context(patch.object(sys, 'platform', 'linux'))
+        # The fake PID is not a real Harold: nothing may signal it.
+        self.stack.enter_context(patch.object(os, 'kill', side_effect=AssertionError('os.kill called')))
+        return self
+
+    def __exit__(self, *exc):
+        self.stack.close()
+        return False
+
+
+class LinuxInstallTests(unittest.TestCase):
+    """A whole Linux install from a release fixture, with the programs it runs faked by FakeLinux."""
+
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.prefix = self.root / 'prefix with spaces'
+        self.prefix.mkdir()
+        self.bundle = self.prefix / 'harold'
+        self.settings = self.root / 'claude/settings.json'
+        self.settings.parent.mkdir()
+        self.settings.write_text('{}')
+        for name, value in (('CLAUDE_SETTINGS', self.settings), ('AGENT_SKILL_FOLDERS', ())):
+            patcher = patch.object(install, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.home = self.root / 'home'
+        patcher = patch.dict('os.environ', {'HOME': str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.release = self.root / 'release'
+        for name in ('control-tower', 'harold.proto',
+                     'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                     'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                     'config/default.toml', 'config/local.template.toml', SKILL_FILE,
+                     *('hooks/claude-mod/' + f for f in RUNTIME_FILES)):
+            path = self.release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('release ' + name)
+        self.harold_log = self.root / 'harold-calls'
+        prefix = shlex.quote(str(self.prefix))
+        (self.release / 'harold').write_text('\n'.join([
+            '#!/bin/sh',
+            'LOG={}'.format(shlex.quote(str(self.harold_log))),
+            'case "$1" in',
+            '  --build-features)',
+            '    copied=no',
+            '    for f in {0}/harold {0}/.harold-stage-*; do [ -e "$f" ] && copied=yes; done'.format(prefix),
+            '    echo "build-features copied=$copied" >> "$LOG"',
+            '    echo agent-monitor; echo rex ;;',
+            '  --check-config)',
+            '    echo check-config >> "$LOG"',
+            '    printf \'{"grpc_addr": "127.0.0.1:50123", "store_path": "%s"}\\n\' "$HAROLD__STORE__PATH" ;;',
+            '  --check-ready) echo \'{"ready": true}\' ;;',
+            '  *) exit 2 ;;',
+            'esac', '']))
+        for name in ('harold', 'control-tower'):
+            (self.release / name).chmod(0o755)
+        self.fake = FakeLinux(self.root, self.bundle)
+        self.unit = self.home / '.config/systemd/user/harold.service'
+        self.addCleanup(self.assert_no_forbidden_program_ran)
+
+    def assert_no_forbidden_program_ran(self):
+        if self.fake.state.is_dir():
+            self.assertEqual(self.fake.markers(), [])
+
+    def args(self, config=None, reinstall=False):
+        return argparse.Namespace(prefix=str(self.prefix), config=config, reinstall=reinstall,
+                                  offline=False, signing_identity=None, prebuilt_dir=str(self.release))
+
+    def run_install(self, config=None, reinstall=False):
+        self.printed = io.StringIO()
+        with self.fake, contextlib.redirect_stdout(self.printed):
+            self.install.install(self.args(config, reinstall), self.root / 'no source')
+        return self.printed.getvalue()
+
+    def run_main(self, *extra):
+        """Runs main() as the command line does. Returns (exit code, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        argv = ['install.py', '--prefix', str(self.prefix), '--prebuilt-dir', str(self.release), *extra]
+        with self.fake, patch.object(sys, 'argv', argv), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.install.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def rex(self):
+        return str(self.fake.bin / 'rex')
+
+    def local_toml(self):
+        return (self.bundle / 'config/local.toml').read_text()
+
+    def assert_nothing_copied(self):
+        self.assertFalse(self.bundle.exists())
+        self.assertEqual(list(self.prefix.glob('.harold-stage-*')), [])
+        self.assertFalse(self.unit.exists())
+
+    def test_features_read_from_the_package_binary_before_copy(self):
+        output = self.run_install()
+        log = self.harold_log.read_text().splitlines()
+        self.assertEqual(log[0], 'build-features copied=no')
+        self.assertLess(log.index('build-features copied=no'), log.index('check-config'))
+        self.assertIn('Harold build features: agent-monitor, rex\n', output)
+
+    def test_package_features_reads_one_name_per_line(self):
+        with self.fake:
+            self.assertEqual(self.install.package_features(self.release / 'harold'), ['agent-monitor', 'rex'])
+
+    def test_missing_rex_stops_with_a_clear_message(self):
+        self.fake.missing.add('rex')
+        with self.fake:
+            with self.assertRaisesRegex(RuntimeError, 'Rex not found'):
+                self.install.find_rex()
+        with self.assertRaisesRegex(RuntimeError, 'Missing tools: rex'):
+            self.run_install()
+        self.assert_nothing_copied()
+
+    def test_no_rex_server_stops_nothing_copied(self):
+        self.fake.flag('no-rex-server')
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_install()
+        self.assertIn("omarchy's agents run in Rex", str(raised.exception))
+        self.assertIn('no Rex server answers', str(raised.exception))
+        self.assertIn('rex --autostart=false whoami', self.fake.calls('rex'))
+        self.assert_nothing_copied()
+
+    def test_config_has_the_four_settings(self):
+        output = self.run_install()
+        text = self.local_toml()
+        for line in ('[agent_monitor]', 'multiplexer = "rex"', 'rex = {}'.format(json.dumps(self.rex())),
+                     '[tts]', 'command = ""', '[telemetry]', 'export = false'):
+            self.assertEqual(text.splitlines().count(line), 1, (line, text))
+        self.assertNotIn('already in', output)
+        try:
+            import tomllib
+        except ImportError:  # Python before 3.11
+            return
+        self.assertEqual(tomllib.loads(text), {
+            'agent_monitor': {'multiplexer': 'rex', 'rex': self.rex()},
+            'tts': {'command': ''}, 'telemetry': {'export': False}})
+
+    def test_existing_tables_are_not_repeated(self):
+        config = self.root / 'import.toml'
+        config.write_text('[tts]\ncommand = "x"\n')
+        output = self.run_install(config=str(config))
+        text = self.local_toml()
+        self.assertEqual(text.count('[tts]'), 1, text)
+        self.assertIn('command = "x"', text)
+        self.assertNotIn('command = ""', text)
+        self.assertEqual(text.count('[agent_monitor]'), 1, text)
+        self.assertEqual(text.count('[telemetry]'), 1, text)
+        self.assertEqual(output.count('[tts]'), 1, output)
+        self.assertIn('[tts] is already in the configuration', output)
+
+    def test_each_existing_table_is_kept_as_the_user_wrote_it(self):
+        rex = '/opt/my rex/rex'
+        for name, table in (('agent_monitor', '[agent_monitor]\nmultiplexer = "tmux"\n'),
+                            ('tts', '[ tts ]\ncommand = "say"\n'),
+                            ('telemetry', '[telemetry]\nexport = true\n'),
+                            ('tts', '[tts.voices]\nfast = "x"\n'),
+                            ('tts', 'tts.command = "say"\n[notify]\nmachines = []\n')):
+            with self.subTest(table=table):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    text = self.install.linux_config(table.encode(), rex).decode()
+                self.assertTrue(text.startswith(table), text)
+                self.assertEqual(text.count('[{}]'.format(name)), 1 if '[{}]'.format(name) in table else 0, text)
+                self.assertEqual(printed.getvalue(),
+                                 '[{}] is already in the configuration; left as written.\n'.format(name))
+                try:
+                    import tomllib
+                except ImportError:  # Python before 3.11
+                    continue
+                parsed = tomllib.loads(text)
+                self.assertEqual(sorted(parsed) if 'notify' not in parsed else sorted(set(parsed) - {'notify'}),
+                                 ['agent_monitor', 'telemetry', 'tts'])
+
+    def test_a_commented_or_nested_header_does_not_count_as_the_table(self):
+        base = b'# [tts]\n[notify]\ntts = true\n[agent_monitor.extra]\n'
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            text = self.install.linux_config(base, '/usr/bin/rex').decode()
+        self.assertIn('\n[tts]\ncommand = ""\n', text)
+        self.assertIn('[agent_monitor] is already in the configuration', printed.getvalue())
+
+    def test_a_config_without_a_final_newline_gets_one_before_the_tables(self):
+        text = self.install.linux_config(b'[notify]\nmachines = []', '/usr/bin/rex').decode()
+        self.assertTrue(text.startswith('[notify]\nmachines = []\n\n[agent_monitor]\n'), text)
+
+    def test_no_question_is_asked_on_linux(self):
+        with patch.object(sys, 'platform', 'linux'), patch('sys.stdin.isatty', return_value=True), \
+             patch('builtins.input', side_effect=AssertionError('asked')):
+            self.assertEqual(self.install.choose_config(None, self.bundle), b'')
+
+    def test_unit_file_values(self):
+        self.run_install()
+        lines = self.unit.read_text().splitlines()
+        bundle = str(self.bundle)
+        for line in ('Restart=on-failure', 'RestartSec=30', 'StartLimitIntervalSec=600', 'StartLimitBurst=5',
+                     'Environment=HAROLD_LAUNCHD=1', 'WantedBy=default.target',
+                     # The bundle path has a space: ExecStart quotes it; the path settings take it whole.
+                     'ExecStart="{}/harold"'.format(bundle),
+                     'WorkingDirectory={}'.format(bundle),
+                     'StandardOutput=append:{}/harold.log'.format(bundle),
+                     'StandardError=append:{}/harold.log'.format(bundle)):
+            self.assertIn(line, lines)
+        path, = [line for line in lines if line.startswith('Environment="PATH=')]
+        # rex's folder ("fake bin") has a space, so the whole assignment is quoted.
+        self.assertEqual(path, 'Environment="PATH={}:{}/.local/bin:/usr/local/bin:/usr/bin"'.format(
+            self.fake.bin, self.home))
+        metadata = json.loads((self.bundle / 'service.json').read_text())
+        self.assertTrue(metadata['env']['PATH'].startswith(str(self.fake.bin) + ':'))
+        self.assertEqual(self.unit.stat().st_mode & 0o777, 0o644)
+        self.assertEqual([p.name for p in self.unit.parent.iterdir()], ['harold.service'])
+
+    def test_unit_values_are_escaped_by_systemd_rules(self):
+        metadata = self.install.make_linux_metadata(Path('/x/50% "a" b\\c'), '', '/r $x/rex')
+        path = self.root / 'unit/harold.service'
+        self.install.write_unit(path, metadata)
+        lines = path.read_text().splitlines()
+        self.assertIn('ExecStart="/x/50%% \\"a\\" b\\\\c/harold/harold"', lines)
+        self.assertIn('WorkingDirectory=/x/50%% "a" b\\c/harold', lines)
+        path_line, = [line for line in lines if line.startswith('Environment="PATH=')]
+        self.assertTrue(path_line.startswith('Environment="PATH=/r $x:'), path_line)
+
+    def test_a_rex_folder_that_cannot_go_in_path_is_refused(self):
+        for rex in ('/a:b/rex', '/a\nb/rex'):
+            with self.subTest(rex=rex):
+                with self.assertRaisesRegex(RuntimeError, 'rex'):
+                    self.install.make_linux_metadata(self.prefix, '', rex)
+
+    def test_systemctl_sequence(self):
+        self.run_install()
+        calls = self.fake.calls('systemctl')
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertEqual(call.split()[1], '--user', call)
+        reload = len(calls) - 1 - calls[::-1].index('systemctl --user daemon-reload')
+        enable = calls.index('systemctl --user enable harold.service')
+        start = calls.index('systemctl --user start harold.service')
+        self.assertLess(reload, enable)
+        self.assertLess(enable, start)
+
+    def test_reinstall_over_a_running_unit_stops_it_first_then_starts_the_new_one(self):
+        self.run_install()
+        (self.fake.state / 'calls').write_text('')
+        output = self.run_install()
+        calls = self.fake.calls('systemctl')
+        stop = calls.index('systemctl --user stop harold.service')
+        reload = len(calls) - 1 - calls[::-1].index('systemctl --user daemon-reload')
+        self.assertLess(stop, reload)
+        self.assertLess(reload, calls.index('systemctl --user enable harold.service'))
+        self.assertLess(calls.index('systemctl --user enable harold.service'),
+                        calls.index('systemctl --user start harold.service'))
+        self.assertIn('Harold ready at 127.0.0.1:50123 (systemd PID 4242)', output)
+        backup, = self.prefix.glob('harold.backup-*')
+        note = (backup / 'ROLLBACK.md').read_text()
+        self.assertIn('systemctl --user enable harold\n./haroldctl start\n', note)
+        self.assertNotIn('launchctl', note)
+        self.assertNotIn('LaunchAgents', note)
+
+    def test_no_tts_environment_and_no_gpu_probe(self):
+        self.run_install()
+        for name in ('pip', 'pip3', 'nvidia-smi'):
+            self.assertFalse((self.fake.state / ('called-' + name)).exists(), name)
+            self.assertEqual(self.fake.calls(name), [])
+        self.assertFalse((self.bundle / 'tts').exists())
+
+    def test_no_mac_tools_called(self):
+        self.run_install()
+        for name in ('codesign', 'launchctl', 'plutil'):
+            self.assertFalse((self.fake.state / ('called-' + name)).exists(), name)
+        self.assertFalse((self.bundle / 'service.plist').exists())
+        self.assertFalse((self.home / 'Library').exists())
+
+    def test_linger_off_prints_a_warning_and_does_not_enable_it(self):
+        self.fake.flag('linger-off')
+        output = self.run_install()
+        warning = [line for line in output.splitlines() if 'linger' in line.lower()]
+        self.assertEqual(len(warning), 1, output)
+        self.assertTrue(warning[0].startswith('Warning: '), warning)
+        self.assertIn('loginctl enable-linger', warning[0])
+        self.assertTrue(output.endswith(warning[0] + '\n'), output)
+        self.assertEqual(self.fake.calls('loginctl'),
+                         ['loginctl show-user {} -p Linger --value'.format(os.getuid())])
+        self.assertFalse((self.fake.state / 'called-enable-linger').exists())
+
+    def test_linger_on_prints_nothing(self):
+        output = self.run_install()
+        self.assertNotIn('linger', output.lower())
+
+    def test_systemctl_user_manager_missing_stops_clearly(self):
+        self.fake.flag('bus-down')
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn('Failed to connect to bus', err)
+        self.assertIn('systemctl --user daemon-reload', err)
+        self.assertNotIn('Traceback', err)
+        self.assert_nothing_copied()
+
+    def test_systemctl_calls_have_a_timeout(self):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append((list(argv), kwargs.get('timeout')))
+            return subprocess.CompletedProcess(argv, 0, '', '')
+
+        with patch.object(subprocess, 'run', side_effect=run):
+            self.install.check_service_manager()
+        self.assertEqual(seen, [(['systemctl', '--user', 'daemon-reload'], 10)])
+
+    def test_reinstall_restarts_old_harold_when_data_copy_fails(self):
+        self.run_install()
+        (self.bundle / 'data/store/state.db').write_bytes(b'store-bytes')
+        old_harold = (self.bundle / 'harold').read_bytes()
+        (self.fake.state / 'calls').write_text('')
+        with patch.object(self.install, 'copy_data_to_backup', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_install()
+        self.assertEqual(raised.exception.code, 1)
+        output = self.printed.getvalue()
+        self.assertIn('Install stopped: the data copy failed (No space left on device).', output)
+        self.assertNotIn('Harold ready', output)
+        calls = self.fake.calls('systemctl')
+        stop = calls.index('systemctl --user stop harold.service')
+        self.assertLess(stop, calls.index('systemctl --user enable harold.service'))
+        self.assertLess(calls.index('systemctl --user enable harold.service'),
+                        calls.index('systemctl --user start harold.service'))
+        self.assertEqual((self.fake.state / 'running').read_text().strip(), str(FakeLinux.PID))
+        self.assertEqual((self.bundle / 'data/store/state.db').read_bytes(), b'store-bytes')
+        self.assertEqual((self.bundle / 'harold').read_bytes(), old_harold)
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertEqual(list(self.prefix.glob('.harold-stage-*')), [])
+
+    def test_unit_has_no_launchd_label_and_hooks_are_installed(self):
+        output = self.run_install()
+        metadata = json.loads((self.bundle / 'service.json').read_text())
+        self.assertNotIn('label', metadata)
+        self.assertNotIn('plist', metadata)
+        self.assertNotIn('launch_agent', metadata)
+        self.assertEqual(metadata['unit'], 'harold.service')
+        self.assertEqual(metadata['unit_file'], str(self.unit))
+        self.assertEqual(metadata['grpc_addr'], '127.0.0.1:50123')
+        self.assertEqual(sorted(metadata['env']), sorted([
+            'HAROLD_CONFIG_DIR', 'HAROLD_ENV', 'HAROLD__STORE__PATH', 'PATH', 'LANG', 'LC_ALL']))
+        settings = json.loads(self.settings.read_text())
+        mod = self.bundle / 'hooks/claude-mod'
+        self.assertEqual(settings['env']['CLAUDE_CODE_PLUGIN_DIRS'], str(mod))
+        hook = self.bundle / 'hooks' / 'claude_turn_complete.py'
+        self.assertEqual(settings['hooks']['Stop'], [
+            {'matcher': '', 'hooks': [{'type': 'command', 'command': 'python3 ' + shlex.quote(str(hook))}]}])
+        self.assertIn('Claude Code mod: added\n', output)
+        self.assertIn('Claude Code turn hook: added\n', output)
+        self.assertNotIn('Full Disk Access', output)
+        self.assertTrue((self.prefix / 'haroldctl').is_file())
+
+    def test_linux_prerequisites_name_the_pacman_and_grpcurl_lines(self):
+        with patch.object(sys, 'platform', 'linux'), patch.object(self.install.os, 'getuid', return_value=1000), \
+             patch.object(self.install.shutil, 'which', return_value=None):
+            with self.assertRaises(RuntimeError) as prebuilt:
+                self.install.prerequisites(self.prefix, prebuilt=True)
+            with self.assertRaises(RuntimeError) as source:
+                self.install.prerequisites(self.prefix, prebuilt=False)
+        message = str(prebuilt.exception)
+        self.assertIn('Missing tools: rex, grpcurl, lsof, systemctl, curl.', message)
+        self.assertIn('sudo pacman -S --needed python curl lsof inetutils base-devel pipewire', message)
+        self.assertIn('grpcurl-bin', message)
+        self.assertNotIn('brew', message)
+        self.assertNotIn('xcode-select', message)
+        self.assertIn('Missing tools: rex, grpcurl, lsof, systemctl, curl, cargo, rustc, protoc.',
+                      str(source.exception))
+
+    def test_linux_prerequisites_refuse_root(self):
+        with patch.object(sys, 'platform', 'linux'), patch.object(self.install.os, 'getuid', return_value=0):
+            with self.assertRaisesRegex(RuntimeError, 'without sudo'):
+                self.install.linux_prerequisites(True)
+
+    def test_the_rex_path_is_absolute_and_not_resolved(self):
+        link = self.root / 'links'
+        link.mkdir()
+        (link / 'rex').symlink_to(self.root / 'fake bin' / 'rex')
+        with self.fake, patch.dict('os.environ', {'PATH': str(link)}):
+            self.assertEqual(self.install.find_rex(), str(link / 'rex'))
 
 
 class PermissionsTests(unittest.TestCase):

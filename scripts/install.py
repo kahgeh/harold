@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and configure an on-demand, per-user Harold service on macOS."""
+"""Install and configure an on-demand, per-user Harold service on macOS (launchd) or Linux (systemd)."""
 
 import argparse
 from datetime import datetime, timezone
@@ -100,9 +100,38 @@ def validate_destination(prefix):
             raise RuntimeError('Expected managed directory: {}'.format(path))
 
 
+PACMAN_LINE = 'sudo pacman -S --needed python curl lsof inetutils base-devel pipewire'
+GRPCURL_LINE = ('Install grpcurl from the AUR package grpcurl-bin at its checked commit, '
+                'with makepkg -si (see docs/prerequisites.md).')
+
+
+def linux_prerequisites(prebuilt):
+    """The Linux twin of the Mac checks in `prerequisites`: no codesign, launchctl or plutil."""
+    if sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9+ is required')
+    if os.getuid() == 0:
+        raise RuntimeError('Run as your normal desktop user, without sudo')
+    required = ('rex', 'grpcurl', 'lsof', 'systemctl', 'curl')
+    if not prebuilt:
+        required += ('cargo', 'rustc', 'protoc')
+    missing = [name for name in required if not shutil.which(name)]
+    if missing:
+        lines = ['Missing tools: {}.'.format(', '.join(missing)), 'Run `{}`.'.format(PACMAN_LINE), GRPCURL_LINE]
+        if 'rex' in missing:
+            lines.append('Rex comes with omarchy: check that `rex` is on your PATH.')
+        if not prebuilt:
+            lines.append('For a source build, install Rust via rustup and run `sudo pacman -S --needed protobuf`.')
+        raise RuntimeError(' '.join(lines) + ' Then rerun.')
+
+
 def prerequisites(repo, prebuilt=False):
     if sys.version_info < (3, 9):
         raise RuntimeError('Python 3.9+ is required')
+    if sys.platform == 'linux':
+        linux_prerequisites(prebuilt)
+        if not prebuilt and not (repo / 'Cargo.lock').is_file():
+            raise RuntimeError('Missing Cargo.lock; restore the checked-in lockfile before installing')
+        return
     if sys.platform != 'darwin':
         raise RuntimeError('This installer requires macOS and a logged-in desktop user')
     if os.getuid() == 0:
@@ -328,6 +357,9 @@ def choose_config(supplied, bundle):
         if not source.is_file():
             raise RuntimeError('Config is not a readable TOML file: {}'.format(source))
         return source.read_bytes()
+    if sys.platform == 'linux':
+        # No iMessage on Linux, so there is no question to ask: linux_config adds the settings.
+        return b''
     if not sys.stdin.isatty():
         raise RuntimeError('No existing configuration and no input terminal. Supply --config PATH')
     recipient = input('iMessage recipient (phone number or email): ').strip()
@@ -341,6 +373,76 @@ def choose_config(supplied, bundle):
     config = '[imessage]\nrecipient = {}\nhandle_ids = {}\n'.format(
         json.dumps(recipient, ensure_ascii=False), json.dumps(handles))
     return (config + '\n[activity_summary]\nenabled = false\n').encode()
+
+
+TOML_HEADER = re.compile(r'^[ \t]*\[(?!\[)[ \t]*([A-Za-z0-9_-]+)[ \t]*[.\]]', re.MULTILINE)
+TOML_TOP_KEY = re.compile(r'^[ \t]*([A-Za-z0-9_-]+)[ \t]*[.=]', re.MULTILINE)
+
+
+def has_table(text, name):
+    """Whether the TOML `text` already defines the table `name`: a `[name]` or `[name.sub]`
+    header, or a top-level `name = ...` or `name.key = ...` before the first header. A line check
+    only (Python 3.9 has no tomllib); a comment line never matches."""
+    if name in TOML_HEADER.findall(text):
+        return True
+    first = TOML_HEADER.search(text)
+    return name in TOML_TOP_KEY.findall(text[:first.start()] if first else text)
+
+
+def linux_config(base, rex):
+    """`base` with the Linux settings appended: [agent_monitor] for Rex, [tts] with no command and
+    [telemetry] with no export. A table already in `base` is left as written, with one line said."""
+    try:
+        text = base.decode('utf-8')
+    except UnicodeDecodeError:
+        raise RuntimeError('The configuration is not UTF-8 text') from None
+    tables = (('agent_monitor', 'multiplexer = "rex"\nrex = {}\n'.format(json.dumps(rex, ensure_ascii=False))),
+              ('tts', 'command = ""\n'),
+              ('telemetry', 'export = false\n'))
+    added = []
+    for name, body in tables:
+        if has_table(text, name):
+            print('[{}] is already in the configuration; left as written.'.format(name), flush=True)
+        else:
+            added.append('[{}]\n{}'.format(name, body))
+    if added:
+        if text and not text.endswith('\n'):
+            text += '\n'
+        text += ('\n' if text else '') + '\n'.join(added)
+    return text.encode('utf-8')
+
+
+def package_features(binary):
+    """The features the package's harold was built with, one per line of `--build-features`."""
+    result = subprocess.run([str(binary), '--build-features'], capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError('{} --build-features failed: {}'.format(binary, result.stderr.strip()))
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def find_rex():
+    """The path of `rex` on PATH, as found: a symlink stays a symlink, so a Rex upgrade keeps it."""
+    location = shutil.which('rex')
+    if not location:
+        raise RuntimeError("Rex not found on PATH: omarchy's agents run in Rex. Check that `rex` is installed.")
+    return os.path.abspath(location)
+
+
+def check_rex_server(rex):
+    result = subprocess.run([rex, '--autostart=false', 'whoami'], capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError("Install stopped: no Rex server answers ({} --autostart=false whoami: {}). "
+                           "omarchy's agents run in Rex, and Harold reads them there. Start Rex, then rerun. "
+                           'Nothing was installed.'.format(rex, result.stderr.strip() or 'exit {}'.format(result.returncode)))
+
+
+def check_service_manager():
+    """Stops before any change when the user's systemd manager does not answer (for example, no
+    DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR). service.run stops a call after 10 seconds."""
+    result = service.systemctl('daemon-reload')
+    if result.returncode:
+        raise RuntimeError('Cannot reach the user service manager: systemctl --user daemon-reload: {}. '
+                           'Run the install from a login session of your user.'.format(result.stderr.strip()))
 
 
 def carried_pairing(bundle):
@@ -511,6 +613,85 @@ def write_launch_agent(metadata):
         pending.unlink(missing_ok=True)
 
 
+def make_linux_metadata(prefix, grpc_addr, rex):
+    """The Linux twin of make_metadata: a systemd user unit, and no launchd label."""
+    bundle = prefix / 'harold'
+    rex_folder = str(Path(rex).parent)
+    if ':' in rex_folder or '\n' in rex_folder:
+        raise RuntimeError("The rex folder {!r} cannot go in PATH (it holds ':' or a line break). "
+                           'Move rex, then rerun.'.format(rex_folder))
+    if '\n' in str(prefix):
+        raise RuntimeError('The install prefix cannot hold a line break')
+    paths = [rex_folder, str(Path.home() / '.local/bin'), '/usr/local/bin', '/usr/bin']
+    return {'bundle': str(bundle), 'unit': service.UNIT, 'grpc_addr': grpc_addr,
+            'unit_file': str(Path.home() / '.config/systemd/user' / service.UNIT),
+            'env': {'HAROLD_CONFIG_DIR': str(bundle / 'config'), 'HAROLD_ENV': 'local',
+                    'HAROLD__STORE__PATH': str(bundle / 'data/store'),
+                    'PATH': ':'.join(dict.fromkeys(paths)), 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}}
+
+
+def unit_path(value):
+    """`value` for a systemd setting that takes a path as is: `%` doubled, no quotes."""
+    return value.replace('%', '%%')
+
+
+def unit_quoted(value):
+    """`value` as one quoted word in a systemd unit, with `\\`, `"` and `%` escaped."""
+    return '"{}"'.format(value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%'))
+
+
+def unit_environment(name, value):
+    assignment = '{}={}'.format(name, value)
+    if re.fullmatch(r'[A-Za-z0-9_@+=:,./-]*', assignment):
+        return 'Environment=' + assignment
+    return 'Environment=' + unit_quoted(assignment)
+
+
+def write_unit(path, metadata):
+    """Writes the systemd user unit at `path`. It is written beside it and moved into place, so a
+    symlink there is replaced, not written through. The file written beside it does not end in
+    `.service`, so systemd never loads it, and it is removed if anything fails."""
+    bundle = Path(metadata['bundle'])
+    log = unit_path(str(bundle / 'harold.log'))
+    # Only the process systemd starts carries HAROLD_LAUNCHD, as with launchd on the Mac.
+    environment = dict(metadata['env'], HAROLD_LAUNCHD='1')
+    lines = ['[Unit]', 'Description=Harold',
+             # After 5 unclean exits in 10 minutes, systemd stops starting it again.
+             'StartLimitIntervalSec=600', 'StartLimitBurst=5', '',
+             '[Service]', 'Type=simple',
+             # `$` starts a variable in ExecStart only.
+             'ExecStart=' + unit_quoted(str(bundle / 'harold')).replace('$', '$$'),
+             'WorkingDirectory=' + unit_path(str(bundle))]
+    lines += [unit_environment(name, value) for name, value in environment.items()]
+    lines += ['Restart=on-failure', 'RestartSec=30', 'TimeoutStopSec=10',
+              'StandardOutput=append:' + log, 'StandardError=append:' + log, '',
+              '[Install]', 'WantedBy=default.target', '']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output = tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.harold-', suffix='.unit.tmp',
+                                         delete=False)
+    pending = Path(output.name)
+    try:
+        with output:
+            output.write('\n'.join(lines))
+        pending.chmod(0o644)
+        os.replace(pending, path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def linger_note():
+    """One warning line when systemd stops the user's services at logout, else None. It never
+    runs `loginctl enable-linger`: that choice is the person's."""
+    try:
+        result = service.run(['loginctl', 'show-user', str(os.getuid()), '-p', 'Linger', '--value'])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0 and result.stdout.strip() == 'no':
+        return ('Warning: lingering is off for your user, so systemd stops Harold when you log out. '
+                'To keep it running after logout, run: loginctl enable-linger')
+    return None
+
+
 def recorded(bundle, name):
     """The text of a bundle's VERSION or REVISION file, or None when it has none."""
     try:
@@ -550,6 +731,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
     aside as harold.replaced-<time> and, unless this was a reinstall, move its data and log back.
     They put back the LaunchAgents copy of `backup`'s plist, or remove the copy when `backup`
     does not start at login, and enable the label, which the new `haroldctl stop` disabled.
+    On Linux they enable the systemd unit instead.
     They also delete the counted-tip file, which an older Harold would leave stale.
     When `data_copied` is true, `backup` holds a copy of the store and events, so the commands move back
     only the other entries of the new data folder.
@@ -578,12 +760,16 @@ def rollback_note(prefix, backup, copied, reinstall, metadata, data_copied=False
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
     # An older Harold counts merges without moving the tips file, so a later upgrade would count them again.
     commands.append('rm -f harold/data/pod/tips')
-    launch_agent = shlex.quote(metadata['launch_agent'])
-    if starts_at_login(backup):
-        commands.append('cp harold/service.plist ' + launch_agent)
+    if sys.platform == 'linux':
+        # The unit names the same bundle path, so it needs no change; the new stop disabled it.
+        commands += ['systemctl --user enable harold', './haroldctl start']
     else:
-        commands.append('rm -f ' + launch_agent)
-    commands += ['launchctl enable gui/$(id -u)/' + metadata['label'], './haroldctl start']
+        launch_agent = shlex.quote(metadata['launch_agent'])
+        if starts_at_login(backup):
+            commands.append('cp harold/service.plist ' + launch_agent)
+        else:
+            commands.append('rm -f ' + launch_agent)
+        commands += ['launchctl enable gui/$(id -u)/' + metadata['label'], './haroldctl start']
     lines = ['# Roll back Harold', '',
              'This folder holds the Harold that was installed in {}.'.format(prefix), '',
              '- Version: {}'.format(recorded(backup, 'VERSION') or 'not recorded'),
@@ -734,7 +920,59 @@ def replace_bundle(stage, bundle, reinstall, data_copy=None):
     return backup
 
 
+def stage_bundle(stage, bundle, artifacts, assets, prebuilt, repo, local, pairing):
+    """Fill `stage` with the programs, hooks, mod, service script, configuration and skill that
+    both the Mac and the Linux install put in the bundle."""
+    (stage / 'config').mkdir(parents=True)
+    (stage / 'hooks').mkdir()
+    (stage / 'data/store').mkdir(parents=True)
+    shutil.copy2(artifacts['harold'], stage / 'harold')
+    shutil.copy2(artifacts['control-tower'], stage / 'control-tower')
+    shutil.copy2(assets / ('harold.proto' if prebuilt is not None else 'harold-api/proto/harold.proto'),
+                 stage / 'harold.proto')
+    shutil.copy2(assets / ('hooks/harold_turn_complete.py' if prebuilt is not None else 'hooks/shared/harold_turn_complete.py'),
+                 stage / 'hooks/harold_turn_complete.py')
+    for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
+        source = assets / ('hooks' if prebuilt is not None else 'hooks/providers') / name
+        shutil.copy2(source, stage / 'hooks' / name)
+    shutil.copytree(assets / 'hooks/claude-mod', stage / 'hooks/claude-mod',
+                    ignore=shutil.ignore_patterns('*.test.ts'))
+    shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
+    for name in ('default.toml', 'local.template.toml'):
+        shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
+    write_skill(assets / SKILL_FILE, stage / SKILL_FILE, bundle / 'harold')
+    record_version(stage, prebuilt, repo)
+    (stage / 'config/local.toml').write_bytes(local)
+    (stage / 'config/local.toml').chmod(0o600)
+    if pairing is not None:
+        # Written at 0600 from the start: Harold refuses a pairing file others can read.
+        descriptor = os.open(stage / 'config/pairing.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(pairing)
+        (stage / 'config/pairing.env').chmod(0o600)
+
+
+def probe_config(stage, bundle, metadata):
+    """Run the staged harold's `--check-config` and set metadata['grpc_addr'] from it."""
+    env = service.managed_environment(metadata['env'])
+    env['HAROLD_CONFIG_DIR'] = str(stage / 'config')
+    probe = subprocess.run([str(stage / 'harold'), '--check-config'], cwd=stage, env=env,
+                           capture_output=True, text=True, timeout=10)
+    if probe.returncode:
+        # Typed config errors can contain credential values; relay only the fixed sentences.
+        relayed = [line.strip() for line in probe.stderr.splitlines() if line.strip() in REFUSAL_SENTENCES]
+        if relayed:
+            raise RuntimeError('Configuration validation failed. Remove these settings, then run the install again:\n'
+                               + '\n'.join(relayed))
+        raise RuntimeError('Configuration validation failed; check the supplied TOML and required iMessage fields')
+    config = json.loads(probe.stdout)
+    metadata['grpc_addr'] = config['grpc_addr']
+    if config['store_path'] != str(bundle / 'data/store'):
+        raise RuntimeError('Configuration probe did not use the managed store path')
+
+
 def install(args, repo):
+    linux = sys.platform == 'linux'
     prebuilt = Path(args.prebuilt_dir).expanduser().resolve() if args.prebuilt_dir else None
     prerequisites(repo, prebuilt=prebuilt is not None)
     artifacts = prebuilt_files(prebuilt) if prebuilt is not None else None
@@ -747,72 +985,48 @@ def install(args, repo):
     pairing = carried_pairing(bundle)
     if artifacts is None:
         artifacts = build_binaries(repo, args.offline)
+    if linux:
+        # All before anything is copied: the build's own features, Rex, and the service manager.
+        features = package_features(artifacts['harold'])
+        print('Harold build features: {}'.format(', '.join(features) or 'none'), flush=True)
+        rex = find_rex()
+        check_rex_server(rex)
+        check_service_manager()
+        local = linux_config(local, rex)
     prefix.mkdir(parents=True, exist_ok=True)
     with service.service_lock(prefix):
         validate_destination(prefix)
         with tempfile.TemporaryDirectory(prefix='.harold-stage-', dir=prefix) as temporary:
             staging = Path(temporary)
             stage = staging / 'harold'
-            (stage / 'config').mkdir(parents=True)
-            (stage / 'hooks').mkdir()
-            (stage / 'data/store').mkdir(parents=True)
-            shutil.copy2(artifacts['harold'], stage / 'harold')
-            shutil.copy2(artifacts['control-tower'], stage / 'control-tower')
-            shutil.copy2(assets / ('harold.proto' if prebuilt is not None else 'harold-api/proto/harold.proto'),
-                         stage / 'harold.proto')
-            shutil.copy2(assets / ('hooks/harold_turn_complete.py' if prebuilt is not None else 'hooks/shared/harold_turn_complete.py'),
-                         stage / 'hooks/harold_turn_complete.py')
-            for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
-                source = assets / ('hooks' if prebuilt is not None else 'hooks/providers') / name
-                shutil.copy2(source, stage / 'hooks' / name)
-            shutil.copytree(assets / 'hooks/claude-mod', stage / 'hooks/claude-mod',
-                            ignore=shutil.ignore_patterns('*.test.ts'))
-            shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
-            for name in ('default.toml', 'local.template.toml'):
-                shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
-            write_skill(assets / SKILL_FILE, stage / SKILL_FILE, bundle / 'harold')
-            record_version(stage, prebuilt, repo)
-            (stage / 'config/local.toml').write_bytes(local)
-            (stage / 'config/local.toml').chmod(0o600)
-            if pairing is not None:
-                # Written at 0600 from the start: Harold refuses a pairing file others can read.
-                descriptor = os.open(stage / 'config/pairing.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, 'wb') as handle:
-                    handle.write(pairing)
-                (stage / 'config/pairing.env').chmod(0o600)
-            metadata = make_metadata(prefix, '')
-            reject_symlinks(Path(metadata['plist']))
-            identity = args.signing_identity if args.signing_identity is not None else saved_signing_identity(bundle)
-            metadata['signing_identity'] = identity
-            for binary in (stage / 'harold', stage / 'control-tower'):
-                sign(binary, identity)
-            old_requirement = designated_requirement(bundle / 'harold')
-            new_requirement = designated_requirement(stage / 'harold')
-            env = service.managed_environment(metadata['env'])
-            env['HAROLD_CONFIG_DIR'] = str(stage / 'config')
-            probe = subprocess.run([str(stage / 'harold'), '--check-config'], cwd=stage, env=env,
-                                   capture_output=True, text=True, timeout=10)
-            if probe.returncode:
-                # Typed config errors can contain credential values; relay only the fixed sentences.
-                relayed = [line.strip() for line in probe.stderr.splitlines() if line.strip() in REFUSAL_SENTENCES]
-                if relayed:
-                    raise RuntimeError('Configuration validation failed. Remove these settings, then run the install again:\n'
-                                       + '\n'.join(relayed))
-                raise RuntimeError('Configuration validation failed; check the supplied TOML and required iMessage fields')
-            config = json.loads(probe.stdout)
-            metadata['grpc_addr'] = config['grpc_addr']
-            if config['store_path'] != str(bundle / 'data/store'):
-                raise RuntimeError('Configuration probe did not use the managed store path')
-            (stage / 'service.json').write_text(json.dumps(metadata, indent=2) + '\n')
-            write_plist(stage / 'service.plist', metadata)
-            checked(['plutil', '-lint', str(stage / 'service.plist')])
+            stage_bundle(stage, bundle, artifacts, assets, prebuilt, repo, local, pairing)
+            if linux:
+                # No codesign, designated requirement, plutil or plist on Linux.
+                metadata = make_linux_metadata(prefix, '', rex)
+                probe_config(stage, bundle, metadata)
+                (stage / 'service.json').write_text(json.dumps(metadata, indent=2) + '\n')
+            else:
+                metadata = make_metadata(prefix, '')
+                reject_symlinks(Path(metadata['plist']))
+                identity = args.signing_identity if args.signing_identity is not None else saved_signing_identity(bundle)
+                metadata['signing_identity'] = identity
+                for binary in (stage / 'harold', stage / 'control-tower'):
+                    sign(binary, identity)
+                old_requirement = designated_requirement(bundle / 'harold')
+                new_requirement = designated_requirement(stage / 'harold')
+                probe_config(stage, bundle, metadata)
+                (stage / 'service.json').write_text(json.dumps(metadata, indent=2) + '\n')
+                write_plist(stage / 'service.plist', metadata)
+                checked(['plutil', '-lint', str(stage / 'service.plist')])
             launcher = '#!/bin/sh\nexec {} "$(dirname "$0")/harold/service.py" "$@"\n'.format(shlex.quote(sys.executable))
             (staging / 'haroldctl').write_text(launcher)
             (staging / 'haroldctl').chmod(0o755)
             old_metadata = metadata
             if (bundle / 'service.json').is_file():
                 old_metadata = json.loads((bundle / 'service.json').read_text())
-                if old_metadata['bundle'] != str(bundle) or old_metadata['label'] != metadata['label']:
+                same_service = (old_metadata.get('unit') == metadata['unit'] if linux
+                                else old_metadata['label'] == metadata['label'])
+                if old_metadata['bundle'] != str(bundle) or not same_service:
                     raise RuntimeError('Existing service metadata does not belong to this prefix')
             fresh_store = not args.reinstall and (bundle / 'data/events').is_dir() and not (bundle / 'data/store').exists()
             # Attribute listeners before stopping any currently running service.
@@ -821,7 +1035,9 @@ def install(args, repo):
                     if not service.executable_matches(pid, bundle / 'harold'):
                         raise RuntimeError('Port {} belongs to unrelated PID {}; leaving it running'.format(current['grpc_addr'], pid))
             # Boot out the old job without disabling it; start enables and loads the new copy.
-            service.unload(old_metadata)
+            # On Linux, with no unit file there is no unit to stop, and `systemctl stop` would fail.
+            if not linux or Path(metadata['unit_file']).is_file():
+                service.unload(old_metadata)
             service.stop_unmanaged(old_metadata)
             data_copy = {}
             try:
@@ -856,15 +1072,23 @@ def install(args, repo):
             if copy_kept:
                 remove_old_program(prefix)
             os.replace(staging / 'haroldctl', prefix / 'haroldctl')
-            write_launch_agent(metadata)
+            if linux:
+                write_unit(Path(metadata['unit_file']), metadata)
+                result = service.systemctl('daemon-reload')
+                if result.returncode:
+                    raise RuntimeError('systemctl --user daemon-reload failed: {}'.format(result.stderr.strip()))
+            else:
+                write_launch_agent(metadata)
             pid = service.start(metadata)
-            print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
-                metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
+            print('Harold ready at {} ({} PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
+                metadata['grpc_addr'], 'systemd' if linux else 'LaunchAgent', pid, prefix / 'haroldctl',
+                bundle / 'config/local.toml', bundle / 'harold.log'))
             print('restart the control-tower to see blocked, done and error', flush=True)
-            message = permissions_message(old_requirement,
-                                          new_requirement, identity, bundle / 'harold')
-            if message:
-                print(message, flush=True)
+            if not linux:
+                message = permissions_message(old_requirement,
+                                              new_requirement, identity, bundle / 'harold')
+                if message:
+                    print(message, flush=True)
             outcome = link_claude_mod(CLAUDE_SETTINGS, bundle / 'hooks/claude-mod')
             print('Claude Code mod: {}'.format(outcome), flush=True)
             outcome = register_turn_hook(CLAUDE_SETTINGS, bundle / 'hooks' / TURN_HOOK)
@@ -877,6 +1101,10 @@ def install(args, repo):
                       'and the mute and pause settings (voice is on, messaging unpaused). '
                       'That folder is left as it was.'.format(bundle / 'data/store', bundle / 'data/events'),
                       flush=True)
+            if linux:
+                note = linger_note()
+                if note:
+                    print(note, flush=True)
 
 
 def main():
