@@ -2574,7 +2574,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 10] = [
+const AGENT_CARDS: [&str; 11] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2585,7 +2585,9 @@ const AGENT_CARDS: [&str; 10] = [
     "Share of state observations read from the screen, by provider and hour",
     "Recap reads, found and none, by day",
     "Slow inventory scans against load, by hour",
+    UNREADABLE_BLOCKS_CARD,
 ];
+const UNREADABLE_BLOCKS_CARD: &str = "Unreadable blocks, last 24 h, by pane";
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
@@ -2701,6 +2703,37 @@ fn the_call_answer_cards_count_failed_runs_and_sum_their_cost_for_each_day() {
     ] {
         assert!(spend.contains(piece), "{piece} in {spend}");
     }
+}
+
+#[test]
+fn the_unreadable_blocks_card_counts_the_unreadable_lines_by_pane_over_24_hours() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == UNREADABLE_BLOCKS_CARD)
+        .expect("the unreadable blocks card");
+    assert_eq!(card["containerId"], "agents-multiplexer");
+    let config = &card["config"];
+    assert_eq!(config["configType"], "sql");
+    assert_eq!(config["displayType"], "table");
+    assert_eq!(config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@");
+    assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@");
+    let sql = config["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "FROM otel.otel_logs",
+        "ServiceName = 'harold'",
+        "Body = 'agent pane unreadable'",
+        "Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now()",
+        "LogAttributes['pane_id'] AS pane_id",
+        "LogAttributes['reason'] AS reason",
+        "count() AS lines",
+        "GROUP BY pane_id, reason",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
+    assert!(!sql.contains("agent pane readable again"), "{sql}");
+    // The product filter does not reach a log card.
+    assert!(!sql.contains("$__filters"), "{sql}");
 }
 
 #[test]
