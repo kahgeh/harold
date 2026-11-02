@@ -507,9 +507,9 @@ An inventory failure preserves current panes and never infers mass departure. A 
 
 ### Rex blocks that do not hold a live agent
 
-An exited block is a Rex block whose program has exited. Rex keeps it, with its `last_exit`. The inventory treats it as a block with no agent: it adds no row and no error. An answer with neither `child` nor `last_exit` stays malformed. If an agent ran in the block, the agent departs.
+An exited block is a Rex block whose program has exited. Rex keeps it, with its `last_exit`. The inventory treats it as a block with no agent. It adds no row and no error. An answer with neither `child` nor `last_exit` stays malformed. If an agent ran in the block, the agent departs.
 
-An unreadable block is a block whose `process` answer failed, timed out or could not be read. The scan leaves that block out and reads the other blocks. A call that Harold's stop signal ended is not unreadable and logs nothing.
+An unreadable block is a block whose `process` answer failed, timed out or could not be read. The scan leaves that block out. It reads the other blocks. A call that Harold's stop signal ended is not unreadable and logs nothing.
 
 | Line | Fields |
 |---|---|
@@ -518,9 +518,9 @@ An unreadable block is a block whose `process` answer failed, timed out or could
 
 Harold logs each line once for each change. A block that stays unreadable logs one `agent pane unreadable` line, not one for each scan. The same rule holds for a block of a Rex host.
 
-One unreadable block does not degrade the inventory. Two cases degrade it: the listing (`ls` or `session.view`) fails, or a scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory` and `reason = failed`. A scan with no blocks is not degraded. A scan never succeeds with old rows.
+One unreadable block does not degrade the inventory. Two cases degrade it. In the first case, the listing (`ls` or `session.view`) fails. In the second case, the scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory` and `reason = failed`. A scan with no blocks is not degraded. A degraded scan returns no old rows.
 
-When the inventory is degraded, `harold speak` cannot find the pane of its caller. The daemon answers `unavailable`, and the command prints `the agent lookup is not available now; try again`. The same line covers a failed event append and a stopped monitor runtime. A failed write of the line keeps `the Harold daemon could not store the spoken line`.
+When the inventory is degraded, `harold speak` cannot find the pane of its caller. The daemon answers `unavailable`. The command prints `the agent lookup is not available now; try again`. The same line covers a failed event append and a stopped monitor runtime. A failed write of the line keeps `the Harold daemon could not store the spoken line`.
 
 The dashboard card "Agent panes unreadable, by pane, last 24 hours" counts `agent pane unreadable` lines for each `pane_id`. A pane with more than one line in a day needs a look. It is a card, not an alert.
 
