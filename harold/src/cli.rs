@@ -70,7 +70,7 @@ fn parse_app(args: &[&str]) -> Result<AppCommand, String> {
 
 pub(crate) const START_CONTROL_TOWER_COMMAND: &str = "start-control-tower";
 const START_CONTROL_TOWER_USAGE: &str =
-    "invalid argument: usage is harold start-control-tower [--endpoint URI]";
+    "invalid argument: usage is harold start-control-tower [--remote] [--endpoint URI]";
 /// The program that `harold start-control-tower` starts. It sits beside `harold`.
 const CONTROL_TOWER_PROGRAM: &str = "control-tower";
 
@@ -78,16 +78,28 @@ const CONTROL_TOWER_PROGRAM: &str = "control-tower";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartControlTowerArgs {
     pub(crate) endpoint: Option<String>,
+    pub(crate) remote: bool,
 }
 
 fn parse_start_control_tower(args: &[&str]) -> Result<StartControlTowerArgs, String> {
-    match args {
-        [] => Ok(StartControlTowerArgs { endpoint: None }),
-        ["--endpoint", endpoint] => Ok(StartControlTowerArgs {
-            endpoint: Some((*endpoint).into()),
-        }),
-        _ => Err(START_CONTROL_TOWER_USAGE.into()),
+    let mut parsed = StartControlTowerArgs {
+        endpoint: None,
+        remote: false,
+    };
+    let mut rest = args.iter();
+    while let Some(&argument) = rest.next() {
+        match argument {
+            "--remote" if !parsed.remote => parsed.remote = true,
+            "--endpoint" if parsed.endpoint.is_none() => {
+                let Some(&endpoint) = rest.next() else {
+                    return Err(START_CONTROL_TOWER_USAGE.into());
+                };
+                parsed.endpoint = Some(endpoint.into());
+            }
+            _ => return Err(START_CONTROL_TOWER_USAGE.into()),
+        }
     }
+    Ok(parsed)
 }
 
 /// The command that starts the control-tower in `folder`. It never reads `PATH`.
@@ -114,6 +126,9 @@ fn control_tower_command(
         ),
     };
     let mut command = std::process::Command::new(program);
+    if args.remote {
+        command.arg("--remote");
+    }
     command.args(["--endpoint", &endpoint]);
     command.args(["--host-marker", &settings.control_tower.host_marker]);
     Ok(command)
@@ -2845,17 +2860,77 @@ mod tests {
     }
 
     #[test]
+    fn start_control_tower_parses_the_remote_flag() {
+        assert_eq!(
+            parse(&["start-control-tower", "--remote"]),
+            Ok(Mode::StartControlTower(StartControlTowerArgs {
+                endpoint: None,
+                remote: true,
+            }))
+        );
+        let expected = Ok(Mode::StartControlTower(StartControlTowerArgs {
+            endpoint: Some("http://x:1".into()),
+            remote: true,
+        }));
+        assert_eq!(
+            parse(&[
+                "start-control-tower",
+                "--remote",
+                "--endpoint",
+                "http://x:1"
+            ]),
+            expected
+        );
+        assert_eq!(
+            parse(&[
+                "start-control-tower",
+                "--endpoint",
+                "http://x:1",
+                "--remote"
+            ]),
+            expected
+        );
+    }
+
+    #[test]
+    fn control_tower_command_passes_remote_first() {
+        let folder = tower_folder(true);
+        let command = control_tower_command(
+            &folder,
+            &settings_for("127.0.0.1:50060"),
+            &StartControlTowerArgs {
+                endpoint: None,
+                remote: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            command_args(&command),
+            [
+                "--remote",
+                "--endpoint",
+                "http://127.0.0.1:50060",
+                "--host-marker",
+                "glyph"
+            ]
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
     fn start_control_tower_parses_with_and_without_an_endpoint() {
         assert_eq!(
             parse(&["start-control-tower"]),
             Ok(Mode::StartControlTower(StartControlTowerArgs {
-                endpoint: None
+                endpoint: None,
+                remote: false,
             }))
         );
         assert_eq!(
             parse(&["start-control-tower", "--endpoint", "http://127.0.0.1:1"]),
             Ok(Mode::StartControlTower(StartControlTowerArgs {
-                endpoint: Some("http://127.0.0.1:1".into())
+                endpoint: Some("http://127.0.0.1:1".into()),
+                remote: false,
             }))
         );
     }
@@ -2865,6 +2940,8 @@ mod tests {
         for rest in [
             vec!["--endpoint"],
             vec!["--endpoint", "a", "--endpoint", "b"],
+            vec!["--remote", "--remote"],
+            vec!["--remote", "extra"],
             vec!["--bogus"],
             vec!["extra"],
         ] {
@@ -2896,7 +2973,10 @@ mod tests {
         let command = control_tower_command(
             &folder,
             &settings_for("127.0.0.1:50060"),
-            &StartControlTowerArgs { endpoint: None },
+            &StartControlTowerArgs {
+                endpoint: None,
+                remote: false,
+            },
         )
         .unwrap();
         assert_eq!(command.get_program(), folder.join("control-tower"));
@@ -2916,7 +2996,10 @@ mod tests {
     fn control_tower_command_passes_the_host_marker() {
         let folder = tower_folder(true);
         let mut settings = settings_for("127.0.0.1:50060");
-        let args = StartControlTowerArgs { endpoint: None };
+        let args = StartControlTowerArgs {
+            endpoint: None,
+            remote: false,
+        };
         let command = control_tower_command(&folder, &settings, &args).unwrap();
         assert_eq!(
             command_args(&command),
@@ -2949,6 +3032,7 @@ mod tests {
             &settings_for("127.0.0.1:50060"),
             &StartControlTowerArgs {
                 endpoint: Some("http://127.0.0.1:9".into()),
+                remote: false,
             },
         )
         .unwrap();
@@ -2965,7 +3049,10 @@ mod tests {
         let error = control_tower_command(
             &folder,
             &settings_for("127.0.0.1:50060"),
-            &StartControlTowerArgs { endpoint: None },
+            &StartControlTowerArgs {
+                endpoint: None,
+                remote: false,
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -2985,7 +3072,10 @@ mod tests {
         let error = control_tower_command(
             &empty,
             &settings_for("127.0.0.1:50060"),
-            &StartControlTowerArgs { endpoint: None },
+            &StartControlTowerArgs {
+                endpoint: None,
+                remote: false,
+            },
         )
         .unwrap_err();
         assert_eq!(

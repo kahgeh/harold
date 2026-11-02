@@ -832,7 +832,7 @@ fn help_lists_start_control_tower() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(
-        help.contains("harold start-control-tower [--endpoint URI]"),
+        help.contains("harold start-control-tower [--remote] [--endpoint URI]"),
         "{help}"
     );
     assert!(
@@ -1421,6 +1421,6 @@ fn start_control_tower_refuses_bad_arguments() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "invalid argument: usage is harold start-control-tower [--endpoint URI]\n"
+        "invalid argument: usage is harold start-control-tower [--remote] [--endpoint URI]\n"
     );
 }

@@ -41,7 +41,7 @@ The resulting development executable is `../target/release/control-tower`.
 An installed Harold starts the control-tower with this command:
 
 ```sh
-harold start-control-tower [--endpoint URI]
+harold start-control-tower [--remote] [--endpoint URI]
 ```
 
 The command passes the gRPC address from the Harold settings. The `--endpoint` argument overrides it.
@@ -58,7 +58,7 @@ Select a different endpoint explicitly:
 cargo run -- --endpoint http://127.0.0.1:6000
 ```
 
-The command accepts the optional `--endpoint` and `--host-marker` arguments, each one time. The
+The command accepts the optional `--remote`, `--endpoint` and `--host-marker` arguments, each one time. The `--remote` flag takes no value. It starts the remote switcher. The
 `--endpoint` value must be an absolute `http://` URI with an authority. There is no
 environment-variable or configuration-file override.
 

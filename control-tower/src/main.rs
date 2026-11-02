@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use control_tower::api::AgentStateSource;
 use control_tower::cli;
 use control_tower::navigation::TmuxNavigator;
+use control_tower::remote;
 use control_tower::runtime;
 use tonic::transport::Endpoint;
 
@@ -20,10 +21,10 @@ fn start() -> Result<(), String> {
     let options = cli::parse_args(std::env::args_os()).map_err(|error| error.to_string())?;
     let endpoint = Endpoint::from_shared(options.endpoint.clone())
         .map_err(|error| format!("invalid Harold endpoint: {error}"))?;
-    runtime::run(
-        options,
-        AgentStateSource::new(endpoint),
-        TmuxNavigator::new(),
-    )
-    .map_err(|error| error.to_string())
+    let source = AgentStateSource::new(endpoint);
+    let navigator = TmuxNavigator::new();
+    if options.remote {
+        return remote::run(options, source, navigator).map_err(|error| error.to_string());
+    }
+    runtime::run(options, source, navigator).map_err(|error| error.to_string())
 }

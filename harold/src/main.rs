@@ -1188,7 +1188,7 @@ fn print_help() {
         "                          Report a pane working (turn-started, still-working) or done"
     );
     println!("                          (turn-completed, subagents-finished); 3s timeout");
-    println!("  harold start-control-tower [--endpoint URI]");
+    println!("  harold start-control-tower [--remote] [--endpoint URI]");
     println!("                          Start the control-tower in this terminal");
     println!("  harold send-message-to-away-device --src-id ID TEXT");
     println!("                          Send TEXT to the away device from tmux or Rex pane ID;");

@@ -4,6 +4,7 @@ pub mod cli;
 pub mod navigation;
 pub mod notes;
 pub mod questions;
+pub mod remote;
 pub mod runtime;
 pub mod terminal;
 pub mod text;

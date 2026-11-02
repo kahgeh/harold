@@ -9,6 +9,7 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:50060";
 pub struct Options {
     pub endpoint: String,
     pub host_marker: HostMarker,
+    pub remote: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,18 +47,21 @@ where
     let _program = args.next();
     let mut endpoint = None;
     let mut host_marker = None;
+    let mut remote = false;
 
     while let Some(argument) = args.next() {
-        let value = args.next();
-        if argument == "--endpoint" && endpoint.is_none() {
+        if argument == "--remote" && !remote {
+            remote = true;
+        } else if argument == "--endpoint" && endpoint.is_none() {
             endpoint = Some(
-                value
+                args.next()
                     .ok_or(CliError::MissingEndpoint)?
                     .into_string()
                     .map_err(|_| CliError::InvalidEncoding)?,
             );
         } else if argument == "--host-marker" && host_marker.is_none() {
-            let value = value
+            let value = args
+                .next()
                 .ok_or(CliError::MissingHostMarker)?
                 .into_string()
                 .map_err(|_| CliError::InvalidEncoding)?;
@@ -81,6 +85,7 @@ where
     Ok(Options {
         endpoint,
         host_marker: host_marker.unwrap_or_default(),
+        remote,
     })
 }
 
@@ -176,6 +181,49 @@ mod tests {
                 "--host-marker",
                 "text"
             ]),
+            Err(CliError::UnknownArgument)
+        );
+    }
+
+    #[test]
+    fn remote_takes_no_value_and_defaults_to_off() {
+        assert!(!parse_args(["control-tower"]).unwrap().remote);
+        let options = parse_args(["control-tower", "--remote"]).unwrap();
+        assert!(options.remote);
+        assert_eq!(options.endpoint, "http://127.0.0.1:50060");
+    }
+
+    #[test]
+    fn remote_mixes_with_the_other_flags_in_any_order() {
+        let options = parse_args([
+            "control-tower",
+            "--endpoint",
+            "http://127.0.0.1:9",
+            "--remote",
+            "--host-marker",
+            "text",
+        ])
+        .unwrap();
+        assert!(options.remote);
+        assert_eq!(options.endpoint, "http://127.0.0.1:9");
+        assert_eq!(options.host_marker, HostMarker::Text);
+        let options = parse_args([
+            "control-tower",
+            "--remote",
+            "--host-marker",
+            "emoji",
+            "--endpoint",
+            "http://127.0.0.1:9",
+        ])
+        .unwrap();
+        assert!(options.remote);
+        assert_eq!(options.host_marker, HostMarker::Emoji);
+    }
+
+    #[test]
+    fn a_repeated_remote_is_an_error() {
+        assert_eq!(
+            parse_args(["control-tower", "--remote", "--remote"]),
             Err(CliError::UnknownArgument)
         );
     }
