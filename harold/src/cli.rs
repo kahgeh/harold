@@ -6167,7 +6167,7 @@ mod tests {
                 tts_muted: Some(true),
                 messaging_paused: Some(false),
                 release_version: "0.72.0".into(),
-                machine_name: "PasM4MBP".into(),
+                machine_name: "laptop-mac".into(),
                 multiplexer: "rex".into(),
                 rex_hosts: vec![RexHostIcon {
                     label: "omarchy".into(),
@@ -6218,7 +6218,7 @@ mod tests {
                 (GetThing::Version, r#"{"release_version":"0.72.0"}"#),
                 (
                     GetThing::Machine,
-                    r#"{"machine_name":"PasM4MBP","host_icon":"mac"}"#,
+                    r#"{"machine_name":"laptop-mac","host_icon":"mac"}"#,
                 ),
                 (GetThing::Multiplexer, r#"{"multiplexer":"rex"}"#),
                 (

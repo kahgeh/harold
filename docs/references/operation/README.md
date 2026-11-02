@@ -236,7 +236,7 @@ These direct commands use the invoking process's normal configuration environmen
 | `voice` | `{"state":"on","engine":"server"}` | `state` is `off` when the voice mute is on, and `on` when it is off. `engine` is the TTS engine, `server` or `command`. |
 | `messaging` | `{"state":"on"}` | `state` is `off` when the messaging pause is on, and `on` when it is off. |
 | `version` | `{"release_version":"0.72.0"}` | Harold's release version. |
-| `machine` | `{"machine_name":"PasM4MBP","host_icon":"mac"}` | The machine name and its host icon. The host icon is empty with none. |
+| `machine` | `{"machine_name":"laptop-mac","host_icon":"mac"}` | The machine name and its host icon. The host icon is empty with none. |
 | `multiplexer` | `{"multiplexer":"rex"}` | `tmux` or `rex`. |
 | `hosts` | `{"hosts":[{"label":"omarchy","host_icon":"arch"}]}` | The Rex hosts. The list is empty with none: `{"hosts":[]}`. |
 | `chief` | `{"chief_session":"chief"}` | The chief's session. The value is empty with none. |
