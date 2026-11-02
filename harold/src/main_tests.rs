@@ -3602,3 +3602,36 @@ fn a_row_of_a_rex_host_has_no_role() {
     assert_eq!(mapped.role, "");
     assert_eq!(mapped.pod_product, "");
 }
+
+#[test]
+fn a_dead_pod_pane_has_no_row_and_the_live_one_keeps_its_role() {
+    let fixture = RoleFixture::new("%1\n%2\n", true);
+    // `%1` is named in the file but not in the snapshot.
+    let snapshot = snapshot_of_panes(&[("%2", "/work/alpha")]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles["%2"], role("pnem", "alpha"));
+}
+
+#[test]
+fn a_pane_named_in_two_products_takes_the_role_of_the_first_product() {
+    let fixture = RoleFixture::new("%1\n%2\n", true);
+    let beta = fixture.root.join("beta/.superpowers/pod");
+    std::fs::create_dir_all(&beta).expect("create the second pod folder");
+    std::fs::write(beta.join("agent-panes"), "%2\n%1\n").expect("write agent-panes");
+    let registry = fixture.sources.registry.clone().expect("a registry");
+    let mut text = std::fs::read_to_string(&registry).expect("read the registry");
+    text.push_str(&format!(
+        "\n[products.beta]\nrepo = \"{}\"\nbase = \"main\"\nslots = 1\n",
+        fixture.root.join("beta").display()
+    ));
+    std::fs::write(&registry, text).expect("write the registry");
+    let snapshot = snapshot_of_panes(&[("%1", "/work/a"), ("%2", "/work/b")]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles["%1"], role("coordinator", "alpha"));
+    assert_eq!(roles["%2"], role("pnem", "alpha"));
+}

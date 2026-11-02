@@ -2643,16 +2643,88 @@ fn pod_pane_roles_reads_line_one_as_coordinator_and_line_two_as_pnem() {
 fn claim_pod_panes_and_pod_pane_roles_agree() {
     let pod = Pod::new();
     let repo = pod.root.join("alpha");
-    write(&pod_files(&repo).join("agent-panes"), "%1 x\n%2\n");
+    // `%3` is not a pod pane. `%2` is named but not live.
+    write(&pod_files(&repo).join("agent-panes"), "%1 x\n%2\n%3\n");
     let product = product_at("alpha", &repo);
-    let panes = vec![live("%1", "/a"), live("%2", "/b")];
+    let panes = vec![live("%1", "/a"), live("%3", "/c")];
     let mut claimed = HashMap::new();
 
     assert!(claim_pod_panes(&product, &panes, &mut claimed));
 
-    for (pane, role, name) in pod_pane_roles(std::slice::from_ref(&product)) {
-        assert_eq!(claimed.get(&pane), Some(&(role, Some(name))));
+    let roles = pod_pane_roles(std::slice::from_ref(&product));
+    assert_eq!(roles.len(), 2);
+    for (pane, role, name) in roles {
+        let is_live = panes.iter().any(|live| live.pane_id == pane);
+        let expected = is_live.then_some((role, Some(name)));
+        assert_eq!(claimed.get(&pane), expected.as_ref());
     }
+    assert_eq!(claimed.len(), 1);
+}
+
+/// The roles that a text in an `agent-panes` file gives.
+fn roles_of_text(text: &str) -> Vec<(String, Role)> {
+    let pod = Pod::new();
+    let repo = pod.root.join("alpha");
+    write(&pod_files(&repo).join("agent-panes"), text);
+    pod_pane_roles(&[product_at("alpha", &repo)])
+        .into_iter()
+        .map(|(pane, role, _)| (pane, role))
+        .collect()
+}
+
+#[test]
+fn a_blank_line_is_not_a_line_of_agent_panes() {
+    assert_eq!(
+        roles_of_text("\n%1\n\n%2\n%3\n"),
+        vec![
+            ("%1".to_owned(), Role::PodCoordination),
+            ("%2".to_owned(), Role::Pnem)
+        ]
+    );
+}
+
+#[test]
+fn one_line_gives_only_the_coordinator() {
+    assert_eq!(
+        roles_of_text("%1\n"),
+        vec![("%1".to_owned(), Role::PodCoordination)]
+    );
+}
+
+#[test]
+fn a_third_line_gives_no_role() {
+    assert_eq!(
+        roles_of_text("%1\n%2\n%3\n%4\n"),
+        vec![
+            ("%1".to_owned(), Role::PodCoordination),
+            ("%2".to_owned(), Role::Pnem)
+        ]
+    );
+}
+
+#[test]
+fn a_pane_named_in_two_products_goes_to_the_first_product() {
+    let pod = Pod::new();
+    let first = pod.root.join("alpha");
+    let second = pod.root.join("beta");
+    write(&pod_files(&first).join("agent-panes"), "%1\n%2\n");
+    write(&pod_files(&second).join("agent-panes"), "%2\n%1\n");
+    let products = [product_at("alpha", &first), product_at("beta", &second)];
+    let panes = vec![live("%1", "/a"), live("%2", "/b")];
+
+    let mut claimed = HashMap::new();
+    for product in &products {
+        claim_pod_panes(product, &panes, &mut claimed);
+    }
+
+    assert_eq!(
+        claimed.get("%1"),
+        Some(&(Role::PodCoordination, Some("alpha".to_owned())))
+    );
+    assert_eq!(
+        claimed.get("%2"),
+        Some(&(Role::Pnem, Some("alpha".to_owned())))
+    );
     assert_eq!(claimed.len(), 2);
 }
 
