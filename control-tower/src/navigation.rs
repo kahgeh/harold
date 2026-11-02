@@ -903,6 +903,7 @@ mod tests {
                 rows: vec![AgentRow {
                     host: String::new(),
                     host_icon: String::new(),
+                    window_name: String::new(),
                     incarnation: incarnation.clone(),
                     provider_display_name: "Codex".into(),
                     tmux_target: "agents:0.0".into(),

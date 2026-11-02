@@ -142,6 +142,8 @@ message AgentPaneState {
   // The host's mark name: a Rex icon name, or arch, linux or mac. Empty for this Mac
   // and for a host with no icon.
   string host_icon = 19;
+  // The name of the window that holds the pane; empty when the window has no name.
+  string window_name = 20;
 }
 
 message AgentMonitorHealth {

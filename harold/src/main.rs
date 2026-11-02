@@ -837,6 +837,7 @@ fn map_agent_snapshot(
                     recap: recap.map(|line| line.text),
                     host: String::new(),
                     host_icon: local_icon.to_owned(),
+                    window_name: String::new(),
                 }
             })
             .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
@@ -887,6 +888,7 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
         recap_at_ms: 0,
         host: agent.host,
         host_icon: row.icon,
+        window_name: String::new(),
     })
 }
 

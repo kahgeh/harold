@@ -688,6 +688,7 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
         last_transition_at_ms: pane.last_transition_at_ms,
         host: sanitize_display(&pane.host, PANE_FIELD_LIMIT),
         host_icon: sanitize_display(&pane.host_icon, PANE_FIELD_LIMIT),
+        window_name: sanitize_display(&pane.window_name, PANE_FIELD_LIMIT),
     })
 }
 
@@ -837,6 +838,7 @@ mod tests {
             recap_at_ms: 0,
             host: String::new(),
             host_icon: String::new(),
+            window_name: String::new(),
         })
         .collect();
 
@@ -1496,6 +1498,7 @@ mod tests {
             recap_at_ms: 0,
             host: String::new(),
             host_icon: String::new(),
+            window_name: String::new(),
         }
     }
 
@@ -1511,6 +1514,23 @@ mod tests {
         let local = super::map_pane(proto_pane("%1")).unwrap();
         assert!(local.host.is_empty() && local.host_icon.is_empty());
         assert!(!local.is_on_host());
+    }
+
+    #[test]
+    fn a_pane_window_name_reaches_the_row() {
+        let mut pane = proto_pane("rex:omarchy/block:abc");
+        pane.window_name = "linux-satellite-2b".into();
+        let row = super::map_pane(pane).unwrap();
+        assert_eq!(row.window_name, "linux-satellite-2b");
+        let mut dirty = proto_pane("rex:omarchy/block:def");
+        dirty.window_name = "\x1b[31mwin".into();
+        assert_eq!(super::map_pane(dirty).unwrap().window_name, "win");
+        assert!(
+            super::map_pane(proto_pane("%1"))
+                .unwrap()
+                .window_name
+                .is_empty()
+        );
     }
 
     fn proto_health(

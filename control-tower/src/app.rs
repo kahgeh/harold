@@ -97,6 +97,8 @@ pub struct AgentRow {
     pub host: String,
     /// The host's mark name, empty for this Mac and for a host with no icon.
     pub host_icon: String,
+    /// The name of the window that holds the pane, empty when the window has no name.
+    pub window_name: String,
 }
 
 impl AgentRow {
@@ -1922,6 +1924,7 @@ mod tests {
         let matched = AgentRow {
             host: String::new(),
             host_icon: String::new(),
+            window_name: String::new(),
             incarnation: incarnation("%17", 17, 170, 1_700, "provider-id"),
             provider_display_name: "Codex Prime".into(),
             tmux_target: "Agents:2.7".into(),
@@ -2367,6 +2370,7 @@ mod tests {
         AgentRow {
             host: String::new(),
             host_icon: String::new(),
+            window_name: String::new(),
             tmux_target: format!("{session_name}:{window_index}.{pane_index}"),
             session_name: session_name.into(),
             window_index,

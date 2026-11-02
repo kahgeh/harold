@@ -4073,6 +4073,7 @@ mod tests {
             rows: vec![AgentRow {
                 host: String::new(),
                 host_icon: String::new(),
+                window_name: String::new(),
                 incarnation: AgentIncarnation {
                     pane_id: "%7".into(),
                     pane_pid: 70,

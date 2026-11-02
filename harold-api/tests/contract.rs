@@ -172,6 +172,7 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("current_step".to_string(), 17),
             ("host".to_string(), 18),
             ("host_icon".to_string(), 19),
+            ("window_name".to_string(), 20),
         ]
     );
 
@@ -179,11 +180,13 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
         pane_id: "rex:omarchy/block:abc".to_string(),
         host: "omarchy".to_string(),
         host_icon: "arch".to_string(),
+        window_name: "linux-satellite-2b".to_string(),
         ..Default::default()
     };
     let decoded = round_trip(&remote);
     assert_eq!(decoded.host, "omarchy");
     assert_eq!(decoded.host_icon, "arch");
+    assert_eq!(decoded.window_name, "linux-satellite-2b");
     assert!(round_trip(&AgentPaneState::default()).host.is_empty());
 }
 

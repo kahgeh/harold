@@ -3814,6 +3814,7 @@ mod tests {
         AgentRow {
             host: String::new(),
             host_icon: String::new(),
+            window_name: String::new(),
             incarnation,
             provider_display_name: provider_display_name.into(),
             tmux_target: tmux_target.into(),
