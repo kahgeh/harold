@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{Value, json};
@@ -2653,13 +2653,48 @@ fn a_stop_during_the_pool_ends_the_calls() {
 
 // -- sessions and `ps` in the pool -------------------------------------------------------------
 
+/// A gate for `count` calls. Each call that enters waits, up to 10 s, until all `count` calls
+/// are inside. A serial pool never fills the gate, so the wait reaches its limit.
+struct CallGate {
+    count: usize,
+    entered: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl CallGate {
+    fn new(count: usize) -> Self {
+        Self {
+            count,
+            entered: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Returns false when the wait reached its limit.
+    fn pass(&self) -> bool {
+        let mut entered = self.entered.lock().unwrap();
+        *entered += 1;
+        self.changed.notify_all();
+        let (_entered, wait) = self
+            .changed
+            .wait_timeout_while(entered, Duration::from_secs(10), |entered| {
+                *entered < self.count
+            })
+            .unwrap();
+        !wait.timed_out()
+    }
+}
+
 /// A fake whose `session_view` and `start_time_ms` calls take time. A session can also fail.
+/// With a gate, each of these calls also waits at the gate.
 struct SlowRex {
     inner: FakeRex,
     view_delay: HashMap<String, Duration>,
     view_errors: HashMap<String, RexError>,
     ps_delay: Duration,
     ps_threads: Mutex<Vec<std::thread::ThreadId>>,
+    gate: Option<Arc<CallGate>>,
+    timed_out: AtomicBool,
 }
 
 impl SlowRex {
@@ -2670,6 +2705,16 @@ impl SlowRex {
             view_errors: HashMap::new(),
             ps_delay: Duration::ZERO,
             ps_threads: Mutex::new(Vec::new()),
+            gate: None,
+            timed_out: AtomicBool::new(false),
+        }
+    }
+
+    fn pass_gate(&self) {
+        if let Some(gate) = &self.gate
+            && !gate.pass()
+        {
+            self.timed_out.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -2682,6 +2727,7 @@ impl RexApi for SlowRex {
         if let Some(delay) = self.view_delay.get(session) {
             std::thread::sleep(*delay);
         }
+        self.pass_gate();
         if let Some(error) = self.view_errors.get(session) {
             return Err(*error);
         }
@@ -2696,6 +2742,7 @@ impl RexApi for SlowRex {
             .unwrap()
             .push(std::thread::current().id());
         std::thread::sleep(self.ps_delay);
+        self.pass_gate();
         self.inner.start_time_ms(pid)
     }
     fn block_call(&self, s: &str, b: &str, m: &str, a: &Value) -> Result<Value, RexError> {
@@ -2754,19 +2801,17 @@ fn slow_rex_of(count: usize) -> SlowRex {
 }
 
 #[test]
-fn four_sessions_of_100_ms_take_about_100_ms() {
+fn the_session_views_run_at_once() {
     let mut api = slow_rex_of(4);
-    for n in 0..4 {
-        api.view_delay
-            .insert(format!("session:{n}"), Duration::from_millis(100));
-    }
-    let started = Instant::now();
+    api.gate = Some(Arc::new(CallGate::new(4)));
     let (sessions, slots) = list_slots_counted(&api).unwrap();
-    let elapsed = started.elapsed();
     assert_eq!(sessions, 4);
     let blocks: Vec<&str> = slots.iter().map(|slot| slot.block_id.as_str()).collect();
     assert_eq!(blocks, ["block:0", "block:1", "block:2", "block:3"]);
-    assert!(elapsed < Duration::from_millis(250), "took {elapsed:?}");
+    assert!(
+        !api.timed_out.load(Ordering::SeqCst),
+        "a session view waited 10 s: the 4 views did not run at once"
+    );
 }
 
 #[test]
@@ -2784,18 +2829,19 @@ fn the_first_failing_session_gives_the_error() {
 fn new_agents_start_times_are_read_in_parallel() {
     let _directory = directory_test_lock();
     let mut api = slow_rex_of(4);
-    api.ps_delay = Duration::from_millis(100);
+    api.gate = Some(Arc::new(CallGate::new(4)));
     let api = Arc::new(api);
     let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
-    let started = Instant::now();
     let observed = inventory.scan().unwrap();
-    let elapsed = started.elapsed();
     let starts: Vec<i64> = observed
         .iter()
         .map(|pane| pane.incarnation.agent_started_at_ms)
         .collect();
     assert_eq!(starts, [1_000, 1_001, 1_002, 1_003]);
-    assert!(elapsed < Duration::from_millis(250), "took {elapsed:?}");
+    assert!(
+        !api.timed_out.load(Ordering::SeqCst),
+        "a start-time read waited 10 s: the 4 reads did not run at once"
+    );
     // The cache serves the next scan.
     let reads = api.ps_threads.lock().unwrap().len();
     inventory.scan().unwrap();
