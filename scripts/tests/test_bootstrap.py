@@ -1,5 +1,7 @@
 import hashlib
 import io
+import shlex
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -41,7 +43,11 @@ shutil.copyfile(pathlib.Path(os.environ['FIXTURE']) / args[-1].rsplit('/', 1)[-1
 ''',
             }
             if system == 'Linux':
-                stubs['sha256sum'] = '#!/bin/sh\nexec /usr/bin/sha256sum "$@"\n'
+                real = shutil.which('sha256sum')
+                real_command = shlex.quote(real) if real else 'shasum -a 256'
+                stubs['sha256sum'] = ('#!/bin/sh\ntouch "$FIXTURE/sha256sum-ran"\nexec '
+                                      + real_command + ' "$@"\n')
+                stubs['sw_vers'] = '#!/bin/sh\ntouch "$FIXTURE/sw_vers-ran"\necho 15.0\n'
             for name, value in stubs.items():
                 path = tools / name
                 path.write_text(value)
@@ -50,6 +56,8 @@ shutil.copyfile(pathlib.Path(os.environ['FIXTURE']) / args[-1].rsplit('/', 1)[-1
             result = subprocess.run(['sh', '-s', '--', '--config', '/a path/config.toml'],
                                     input=BOOTSTRAP.read_text(), capture_output=True, text=True, env=env)
             self.curl_called = (root / 'curl-called').exists()
+            self.sha256sum_ran = (root / 'sha256sum-ran').exists()
+            self.sw_vers_ran = (root / 'sw_vers-ran').exists()
             return result, marker.read_text() if marker.exists() else None
 
     def test_pipe_download_verifies_and_forwards_arguments(self):
@@ -73,6 +81,8 @@ shutil.copyfile(pathlib.Path(os.environ['FIXTURE']) / args[-1].rsplit('/', 1)[-1
         result, installed = self.run_bootstrap(system='Linux', machine='x86_64')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('--prebuilt-dir', installed)
+        self.assertTrue(self.sha256sum_ran)
+        self.assertFalse(self.sw_vers_ran)
 
     def test_linux_bad_checksum_does_not_execute_installer(self):
         result, installed = self.run_bootstrap(corrupt=True, system='Linux', machine='x86_64')
