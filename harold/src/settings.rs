@@ -1926,12 +1926,17 @@ pub fn init_settings(settings: Arc<Settings>) {
 
 /// The shipped default configuration with `overrides` (TOML) laid over it: a `Settings` a
 /// test builds itself, so code that takes `&Settings` is tested without the process-wide one.
+/// The machine name is `test-machine` unless `overrides` sets it, so no test reads the host name.
 #[cfg(test)]
 pub(crate) fn settings_with(overrides: &str) -> Settings {
     use config::{Config, File, FileFormat};
     let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
     Config::builder()
         .add_source(File::new(&default, FileFormat::Toml))
+        .add_source(File::from_str(
+            "machine_name = \"test-machine\"",
+            FileFormat::Toml,
+        ))
         .add_source(File::from_str(overrides, FileFormat::Toml))
         .build()
         .and_then(Config::try_deserialize)
@@ -2789,6 +2794,19 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             errors,
             vec!["agent_monitor.rex_host_marks must be \"arch\", \"linux\" or \"mac\": omarchy = windows".to_string()]
         );
+    }
+
+    #[test]
+    fn a_rex_label_equal_to_the_machine_name_is_refused_whatever_the_host() {
+        let refusal = "agent_monitor.rex_hosts names this machine's machine_name: omarchy";
+        let errors = host_errors(
+            "machine_name = \"omarchy\"\n[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]",
+        );
+        assert_eq!(errors, vec![refusal.to_string()]);
+        let errors = host_errors(
+            "machine_name = \"test-machine\"\n[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     const REX: &str = "[agent_monitor]\nmultiplexer = \"rex\"\n";
