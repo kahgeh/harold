@@ -2694,6 +2694,7 @@ struct SlowRex {
     ps_delay: Duration,
     ps_threads: Mutex<Vec<std::thread::ThreadId>>,
     gate: Option<Arc<CallGate>>,
+    ps_gate: Option<Arc<CallGate>>,
     timed_out: AtomicBool,
 }
 
@@ -2706,12 +2707,13 @@ impl SlowRex {
             ps_delay: Duration::ZERO,
             ps_threads: Mutex::new(Vec::new()),
             gate: None,
+            ps_gate: None,
             timed_out: AtomicBool::new(false),
         }
     }
 
-    fn pass_gate(&self) {
-        if let Some(gate) = &self.gate
+    fn pass_gate(&self, gate: &Option<Arc<CallGate>>) {
+        if let Some(gate) = gate
             && !gate.pass()
         {
             self.timed_out.store(true, Ordering::SeqCst);
@@ -2727,7 +2729,7 @@ impl RexApi for SlowRex {
         if let Some(delay) = self.view_delay.get(session) {
             std::thread::sleep(*delay);
         }
-        self.pass_gate();
+        self.pass_gate(&self.gate);
         if let Some(error) = self.view_errors.get(session) {
             return Err(*error);
         }
@@ -2742,7 +2744,7 @@ impl RexApi for SlowRex {
             .unwrap()
             .push(std::thread::current().id());
         std::thread::sleep(self.ps_delay);
-        self.pass_gate();
+        self.pass_gate(&self.ps_gate);
         self.inner.start_time_ms(pid)
     }
     fn block_call(&self, s: &str, b: &str, m: &str, a: &Value) -> Result<Value, RexError> {
@@ -2829,7 +2831,7 @@ fn the_first_failing_session_gives_the_error() {
 fn new_agents_start_times_are_read_in_parallel() {
     let _directory = directory_test_lock();
     let mut api = slow_rex_of(4);
-    api.gate = Some(Arc::new(CallGate::new(4)));
+    api.ps_gate = Some(Arc::new(CallGate::new(4)));
     let api = Arc::new(api);
     let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
     let observed = inventory.scan().unwrap();
