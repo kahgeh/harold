@@ -44,11 +44,12 @@ pub use harold_api::harold;
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
     AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, CallRequest, CallResponse,
-    GetHaroldStateRequest, GetHaroldStateResponse, MonitorHealthState, ReportAgentStateRequest,
-    ReportAgentStateResponse, RexHostIcon, SendMessageToAwayDeviceRequest,
-    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
-    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    GetHaroldStateRequest, GetHaroldStateResponse, GetRemoteOrderRequest, GetRemoteOrderResponse,
+    MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse, RexHostIcon,
+    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
+    SetMessagingPausedResponse, SetRemoteOrderRequest, SetRemoteOrderResponse, SetTtsMutedRequest,
+    SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
+    TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 /// Release tag compiled in by the release workflow; "source" for any other build.
@@ -313,6 +314,22 @@ impl HaroldService {
 #[tonic::async_trait]
 impl Harold for HaroldService {
     type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
+
+    // Task 1 stub: a later task fills in the remote order calls.
+    async fn get_remote_order(
+        &self,
+        _: Request<GetRemoteOrderRequest>,
+    ) -> Result<Response<GetRemoteOrderResponse>, Status> {
+        Ok(Response::new(GetRemoteOrderResponse::default()))
+    }
+
+    // Task 1 stub: a later task fills in the remote order calls.
+    async fn set_remote_order(
+        &self,
+        _: Request<SetRemoteOrderRequest>,
+    ) -> Result<Response<SetRemoteOrderResponse>, Status> {
+        Ok(Response::new(SetRemoteOrderResponse::default()))
+    }
 
     async fn get_harold_state(
         &self,
@@ -862,6 +879,8 @@ fn map_agent_snapshot(
                     host: String::new(),
                     host_icon: local_icon.to_owned(),
                     window_name,
+                    role: String::new(),
+                    pod_product: String::new(),
                 }
             })
             .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
@@ -913,6 +932,8 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
         host: agent.host,
         host_icon: row.icon,
         window_name: agent.window_name,
+        role: String::new(),
+        pod_product: String::new(),
     })
 }
 

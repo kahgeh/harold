@@ -173,6 +173,8 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("host".to_string(), 18),
             ("host_icon".to_string(), 19),
             ("window_name".to_string(), 20),
+            ("role".to_string(), 21),
+            ("pod_product".to_string(), 22),
         ]
     );
 
@@ -292,7 +294,39 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "SpeakLine".to_string(),
             "Call".to_string(),
             "GetHaroldState".to_string(),
+            "GetRemoteOrder".to_string(),
+            "SetRemoteOrder".to_string(),
         ]
+    );
+}
+
+#[test]
+fn agent_pane_state_has_role_21_and_pod_product_22() {
+    let fields = message_fields("AgentPaneState");
+    assert!(fields.contains(&("role".to_string(), 21)));
+    assert!(fields.contains(&("pod_product".to_string(), 22)));
+}
+
+#[test]
+fn harold_service_lists_the_remote_order_calls() {
+    let methods: Vec<String> = harold_file_descriptor()
+        .service
+        .into_iter()
+        .find(|service| service.name.as_deref() == Some("Harold"))
+        .expect("Harold service descriptor")
+        .method
+        .into_iter()
+        .map(|method| method.name.expect("method name"))
+        .collect();
+    assert!(methods.contains(&"GetRemoteOrder".to_string()));
+    assert!(methods.contains(&"SetRemoteOrder".to_string()));
+    assert_eq!(
+        message_fields("GetRemoteOrderResponse"),
+        [("products".to_string(), 1)]
+    );
+    assert_eq!(
+        message_fields("SetRemoteOrderRequest"),
+        [("products".to_string(), 1)]
     );
 }
 

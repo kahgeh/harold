@@ -839,6 +839,8 @@ mod tests {
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
         })
         .collect();
 
@@ -1499,6 +1501,8 @@ mod tests {
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
         }
     }
 

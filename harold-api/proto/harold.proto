@@ -16,6 +16,11 @@ service Harold {
   rpc Call (CallRequest) returns (CallResponse);
   // Read-only. Returns the Harold state that `harold get` prints.
   rpc GetHaroldState (GetHaroldStateRequest) returns (GetHaroldStateResponse);
+  // Read-only. Returns the remote order: the products in the order the control-tower
+  // shows their remote sections.
+  rpc GetRemoteOrder (GetRemoteOrderRequest) returns (GetRemoteOrderResponse);
+  // Replaces the remote order with the products in the request.
+  rpc SetRemoteOrder (SetRemoteOrderRequest) returns (SetRemoteOrderResponse);
 }
 
 // The web app's paired devices and its pairing lock, for `harold app`.
@@ -144,7 +149,28 @@ message AgentPaneState {
   string host_icon = 19;
   // The name of the window that holds the pane; empty when the window has no name.
   string window_name = 20;
+  // The role of the agent in its pod, for example a PnEM or a builder. Empty when the
+  // pane has no role.
+  string role = 21;
+  // The product that the pod of the pane works on. Empty when the pane has no pod.
+  string pod_product = 22;
 }
+
+// The request has no fields.
+message GetRemoteOrderRequest {}
+
+message GetRemoteOrderResponse {
+  // The product names in remote order, first to last.
+  repeated string products = 1;
+}
+
+message SetRemoteOrderRequest {
+  // The product names in the new remote order, first to last.
+  repeated string products = 1;
+}
+
+// The response has no fields.
+message SetRemoteOrderResponse {}
 
 message AgentMonitorHealth {
   string component = 1;
