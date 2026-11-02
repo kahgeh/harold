@@ -129,11 +129,34 @@ impl fmt::Display for NavigationError {
 
 impl std::error::Error for NavigationError {}
 
+/// What Enter on a row of a Rex host did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostJump {
+    /// The Rex app on the host now shows the window.
+    Moved,
+    /// No Rex app is connected to the host.
+    NoApp,
+    /// Several Rex apps are connected, and more than one is labelled with this Mac's name.
+    ManyApps,
+    /// Several Rex apps are connected, and none is labelled with this Mac's name.
+    NoMatchingApp,
+}
+
 pub trait PaneNavigator {
     fn jump_to(&self, client: &str, pane_id: &str) -> Result<(), NavigationError>;
 
     /// Shows a Rex block in the Rex app.
     fn focus_rex_block(&self, _session: &str, _block: &str) -> Result<(), NavigationError> {
+        Err(NavigationError::RexNotFound)
+    }
+
+    /// Moves the Rex app on a Rex host to the window that holds a block.
+    fn focus_host_block(
+        &self,
+        _host: &str,
+        _session: &str,
+        _block: &str,
+    ) -> Result<HostJump, NavigationError> {
         Err(NavigationError::RexNotFound)
     }
 
@@ -251,6 +274,45 @@ impl TmuxNavigator {
         let mut full = vec![args[0], "--autostart=false", "--timeout=3s"];
         full.extend_from_slice(&args[1..]);
         self.run_command(&rex.to_string_lossy(), operation, &full)
+    }
+
+    /// Runs `rex` on another host: `-S <host>`, then `-C <client>` when given, then the first
+    /// argument, the two flags and the rest. A call for a host never runs without `-S`.
+    fn run_rex_on(
+        &self,
+        host: &str,
+        client: Option<&str>,
+        operation: &'static str,
+        args: &[&str],
+    ) -> Result<CommandOutput, NavigationError> {
+        let rex = self.find_rex().ok_or(NavigationError::RexNotFound)?;
+        let mut full = vec!["-S", host];
+        if let Some(client) = client {
+            full.extend(["-C", client]);
+        }
+        full.extend([args[0], "--autostart=false", "--timeout=3s"]);
+        full.extend_from_slice(&args[1..]);
+        self.run_command(&rex.to_string_lossy(), operation, &full)
+    }
+
+    /// The id of the Rex app on a host, or why there is none. With several apps, the one
+    /// labelled with this Mac's short host name.
+    fn host_app_client(&self, host: &str) -> Result<Result<String, HostJump>, NavigationError> {
+        let clients =
+            self.run_rex_on(host, None, "read Rex clients", &["client", "ls", "--json"])?;
+        let mut apps = rex_app_clients(&String::from_utf8_lossy(&clients.stdout));
+        if apps.len() > 1 {
+            let name = self.run_command("hostname", "read this Mac's name", &["-s"])?;
+            let name = String::from_utf8_lossy(&name.stdout);
+            let name = name.trim();
+            apps.retain(|(_, label)| label == name);
+            return Ok(match apps.len() {
+                0 => Err(HostJump::NoMatchingApp),
+                1 => Ok(apps.remove(0).0),
+                _ => Err(HostJump::ManyApps),
+            });
+        }
+        Ok(apps.pop().map(|(id, _)| id).ok_or(HostJump::NoApp))
     }
 
     /// The Rex block the user sees: the focused block of the active window of the one session
@@ -371,6 +433,70 @@ impl PaneNavigator for TmuxNavigator {
         Ok(())
     }
 
+    /// Moves the Rex app on `host` to the window that holds `block`. Every call runs on the
+    /// host (`-S`), and none runs on this Mac's Rex. The block is focused only when it is not
+    /// the window's focused block. Harold types nothing into the agent.
+    fn focus_host_block(
+        &self,
+        host: &str,
+        session: &str,
+        block: &str,
+    ) -> Result<HostJump, NavigationError> {
+        let clean = |text: &str| {
+            !text.trim().is_empty()
+                && !text.trim_start().starts_with('-')
+                && !text.chars().any(char::is_control)
+        };
+        if !clean(host) || !clean(session) || !clean(block) {
+            return Err(NavigationError::BadRexTarget);
+        }
+        let sessions = self.run_rex_on(host, None, "list Rex sessions", &["ls", "--json"])?;
+        let sessions = String::from_utf8_lossy(&sessions.stdout);
+        let Some(session_id) = rex_session_id(&sessions, session) else {
+            return Err(NavigationError::CommandFailed {
+                operation: "list Rex sessions",
+                detail: "no Rex session has this name".into(),
+            });
+        };
+        let request = format!("{{\"session_id\":\"{session_id}\"}}");
+        let view = self.run_rex_on(
+            host,
+            None,
+            "read Rex session",
+            &["api", "call", "session.view", &request],
+        )?;
+        let view = String::from_utf8_lossy(&view.stdout);
+        let Some((window_id, focused)) = rex_window_of_block(&view, block) else {
+            return Err(NavigationError::CommandFailed {
+                operation: "read Rex session",
+                detail: "no window of the session holds this block".into(),
+            });
+        };
+        let client = match self.host_app_client(host)? {
+            Ok(client) if clean(&client) => client,
+            Ok(_) => return Err(NavigationError::BadRexTarget),
+            Err(jump) => return Ok(jump),
+        };
+        if focused.as_deref() != Some(block) {
+            let session_flag = format!("--session={session}");
+            self.run_rex_on(
+                host,
+                None,
+                "focus Rex block",
+                &["focus", &session_flag, block],
+            )?;
+        }
+        let session_argument = format!("session_id={session_id}");
+        let window_argument = format!("window_id={window_id}");
+        self.run_rex_on(
+            host,
+            Some(&client),
+            "show Rex session",
+            &["do", "session.select", &session_argument, &window_argument],
+        )?;
+        Ok(HostJump::Moved)
+    }
+
     /// Runs `open <link>`. The scheme check means the link can never be read as a flag
     /// or name a local file or app.
     fn open_link(&self, link: &str) -> Result<(), NavigationError> {
@@ -471,6 +597,41 @@ fn rex_app_session_ids(clients: &str) -> Vec<String> {
     ids
 }
 
+/// The app clients in `rex client ls --json`: each client id with its label (empty when the
+/// client has none). The kind and the label sit in the client's `info`.
+fn rex_app_clients(clients: &str) -> Vec<(String, String)> {
+    clients
+        .split("\"client_id\"")
+        .skip(1)
+        .filter(|client| json_string(client, "kind", 0).is_some_and(|(kind, _)| kind == "app"))
+        .filter_map(|client| {
+            let (id, _) = json_string(&format!("\"client_id\"{client}"), "client_id", 0)?;
+            let label =
+                json_string(client, "label", 0).map_or_else(String::new, |(label, _)| label);
+            Some((id, label))
+        })
+        .collect()
+}
+
+/// The window of a `session.view` result that holds `block`: its id and its focused block.
+fn rex_window_of_block(view: &str, block: &str) -> Option<(String, Option<String>)> {
+    let mut at = 0;
+    while let Some((window, after)) = json_string(view, "window_id", at) {
+        let end = json_string(view, "window_id", after).map_or(view.len(), |(_, next)| next);
+        let part = view.get(after..end).unwrap_or_default();
+        let mut from = 0;
+        while let Some((candidate, next)) = json_string(part, "block_id", from) {
+            if candidate == block {
+                let focused = json_string(part, "focused_block_id", 0).map(|(focused, _)| focused);
+                return Some((window, focused));
+            }
+            from = next;
+        }
+        at = after;
+    }
+    None
+}
+
 /// The focused block of the active window in a `session.view` result.
 fn rex_focused_block_of(view: &str) -> Option<String> {
     let (active, _) = json_string(view, "active_window_id", 0)?;
@@ -499,7 +660,7 @@ fn sanitize_detail(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandOutput, CommandRunner, NavigationError, PaneNavigator, ProcessContext,
+        CommandOutput, CommandRunner, HostJump, NavigationError, PaneNavigator, ProcessContext,
         TmuxNavigator, is_tmux_pane_id,
     };
     use crate::app::{
@@ -1267,5 +1428,395 @@ mod tests {
             super::rex_session_id(listing, "r&d \"q\""),
             Some("session:x".into())
         );
+    }
+
+    // ---- Rex host rows ----
+
+    const HOST_VIEW: &str = r#"{"revision":4,"session_id":"session:bbb","label":"harold","active_window_id":"window:1","windows":[{"window_id":"window:1","label":"pod","focused_block_id":"block:one","layers":[{"layer_id":"layer:a","blocks":[{"block_id":"block:one"}]}]},{"window_id":"window:2","label":"linux-satellite-2b","focused_block_id":"block:two","layers":[{"layer_id":"layer:b","blocks":[{"block_id":"block:two"},{"block_id":"block:three"}]}]}]}"#;
+
+    /// A `rex client ls --json` listing of (kind, label) pairs, in the real shape: the kind and
+    /// the label sit inside `info`, and only an app has a label.
+    fn clients_of(clients: &[(&str, &str)]) -> String {
+        let items: Vec<String> = clients
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, label))| {
+                let label = if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(r#","label":"{label}""#)
+                };
+                format!(
+                    r#"{{"client_id":"client:{index}","info":{{"kind":"{kind}","platform":"macos","name":"Rex Beta"{label}}},"principal":{{"kind":"tailscale"}},"connection_state":"connected","session_ids":["session:bbb"]}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"clients":[{}]}}"#, items.join(","))
+    }
+
+    fn one_app() -> String {
+        clients_of(&[("cli", ""), ("app", "PasM4MBP")])
+    }
+
+    #[test]
+    fn run_rex_on_puts_the_host_first_then_the_client_then_the_flags() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec!["", ""]);
+
+        navigator
+            .run_rex_on("omarchy", None, "list Rex sessions", &["ls", "--json"])
+            .unwrap();
+        navigator
+            .run_rex_on(
+                "omarchy",
+                Some("client:7"),
+                "show Rex session",
+                &["do", "session.select", "session_id=session:bbb"],
+            )
+            .unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(
+            args(&calls[0]),
+            [
+                "-S",
+                "omarchy",
+                "ls",
+                "--autostart=false",
+                "--timeout=3s",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            args(&calls[1]),
+            [
+                "-S",
+                "omarchy",
+                "-C",
+                "client:7",
+                "do",
+                "--autostart=false",
+                "--timeout=3s",
+                "session.select",
+                "session_id=session:bbb"
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_host_row_runs_ls_view_clients_select_in_order_each_with_the_host_first() {
+        let clients = one_app();
+        let (navigator, runner) =
+            rex_navigator(vec![REX_SERVER], vec![SESSIONS, HOST_VIEW, &clients, ""]);
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:two")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::Moved);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 4);
+        assert!(calls.iter().all(|call| call.0 == REX_SERVER));
+        assert_eq!(
+            args(&calls[0]),
+            [
+                "-S",
+                "omarchy",
+                "ls",
+                "--autostart=false",
+                "--timeout=3s",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            args(&calls[1]),
+            [
+                "-S",
+                "omarchy",
+                "api",
+                "--autostart=false",
+                "--timeout=3s",
+                "call",
+                "session.view",
+                r#"{"session_id":"session:bbb"}"#
+            ]
+        );
+        assert_eq!(
+            args(&calls[2]),
+            [
+                "-S",
+                "omarchy",
+                "client",
+                "--autostart=false",
+                "--timeout=3s",
+                "ls",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            args(&calls[3]),
+            [
+                "-S",
+                "omarchy",
+                "-C",
+                "client:1",
+                "do",
+                "--autostart=false",
+                "--timeout=3s",
+                "session.select",
+                "session_id=session:bbb",
+                "window_id=window:2"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_that_is_not_the_windows_focused_block_is_focused_first_on_the_host() {
+        let clients = one_app();
+        let (navigator, runner) = rex_navigator(
+            vec![REX_SERVER],
+            vec![SESSIONS, HOST_VIEW, &clients, "", ""],
+        );
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:three")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::Moved);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(
+            args(&calls[3]),
+            [
+                "-S",
+                "omarchy",
+                "focus",
+                "--autostart=false",
+                "--timeout=3s",
+                "--session=rexsup-dash-28440",
+                "block:three"
+            ]
+        );
+        assert_eq!(args(&calls[4])[..4], ["-S", "omarchy", "-C", "client:1"]);
+        assert!(args(&calls[4]).contains(&"window_id=window:2"));
+    }
+
+    #[test]
+    fn no_call_for_a_host_row_runs_without_the_host_flag() {
+        let clients = clients_of(&[("app", "PasM4MBP"), ("app", "Other")]);
+        for (block, outputs) in [
+            (
+                "block:two",
+                vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", ""],
+            ),
+            (
+                "block:three",
+                vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", "", ""],
+            ),
+        ] {
+            let (navigator, runner) = rex_navigator(vec![REX_SERVER], outputs);
+            navigator
+                .focus_host_block("omarchy", "rexsup-dash-28440", block)
+                .unwrap();
+            for call in runner.calls().iter().filter(|call| call.0 == REX_SERVER) {
+                assert_eq!(args(call)[..2], ["-S", "omarchy"], "{call:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_app_client_is_used() {
+        let clients = clients_of(&[("cli", ""), ("app", "Elsewhere"), ("cli", "")]);
+        let (navigator, runner) =
+            rex_navigator(vec![REX_SERVER], vec![SESSIONS, HOST_VIEW, &clients, ""]);
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:two")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::Moved);
+        // No `hostname` call: one app needs no label match.
+        assert_eq!(runner.calls().len(), 4);
+        assert_eq!(args(&runner.calls()[3])[2..4], ["-C", "client:1"]);
+    }
+
+    #[test]
+    fn several_apps_use_the_one_labelled_with_the_short_host_name() {
+        let clients = clients_of(&[("app", "Other"), ("app", "PasM4MBP"), ("app", "Third")]);
+        let (navigator, runner) = rex_navigator(
+            vec![REX_SERVER],
+            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n", ""],
+        );
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:two")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::Moved);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[3], ("hostname".into(), vec!["-s".into()]));
+        assert_eq!(args(&calls[4])[2..4], ["-C", "client:1"]);
+    }
+
+    #[test]
+    fn several_apps_with_none_matching_gives_no_matching_app() {
+        let clients = clients_of(&[("app", "Other"), ("app", "Third")]);
+        let (navigator, runner) = rex_navigator(
+            vec![REX_SERVER],
+            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n"],
+        );
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:three")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::NoMatchingApp);
+        // Nothing runs after the client choice: no focus and no select.
+        assert_eq!(runner.calls().len(), 4);
+    }
+
+    #[test]
+    fn several_apps_with_two_matching_gives_many_apps() {
+        let clients = clients_of(&[("app", "PasM4MBP"), ("app", "PasM4MBP")]);
+        let (navigator, runner) = rex_navigator(
+            vec![REX_SERVER],
+            vec![SESSIONS, HOST_VIEW, &clients, "PasM4MBP\n"],
+        );
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:three")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::ManyApps);
+        assert_eq!(runner.calls().len(), 4);
+    }
+
+    #[test]
+    fn no_app_gives_no_app_and_runs_no_select() {
+        let clients = clients_of(&[("cli", ""), ("cli", "")]);
+        let (navigator, runner) =
+            rex_navigator(vec![REX_SERVER], vec![SESSIONS, HOST_VIEW, &clients]);
+
+        let jump = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:three")
+            .unwrap();
+
+        assert_eq!(jump, HostJump::NoApp);
+        assert_eq!(runner.calls().len(), 3);
+    }
+
+    #[test]
+    fn a_failed_step_names_the_step() {
+        let clients = one_app();
+        let steps = [
+            "list Rex sessions",
+            "read Rex session",
+            "read Rex clients",
+            "focus Rex block",
+            "show Rex session",
+        ];
+        let good = [SESSIONS, HOST_VIEW, &clients, "", ""];
+        for (failing, step) in steps.into_iter().enumerate() {
+            let mut outputs: Vec<io::Result<CommandOutput>> = good[..failing]
+                .iter()
+                .map(|stdout| {
+                    Ok(CommandOutput {
+                        success: true,
+                        stdout: stdout.as_bytes().to_vec(),
+                        stderr: Vec::new(),
+                    })
+                })
+                .collect();
+            let hostile = format!("\x1b[31mboom\x1b[0m\n{}", "x".repeat(600));
+            outputs.push(Ok(CommandOutput {
+                success: false,
+                stdout: Vec::new(),
+                stderr: hostile.into_bytes(),
+            }));
+            let runner = FakeRunner::with_outputs(outputs);
+            let observed = runner.clone();
+            let context = RexContext {
+                path: None,
+                files: vec![REX_SERVER],
+            };
+            let navigator = TmuxNavigator::with_ports(runner, context);
+
+            let error = navigator
+                .focus_host_block("omarchy", "rexsup-dash-28440", "block:three")
+                .unwrap_err();
+
+            let NavigationError::CommandFailed { operation, detail } = error else {
+                panic!("expected a failed step at {step}");
+            };
+            assert_eq!(operation, step);
+            assert!(detail.starts_with("boom"), "{detail}");
+            assert!(!detail.contains('\x1b') && !detail.contains('\n'));
+            assert_eq!(detail.chars().count(), 512);
+            assert_eq!(observed.calls().len(), failing + 1, "{step}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_session_runs_no_select() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![SESSIONS]);
+
+        let error = navigator
+            .focus_host_block("omarchy", "gone", "block:two")
+            .unwrap_err();
+
+        assert!(matches!(error, NavigationError::CommandFailed { .. }));
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_block_in_no_window_runs_no_select() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![SESSIONS, HOST_VIEW]);
+
+        let error = navigator
+            .focus_host_block("omarchy", "rexsup-dash-28440", "block:nowhere")
+            .unwrap_err();
+
+        let NavigationError::CommandFailed { operation, .. } = error else {
+            panic!("expected a failed step");
+        };
+        assert_eq!(operation, "read Rex session");
+        assert_eq!(runner.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_hostile_host_session_or_block_runs_nothing() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![]);
+        for (host, session, block) in [
+            ("", "s", "block:a"),
+            ("h", "", "block:a"),
+            ("h", "s", ""),
+            ("-x", "s", "block:a"),
+            ("h", "--json", "block:a"),
+            ("h", "s", "-block:a"),
+            ("h\n", "s", "block:a"),
+            ("h", "s\x1b", "block:a"),
+            ("h", "s", "block:a\n"),
+            ("  ", "s", "block:a"),
+        ] {
+            assert_eq!(
+                navigator.focus_host_block(host, session, block),
+                Err(NavigationError::BadRexTarget),
+                "{host:?} {session:?} {block:?}"
+            );
+        }
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn enter_on_this_macs_rex_block_runs_todays_calls_unchanged() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec!["", SESSIONS, ""]);
+
+        navigator
+            .focus_rex_block("rexsup-dash-28440", "block:abc")
+            .unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|call| args(call)[0] != "-S"));
     }
 }

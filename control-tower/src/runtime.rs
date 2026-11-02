@@ -19,7 +19,7 @@ use crate::app::{
 };
 use crate::cli::Options;
 use crate::navigation::{
-    NavigationError, PaneNavigator, REX_BLOCK_PREFIX, REX_HOST_PREFIX, TmuxNavigator,
+    HostJump, NavigationError, PaneNavigator, REX_BLOCK_PREFIX, REX_HOST_PREFIX, TmuxNavigator,
 };
 use crate::notes::{DEBOUNCE, NoteLine, NotesAction, NotesEvent, SharedBackend};
 use crate::questions::{Outgoing, PickView, Queue, SendResult};
@@ -1490,23 +1490,38 @@ impl RuntimeCore {
                 Control::Continue
             }
             Effect::Navigate { pane_id } if pane_id.starts_with(REX_HOST_PREFIX) => {
-                // An agent on another Rex host: nothing here can reach it, so no navigator runs.
-                let label = self
+                // An agent on another Rex host: the host and the block come from the pane id
+                // (`rex:<label>/block:<id>`), the session name from the row.
+                let session = self
                     .app
                     .snapshot
                     .rows
                     .iter()
                     .find(|row| row.incarnation.pane_id == pane_id)
-                    .map(|row| row.host.as_str())
-                    .filter(|host| !host.is_empty())
-                    .or_else(|| {
-                        pane_id
-                            .strip_prefix(REX_HOST_PREFIX)
-                            .and_then(|rest| rest.split('/').next())
-                    })
-                    .map(|label| sanitize_display(label, ERROR_LIMIT))
+                    .map(|row| row.session_name.clone())
                     .unwrap_or_default();
-                self.app.set_runtime_status(RuntimeStatus::OnHost(label));
+                let (host, block) = pane_id
+                    .strip_prefix(REX_HOST_PREFIX)
+                    .and_then(|rest| rest.split_once('/'))
+                    .unwrap_or_default();
+                let label = sanitize_display(host, ERROR_LIMIT);
+                match navigator.focus_host_block(host, &session, block) {
+                    Ok(HostJump::Moved) => self.app.clear_runtime_status(),
+                    Ok(HostJump::NoApp) => self.app.set_runtime_status(RuntimeStatus::OnHost(
+                        format!("{label}: no Rex app is connected"),
+                    )),
+                    Ok(HostJump::ManyApps) => self.app.set_runtime_status(RuntimeStatus::OnHost(
+                        format!("{label}: more than one Rex app"),
+                    )),
+                    Ok(HostJump::NoMatchingApp) => {
+                        self.app.set_runtime_status(RuntimeStatus::OnHost(format!(
+                            "{label}: no Rex app matches this Mac"
+                        )));
+                    }
+                    Err(error) => self.app.set_runtime_status(RuntimeStatus::NavigationFailed(
+                        sanitize_display(&error.to_string(), ERROR_LIMIT),
+                    )),
+                }
                 Control::Continue
             }
             Effect::Navigate { pane_id } if pane_id.starts_with(REX_BLOCK_PREFIX) => {
@@ -1575,7 +1590,7 @@ mod tests {
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
-    use crate::navigation::{NavigationError, PaneNavigator};
+    use crate::navigation::{HostJump, NavigationError, PaneNavigator};
     use crate::notes::NoteLine;
     use crate::questions::{
         AnswerKind, DecisionView, OptionView, Outgoing, PickView, QStop, QuestionView, Queue,
@@ -1942,28 +1957,122 @@ mod tests {
         base
     }
 
-    #[test]
-    fn enter_on_a_host_row_shows_on_label_and_runs_no_navigator() {
+    struct HostNavigator {
+        calls: Rc<RefCell<Vec<(String, String, String)>>>,
+        result: Result<HostJump, NavigationError>,
+    }
+
+    impl PaneNavigator for HostNavigator {
+        fn jump_to(&self, _: &str, _: &str) -> Result<(), NavigationError> {
+            panic!("a host row must not switch a tmux client");
+        }
+
+        fn focus_rex_block(&self, _: &str, _: &str) -> Result<(), NavigationError> {
+            panic!("a host row must not run a call on this Mac's Rex");
+        }
+
+        fn focus_host_block(
+            &self,
+            host: &str,
+            session: &str,
+            block: &str,
+        ) -> Result<HostJump, NavigationError> {
+            self.calls
+                .borrow_mut()
+                .push((host.into(), session.into(), block.into()));
+            self.result.clone()
+        }
+    }
+
+    fn enter_on_host_row(
+        result: Result<HostJump, NavigationError>,
+    ) -> (RuntimeCore, Vec<(String, String, String)>) {
         let calls = Rc::new(RefCell::new(Vec::new()));
-        // The navigator panics on a tmux jump and records a Rex focus.
-        let navigator = RexNavigator {
+        let navigator = HostNavigator {
             calls: calls.clone(),
-            fail: false,
+            result,
         };
-        for client in [None, Some("client-7".to_owned())] {
-            let mut core = RuntimeCore::new(client);
-            core.begin_stream();
-            core.accept_snapshot(host_snapshot(1, false, None), 1);
-            assert_eq!(
-                core.handle_key(KeyCode::Enter, &navigator),
-                Control::Continue
-            );
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, false, None), 1);
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::Continue
+        );
+        let calls = calls.borrow().clone();
+        (core, calls)
+    }
+
+    #[test]
+    fn enter_on_a_host_row_calls_focus_host_block_with_the_rows_host_session_and_block() {
+        let (core, calls) = enter_on_host_row(Ok(HostJump::Moved));
+
+        assert_eq!(
+            calls,
+            [("omarchy".into(), "harold".into(), "block:abc".into())]
+        );
+        assert_eq!(core.app.runtime_status(), None);
+    }
+
+    #[test]
+    fn a_host_jump_with_no_app_or_many_apps_or_no_matching_app_shows_its_status() {
+        for (jump, text) in [
+            (HostJump::NoApp, "omarchy: no Rex app is connected"),
+            (HostJump::ManyApps, "omarchy: more than one Rex app"),
+            (
+                HostJump::NoMatchingApp,
+                "omarchy: no Rex app matches this Mac",
+            ),
+        ] {
+            let (core, calls) = enter_on_host_row(Ok(jump));
+            assert_eq!(calls.len(), 1);
             assert_eq!(
                 core.app.runtime_status(),
-                Some(&RuntimeStatus::OnHost("omarchy".into()))
+                Some(&RuntimeStatus::OnHost(text.into()))
             );
         }
-        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_host_jump_shows_a_cut_navigation_error() {
+        let error = NavigationError::CommandFailed {
+            operation: "read Rex clients",
+            detail: "boom".into(),
+        };
+        let (core, _) = enter_on_host_row(Err(error));
+        let Some(RuntimeStatus::NavigationFailed(text)) = core.app.runtime_status() else {
+            panic!("expected a navigation error");
+        };
+        assert!(
+            text.contains("read Rex clients") && text.contains("boom"),
+            "{text}"
+        );
+
+        let hostile = NavigationError::CommandFailed {
+            operation: "focus Rex block",
+            detail: "x\x1b[31m".into(),
+        };
+        let (core, _) = enter_on_host_row(Err(hostile));
+        let Some(RuntimeStatus::NavigationFailed(text)) = core.app.runtime_status() else {
+            panic!("expected a navigation error");
+        };
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    #[test]
+    fn a_moved_host_jump_clears_an_earlier_status() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, false, None), 1);
+        for (result, cleared) in [(Ok(HostJump::NoApp), false), (Ok(HostJump::Moved), true)] {
+            let navigator = HostNavigator {
+                calls: calls.clone(),
+                result,
+            };
+            core.handle_key(KeyCode::Enter, &navigator);
+            assert_eq!(core.app.runtime_status().is_none(), cleared);
+        }
     }
 
     #[test]
