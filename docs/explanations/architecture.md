@@ -186,7 +186,9 @@ Harold never starts a Rex server. A Rex call that fails makes the listing fail, 
 
 ### Rex hosts and the pane id forms
 
-With `multiplexer = "rex"`, Harold can also list the agents on other machines. Each machine is a **Rex host**: another Rex server that this Mac's Rex knows by a label, such as `omarchy`. The setting `[agent_monitor] rex_hosts` names the labels. Harold reaches a host with `rex -S <label>` and only reads: it types nothing there, and it reads no screen and no transcript there. It keeps these agents in memory, outside the agent snapshot, the reducer and the store.
+With `multiplexer = "rex"`, Harold can also list the agents on other machines. Each machine is a **Rex host**: another Rex server that this Mac's Rex knows by a label, such as `omarchy`. The setting `[agent_monitor] rex_hosts` names the labels. Harold reaches a host with `rex -S <label>` and only reads: it types nothing there, and it reads no screen and no transcript there. It keeps these agents in memory, outside the agent snapshot, the reducer and the store. A host row can be focused. Enter on it moves the user's Rex app with `rex -S <label>` and that host's own session and block ids. Harold still types nothing into an agent on a Rex host.
+
+Every agent row carries a window name: the name of the window that holds its pane. The names of this Mac's windows live in memory in `WindowNames`, which the scan fills. A host row takes its window name from its slot.
 
 A pane id has three forms:
 

@@ -11,6 +11,7 @@ Workers run on omarchy under the Mac's pod-coordination, and the control-tower m
 
 1. Harold reads the agents of the Rex hosts named in `[agent_monitor] rex_hosts`, only with Rex, and only when `multiplexer = "rex"`.
 2. Harold only reads. It types nothing, reads no screen and no transcript there, and keeps the agents in memory, outside `AgentSnapshot`, the reducer and the store.
+   - Amended 2026-11-03: Harold types nothing into an agent on a Rex host. The control-tower may move your Rex app to it, with `rex -S <label>` and that host's own session and block ids only, and never through this Mac's Rex.
 3. An agent on a Rex host has the pane id `rex:<label>/block:<id>`. The local forms `%<n>` and `block:<id>` do not change and mean this machine. Every writer goes through one route, `route_pane`, that takes only a local form, by its shape. It refuses every other id before any call.
 4. Each host's calls use a 2-second limit. After 3 failed listings Harold tries that host only every 30 seconds. The Mac's scan never waits for a host.
    - Amended 2026-11-02: Harold counts failed scans of the host, not failed listings. A scan fails when a call to list the slots or to read a process fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan.

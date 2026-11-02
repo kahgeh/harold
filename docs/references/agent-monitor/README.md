@@ -291,6 +291,11 @@ The two flags are `optional`, so Harold writes them on the wire also when they a
 | `state` | 12 | `AgentState` (`Working`, `Blocked`, `Done`, `Idle`, `Error`, or `Unknown`) |
 | `last_transition_at_ms` | 13 | `int64` |
 | `work_summary` | 14 | `optional string` |
+| `host` | 18 | `string`: the Rex host label, empty for this Mac |
+| `host_icon` | 19 | `string`: the host's mark name, empty for this Mac and for a host with no icon |
+| `window_name` | 20 | `string`: the name of the window that holds the pane, empty when the window has no name |
+
+`window_name` comes from the `label` of the window in Rex's `session.view` (not the label of a pane), or from the tmux format field `#{window_name}`. It is in memory only: no event and no schema holds it. An older control-tower skips the field.
 
 The pane message does not expose adapter IDs, classifier IDs, evidence provenance, raw screen text, internal work summary timestamps, or search behavior. The service has no search RPC or query field. Consumers perform search locally over the snapshots they already hold.
 
