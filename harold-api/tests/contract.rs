@@ -1,10 +1,10 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
     AgentPaneState, AgentState, AgentStateSnapshot, CallAction, CallRequest, CallResponse,
-    CallResult, CallState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest,
-    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
-    TurnCompleteRequest,
+    CallResult, CallState, GetHaroldStateResponse, ReportAgentStateRequest,
+    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
+    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest,
+    SpeakLineResponse, TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -288,8 +288,50 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "SendMessageToAwayDevice".to_string(),
             "SpeakLine".to_string(),
             "Call".to_string(),
+            "GetHaroldState".to_string(),
         ]
     );
+}
+
+#[test]
+fn get_harold_state_fields_are_pinned() {
+    let expected: Vec<(String, i32)> = [
+        ("tts_muted", 1),
+        ("messaging_paused", 2),
+        ("release_version", 3),
+        ("machine_name", 4),
+        ("multiplexer", 5),
+        ("rex_hosts", 6),
+        ("machine_host_icon", 7),
+        ("tts_engine", 8),
+        ("chief_session", 9),
+    ]
+    .into_iter()
+    .map(|(name, number)| (name.to_string(), number))
+    .collect();
+    assert_eq!(message_fields("GetHaroldStateResponse"), expected);
+}
+
+#[test]
+fn rex_host_icon_fields_are_pinned() {
+    assert_eq!(
+        message_fields("RexHostIcon"),
+        [("label".to_string(), 1), ("host_icon".to_string(), 2)]
+    );
+}
+
+#[test]
+fn get_harold_state_flags_are_written_when_false() {
+    let response = GetHaroldStateResponse {
+        tts_muted: Some(false),
+        messaging_paused: Some(false),
+        ..Default::default()
+    };
+    let bytes = response.encode_to_vec();
+    assert_eq!(&bytes[..4], &[0x08, 0x00, 0x10, 0x00]);
+    let decoded = round_trip(&response);
+    assert_eq!(decoded.tts_muted, Some(false));
+    assert_eq!(decoded.messaging_paused, Some(false));
 }
 
 #[test]

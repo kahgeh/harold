@@ -14,6 +14,8 @@ service Harold {
   rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
   // The control-tower starts, ends and watches a call with the chief.
   rpc Call (CallRequest) returns (CallResponse);
+  // Read-only. Returns the Harold state that `harold get` prints.
+  rpc GetHaroldState (GetHaroldStateRequest) returns (GetHaroldStateResponse);
 }
 
 // The web app's paired devices and its pairing lock, for `harold app`.
@@ -232,4 +234,25 @@ message CallResponse {
   string chief_pane_id = 2;
   string last_transcript = 3;
   CallResult last_result = 4;
+}
+
+message GetHaroldStateRequest {}
+
+// This message never holds a secret or a path.
+// The two flags are optional so that a false value is still written on the wire.
+message GetHaroldStateResponse {
+  optional bool tts_muted = 1;
+  optional bool messaging_paused = 2;
+  string release_version = 3;
+  string machine_name = 4;
+  string multiplexer = 5;
+  repeated RexHostIcon rex_hosts = 6;
+  string machine_host_icon = 7;
+  string tts_engine = 8;
+  string chief_session = 9;
+}
+
+message RexHostIcon {
+  string label = 1;
+  string host_icon = 2;
 }
