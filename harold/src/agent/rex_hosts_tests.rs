@@ -31,10 +31,15 @@ struct Fake {
 impl Fake {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("rex-hosts-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("running")).unwrap();
         let script = format!(
             "D='{}'\necho \"$*\" >> \"$D/calls.log\"\n\
-             if [ -f \"$D/delay\" ]; then case \"$*\" in *whoami*) ;; *) sleep \"$(cat \"$D/delay\")\";; esac; fi\n\
+             if [ -f \"$D/delay\" ]; then case \"$*\" in *whoami*) ;; *)\n\
+             case \"$*\" in *session.view*) S=view;; *process*) S=process;; *) S=other;; esac\n\
+             touch \"$D/running/$$\"\n\
+             echo \"$S $(ls \"$D/running\" | wc -l)\" >> \"$D/counts.log\"\n\
+             sleep \"$(cat \"$D/delay\")\"\n\
+             rm -f \"$D/running/$$\";; esac; fi\n\
              case \"$*\" in\n\
              *whoami*) cat \"$D/whoami.json\";;\n\
              *\" ls --json\"*) cat \"$D/ls.json\";;\n\
@@ -100,6 +105,18 @@ impl Fake {
     /// Makes each call, except `whoami`, last this many seconds.
     fn call_takes(&self, seconds: &str) {
         self.put("delay", seconds);
+    }
+
+    /// The highest count of calls of one step (`view`, `process` or `other`) that ran together.
+    fn peak(&self, step: &str) -> usize {
+        let log = std::fs::read_to_string(self.dir.join("counts.log")).unwrap_or_default();
+        log.lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                (words.next()? == step).then(|| words.next()?.parse().ok())?
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     fn remove_hosts(&self) {
@@ -421,7 +438,7 @@ fn host_scan_fails_when_every_process_call_fails() {
 }
 
 #[test]
-fn a_host_with_2_sessions_and_8_blocks_takes_its_slowest_call_per_step() {
+fn a_host_with_2_sessions_and_8_blocks_runs_each_step_at_once() {
     let fake = Fake::new("pool");
     fake.put(
         "ls.json",
@@ -435,19 +452,20 @@ fn a_host_with_2_sessions_and_8_blocks_takes_its_slowest_call_per_step() {
         "view.json",
         &format!(r#"{{"windows":[{{"layers":[{{"blocks":[{blocks}]}}]}}]}}"#),
     );
-    fake.call_takes("0.15");
+    // Each call stays 0.5 s, so slow starts under load still overlap.
+    fake.call_takes("0.5");
     let inventory = fake.inventory("omarchy", None, clock(1));
-    let started = std::time::Instant::now();
     let scan = inventory.scan();
-    let elapsed = started.elapsed();
     assert_eq!(scan.outcome, Ok(()));
     assert_eq!(scan.agents.len(), 2);
     assert_eq!(scan.agents[0].session_name, "one");
     assert_eq!(scan.agents[1].session_name, "two");
-    // In series the 13 calls take 1.95 s. By step they take about 0.6 s.
+    // A serial step has a peak of 1.
+    assert!(fake.peak("view") >= 2, "view peak {}", fake.peak("view"));
     assert!(
-        elapsed < std::time::Duration::from_millis(1200),
-        "{elapsed:?}"
+        fake.peak("process") >= 4,
+        "process peak {}",
+        fake.peak("process")
     );
 }
 
