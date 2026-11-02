@@ -14,6 +14,7 @@ Workers run on omarchy under the Mac's pod-coordination, and the control-tower m
 3. An agent on a Rex host has the pane id `rex:<label>/block:<id>`. The local forms `%<n>` and `block:<id>` do not change and mean this machine. Every writer goes through one route, `route_pane`, that takes only a local form, by its shape. It refuses every other id before any call.
 4. Each host's calls use a 2-second limit. After 3 failed listings Harold tries that host only every 30 seconds. The Mac's scan never waits for a host.
    - Amended 2026-11-02: Harold counts failed scans of the host, not failed listings. A scan fails when a call to list the slots or to read a process fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan.
+   - Amended 2026-11-02 (rex-exited-block): a host scan leaves an unreadable block out, and an exited block holds no agent. The scan fails only when no block answers, when the call to list the slots fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan.
 5. Harold reads the state of an agent on a Rex host with one `program_status` call for each agent block in each scan. It starts no `rex events` stream over the network. It also reads the `host_id` of each host once, with `rex -S <label> whoami --json`, to find two labels for one server.
 
 ## Consequences
