@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{Value, json};
 
@@ -2532,20 +2532,30 @@ fn find_session_refuses_a_host_pane_id_without_listing() {
 }
 
 #[test]
-fn a_pool_with_one_slow_call_takes_the_time_of_that_call() {
-    // Width 4. Item 0 takes 300 ms and the 8 others take 100 ms each.
-    // Chunks of 4 need 300 + 100 + 100 = 500 ms. A pool needs about 300 ms,
-    // because the 3 free workers do the 8 other items in 3 rounds.
+fn a_slow_call_holds_only_its_own_place_in_the_pool() {
+    // Width 4. Item 0 waits until the 8 other items have finished. A pool lets the
+    // 3 free places finish them while item 0 waits. Chunks of 4 never start items
+    // 4 to 8 while item 0 holds its chunk, so the wait reaches its limit.
     let items: Vec<usize> = (0..9).collect();
-    let started = Instant::now();
+    let finished = Mutex::new(0_usize);
+    let changed = Condvar::new();
     let results = parallel_map(&items, 4, None, |item| {
-        let pause = if *item == 0 { 300 } else { 100 };
-        std::thread::sleep(Duration::from_millis(pause));
-        *item
+        if *item == 0 {
+            let guard = finished.lock().unwrap();
+            let (_guard, wait) = changed
+                .wait_timeout_while(guard, Duration::from_secs(10), |count| *count < 8)
+                .unwrap();
+            return !wait.timed_out();
+        }
+        *finished.lock().unwrap() += 1;
+        changed.notify_all();
+        true
     });
-    let elapsed = started.elapsed();
     assert_eq!(results.len(), 9);
-    assert!(elapsed < Duration::from_millis(420), "took {elapsed:?}");
+    assert!(
+        results[0],
+        "item 0 waited 10 s: the 8 other items did not finish while it held its place"
+    );
 }
 
 #[test]
