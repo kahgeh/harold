@@ -24,9 +24,9 @@ use super::harold::{
     SpeakLineRequest, WatchAgentStatesRequest,
 };
 use super::{
-    HAROLD_VERSION, HaroldService, HaroldStateView, Request, TurnCompleteRequest, apply_setting,
-    load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
-    version_or_source,
+    HAROLD_VERSION, HaroldService, HaroldStateView, Request, RoleSources, TurnCompleteRequest,
+    apply_setting, load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log,
+    restore_startup_state, store, version_or_source,
 };
 
 struct EmptyInventory;
@@ -1059,7 +1059,8 @@ fn snapshot_mapping_carries_the_harold_version() {
             &Recaps::default(),
             &HostAgents::default(),
             &WindowNames::default(),
-            ""
+            "",
+            &RoleSources::default(),
         )
         .harold_version,
         HAROLD_VERSION
@@ -1087,6 +1088,7 @@ fn snapshot_mapping_gives_each_effective_state_its_own_number() {
             &HostAgents::default(),
             &WindowNames::default(),
             "",
+            &RoleSources::default(),
         );
         assert_eq!(mapped.panes[0].state, expected, "{effective:?}");
     }
@@ -1111,6 +1113,7 @@ fn snapshot_mapping_carries_tts_muted() {
             &HostAgents::default(),
             &WindowNames::default(),
             "",
+            &RoleSources::default(),
         )
         .tts_muted
     );
@@ -1176,6 +1179,7 @@ fn snapshot_mapping_carries_messaging_paused() {
             &HostAgents::default(),
             &WindowNames::default(),
             "",
+            &RoleSources::default(),
         )
         .messaging_paused
     );
@@ -2557,6 +2561,7 @@ fn named_stream(
         HostAgents::default(),
         names.clone(),
         String::new(),
+        RoleSources::default(),
         sender,
         shutdown_rx,
     ));
@@ -2608,6 +2613,7 @@ async fn a_blocked_record_gives_its_step() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(step_of(&mapped).as_deref(), Some("Allow Bash?"));
 }
@@ -2626,6 +2632,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(step_of(&mapped), None);
     // A step that is removed goes from the next snapshot too.
@@ -2638,6 +2645,7 @@ fn a_done_idle_or_error_record_and_a_record_with_no_msg_give_none() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(step_of(&mapped), None);
 }
@@ -2871,6 +2879,7 @@ async fn a_recap_reaches_the_stream_with_its_time() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -2884,6 +2893,7 @@ fn a_pane_without_a_recap_has_none_and_zero() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(recap_of(&mapped), (None, 0));
 }
@@ -3109,6 +3119,7 @@ fn an_unreachable_host_shows_its_last_agents_as_unknown() {
         &hosts,
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes[0].state, i32::from(AgentState::Working));
     assert_eq!(mapped.panes[1].state, i32::from(AgentState::Unknown));
@@ -3126,6 +3137,7 @@ fn own_rows_carry_the_mark_of_machine_name() {
         &HostAgents::default(),
         &WindowNames::default(),
         "mac",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes[0].host_icon, "mac");
     assert_eq!(mapped.panes[0].host, "");
@@ -3139,6 +3151,7 @@ fn own_rows_carry_the_mark_of_machine_name() {
         &hosts,
         &WindowNames::default(),
         "mac",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes.len(), 2);
     assert_eq!(mapped.panes[0].host_icon, "mac");
@@ -3154,6 +3167,7 @@ fn own_rows_carry_no_mark_without_an_entry() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes[0].host_icon, "");
     assert_eq!(mapped.panes[0].host, "");
@@ -3326,6 +3340,7 @@ async fn get_harold_state_returns_each_field_from_settings() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(response.release_version, snapshot.harold_version);
 }
@@ -3399,6 +3414,7 @@ fn a_local_row_gets_its_window_name_from_the_map() {
         &HostAgents::default(),
         &names_for_step_pane("work"),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes[0].pane_id, STEP_PANE);
     assert_eq!(mapped.panes[0].window_name, "work");
@@ -3413,6 +3429,7 @@ fn a_local_row_with_no_entry_in_the_map_has_an_empty_window_name() {
         &HostAgents::default(),
         &WindowNames::default(),
         "",
+        &RoleSources::default(),
     );
     assert_eq!(mapped.panes[0].window_name, "");
 }
@@ -3444,4 +3461,144 @@ fn a_host_agent_row_gets_its_window_name() {
     row.agent.window_name = "linux-satellite-2b".into();
     let mapped = super::map_host_agent(row).expect("a row");
     assert_eq!(mapped.window_name, "linux-satellite-2b");
+}
+
+// --- roles ---
+
+/// A temporary product repo with an `agent-panes` file and a registry that names it.
+/// The folder is removed when the value drops.
+struct RoleFixture {
+    root: std::path::PathBuf,
+    sources: RoleSources,
+}
+
+impl RoleFixture {
+    fn new(agent_panes: &str, with_registry: bool) -> Self {
+        let root = std::env::temp_dir().join(format!("harold-roles-{}", uuid::Uuid::new_v4()));
+        let pod_folder = root.join("alpha/.superpowers/pod");
+        std::fs::create_dir_all(&pod_folder).expect("create the pod folder");
+        std::fs::write(pod_folder.join("agent-panes"), agent_panes).expect("write agent-panes");
+        let registry = root.join("products.toml");
+        std::fs::write(
+            &registry,
+            format!(
+                "[products.alpha]\nrepo = \"{}\"\nbase = \"main\"\nslots = 1\n",
+                root.join("alpha").display()
+            ),
+        )
+        .expect("write the registry");
+        let sources = RoleSources {
+            chief_folder: Some("/work/chief".into()),
+            chief_session: None,
+            registry: with_registry.then_some(registry),
+        };
+        Self { root, sources }
+    }
+}
+
+impl Drop for RoleFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// A snapshot of panes as `(pane id, folder)` pairs.
+fn snapshot_of_panes(panes: &[(&str, &str)]) -> AgentSnapshot {
+    let mut snapshot = populated_snapshot(1, None);
+    let template = snapshot.panes[0].clone();
+    snapshot.panes = panes
+        .iter()
+        .map(|(pane_id, folder)| {
+            let mut projection = template.clone();
+            projection.pane.incarnation.pane_id = (*pane_id).into();
+            projection.pane.working_directory = (*folder).into();
+            projection
+        })
+        .collect();
+    snapshot
+}
+
+/// The `(role, pod_product)` of each pane, by pane id.
+fn roles_of(
+    snapshot: AgentSnapshot,
+    sources: &RoleSources,
+) -> std::collections::BTreeMap<String, (String, String)> {
+    map_agent_snapshot(
+        snapshot,
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        &WindowNames::default(),
+        "",
+        sources,
+    )
+    .panes
+    .into_iter()
+    .map(|pane| (pane.pane_id, (pane.role, pane.pod_product)))
+    .collect()
+}
+
+fn role(role: &str, product: &str) -> (String, String) {
+    (role.to_owned(), product.to_owned())
+}
+
+#[test]
+fn map_agent_snapshot_marks_chief_coordinator_and_pnem() {
+    let fixture = RoleFixture::new("%1 x\n%2\n", true);
+    let snapshot = snapshot_of_panes(&[
+        ("%1", "/work/alpha"),
+        ("%2", "/work/alpha"),
+        ("%9", "/work/chief"),
+    ]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles["%9"], role("chief", ""));
+    assert_eq!(roles["%1"], role("coordinator", "alpha"));
+    assert_eq!(roles["%2"], role("pnem", "alpha"));
+}
+
+#[test]
+fn an_ordinary_agent_pane_has_no_role() {
+    let fixture = RoleFixture::new("%1\n%2\n", true);
+    let snapshot = snapshot_of_panes(&[("%5", "/work/other"), ("%9", "/work/chief")]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles["%5"], role("", ""));
+}
+
+#[test]
+fn no_registry_gives_the_chief_role_only() {
+    let fixture = RoleFixture::new("%1\n%2\n", false);
+    let snapshot = snapshot_of_panes(&[
+        ("%1", "/work/alpha"),
+        ("%2", "/work/alpha"),
+        ("%9", "/work/chief"),
+    ]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles["%9"], role("chief", ""));
+    assert_eq!(roles["%1"], role("", ""));
+    assert_eq!(roles["%2"], role("", ""));
+}
+
+#[test]
+fn a_registry_that_cannot_be_read_gives_no_pod_roles() {
+    let mut fixture = RoleFixture::new("%1\n%2\n", true);
+    fixture.sources.registry = Some(fixture.root.join("missing.toml"));
+    let snapshot = snapshot_of_panes(&[("%1", "/work/alpha"), ("%9", "/work/chief")]);
+
+    let roles = roles_of(snapshot, &fixture.sources);
+
+    assert_eq!(roles["%1"], role("", ""));
+    assert_eq!(roles["%9"], role("chief", ""));
+}
+
+#[test]
+fn a_row_of_a_rex_host_has_no_role() {
+    let mapped = super::map_host_agent(fixed_host_agent_row()).expect("a row");
+    assert_eq!(mapped.role, "");
+    assert_eq!(mapped.pod_product, "");
 }

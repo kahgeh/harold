@@ -2612,6 +2612,57 @@ fn live(pane_id: &str, folder: &str) -> LivePane {
     }
 }
 
+/// A product with the repo folder `repo`, for the role lookup.
+fn product_at(name: &str, repo: &Path) -> Product {
+    Product {
+        name: name.into(),
+        repo: repo.to_path_buf(),
+        base: "main".into(),
+        slots: 1,
+    }
+}
+
+#[test]
+fn pod_pane_roles_reads_line_one_as_coordinator_and_line_two_as_pnem() {
+    let pod = Pod::new();
+    let repo = pod.root.join("alpha");
+    write(&pod_files(&repo).join("agent-panes"), "%1 x\n%2\n%3\n");
+
+    let roles = pod_pane_roles(&[product_at("alpha", &repo)]);
+
+    assert_eq!(
+        roles,
+        vec![
+            ("%1".to_owned(), Role::PodCoordination, "alpha".to_owned()),
+            ("%2".to_owned(), Role::Pnem, "alpha".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn claim_pod_panes_and_pod_pane_roles_agree() {
+    let pod = Pod::new();
+    let repo = pod.root.join("alpha");
+    write(&pod_files(&repo).join("agent-panes"), "%1 x\n%2\n");
+    let product = product_at("alpha", &repo);
+    let panes = vec![live("%1", "/a"), live("%2", "/b")];
+    let mut claimed = HashMap::new();
+
+    assert!(claim_pod_panes(&product, &panes, &mut claimed));
+
+    for (pane, role, name) in pod_pane_roles(std::slice::from_ref(&product)) {
+        assert_eq!(claimed.get(&pane), Some(&(role, Some(name))));
+    }
+    assert_eq!(claimed.len(), 2);
+}
+
+#[test]
+fn a_missing_agent_panes_file_gives_no_roles() {
+    let pod = Pod::new();
+    let repo = pod.root.join("alpha");
+    assert_eq!(pod_pane_roles(&[product_at("alpha", &repo)]), Vec::new());
+}
+
 #[tokio::test]
 async fn a_pod_runs_when_a_pane_of_its_agent_panes_file_is_live_and_agents_count_by_role() {
     let pod = Pod::new();

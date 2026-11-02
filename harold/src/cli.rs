@@ -6287,6 +6287,22 @@ mod tests {
             ) -> Result<tonic::Response<SetTtsMutedResponse>, tonic::Status> {
                 Err(tonic::Status::unimplemented(""))
             }
+            async fn get_remote_order(
+                &self,
+                _: tonic::Request<harold_api::harold::GetRemoteOrderRequest>,
+            ) -> Result<tonic::Response<harold_api::harold::GetRemoteOrderResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(Default::default()))
+            }
+
+            async fn set_remote_order(
+                &self,
+                _: tonic::Request<harold_api::harold::SetRemoteOrderRequest>,
+            ) -> Result<tonic::Response<harold_api::harold::SetRemoteOrderResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(Default::default()))
+            }
+
             async fn set_messaging_paused(
                 &self,
                 _: tonic::Request<SetMessagingPausedRequest>,

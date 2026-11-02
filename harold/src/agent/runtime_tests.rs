@@ -1620,6 +1620,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         &crate::agent::rex_host_runner::HostAgents::default(),
         &crate::agent::inventory::WindowNames::default(),
         "",
+        &crate::RoleSources::default(),
     );
     assert!(!format!("{protobuf:?}").contains(&sentinel));
     assert!(

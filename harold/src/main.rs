@@ -105,6 +105,8 @@ struct HaroldStateView {
     tts_engine: String,
     /// The chief's session name, or empty with none.
     chief_session: String,
+    /// Where the role of each pane comes from.
+    roles: RoleSources,
 }
 
 impl HaroldStateView {
@@ -135,6 +137,37 @@ impl HaroldStateView {
             }
             .to_owned(),
             chief_session: settings.notify.chief_session.clone().unwrap_or_default(),
+            roles: RoleSources::from_settings(settings),
+        }
+    }
+}
+
+/// Where Harold finds the role of each agent pane: the chief's folder and session, and the
+/// pod registry. The registry is read at each snapshot mapping, as the files are small.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RoleSources {
+    chief_folder: Option<String>,
+    chief_session: Option<String>,
+    registry: Option<std::path::PathBuf>,
+}
+
+impl RoleSources {
+    fn from_settings(settings: &settings::Settings) -> Self {
+        Self {
+            chief_folder: settings.notify.chief.clone(),
+            chief_session: settings.notify.chief_session.clone(),
+            registry: settings.telemetry.pod_registry_path(),
+        }
+    }
+
+    /// The pod panes of the registry. A registry that cannot be read gives none.
+    fn pod_roles(&self) -> Vec<(String, pod_stats::Role, String)> {
+        let Some(path) = &self.registry else {
+            return Vec::new();
+        };
+        match pod_stats::read_registry(path) {
+            Ok(products) => pod_stats::pod_pane_roles(&products),
+            Err(_) => Vec::new(),
         }
     }
 }
@@ -525,6 +558,7 @@ impl Harold for HaroldService {
             hosts,
             window_names,
             self.local_icon.clone(),
+            self.state_view.roles.clone(),
             sender,
             shutdown,
         ));
@@ -725,6 +759,7 @@ async fn forward_agent_snapshots(
     hosts: agent::rex_host_runner::HostAgents,
     window_names: agent::inventory::WindowNames,
     local_icon: String,
+    roles: RoleSources,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -747,6 +782,7 @@ async fn forward_agent_snapshots(
         &hosts,
         &window_names,
         &local_icon,
+        &roles,
     );
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
@@ -762,7 +798,7 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot =
-                    map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                    map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -771,7 +807,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -780,7 +816,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -789,7 +825,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -798,7 +834,7 @@ async fn forward_agent_snapshots(
                 if changed.is_err() {
                     break;
                 }
-                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon);
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -827,7 +863,18 @@ fn map_agent_snapshot(
     hosts: &agent::rex_host_runner::HostAgents,
     window_names: &agent::inventory::WindowNames,
     local_icon: &str,
+    roles: &RoleSources,
 ) -> AgentStateSnapshot {
+    let chief = web_app::chief::find_chief(
+        &snapshot,
+        roles.chief_folder.as_deref(),
+        roles.chief_session.as_deref(),
+    );
+    let chief_pane = match chief {
+        web_app::chief::ChiefPane::One { pane_id, .. } => Some(pane_id),
+        _ => None,
+    };
+    let pod_roles = roles.pod_roles();
     AgentStateSnapshot {
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
@@ -858,6 +905,8 @@ fn map_agent_snapshot(
                 let window_name = window_names
                     .get(&pane.incarnation.pane_id)
                     .unwrap_or_default();
+                let (role, pod_product) =
+                    pane_role(&pane.incarnation.pane_id, chief_pane.as_deref(), &pod_roles);
                 AgentPaneState {
                     pane_id: pane.incarnation.pane_id,
                     tmux_target: pane.tmux_target,
@@ -879,13 +928,37 @@ fn map_agent_snapshot(
                     host: String::new(),
                     host_icon: local_icon.to_owned(),
                     window_name,
-                    role: String::new(),
-                    pod_product: String::new(),
+                    role,
+                    pod_product,
                 }
             })
             .chain(hosts.snapshot().into_iter().filter_map(map_host_agent))
             .collect(),
     }
+}
+
+/// The role of a pane of this Mac and the product of its pod: `chief`, `coordinator` or
+/// `pnem`, or empty for any other pane.
+fn pane_role(
+    pane_id: &str,
+    chief_pane: Option<&str>,
+    pod_roles: &[(String, pod_stats::Role, String)],
+) -> (String, String) {
+    if chief_pane == Some(pane_id) {
+        return ("chief".to_owned(), String::new());
+    }
+    for (pod_pane, role, product) in pod_roles {
+        if pod_pane != pane_id {
+            continue;
+        }
+        let name = match role {
+            pod_stats::Role::PodCoordination => "coordinator",
+            pod_stats::Role::Pnem => "pnem",
+            _ => continue,
+        };
+        return (name.to_owned(), product.clone());
+    }
+    (String::new(), String::new())
 }
 
 /// The API state of an effective state: each of the six states has its own number.

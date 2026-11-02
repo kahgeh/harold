@@ -1837,6 +1837,24 @@ fn pane_ids(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The pod panes that the products' `agent-panes` files name, in product order: line one
+/// is pod coordination, line two the PnEM. A pane may be dead: this does not check it.
+pub(crate) fn pod_pane_roles(products: &[Product]) -> Vec<(String, Role, String)> {
+    let mut roles = Vec::new();
+    for product in products {
+        let Some(text) = read_text(&product.repo.join(POD_FOLDER).join("agent-panes")) else {
+            continue;
+        };
+        for (pane, role) in pane_ids(&text)
+            .into_iter()
+            .zip([Role::PodCoordination, Role::Pnem])
+        {
+            roles.push((pane.to_owned(), role, product.name.clone()));
+        }
+    }
+    roles
+}
+
 /// Claims the live panes that the product's `agent-panes` file names: the first is pod
 /// coordination, the second the PnEM. Returns whether any of them is live, which is
 /// whether the pod runs.
@@ -1845,19 +1863,11 @@ fn claim_pod_panes(
     live: &[LivePane],
     claimed: &mut HashMap<String, (Role, Option<String>)>,
 ) -> bool {
-    let Some(text) = read_text(&product.repo.join(POD_FOLDER).join("agent-panes")) else {
-        return false;
-    };
     let mut running = false;
-    for (pane, role) in pane_ids(&text)
-        .into_iter()
-        .zip([Role::PodCoordination, Role::Pnem])
-    {
+    for (pane, role, name) in pod_pane_roles(std::slice::from_ref(product)) {
         if live.iter().any(|live| live.pane_id == pane) {
             running = true;
-            claimed
-                .entry(pane.to_owned())
-                .or_insert((role, Some(product.name.clone())));
+            claimed.entry(pane).or_insert((role, Some(name)));
         }
     }
     running
