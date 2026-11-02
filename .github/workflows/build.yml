@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
     concurrency:
       group: build-${{ github.workflow }}-${{ github.ref }}-linux
       cancel-in-progress: false
@@ -157,3 +157,74 @@ jobs:
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete
           python3 -I harold/src/tts/test_tts_workers.py
+
+      - name: Build release binaries
+        if: github.event_name == 'release'
+        env:
+          HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-features --features harold/linux-defaults -p harold -p control-tower
+
+      - name: Check no OpenSSL library is linked
+        if: github.event_name == 'release'
+        run: |
+          libs=$(ldd target/x86_64-unknown-linux-gnu/release/harold)
+          if grep -E 'libssl|libcrypto' <<<"$libs"; then
+            echo "harold links an OpenSSL library; vendored OpenSSL is required" >&2
+            exit 1
+          fi
+
+      - name: Package
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          package="harold-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$package/config" "dist/$package/scripts" "dist/$package/hooks" "dist/$package/skills/send-message-to-away-device"
+          for binary in harold control-tower; do
+            cp "target/x86_64-unknown-linux-gnu/release/$binary" "dist/$package/$binary"
+          done
+          cp harold-api/proto/harold.proto "dist/$package/"
+          cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
+          cp scripts/install.py scripts/harold_service.py "dist/$package/scripts/"
+          cp hooks/shared/harold_turn_complete.py "dist/$package/hooks/"
+          cp hooks/providers/claude_turn_complete.py hooks/providers/codex_turn_complete.py "dist/$package/hooks/"
+          cp -R hooks/claude-mod "dist/$package/hooks/claude-mod"
+          find "dist/$package/hooks/claude-mod" -name '*.test.ts' -delete
+          for file in .claude-plugin/plugin.json hooks/hooks.json hooks/register.ts hooks/accept.ts; do
+            test -f "dist/$package/hooks/claude-mod/$file"
+          done
+          cp skills/send-message-to-away-device/SKILL.md "dist/$package/skills/send-message-to-away-device/"
+          test -f "dist/$package/skills/send-message-to-away-device/SKILL.md"
+          cp README.md LICENSE "dist/$package/"
+          cp -R LICENSES "dist/$package/LICENSES"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
+          printf '%s\n' "$RELEASE_TAG" > "dist/$package/VERSION"
+          tar -czf "dist/$package.tar.gz" -C dist "$package"
+          cd dist
+          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
+          sha256sum -c "$package.tar.gz.sha256"
+
+      - name: Smoke test in Arch Linux
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="harold-x86_64-unknown-linux-gnu"
+          mkdir -p smoke
+          tar -xzf "dist/$package.tar.gz" -C smoke
+          docker run --rm -v "$PWD/smoke/$package:/package:ro" archlinux:base@sha256:DIGEST_PENDING_APPROVAL /package/harold --help
+          docker run --rm -v "$PWD/smoke/$package:/package:ro" archlinux:base@sha256:DIGEST_PENDING_APPROVAL /package/harold --build-features
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            dist/harold-x86_64-unknown-linux-gnu.tar.gz \
+            dist/harold-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            --clobber
