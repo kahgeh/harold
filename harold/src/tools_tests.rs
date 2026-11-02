@@ -848,6 +848,13 @@ impl hp::harold_server::Harold for CoreStub {
         Err(Status::not_found("core"))
     }
 
+    async fn get_harold_state(
+        &self,
+        _: Request<hp::GetHaroldStateRequest>,
+    ) -> Result<Response<hp::GetHaroldStateResponse>, Status> {
+        Err(Status::not_found("core"))
+    }
+
     async fn watch_agent_states(
         &self,
         _: Request<hp::WatchAgentStatesRequest>,

@@ -302,6 +302,13 @@ impl Harold for ProbeServer {
         Err(Status::unimplemented("call"))
     }
 
+    async fn get_harold_state(
+        &self,
+        _: Request<harold_api::harold::GetHaroldStateRequest>,
+    ) -> Result<Response<harold_api::harold::GetHaroldStateResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
     async fn watch_agent_states(
         &self,
         _: Request<WatchAgentStatesRequest>,
@@ -495,6 +502,13 @@ impl Harold for RecordingServer {
 
     async fn call(&self, _: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         Err(Status::unimplemented("call"))
+    }
+
+    async fn get_harold_state(
+        &self,
+        _: Request<harold_api::harold::GetHaroldStateRequest>,
+    ) -> Result<Response<harold_api::harold::GetHaroldStateResponse>, Status> {
+        Err(Status::unimplemented("not used"))
     }
 
     async fn watch_agent_states(

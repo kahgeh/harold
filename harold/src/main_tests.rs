@@ -19,11 +19,12 @@ use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
 use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, MonitorHealthState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest,
-    SetMessagingPausedRequest, SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
+    AgentState, GetHaroldStateRequest, MonitorHealthState, ReportAgentStateRequest,
+    SendMessageToAwayDeviceRequest, SetMessagingPausedRequest, SetTtsMutedRequest,
+    SpeakLineRequest, WatchAgentStatesRequest,
 };
 use super::{
-    HAROLD_VERSION, HaroldService, Request, TurnCompleteRequest, apply_setting,
+    HAROLD_VERSION, HaroldService, HaroldStateView, Request, TurnCompleteRequest, apply_setting,
     load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
     version_or_source,
 };
@@ -100,6 +101,7 @@ where
             recaps: crate::agent::recap::Recaps::default(),
             host_agents: HostAgents::default(),
             local_icon: String::new(),
+            state_view: HaroldStateView::default(),
         },
         shutdown,
         task,
@@ -3201,4 +3203,148 @@ fn the_host_agent_row_bytes_match_the_golden_file() {
         "The golden file is out of date. Write this one line, with a newline, to \
          harold-api/tests/fixtures/host_agent_row.hex:\n{actual}"
     );
+}
+
+// --- GetHaroldState ---
+
+const SECRET_PAIRING_FILE: &str = "/secret/pairing-9f3a.env";
+const SECRET_KEY_FILE: &str = "/secret/hyperdx-key-77c1";
+const SECRET_RECIPIENT: &str = "recipient-4471@secret.example";
+const SECRET_TTS_COMMAND: &str = "secret-tts-command-5d2e";
+
+/// Settings that hold the values the answer reports and some values it must never report.
+fn state_settings(with_hosts: bool) -> crate::settings::Settings {
+    let dir = format!("{}/config", env!("CARGO_MANIFEST_DIR"));
+    let mut loaded = crate::settings::Settings::load_defaults(&dir).expect("default settings");
+    let settings = Arc::get_mut(&mut loaded).expect("one owner");
+    settings.machine_name = "TestMac".to_owned();
+    settings.tts.command = SECRET_TTS_COMMAND.to_owned();
+    settings.imessage.recipient = Some(SECRET_RECIPIENT.to_owned());
+    // The HyperDX key file path has no setting of its own. A text setting stands in for it.
+    settings.telemetry.pod_registry = Some(SECRET_KEY_FILE.to_owned());
+    settings.web_app = Some(crate::settings::WebAppSettings {
+        listen: "127.0.0.1:4330".to_owned(),
+        allowed_login: "someone".to_owned(),
+        app_name: None,
+        icon: None,
+        require_pairing: true,
+        pairing_file: Some(SECRET_PAIRING_FILE.to_owned()),
+        specs_listen: None,
+    });
+    if with_hosts {
+        settings.agent_monitor.multiplexer = "rex".to_owned();
+        settings.agent_monitor.rex_hosts = vec!["omarchy".to_owned(), "plain".to_owned()];
+        settings
+            .agent_monitor
+            .rex_host_marks
+            .insert("omarchy".to_owned(), "arch".to_owned());
+        settings
+            .agent_monitor
+            .rex_host_marks
+            .insert("testmac".to_owned(), "mac".to_owned());
+        settings.notify.chief_session = Some("chief".to_owned());
+        settings.tts.engine = crate::settings::TtsEngine::Command;
+    }
+    Arc::try_unwrap(loaded).expect("one owner")
+}
+
+async fn harold_state_for(
+    settings: &crate::settings::Settings,
+    muted: bool,
+    paused: bool,
+) -> super::harold::GetHaroldStateResponse {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let mut snapshot = empty_snapshot();
+    snapshot.tts_muted = muted;
+    snapshot.messaging_paused = paused;
+    let (mut service, shutdown, task) = test_service(store, snapshot);
+    service.state_view = HaroldStateView::from_settings(settings);
+    let response = service
+        .get_harold_state(Request::new(GetHaroldStateRequest {}))
+        .await
+        .expect("answer")
+        .into_inner();
+    drop(shutdown);
+    task.abort();
+    response
+}
+
+#[tokio::test]
+async fn get_harold_state_returns_each_field_from_settings() {
+    let settings = state_settings(true);
+    let response = harold_state_for(&settings, true, false).await;
+
+    assert_eq!(response.tts_muted, Some(true));
+    assert_eq!(response.messaging_paused, Some(false));
+    assert_eq!(response.release_version, HAROLD_VERSION);
+    assert_eq!(response.machine_name, "TestMac");
+    assert_eq!(response.multiplexer, "rex");
+    let hosts: Vec<(&str, &str)> = response
+        .rex_hosts
+        .iter()
+        .map(|host| (host.label.as_str(), host.host_icon.as_str()))
+        .collect();
+    assert_eq!(hosts, vec![("omarchy", "arch"), ("plain", "")]);
+    assert_eq!(response.machine_host_icon, "mac");
+    assert_eq!(response.tts_engine, "command");
+    assert_eq!(response.chief_session, "chief");
+
+    let snapshot = map_agent_snapshot(
+        AgentSnapshotHub::new(empty_snapshot()).current(),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        "",
+    );
+    assert_eq!(response.release_version, snapshot.harold_version);
+}
+
+#[tokio::test]
+async fn get_harold_state_holds_no_secret() {
+    use prost::Message as _;
+    let settings = state_settings(true);
+    let response = harold_state_for(&settings, false, false).await;
+    let debug = format!("{response:?}");
+    let bytes = response.encode_to_vec();
+    for secret in [
+        SECRET_PAIRING_FILE,
+        SECRET_KEY_FILE,
+        SECRET_RECIPIENT,
+        SECRET_TTS_COMMAND,
+    ] {
+        assert!(!debug.contains(secret), "Debug text holds {secret}");
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "wire bytes hold {secret}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_harold_state_flags_follow_the_snapshot() {
+    use prost::Message as _;
+    let settings = state_settings(false);
+    for (muted, paused) in [(false, false), (true, false), (false, true), (true, true)] {
+        let response = harold_state_for(&settings, muted, paused).await;
+        assert_eq!(response.tts_muted, Some(muted));
+        assert_eq!(response.messaging_paused, Some(paused));
+        let bytes = response.encode_to_vec();
+        // Tag 1 and tag 2 are varints: 0x08 and 0x10, each with its value.
+        assert_eq!(
+            bytes[..4],
+            [0x08, u8::from(muted), 0x10, u8::from(paused)],
+            "muted {muted}, paused {paused}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_harold_state_with_no_hosts_marks_or_chief() {
+    let settings = state_settings(false);
+    let response = harold_state_for(&settings, false, false).await;
+    assert!(response.rex_hosts.is_empty());
+    assert_eq!(response.machine_host_icon, "");
+    assert_eq!(response.chief_session, "");
+    assert_eq!(response.multiplexer, "tmux");
 }

@@ -1529,6 +1529,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
         local_icon: String::new(),
+        state_view: crate::HaroldStateView::default(),
     };
     crate::test_logs::keep_second_dispatcher();
     let captured_logs = Arc::new(Mutex::new(Vec::new()));
@@ -1675,6 +1676,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
         local_icon: String::new(),
+        state_view: crate::HaroldStateView::default(),
     };
 
     fixture.handle.inventory_tick().await.unwrap();
@@ -5446,6 +5448,7 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the
         recaps: crate::agent::recap::Recaps::default(),
         host_agents: crate::agent::rex_host_runner::HostAgents::default(),
         local_icon: String::new(),
+        state_view: crate::HaroldStateView::default(),
     };
 
     // The first scan runs until its 1.5 s deadline stops it; both calls queue behind it.

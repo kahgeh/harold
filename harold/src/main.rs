@@ -44,10 +44,11 @@ pub use harold_api::harold;
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
     AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, CallRequest, CallResponse,
-    MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse,
-    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
-    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest,
-    SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    GetHaroldStateRequest, GetHaroldStateResponse, MonitorHealthState, ReportAgentStateRequest,
+    ReportAgentStateResponse, RexHostIcon, SendMessageToAwayDeviceRequest,
+    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
+    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 /// Release tag compiled in by the release workflow; "source" for any other build.
@@ -82,6 +83,57 @@ struct HaroldService {
     host_agents: agent::rex_host_runner::HostAgents,
     /// The mark name of Harold's own machine from `rex_host_marks`, or empty with no entry.
     local_icon: String,
+    /// The settings values that `GetHaroldState` reports, read once at start.
+    state_view: HaroldStateView,
+}
+
+/// The settings values that `GetHaroldState` reports. It holds no other setting, so a
+/// secret or a path cannot reach the answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HaroldStateView {
+    machine_name: String,
+    /// `tmux` or `rex`.
+    multiplexer: String,
+    /// Each label in `rex_hosts` with its host icon, which is empty with no entry.
+    rex_hosts: Vec<(String, String)>,
+    /// The host icon of this machine, or empty with no entry.
+    machine_host_icon: String,
+    /// `server` or `command`.
+    tts_engine: String,
+    /// The chief's session name, or empty with none.
+    chief_session: String,
+}
+
+impl HaroldStateView {
+    fn from_settings(settings: &settings::Settings) -> Self {
+        let monitor = &settings.agent_monitor;
+        Self {
+            machine_name: settings.machine_name.clone(),
+            multiplexer: match monitor.multiplexer() {
+                settings::Multiplexer::Tmux => "tmux",
+                settings::Multiplexer::Rex => "rex",
+            }
+            .to_owned(),
+            rex_hosts: monitor
+                .rex_hosts
+                .iter()
+                .map(|label| {
+                    let icon = monitor.rex_host_marks.get(label).cloned();
+                    (label.clone(), icon.unwrap_or_default())
+                })
+                .collect(),
+            machine_host_icon: monitor
+                .mark_for_machine(&settings.machine_name)
+                .unwrap_or_default()
+                .to_owned(),
+            tts_engine: match settings.tts.engine {
+                settings::TtsEngine::Server => "server",
+                settings::TtsEngine::Command => "command",
+            }
+            .to_owned(),
+            chief_session: settings.notify.chief_session.clone().unwrap_or_default(),
+        }
+    }
 }
 
 /// The provider id of Claude Code panes.
@@ -99,6 +151,7 @@ fn harold_service(
     recaps: agent::recap::Recaps,
     host_agents: agent::rex_host_runner::HostAgents,
     local_icon: String,
+    state_view: HaroldStateView,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -112,6 +165,7 @@ fn harold_service(
         recaps,
         host_agents,
         local_icon,
+        state_view,
     }
 }
 
@@ -255,6 +309,31 @@ impl HaroldService {
 #[tonic::async_trait]
 impl Harold for HaroldService {
     type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
+
+    async fn get_harold_state(
+        &self,
+        _: Request<GetHaroldStateRequest>,
+    ) -> Result<Response<GetHaroldStateResponse>, Status> {
+        let view = &self.state_view;
+        Ok(Response::new(GetHaroldStateResponse {
+            tts_muted: Some(self.snapshots.tts_muted()),
+            messaging_paused: Some(self.snapshots.messaging_paused()),
+            release_version: HAROLD_VERSION.to_owned(),
+            machine_name: view.machine_name.clone(),
+            multiplexer: view.multiplexer.clone(),
+            rex_hosts: view
+                .rex_hosts
+                .iter()
+                .map(|(label, host_icon)| RexHostIcon {
+                    label: label.clone(),
+                    host_icon: host_icon.clone(),
+                })
+                .collect(),
+            machine_host_icon: view.machine_host_icon.clone(),
+            tts_engine: view.tts_engine.clone(),
+            chief_session: view.chief_session.clone(),
+        }))
+    }
 
     async fn set_tts_muted(
         &self,
@@ -1499,6 +1578,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             .mark_for_machine(&cfg.machine_name)
             .unwrap_or_default()
             .to_owned(),
+        HaroldStateView::from_settings(cfg),
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
