@@ -223,8 +223,37 @@ An RPC that appends after the handler has stopped remains durable and is project
 | `harold --check-config` | Validates resolved configuration and prints only `grpc_addr` and `store_path` as JSON; does not open storage |
 | `harold --check-ready` | Receives one snapshot within five seconds and prints `ready` and `through_event_version`; does not print pane contents or append events |
 | `harold accept EVENT --pane ID --adapter NAME` | Reports one event for a pane to the running daemon. `EVENT` is `turn-started` or `still-working`, which report working, or `turn-completed` or `subagents-finished`, which report done; any other name is an argument error. Sends no work summary; exits 0 when accepted, otherwise prints one line on standard error and exits 1; waits 3 seconds at most; never starts a daemon |
+| `harold get THING` | Prints one thing of the Harold state as one line of JSON, from one `GetHaroldState` call to the running daemon. See [`harold get`](#harold-get) |
 
 These direct commands use the invoking process's normal configuration environment. `haroldctl status` runs the readiness check with the installed environment and adds process ownership verification.
+
+## `harold get`
+
+`harold get THING` tells the current value of one item of the Harold state. It calls `GetHaroldState` on the daemon over loopback. It reads nothing from the screen. It reads from the config file only the address of the daemon. Each value is the value Harold uses now.
+
+| Thing | Prints on standard output | Meaning |
+| --- | --- | --- |
+| `voice` | `{"state":"on","engine":"server"}` | `state` is `off` when the voice mute is on, and `on` when it is off. `engine` is the TTS engine, `server` or `command`. |
+| `messaging` | `{"state":"on"}` | `state` is `off` when the messaging pause is on, and `on` when it is off. |
+| `version` | `{"release_version":"0.72.0"}` | Harold's release version. |
+| `machine` | `{"machine_name":"PasM4MBP","host_icon":"mac"}` | The machine name and its host icon. The host icon is empty with none. |
+| `multiplexer` | `{"multiplexer":"rex"}` | `tmux` or `rex`. |
+| `hosts` | `{"hosts":[{"label":"omarchy","host_icon":"arch"}]}` | The Rex hosts. The list is empty with none: `{"hosts":[]}`. |
+| `chief` | `{"chief_session":"chief"}` | The chief's session. The value is empty with none. |
+
+For `voice` and `messaging`, `off` always means that the switch stops the thing. Standard output holds JSON only, and only with exit 0. Standard error holds every error line.
+
+| Case | Line on standard error | Exit |
+| --- | --- | --- |
+| No thing, extra words, or a name that is not in the table | `unknown thing "NAME": voice, messaging, version, machine, multiplexer, hosts, chief` | 2 |
+| The daemon does not answer within 3 seconds | `the Harold daemon did not answer within 3 seconds` | 1 |
+| No daemon on the address | `the Harold daemon is not reachable` | 1 |
+| An older Harold without the call (`Unimplemented`) | `this Harold is too old for harold get` | 1 |
+| Another gRPC error | `the Harold daemon refused the call` | 1 |
+
+A script that needs the voice state runs `harold get voice`. On any exit that is not 0, the script treats the voice as possibly on. Do not read the voice state from the control-tower screen.
+
+The answer never holds a token, key, pairing code, HyperDX key, phone number, iMessage recipient, TTS command line or path.
 
 ## Turn-end update diagnostics
 

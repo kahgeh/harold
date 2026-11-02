@@ -231,8 +231,31 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `WatchAgentStates` | Empty request | Server stream whose first message is the complete current snapshot, followed by complete snapshots at greater revisions. There is nothing to replay from; a client reconnects and gets the latest complete snapshot. |
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
+| `GetHaroldState` | Empty request | Unary and read-only; responds with the Harold state in `GetHaroldStateResponse`. See [GetHaroldState](#getharoldstate). An older Harold answers `Unimplemented`. |
+
+`AgentStateSnapshot.tts_muted` is a plain proto3 `bool`. Proto3 does not write a `false` scalar on the wire, so a client such as `grpcurl` omits it unless it uses `-emit-defaults`. An absent `tts_muted` means `false`: the voice mute is off. To read the voice mute without this rule, run `harold get voice`. It calls `GetHaroldState`, which always writes both flags.
 
 `ReportAgentState.state` accepts `AGENT_STATE_WORKING`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_DONE`, `AGENT_STATE_IDLE` and `AGENT_STATE_ERROR`. The old name `AGENT_STATE_BUSY` stays readable as a wire-name alias of `AGENT_STATE_WORKING` for installed plugins. Pane IDs have the tmux `%` plus decimal-digits form or the Rex `block:` plus block ID form. With `multiplexer = "rex"`, Harold refuses a `%` pane ID in a message or a spoken line, and with `"tmux"` it refuses a `block:` pane ID. A hook report from a pane of the other multiplexer is dropped without an error. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
+
+### `GetHaroldState`
+
+`GetHaroldState` reports what Harold holds now. It does not copy the config file. It uses the same loopback listener as every other call. Each field has its own number, and the field list is pinned by a contract test.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `tts_muted = 1` | `optional bool` | Whether the voice mute is on now |
+| `messaging_paused = 2` | `optional bool` | Whether the messaging pause is on now |
+| `release_version = 3` | `string` | Harold's release version (`source` for a source build) |
+| `machine_name = 4` | `string` | The machine name of this machine |
+| `multiplexer = 5` | `string` | `tmux` or `rex` |
+| `rex_hosts = 6` | repeated `RexHostIcon` | One entry for each label in `[agent_monitor] rex_hosts` |
+| `machine_host_icon = 7` | `string` | The host icon of this machine's `machine_name`; empty with none |
+| `tts_engine = 8` | `string` | `server` or `command` |
+| `chief_session = 9` | `string` | `notify.chief_session`; empty with none |
+
+`RexHostIcon` holds `label = 1` and `host_icon = 2`. The host icon is empty when the label has no entry in `[agent_monitor.rex_host_marks]`.
+
+The two flags are `optional`, so Harold writes them on the wire also when they are `false`. Harold always sets both. The answer never holds a token, key, pairing code, HyperDX key, phone number, iMessage recipient, TTS command line or path.
 
 ### `AgentStateSnapshot`
 

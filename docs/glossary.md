@@ -148,6 +148,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | `notify.chief` | The `[notify] chief` entry that names the chief's pane by its folder. It decides which pane is the chief, not what the chief may use | "chief folder setting", "away_messages_only_from" for it |
 | voice, voice mute | Harold's speech at the desk, and the switch that silences it (`Voice: mute`) | — |
 | messaging pause | The switch that stops all phone traffic in both directions (`Messaging: pause`) | "kill switch" as its name |
+| Harold state | What Harold holds now, as `harold get` reads it: the voice mute, the messaging pause, the release version, the machine name, the multiplexer, the Rex hosts and their host icons, the TTS engine and the chief's session. A value can change while Harold runs. In `harold get`, a **thing** is one named item of it, such as `voice`. It never holds a token, key, pairing code, phone number, command line or path | "config dump", "settings export" |
 | call | A voice conversation through Harold, answered by the call answerer, which hands real work to the chief. At the Mac or in the web app | "call" for an RPC or a function |
 | call answerer | The small model, one `claude -p` run on Haiku for each turn, that answers your turns in a call from the call facts and hands real work to the chief. You asked for it as the fast call voice | "call voice" (voice is Harold's speech), "assistant", "bot", "fast model" |
 | call facts | The facts for a call: what Harold gives the call answerer on each turn, as it gives a watch run its facts. The agents, the pods, and this call's hand-overs and chief lines, and with Choice C(b) your todos and the chief's queue | "brief", "context" |
@@ -306,6 +307,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | note | The control-tower's revise or reject text. The web app's "Notes" page and header link mean vault notes, never backlog notes | backlog note, vault note |
 | dash | not used: say control-tower | HyperDX dashboard |
 | monitor | Never alone | agent monitor, HyperDX alert |
+| state | Never alone. It has three senses: agent state (what an agent does now), spec state (the question tool's state of a spec, such as `changed`), and switch state (the `state` field, `on` or `off`, of `harold get voice` and `harold get messaging`; `off` means the switch stops it) | agent state, spec state, switch state |
 | session | A tmux session, a Rex session, or a pod session | agent, for the agent itself |
 | task | The work asked of an agent | background job, for Harold's own threads |
 | version | Never alone | question version, release version |
