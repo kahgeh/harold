@@ -505,6 +505,25 @@ A worker that does not stop causes later attempts to return internal `busy` with
 
 An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents Harold from becoming ready.
 
+### Rex blocks that do not hold a live agent
+
+An exited block is a Rex block whose program has exited. Rex keeps it, with its `last_exit`. The inventory treats it as a block with no agent: it adds no row and no error. An answer with neither `child` nor `last_exit` stays malformed. If an agent ran in the block, the agent departs.
+
+An unreadable block is a block whose `process` answer failed, timed out or could not be read. The scan leaves that block out and reads the other blocks. A call that Harold's stop signal ended is not unreadable and logs nothing.
+
+| Line | Fields |
+|---|---|
+| `agent pane unreadable` (warn) | `pane_id`, `reason` (`failed`, `timeout` or `malformed`) |
+| `agent pane readable again` (info) | `pane_id` |
+
+Harold logs each line once for each change. A block that stays unreadable logs one `agent pane unreadable` line, not one for each scan. The same rule holds for a block of a Rex host.
+
+One unreadable block does not degrade the inventory. Two cases degrade it: the listing (`ls` or `session.view`) fails, or a scan has at least one block and the `process` call fails for every block. The second case logs `agent monitor degraded` with `component = inventory` and `reason = failed`. A scan with no blocks is not degraded. A scan never succeeds with old rows.
+
+When the inventory is degraded, `harold speak` cannot find the pane of its caller. The daemon answers `unavailable`, and the command prints `the agent lookup is not available now; try again`. The same line covers a failed event append and a stopped monitor runtime. A failed write of the line keeps `the Harold daemon could not store the spoken line`.
+
+The dashboard card "Agent panes unreadable, by pane, last 24 hours" counts `agent pane unreadable` lines for each `pane_id`. A pane with more than one line in a day needs a look. It is a card, not an alert.
+
 ## Lifecycle limits
 
 - `WatchAgentStates` is snapshot-then-stream, not replay from a checkpoint. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.

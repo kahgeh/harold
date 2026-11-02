@@ -31,6 +31,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | host pane id | The pane id of an agent on a Rex host, `rex:<label>/block:<id>`. No writer takes it | "remote id", "qualified id", "pane address" |
 | host icon | The mark name that `[agent_monitor.rex_host_marks]` gives a host, `arch`, `linux` or `mac`, keyed by a label in `rex_hosts` or by Harold's own `machine_name`. A host with no entry has none | "host logo", "host image" |
 | host marker | The glyph, emoji or label and dot that the control-tower's WHERE column shows before the session of an agent: the mark of its host icon, or, in text mode, the label of a Rex host | "host badge", "icon prefix", "host tag" |
+| exited block | A Rex block whose program has exited. Rex keeps it, with its `last_exit`, and it holds no agent | "dead pane", "zombie block" |
+| unreadable block | A Rex block whose `process` answer failed, timed out or could not be read in one inventory scan | "bad block", "broken pane" |
 | pane label | The text the agent list shows and a routing tag matches: `<session>:<window>.<pane>` | "target" |
 | INSERT mode | Claude Code's Vim editor mode in which keys type text into the input box | — |
 | NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |

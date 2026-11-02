@@ -226,6 +226,7 @@ const TOOL_USAGE_LINE: &str =
     "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
+const SPOKEN_LOOKUP_UNAVAILABLE_LINE: &str = "the agent lookup is not available now; try again";
 const SPOKEN_NOT_STORED_LINE: &str = "the Harold daemon could not store the spoken line";
 
 /// The arguments after the command name: one `--src-id ID` and one text, in either order.
@@ -306,6 +307,11 @@ fn speak_refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String 
         }
         (tonic::Code::FailedPrecondition, AGENT_NOT_FOUND) => {
             format!("no agent is running in pane {src_id}")
+        }
+        // The daemon answers this when the inventory is unavailable, an event append failed
+        // or the monitor runtime stopped.
+        (tonic::Code::Unavailable, "agent lookup unavailable") => {
+            SPOKEN_LOOKUP_UNAVAILABLE_LINE.into()
         }
         // Includes an older daemon that does not have the RPC.
         _ => SPOKEN_NOT_STORED_LINE.into(),
@@ -3489,6 +3495,22 @@ mod tests {
         assert_eq!(
             speak_refusal_line(tonic::Code::FailedPrecondition, AGENT_NOT_FOUND, "%47"),
             "no agent is running in pane %47"
+        );
+        assert_eq!(
+            speak_refusal_line(tonic::Code::Unimplemented, "", "%47"),
+            "the Harold daemon could not store the spoken line"
+        );
+    }
+
+    #[test]
+    fn speak_unavailable_prints_the_lookup_line_and_internal_keeps_the_store_line() {
+        assert_eq!(
+            speak_refusal_line(tonic::Code::Unavailable, "agent lookup unavailable", "%47"),
+            "the agent lookup is not available now; try again"
+        );
+        assert_eq!(
+            speak_refusal_line(tonic::Code::Internal, "event store write failed", "%47"),
+            "the Harold daemon could not store the spoken line"
         );
         assert_eq!(
             speak_refusal_line(tonic::Code::Unimplemented, "", "%47"),
