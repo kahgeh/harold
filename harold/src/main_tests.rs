@@ -3324,6 +3324,7 @@ async fn get_harold_state_returns_each_field_from_settings() {
         &CurrentSteps::default(),
         &Recaps::default(),
         &HostAgents::default(),
+        &WindowNames::default(),
         "",
     );
     assert_eq!(response.release_version, snapshot.harold_version);
