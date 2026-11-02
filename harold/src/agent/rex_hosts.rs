@@ -294,12 +294,14 @@ impl RexHostInventory {
                 ],
             )
         });
-        let processes = texts
-            .into_iter()
-            .map(|text| parse_process(&text?))
-            .collect::<Result<Vec<_>, RexError>>()?;
+        // A block that does not answer is left out. The other blocks stay.
+        let answered: Vec<_> = slots
+            .iter()
+            .zip(texts)
+            .filter_map(|(slot, text)| Some((slot, parse_process(&text.ok()?).ok()?)))
+            .collect();
         let mut hits = Vec::new();
-        for (slot, process) in slots.iter().zip(&processes) {
+        for (slot, process) in &answered {
             if let Some((agent, program)) = find_agent(process, &self.settings) {
                 hits.push((slot, agent, program));
             }

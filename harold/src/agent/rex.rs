@@ -737,6 +737,8 @@ pub(crate) struct RexAgentInventory {
     programs: Mutex<HashMap<(String, u32), String>>,
     /// The status streams. Each scan gives them the listed sessions.
     status: Arc<RexStatus>,
+    /// The blocks whose `process` call failed in the last scan, by block id.
+    unreadable: Mutex<HashSet<String>>,
 }
 
 impl RexAgentInventory {
@@ -751,6 +753,7 @@ impl RexAgentInventory {
             status,
             start_times: Mutex::new(HashMap::new()),
             programs: Mutex::new(HashMap::new()),
+            unreadable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -775,12 +778,14 @@ impl RexAgentInventory {
         *rex_ms = elapsed_ms(started);
         let started = Instant::now();
         let observed_at_ms = now_ms()?;
-        let processes = processes.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let answered = self.keep_answered(&slots, processes)?;
+        let (slots, processes): (Vec<&RexBlockSlot>, Vec<RexProcess>) =
+            answered.into_iter().unzip();
         self.read_new_start_times(&processes);
         let mut observed = Vec::new();
         let mut programs = HashMap::new();
         let mut seen = HashSet::new();
-        for (slot, process) in slots.iter().zip(&processes) {
+        for (slot, process) in slots.into_iter().zip(&processes) {
             let result = observe_block(slot, process, &self.settings, observed_at_ms, |pid| {
                 seen.insert(pid);
                 self.start_time(pid)
@@ -803,6 +808,56 @@ impl RexAgentInventory {
             .retain(|pid, _| seen.contains(pid));
         *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
         Ok(observed)
+    }
+
+    /// Keeps the blocks whose `process` call answered. It logs each change of the unreadable
+    /// set once. It fails with the first error when the scan has blocks and no call answered.
+    /// A call that Harold's stop signal ended logs nothing.
+    fn keep_answered<'a>(
+        &self,
+        slots: &'a [RexBlockSlot],
+        results: Vec<Result<RexProcess, RexError>>,
+    ) -> Result<Vec<(&'a RexBlockSlot, RexProcess)>, InventoryError> {
+        let first_error = results
+            .iter()
+            .find_map(|result| result.as_ref().err().copied());
+        let mut answered = Vec::new();
+        let mut failed = Vec::new();
+        for (slot, result) in slots.iter().zip(results) {
+            match result {
+                Ok(process) => answered.push((slot, process)),
+                Err(error) => failed.push((slot, error)),
+            }
+        }
+        if let Some(error) = first_error
+            && (answered.is_empty() || stop_requested())
+        {
+            return Err(error.into());
+        }
+        let mut unreadable = self
+            .unreadable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (slot, error) in &failed {
+            if !unreadable.contains(&slot.block_id) {
+                let reason = match error {
+                    RexError::Timeout => "timeout",
+                    RexError::Malformed => "malformed",
+                    RexError::Failed | RexError::Absent => "failed",
+                };
+                tracing::warn!(pane_id = %slot.block_id, reason, "agent pane unreadable");
+            }
+        }
+        for (slot, _) in &answered {
+            if unreadable.contains(&slot.block_id) {
+                tracing::info!(pane_id = %slot.block_id, "agent pane readable again");
+            }
+        }
+        *unreadable = failed
+            .iter()
+            .map(|(slot, _)| slot.block_id.clone())
+            .collect();
+        Ok(answered)
     }
 
     /// Reads the start times of the new agents in the pool and fills the cache. A single new

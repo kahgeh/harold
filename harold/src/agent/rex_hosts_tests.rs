@@ -388,6 +388,29 @@ fn a_failed_status_call_gives_that_agent_unknown_and_keeps_the_others() {
 }
 
 #[test]
+fn host_scan_leaves_out_an_exited_block() {
+    let fake = Fake::new("exited");
+    fake.put(
+        "process-b2.json",
+        r#"{"home":"/Users/x","last_exit":{"exit_code":1,"error":"exit status 1"}}"#,
+    );
+    let scan = fake.inventory("omarchy", None, clock(1)).scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents.len(), 1);
+    assert_eq!(scan.agents[0].host_pane_id, "rex:omarchy/block:b1");
+}
+
+#[test]
+fn host_scan_survives_one_unreadable_block() {
+    let fake = Fake::new("unreadable");
+    fake.put("process-b2.json", "not json");
+    let scan = fake.inventory("omarchy", None, clock(1)).scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents.len(), 1);
+    assert_eq!(scan.agents[0].host_pane_id, "rex:omarchy/block:b1");
+}
+
+#[test]
 fn a_host_with_2_sessions_and_8_blocks_takes_its_slowest_call_per_step() {
     let fake = Fake::new("pool");
     fake.put(

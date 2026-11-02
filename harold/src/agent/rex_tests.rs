@@ -310,6 +310,8 @@ struct FakeRex {
     gate: Option<Arc<Gate>>,
     /// The purpose of each `read_call`, in order.
     purposes: Mutex<Vec<&'static str>>,
+    /// Blocks that `session_view` leaves out.
+    hidden: Mutex<Vec<String>>,
 }
 
 /// The first `program_status` call for `block` waits and answers `first`. Later calls for
@@ -410,7 +412,12 @@ impl RexApi for FakeRex {
         }
     }
     fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
-        Ok(self.views.get(session).unwrap_or(&self.windows).clone())
+        let mut windows = self.views.get(session).unwrap_or(&self.windows).clone();
+        let hidden = self.hidden.lock().unwrap();
+        for window in &mut windows {
+            window.retain(|block| !hidden.contains(block));
+        }
+        Ok(windows)
     }
     fn process(&self, _: &str, block: &str) -> Result<RexProcess, RexError> {
         self.processes
@@ -678,6 +685,144 @@ fn is_current_stays_an_error_when_process_fails_and_the_block_is_still_listed() 
         inventory.is_current(&incarnation),
         Err(InventoryError::RexFailed)
     );
+}
+
+/// Three blocks: `block:a` and `block:c` hold agents, `block:b` answers as given.
+fn three_blocks(middle: Result<RexProcess, RexError>) -> FakeRex {
+    let other = process(
+        2,
+        Some(proc(6, "claude", None)),
+        vec![proc(2, "login", None)],
+    );
+    let api = fake(&[
+        ("block:a", Ok(claude_process())),
+        ("block:b", middle),
+        ("block:c", Ok(other)),
+    ]);
+    api.starts.lock().unwrap().insert(6, 6_000);
+    api
+}
+
+fn set_block(api: &FakeRex, block: &str, answer: Result<RexProcess, RexError>) {
+    api.processes.lock().unwrap().insert(block.into(), answer);
+}
+
+#[test]
+fn scan_with_an_exited_block_finds_the_other_agents() {
+    let _directory = directory_test_lock();
+    let (logs, _guard) = capture_logs();
+    let inventory = RexAgentInventory::new(
+        Arc::new(three_blocks(Ok(exited_process()))),
+        settings(),
+        inert_status(),
+    );
+    let observed = inventory.scan().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(logs.with("agent pane unreadable").is_empty());
+}
+
+#[test]
+fn scan_of_only_an_exited_block_gives_no_row_and_no_error() {
+    let _directory = directory_test_lock();
+    let api = fake(&[("block:a", Ok(exited_process()))]);
+    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    assert_eq!(inventory.scan(), Ok(Vec::new()));
+}
+
+#[test]
+fn scan_with_one_failing_block_logs_unreadable_once() {
+    let _directory = directory_test_lock();
+    let (logs, _guard) = capture_logs();
+    let api = Arc::new(three_blocks(Err(RexError::Failed)));
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    for _ in 0..3 {
+        assert_eq!(inventory.scan().unwrap().len(), 2);
+    }
+    let unreadable = logs.with("agent pane unreadable");
+    assert_eq!(unreadable.len(), 1, "{unreadable:?}");
+    assert!(unreadable[0].contains("pane_id=block:b"), "{unreadable:?}");
+    assert!(
+        unreadable[0].contains("reason=\"failed\""),
+        "{unreadable:?}"
+    );
+    assert!(logs.with("agent pane readable again").is_empty());
+
+    set_block(&api, "block:b", Ok(exited_process()));
+    assert_eq!(inventory.scan().unwrap().len(), 2);
+    let again = logs.with("agent pane readable again");
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert!(again[0].contains("pane_id=block:b"), "{again:?}");
+    assert_eq!(logs.with("agent pane unreadable").len(), 1);
+}
+
+#[test]
+fn scan_reason_names_timeout_and_malformed() {
+    let _directory = directory_test_lock();
+    let (logs, _guard) = capture_logs();
+    for error in [RexError::Timeout, RexError::Malformed] {
+        let inventory = RexAgentInventory::new(
+            Arc::new(three_blocks(Err(error))),
+            settings(),
+            inert_status(),
+        );
+        assert_eq!(inventory.scan().unwrap().len(), 2);
+    }
+    let lines = logs.with("agent pane unreadable");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("reason=\"timeout\""), "{lines:?}");
+    assert!(lines[1].contains("reason=\"malformed\""), "{lines:?}");
+}
+
+#[test]
+fn scan_fails_when_every_process_call_fails() {
+    let _directory = directory_test_lock();
+    let api = fake(&[
+        ("block:a", Err(RexError::Failed)),
+        ("block:b", Err(RexError::Failed)),
+        ("block:c", Err(RexError::Failed)),
+    ]);
+    let inventory = RexAgentInventory::new(Arc::new(api), settings(), inert_status());
+    assert_eq!(inventory.scan(), Err(InventoryError::RexFailed));
+}
+
+#[test]
+fn scan_with_no_blocks_succeeds_with_no_rows() {
+    let _directory = directory_test_lock();
+    let inventory = RexAgentInventory::new(Arc::new(fake(&[])), settings(), inert_status());
+    assert_eq!(inventory.scan(), Ok(Vec::new()));
+}
+
+#[test]
+fn scan_stopped_during_process_calls_logs_no_unreadable() {
+    let _directory = directory_test_lock();
+    let (logs, _guard) = capture_logs();
+    let inventory = RexAgentInventory::new(
+        Arc::new(three_blocks(Err(RexError::Failed))),
+        settings(),
+        inert_status(),
+    );
+    let signal = StopSignal::default();
+    signal.request();
+    let result = run_stoppable(signal, || inventory.scan());
+    assert_eq!(result, Err(InventoryError::RexFailed));
+    assert!(logs.with("agent pane unreadable").is_empty());
+}
+
+#[test]
+fn unreadable_set_drops_a_block_that_leaves_the_listing() {
+    let _directory = directory_test_lock();
+    let (logs, _guard) = capture_logs();
+    let api = Arc::new(three_blocks(Err(RexError::Failed)));
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    assert_eq!(inventory.scan().unwrap().len(), 2);
+
+    api.hidden.lock().unwrap().push("block:b".into());
+    assert_eq!(inventory.scan().unwrap().len(), 2);
+
+    api.hidden.lock().unwrap().clear();
+    assert_eq!(inventory.scan().unwrap().len(), 2);
+    assert_eq!(logs.with("agent pane unreadable").len(), 2);
+    assert!(logs.with("agent pane readable again").is_empty());
 }
 
 #[test]
