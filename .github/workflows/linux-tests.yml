@@ -45,6 +45,7 @@ jobs:
           grep -q "needs macOS" guard.log || { cat guard.log >&2; echo "the build failed, but not with 'needs macOS'" >&2; exit 1; }
 
       - name: Test
+        timeout-minutes: 25
         run: |
           cargo test --locked --workspace --no-default-features --features harold/linux-defaults
           python3 -m unittest discover -s scripts/tests
