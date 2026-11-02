@@ -845,7 +845,7 @@ mod rex_observer {
     use crate::agent::domain::ScreenObservation;
     use crate::agent::rex::{
         CurrentSteps, Lookup, Program, RexApi, RexBlockSlot, RexError, RexProcess, RexSession,
-        RexStatus,
+        RexStatus, RexWindow,
     };
     use crate::agent::screen::{PROGRAM_STATUS_CLASSIFIER_ID, RexVisibleScreen};
 
@@ -884,8 +884,11 @@ mod rex_observer {
                 label: "three".to_string(),
             }])
         }
-        fn session_view(&self, _: &str) -> Result<Vec<Vec<String>>, RexError> {
-            Ok(vec![self.blocks.clone()])
+        fn session_view(&self, _: &str) -> Result<Vec<RexWindow>, RexError> {
+            Ok(vec![RexWindow {
+                label: String::new(),
+                blocks: self.blocks.clone(),
+            }])
         }
         fn process(&self, _: &str, _: &str) -> Result<RexProcess, RexError> {
             Err(RexError::Failed)
@@ -1022,6 +1025,7 @@ mod rex_observer {
             window: 1,
             pane: 1,
             block_id: block.to_string(),
+            window_name: String::new(),
         }]);
         let deadline = Instant::now() + Duration::from_secs(20);
         while status.lookup(block) == Lookup::NoStream {

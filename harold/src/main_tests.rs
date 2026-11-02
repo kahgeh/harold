@@ -2981,6 +2981,7 @@ fn host_agent(state: ObservedAgentState) -> RexHostAgent {
         session_name: "harold".into(),
         window_index: 2,
         pane_index: 3,
+        window_name: String::new(),
         working_directory: "/home/u/harold".into(),
     }
 }

@@ -34,6 +34,7 @@ fn agent(
         session_name: "work".into(),
         window_index: 1,
         pane_index: 2,
+        window_name: String::new(),
         working_directory: "/work/repo".into(),
     }
 }

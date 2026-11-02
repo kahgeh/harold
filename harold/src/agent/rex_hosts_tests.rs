@@ -196,6 +196,20 @@ fn an_agent_gets_a_host_pane_id_and_its_place() {
 }
 
 #[test]
+fn a_host_agent_carries_its_window_name() {
+    let fake = Fake::new("window-name");
+    fake.put(
+        "view.json",
+        r#"{"windows":[{"label":"linux-satellite-2b","layers":[{"blocks":[
+        {"block_id":"block:b1","creator_name":"com.superlogical.terminal"},
+        {"block_id":"block:b2","creator_name":"com.superlogical.terminal"}]}]}]}"#,
+    );
+    let scan = fake.inventory("omarchy", None, clock(1000)).scan();
+    assert_eq!(scan.agents.len(), 1);
+    assert_eq!(scan.agents[0].window_name, "linux-satellite-2b");
+}
+
+#[test]
 fn a_record_that_says_blocked_done_or_error_gives_that_state() {
     let fake = Fake::new("five-states");
     for (word, expected) in [

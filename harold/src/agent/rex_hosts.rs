@@ -69,6 +69,7 @@ pub(crate) struct RexHostAgent {
     pub(crate) session_name: String,
     pub(crate) window_index: u32,
     pub(crate) pane_index: u32,
+    pub(crate) window_name: String,
     pub(crate) working_directory: String,
 }
 
@@ -360,6 +361,7 @@ impl RexHostInventory {
                     session_name: slot.session_label.clone(),
                     window_index: slot.window,
                     pane_index: slot.pane,
+                    window_name: slot.window_name.clone(),
                     working_directory: agent.cwd.clone(),
                 },
             ));

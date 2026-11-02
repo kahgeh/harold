@@ -6002,6 +6002,7 @@ impl super::rex_host_runner::HostSource for StuckHost {
                     session_name: "harold".into(),
                     window_index: 0,
                     pane_index: 0,
+                    window_name: String::new(),
                     working_directory: "/home/harold".into(),
                 }],
                 host_id: Some("host-o".into()),

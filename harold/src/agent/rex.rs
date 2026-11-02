@@ -130,13 +130,23 @@ pub(crate) struct RexBlockSlot {
     /// From 1, the block's place in its window.
     pub(crate) pane: u32,
     pub(crate) block_id: String,
+    /// The window's label. It is empty when the window has none.
+    pub(crate) window_name: String,
+}
+
+/// One Rex window: its label and its terminal blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RexWindow {
+    /// Empty when the window has no label.
+    pub(crate) label: String,
+    pub(crate) blocks: Vec<String>,
 }
 
 /// The calls Harold makes to Rex.
 pub(crate) trait RexApi: Send + Sync {
     fn sessions(&self) -> Result<Vec<RexSession>, RexError>;
-    /// The terminal blocks of the session, window by window: each inner list is one window.
-    fn session_view(&self, session_id: &str) -> Result<Vec<Vec<String>>, RexError>;
+    /// The windows of the session, each with its label and its terminal blocks.
+    fn session_view(&self, session_id: &str) -> Result<Vec<RexWindow>, RexError>;
     fn process(&self, session_id: &str, block_id: &str) -> Result<RexProcess, RexError>;
     /// The start time of the process, in milliseconds since the epoch.
     fn start_time_ms(&self, pid: u32) -> Option<i64>;
@@ -221,9 +231,9 @@ pub(crate) fn parse_sessions(text: &str) -> Result<Vec<RexSession>, RexError> {
 
 const TERMINAL_CREATOR: &str = "com.superlogical.terminal";
 
-/// The terminal blocks of each window, in the order of `session.view`. A window's blocks are
+/// The windows in the order of `session.view`, each with its label. A window's blocks are
 /// in its layers, in the screen order of the layout.
-pub(crate) fn parse_session_view(text: &str) -> Result<Vec<Vec<String>>, RexError> {
+pub(crate) fn parse_session_view(text: &str) -> Result<Vec<RexWindow>, RexError> {
     let value = parse_json(text)?;
     let windows = value
         .get("windows")
@@ -248,7 +258,10 @@ pub(crate) fn parse_session_view(text: &str) -> Result<Vec<Vec<String>>, RexErro
                 }
             }
         }
-        result.push(blocks);
+        result.push(RexWindow {
+            label: string_field(window, "label").unwrap_or_default(),
+            blocks,
+        });
     }
     Ok(result)
 }
@@ -292,16 +305,17 @@ pub(crate) fn parse_process(text: &str) -> Result<RexProcess, RexError> {
 }
 
 /// The slots of a session's blocks, numbered from 1 by window and by place in the window.
-pub(crate) fn slots_of(session: &RexSession, windows: &[Vec<String>]) -> Vec<RexBlockSlot> {
+pub(crate) fn slots_of(session: &RexSession, windows: &[RexWindow]) -> Vec<RexBlockSlot> {
     let mut slots = Vec::new();
-    for (window, blocks) in (1_u32..).zip(windows) {
-        for (pane, block_id) in (1_u32..).zip(blocks) {
+    for (window, view) in (1_u32..).zip(windows) {
+        for (pane, block_id) in (1_u32..).zip(&view.blocks) {
             slots.push(RexBlockSlot {
                 session_id: session.id.clone(),
                 session_label: session.label.clone(),
                 window,
                 pane,
                 block_id: block_id.clone(),
+                window_name: view.label.clone(),
             });
         }
     }
@@ -1294,7 +1308,7 @@ impl RexApi for SystemRex {
         })
     }
 
-    fn session_view(&self, session_id: &str) -> Result<Vec<Vec<String>>, RexError> {
+    fn session_view(&self, session_id: &str) -> Result<Vec<RexWindow>, RexError> {
         let args = json!({"session_id": session_id}).to_string();
         recorded(MultiplexerOperation::Layout, || {
             parse_session_view(&self.run(&["api", "call", "session.view", &args])?)

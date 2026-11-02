@@ -103,7 +103,7 @@ impl RexApi for Api {
     fn sessions(&self) -> Result<Vec<super::super::RexSession>, RexError> {
         Err(RexError::Failed)
     }
-    fn session_view(&self, _: &str) -> Result<Vec<Vec<String>>, RexError> {
+    fn session_view(&self, _: &str) -> Result<Vec<super::super::RexWindow>, RexError> {
         Err(RexError::Failed)
     }
     fn process(&self, _: &str, _: &str) -> Result<super::super::RexProcess, RexError> {
@@ -146,6 +146,7 @@ fn slot(session: &str, block: &str) -> RexBlockSlot {
         window: 1,
         pane: 1,
         block_id: block.to_string(),
+        window_name: String::new(),
     }
 }
 

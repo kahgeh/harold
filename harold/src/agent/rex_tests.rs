@@ -48,6 +48,7 @@ fn slot(block: &str, window: u32, pane: u32) -> RexBlockSlot {
         window,
         pane,
         block_id: block.into(),
+        window_name: String::new(),
     }
 }
 
@@ -73,6 +74,50 @@ fn control_characters_in_strings_are_escaped_before_parsing() {
 }
 
 #[test]
+fn parse_session_view_keeps_each_window_label() {
+    let view = r#"{"windows":[
+      {"label":"pod","layers":[{"blocks":[
+        {"block_id":"block:a","creator_name":"com.superlogical.terminal"}]}]},
+      {"label":"linux-satellite-2b","layers":[{"blocks":[
+        {"block_id":"block:b","creator_name":"com.superlogical.terminal"}]}]}]}"#;
+    let windows = parse_session_view(view).unwrap();
+    let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["pod", "linux-satellite-2b"]);
+    assert_eq!(windows[1].blocks, vec!["block:b"]);
+}
+
+#[test]
+fn a_window_with_no_label_gives_an_empty_name() {
+    let view = r#"{"windows":[
+      {"layers":[]},
+      {"label":"","layers":[]}]}"#;
+    let windows = parse_session_view(view).unwrap();
+    assert_eq!(windows.len(), 2);
+    assert!(windows.iter().all(|w| w.label.is_empty()));
+}
+
+#[test]
+fn slots_carry_their_window_name() {
+    let session = RexSession {
+        id: "session:1".into(),
+        label: "harold-main".into(),
+    };
+    let windows = vec![
+        RexWindow {
+            label: "pod".into(),
+            blocks: vec!["block:a".into(), "block:b".into()],
+        },
+        RexWindow {
+            label: String::new(),
+            blocks: vec!["block:c".into()],
+        },
+    ];
+    let slots = slots_of(&session, &windows);
+    let names: Vec<&str> = slots.iter().map(|s| s.window_name.as_str()).collect();
+    assert_eq!(names, ["pod", "pod", ""]);
+}
+
+#[test]
 fn rex_ls_session_view_and_process_parse() {
     let sessions = parse_sessions(
         r#"{"sessions":[{"session_id":"session:a","label":"one"},{"session_id":"session:b","label":"two"}]}"#,
@@ -89,7 +134,8 @@ fn rex_ls_session_view_and_process_parse() {
       {"window_id":"w2","layers":[{"kind":"tiled","blocks":[
         {"block_id":"block:c","creator_name":"com.superlogical.terminal"}]}]}]}"#;
     let windows = parse_session_view(view).unwrap();
-    assert_eq!(windows, vec![vec!["block:a", "block:b"], vec!["block:c"]]);
+    let blocks: Vec<&[String]> = windows.iter().map(|w| w.blocks.as_slice()).collect();
+    assert_eq!(blocks, [&["block:a", "block:b"][..], &["block:c"][..]]);
     let session = RexSession {
         id: "session:1".into(),
         label: "harold-main".into(),
@@ -411,13 +457,19 @@ impl RexApi for FakeRex {
             None => Ok(self.sessions.clone()),
         }
     }
-    fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+    fn session_view(&self, session: &str) -> Result<Vec<RexWindow>, RexError> {
         let mut windows = self.views.get(session).unwrap_or(&self.windows).clone();
         let hidden = self.hidden.lock().unwrap();
         for window in &mut windows {
             window.retain(|block| !hidden.contains(block));
         }
-        Ok(windows)
+        Ok(windows
+            .into_iter()
+            .map(|blocks| RexWindow {
+                label: String::new(),
+                blocks,
+            })
+            .collect())
     }
     fn process(&self, _: &str, block: &str) -> Result<RexProcess, RexError> {
         self.processes
@@ -1584,6 +1636,7 @@ fn slot_in(session: &str, block: &str) -> RexBlockSlot {
         window: 1,
         pane: 1,
         block_id: block.to_string(),
+        window_name: String::new(),
     }
 }
 
@@ -2467,7 +2520,7 @@ fn find_session_refuses_a_host_pane_id_without_listing() {
             self.0.fetch_add(1, Ordering::SeqCst);
             self.1.sessions()
         }
-        fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+        fn session_view(&self, session: &str) -> Result<Vec<RexWindow>, RexError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             self.1.session_view(session)
         }
@@ -2725,7 +2778,7 @@ impl RexApi for SlowRex {
     fn sessions(&self) -> Result<Vec<RexSession>, RexError> {
         self.inner.sessions()
     }
-    fn session_view(&self, session: &str) -> Result<Vec<Vec<String>>, RexError> {
+    fn session_view(&self, session: &str) -> Result<Vec<RexWindow>, RexError> {
         if let Some(delay) = self.view_delay.get(session) {
             std::thread::sleep(*delay);
         }
