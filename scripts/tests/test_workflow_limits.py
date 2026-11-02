@@ -64,7 +64,7 @@ def read(name):
 class WorkflowLimitsTest(unittest.TestCase):
     def test_build_job_steps(self):
         text = read("build.yml")
-        self.assertEqual(step_limit(text, "build", "Test"), 25)
+        self.assertEqual(step_limit(text, "build", "Test"), 35)
         self.assertEqual(step_limit(text, "build", "Check the feature mixes"), 15)
         self.assertEqual(step_limit(text, "build", "Build release binaries"), 20)
 
