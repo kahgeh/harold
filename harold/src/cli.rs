@@ -6,8 +6,9 @@ use crate::away_message::{
     WRONG_MULTIPLEXER_PREFIX,
 };
 use crate::harold::{
-    AgentState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SpeakLineRequest,
-    WatchAgentStatesRequest, harold_client::HaroldClient,
+    AgentState, GetHaroldStateRequest, GetHaroldStateResponse, ReportAgentStateRequest,
+    SendMessageToAwayDeviceRequest, SpeakLineRequest, WatchAgentStatesRequest,
+    harold_client::HaroldClient,
 };
 use crate::settings::Settings;
 use harold_api::tools::backlog::v1 as backlog_api;
@@ -30,6 +31,7 @@ pub(crate) enum Mode {
     CheckReady,
     BuildFeatures,
     Accept(AcceptArgs),
+    Get(GetThing),
     SendMessageToAwayDevice(AwayMessageArgs),
     Speak(AwayMessageArgs),
     Tool(ToolCommand),
@@ -1363,6 +1365,7 @@ impl Mode {
             ["--check-ready"] => Ok(Self::CheckReady),
             ["--build-features"] => Ok(Self::BuildFeatures),
             ["accept", rest @ ..] => parse_accept(rest).map(Self::Accept),
+            [GET_COMMAND, rest @ ..] => parse_get(rest).map(Self::Get),
             [AWAY_MESSAGE_COMMAND, rest @ ..] => {
                 parse_away_message(rest).map(Self::SendMessageToAwayDevice)
             }
@@ -1447,6 +1450,181 @@ pub(crate) async fn call_within<T, E: From<String>>(
             deadline.as_secs()
         ))
     })?
+}
+
+pub(crate) const GET_COMMAND: &str = "get";
+/// The exit code of `harold get` for a name that is not a thing.
+pub(crate) const UNKNOWN_THING_EXIT: i32 = 2;
+
+/// One named item of the Harold state, which `harold get` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GetThing {
+    Voice,
+    Messaging,
+    Version,
+    Machine,
+    Multiplexer,
+    Hosts,
+    Chief,
+}
+
+impl GetThing {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "voice" => Self::Voice,
+            "messaging" => Self::Messaging,
+            "version" => Self::Version,
+            "machine" => Self::Machine,
+            "multiplexer" => Self::Multiplexer,
+            "hosts" => Self::Hosts,
+            "chief" => Self::Chief,
+            _ => return None,
+        })
+    }
+}
+
+/// A `harold get` failure: the line for standard error and the exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GetFailure {
+    pub(crate) line: String,
+    pub(crate) exit_code: i32,
+}
+
+impl GetFailure {
+    fn other(line: impl Into<String>) -> Self {
+        Self {
+            line: line.into(),
+            exit_code: 1,
+        }
+    }
+}
+
+impl From<String> for GetFailure {
+    fn from(line: String) -> Self {
+        Self::other(line)
+    }
+}
+
+fn parse_get(args: &[&str]) -> Result<GetThing, String> {
+    let unknown = |name: &str| {
+        format!(
+            "unknown thing \"{name}\": voice, messaging, version, machine, multiplexer, hosts, chief"
+        )
+    };
+    match args {
+        [name] => GetThing::from_name(name).ok_or_else(|| unknown(name)),
+        _ => Err(unknown(&args.join(" "))),
+    }
+}
+
+/// `on` unless the switch stops the thing. A missing flag counts as `on`.
+fn switch_state(stopped: Option<bool>) -> &'static str {
+    if stopped == Some(true) { "off" } else { "on" }
+}
+
+/// The JSON object that `harold get` prints for `thing`. Structs keep the field order.
+fn render_get(thing: GetThing, state: &GetHaroldStateResponse) -> String {
+    use serde::Serialize;
+    #[derive(Serialize)]
+    struct Voice<'a> {
+        state: &'static str,
+        engine: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Switch {
+        state: &'static str,
+    }
+    #[derive(Serialize)]
+    struct Version<'a> {
+        release_version: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Machine<'a> {
+        machine_name: &'a str,
+        host_icon: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Multiplexer<'a> {
+        multiplexer: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Host<'a> {
+        label: &'a str,
+        host_icon: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Hosts<'a> {
+        hosts: Vec<Host<'a>>,
+    }
+    #[derive(Serialize)]
+    struct Chief<'a> {
+        chief_session: &'a str,
+    }
+    let json = match thing {
+        GetThing::Voice => serde_json::to_string(&Voice {
+            state: switch_state(state.tts_muted),
+            engine: &state.tts_engine,
+        }),
+        GetThing::Messaging => serde_json::to_string(&Switch {
+            state: switch_state(state.messaging_paused),
+        }),
+        GetThing::Version => serde_json::to_string(&Version {
+            release_version: &state.release_version,
+        }),
+        GetThing::Machine => serde_json::to_string(&Machine {
+            machine_name: &state.machine_name,
+            host_icon: &state.machine_host_icon,
+        }),
+        GetThing::Multiplexer => serde_json::to_string(&Multiplexer {
+            multiplexer: &state.multiplexer,
+        }),
+        GetThing::Hosts => serde_json::to_string(&Hosts {
+            hosts: state
+                .rex_hosts
+                .iter()
+                .map(|host| Host {
+                    label: &host.label,
+                    host_icon: &host.host_icon,
+                })
+                .collect(),
+        }),
+        GetThing::Chief => serde_json::to_string(&Chief {
+            chief_session: &state.chief_session,
+        }),
+    };
+    json.expect("a struct of strings is valid JSON")
+}
+
+pub(crate) async fn get(settings: &Settings, thing: GetThing) -> Result<String, GetFailure> {
+    get_within(settings, thing, CALL_DEADLINE).await
+}
+
+/// Ask the daemon for its Harold state and render one thing from the answer.
+pub(crate) async fn get_within(
+    settings: &Settings,
+    thing: GetThing,
+    wait: Duration,
+) -> Result<String, GetFailure> {
+    let address = settings
+        .grpc
+        .addr()
+        .map_err(|_| GetFailure::other("invalid configuration"))?;
+    let response = call_within(CALL_DEADLINE, wait, async {
+        let mut client = HaroldClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| GetFailure::other("the Harold daemon is not reachable"))?;
+        client
+            .get_harold_state(GetHaroldStateRequest {})
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unimplemented => {
+                    GetFailure::other("this Harold is too old for harold get")
+                }
+                _ => GetFailure::other("the Harold daemon refused the call"),
+            })
+    })
+    .await?;
+    Ok(render_get(thing, &response.into_inner()))
 }
 
 pub(crate) async fn accept(
@@ -5973,6 +6151,253 @@ mod tests {
             .await;
 
             assert_eq!(said, Err("/usr/bin/false failed".to_string()));
+        }
+    }
+
+    mod get_command {
+        use super::*;
+        use crate::harold::harold_server::{Harold, HaroldServer};
+        use crate::harold::{RexHostIcon, *};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        const UNKNOWN: &str = "unknown thing \"bogus\": voice, messaging, version, machine, multiplexer, hosts, chief";
+
+        fn state() -> GetHaroldStateResponse {
+            GetHaroldStateResponse {
+                tts_muted: Some(true),
+                messaging_paused: Some(false),
+                release_version: "0.72.0".into(),
+                machine_name: "PasM4MBP".into(),
+                multiplexer: "rex".into(),
+                rex_hosts: vec![RexHostIcon {
+                    label: "omarchy".into(),
+                    host_icon: "arch".into(),
+                }],
+                machine_host_icon: "mac".into(),
+                tts_engine: "server".into(),
+                chief_session: "chief".into(),
+            }
+        }
+
+        #[test]
+        fn get_voice_is_off_when_the_voice_mute_is_on() {
+            let mut state = state();
+            assert_eq!(
+                render_get(GetThing::Voice, &state),
+                r#"{"state":"off","engine":"server"}"#
+            );
+            state.tts_muted = Some(false);
+            assert_eq!(
+                render_get(GetThing::Voice, &state),
+                r#"{"state":"on","engine":"server"}"#
+            );
+            state.tts_muted = None;
+            assert_eq!(
+                render_get(GetThing::Voice, &state),
+                r#"{"state":"on","engine":"server"}"#
+            );
+        }
+
+        #[test]
+        fn get_messaging_is_off_when_the_messaging_pause_is_on() {
+            let mut state = state();
+            assert_eq!(render_get(GetThing::Messaging, &state), r#"{"state":"on"}"#);
+            state.messaging_paused = Some(true);
+            assert_eq!(
+                render_get(GetThing::Messaging, &state),
+                r#"{"state":"off"}"#
+            );
+            state.messaging_paused = None;
+            assert_eq!(render_get(GetThing::Messaging, &state), r#"{"state":"on"}"#);
+        }
+
+        #[test]
+        fn get_prints_each_other_thing() {
+            let mut state = state();
+            for (thing, json) in [
+                (GetThing::Version, r#"{"release_version":"0.72.0"}"#),
+                (
+                    GetThing::Machine,
+                    r#"{"machine_name":"PasM4MBP","host_icon":"mac"}"#,
+                ),
+                (GetThing::Multiplexer, r#"{"multiplexer":"rex"}"#),
+                (
+                    GetThing::Hosts,
+                    r#"{"hosts":[{"label":"omarchy","host_icon":"arch"}]}"#,
+                ),
+                (GetThing::Chief, r#"{"chief_session":"chief"}"#),
+            ] {
+                assert_eq!(render_get(thing, &state), json);
+            }
+            state.rex_hosts.clear();
+            assert_eq!(render_get(GetThing::Hosts, &state), r#"{"hosts":[]}"#);
+        }
+
+        #[test]
+        fn get_parses_a_thing_and_refuses_the_rest() {
+            assert_eq!(parse(&["get", "voice"]), Ok(Mode::Get(GetThing::Voice)));
+            assert_eq!(parse(&["get", "chief"]), Ok(Mode::Get(GetThing::Chief)));
+            assert_eq!(
+                parse(&["get"]),
+                Err("unknown thing \"\": voice, messaging, version, machine, multiplexer, hosts, chief".into())
+            );
+            assert_eq!(parse(&["get", "bogus"]), Err(UNKNOWN.into()));
+            assert_eq!(
+                parse(&["get", "voice", "x"]),
+                Err("unknown thing \"voice x\": voice, messaging, version, machine, multiplexer, hosts, chief".into())
+            );
+        }
+
+        /// A daemon stand-in that answers `GetHaroldState` with `answer`.
+        struct Fake {
+            answer: Result<GetHaroldStateResponse, tonic::Status>,
+        }
+
+        #[tonic::async_trait]
+        impl Harold for Fake {
+            type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, tonic::Status>>;
+
+            async fn get_harold_state(
+                &self,
+                _: tonic::Request<GetHaroldStateRequest>,
+            ) -> Result<tonic::Response<GetHaroldStateResponse>, tonic::Status> {
+                self.answer.clone().map(tonic::Response::new)
+            }
+            async fn turn_complete(
+                &self,
+                _: tonic::Request<TurnCompleteRequest>,
+            ) -> Result<tonic::Response<TurnCompleteResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn report_agent_state(
+                &self,
+                _: tonic::Request<ReportAgentStateRequest>,
+            ) -> Result<tonic::Response<ReportAgentStateResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn watch_agent_states(
+                &self,
+                _: tonic::Request<WatchAgentStatesRequest>,
+            ) -> Result<tonic::Response<Self::WatchAgentStatesStream>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn set_tts_muted(
+                &self,
+                _: tonic::Request<SetTtsMutedRequest>,
+            ) -> Result<tonic::Response<SetTtsMutedResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn set_messaging_paused(
+                &self,
+                _: tonic::Request<SetMessagingPausedRequest>,
+            ) -> Result<tonic::Response<SetMessagingPausedResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn send_message_to_away_device(
+                &self,
+                _: tonic::Request<SendMessageToAwayDeviceRequest>,
+            ) -> Result<tonic::Response<SendMessageToAwayDeviceResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn speak_line(
+                &self,
+                _: tonic::Request<SpeakLineRequest>,
+            ) -> Result<tonic::Response<SpeakLineResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+            async fn call(
+                &self,
+                _: tonic::Request<CallRequest>,
+            ) -> Result<tonic::Response<CallResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(""))
+            }
+        }
+
+        async fn serve(answer: Result<GetHaroldStateResponse, tonic::Status>) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let (incoming, connections) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    if incoming
+                        .send(Ok::<_, std::io::Error>(socket))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(HaroldServer::new(Fake { answer }))
+                    .serve_with_incoming(ReceiverStream::new(connections)),
+            );
+            address
+        }
+
+        fn failure(line: &str) -> GetFailure {
+            GetFailure {
+                line: line.into(),
+                exit_code: 1,
+            }
+        }
+
+        #[tokio::test]
+        async fn get_prints_the_thing_a_daemon_answers() {
+            let address = serve(Ok(state())).await;
+            let result = tokio::time::timeout(
+                GUARD,
+                get_within(&settings_for(&address), GetThing::Voice, CALL_DEADLINE),
+            )
+            .await
+            .expect("get waited past its deadline");
+            assert_eq!(result, Ok(r#"{"state":"off","engine":"server"}"#.into()));
+        }
+
+        #[tokio::test]
+        async fn get_gives_up_on_a_daemon_that_never_answers() {
+            let (hung, stand_in) = never_answers().await;
+            let wait = Duration::from_millis(100);
+            let result = tokio::time::timeout(
+                GUARD,
+                get_within(&settings_for(&hung), GetThing::Voice, wait),
+            )
+            .await
+            .expect("get waited past its deadline");
+            stand_in.abort();
+            assert_eq!(result, Err(failure(NOT_ANSWERING)));
+        }
+
+        #[tokio::test]
+        async fn get_names_a_daemon_that_is_down() {
+            let result = tokio::time::timeout(
+                GUARD,
+                get_within(
+                    &settings_for(CLOSED),
+                    GetThing::Voice,
+                    Duration::from_secs(3600),
+                ),
+            )
+            .await
+            .expect("get waited past its deadline");
+            assert_eq!(result, Err(failure(NOT_REACHABLE)));
+        }
+
+        #[tokio::test]
+        async fn get_names_a_daemon_that_is_too_old() {
+            let address = serve(Err(tonic::Status::unimplemented(""))).await;
+            let result = tokio::time::timeout(
+                GUARD,
+                get_within(&settings_for(&address), GetThing::Voice, CALL_DEADLINE),
+            )
+            .await
+            .expect("get waited past its deadline");
+            assert_eq!(
+                result,
+                Err(failure("this Harold is too old for harold get"))
+            );
         }
     }
 }

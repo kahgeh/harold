@@ -1031,6 +1031,8 @@ fn print_help() {
     println!("  harold                  Start the Harold daemon");
     println!("  harold --check-config   Validate config and print address/store JSON; no writes");
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
+    println!("  harold get THING        Print one thing of the Harold state as JSON: voice,");
+    println!("                          messaging, version, machine, multiplexer, hosts, chief");
     println!("  harold accept EVENT --pane ID --adapter NAME");
     println!(
         "                          Report a pane working (turn-started, still-working) or done"
@@ -1150,6 +1152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = cli::with_caller_pane(args);
     let mode = match cli::Mode::parse(&args) {
         Ok(mode) => mode,
+        Err(line) if args.first().map(String::as_str) == Some(cli::GET_COMMAND) => {
+            eprintln!("{line}");
+            std::process::exit(cli::UNKNOWN_THING_EXIT)
+        }
         Err(line)
             if matches!(
                 args.first().map(String::as_str),
@@ -1268,6 +1274,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::CheckConfig
             | cli::Mode::CheckReady
             | cli::Mode::Accept(_)
+            | cli::Mode::Get(_)
             | cli::Mode::SendMessageToAwayDevice(_)
             | cli::Mode::Speak(_)
             | cli::Mode::Tool(_)
@@ -1313,6 +1320,16 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::CheckConfig => return cli::check_config(&settings),
         cli::Mode::CheckReady => return cli::check_ready(&settings).await,
         cli::Mode::Accept(ref args) => return cli::accept(&settings, args).await,
+        cli::Mode::Get(thing) => match cli::get(&settings, thing).await {
+            Ok(json) => {
+                println!("{json}");
+                return Ok(());
+            }
+            Err(failure) => {
+                eprintln!("{}", failure.line);
+                std::process::exit(failure.exit_code)
+            }
+        },
         cli::Mode::SendMessageToAwayDevice(ref args) => {
             if let Err(line) = cli::send_message_to_away_device(&settings, args).await {
                 exit_with_line(&line);
