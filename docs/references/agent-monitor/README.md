@@ -522,8 +522,6 @@ One unreadable block does not degrade the inventory. Two cases degrade it. In th
 
 When the inventory is degraded, `harold speak` cannot find the pane of its caller. The daemon answers `unavailable`. The command prints `the agent lookup is not available now; try again`. The same line covers a failed event append and a stopped monitor runtime. A failed write of the line keeps `the Harold daemon could not store the spoken line`.
 
-The dashboard card "Agent panes unreadable, by pane, last 24 hours" counts `agent pane unreadable` lines for each `pane_id`. A pane with more than one line in a day needs a look. It is a card, not an alert.
-
 ## Lifecycle limits
 
 - `WatchAgentStates` is snapshot-then-stream, not replay from a checkpoint. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
