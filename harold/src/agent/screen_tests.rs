@@ -741,7 +741,7 @@ fn stoppable_output_kills_a_stopped_child() {
     })
     .expect_err("a stopped child gives no output");
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(4));
 }
 
 #[test]

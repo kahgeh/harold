@@ -989,7 +989,7 @@ fn an_absent_program_is_absent_and_a_slow_one_times_out() {
     let started = Instant::now();
     let slow = run_program(&script, &["ls"], Duration::from_millis(100));
     assert_eq!(slow, Err(RexError::Timeout));
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(4));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

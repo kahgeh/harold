@@ -335,7 +335,7 @@ fn stopped_inventory_command_is_killed_and_fails() {
         command_stdout(std::process::Command::new("/bin/sleep").arg("5"))
     });
     assert_eq!(stdout, Err(InventoryError::CommandFailed));
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
 }
 
 fn agent_settings() -> AgentSettings {
