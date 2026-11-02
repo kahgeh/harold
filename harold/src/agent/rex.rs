@@ -108,7 +108,8 @@ impl RexProc {
 /// nearest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RexProcess {
-    pub(crate) child: RexProc,
+    /// `None` when the block's program has exited: Rex then answers with `last_exit` only.
+    pub(crate) child: Option<RexProc>,
     pub(crate) foreground: Option<RexProc>,
     pub(crate) ancestors: Vec<RexProc>,
 }
@@ -268,7 +269,11 @@ fn parse_proc(value: &Value) -> Result<RexProc, RexError> {
 
 pub(crate) fn parse_process(text: &str) -> Result<RexProcess, RexError> {
     let value = parse_json(text)?;
-    let child = parse_proc(value.get("child").ok_or(RexError::Malformed)?)?;
+    let child = match value.get("child") {
+        Some(Value::Object(_)) => Some(parse_proc(&value["child"])?),
+        Some(Value::Null) | None if value.get("last_exit").is_some() => None,
+        _ => return Err(RexError::Malformed),
+    };
     let foreground = match value.get("foreground") {
         Some(Value::Null) | None => None,
         Some(foreground) => Some(parse_proc(foreground)?),
@@ -314,12 +319,13 @@ pub(crate) fn find_agent<'a>(
     process: &'a RexProcess,
     settings: &AgentSettings,
 ) -> Option<(&'a RexProc, String)> {
+    let child = process.child.as_ref()?;
     for candidate in process.foreground.iter().chain(process.ancestors.iter()) {
         let program = candidate.program();
         if settings.matches_command(&program) {
             return Some((candidate, program));
         }
-        if candidate.pid == process.child.pid {
+        if candidate.pid == child.pid {
             break;
         }
     }
@@ -336,6 +342,9 @@ pub(crate) fn observe_block(
     mut start_time: impl FnMut(u32) -> Option<i64>,
 ) -> Result<Option<(AgentPaneObservation, String)>, InventoryError> {
     let Some((agent, program)) = find_agent(process, settings) else {
+        return Ok(None);
+    };
+    let Some(child) = process.child.as_ref() else {
         return Ok(None);
     };
     let Some(agent_started_at_ms) = start_time(agent.pid) else {
@@ -358,7 +367,7 @@ pub(crate) fn observe_block(
     let observation = AgentPaneObservation {
         incarnation: AgentIncarnation {
             pane_id: slot.block_id.clone(),
-            pane_pid: process.child.pid,
+            pane_pid: child.pid,
             agent_pid: agent.pid,
             agent_started_at_ms,
             provider_id,
@@ -900,7 +909,8 @@ impl AgentInventoryPort for RexAgentInventory {
         let Some((agent, _)) = find_agent(&process, &self.settings) else {
             return Ok(false);
         };
-        if agent.pid != incarnation.agent_pid || process.child.pid != incarnation.pane_pid {
+        let child_pid = process.child.as_ref().map(|child| child.pid);
+        if agent.pid != incarnation.agent_pid || child_pid != Some(incarnation.pane_pid) {
             return Ok(false);
         }
         Ok(self.api.start_time_ms(agent.pid) == Some(incarnation.agent_started_at_ms))

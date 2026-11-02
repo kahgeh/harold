@@ -121,10 +121,76 @@ fn rex_ls_session_view_and_process_parse() {
 
 fn process(child: u32, foreground: Option<RexProc>, ancestors: Vec<RexProc>) -> RexProcess {
     RexProcess {
-        child: proc(child, "login", None),
+        child: Some(proc(child, "login", None)),
         foreground,
         ancestors,
     }
+}
+
+const EXITED_ANSWER: &str =
+    r#"{"home":"/Users/x","last_exit":{"exit_code":1,"error":"exit status 1"}}"#;
+
+fn exited_process() -> RexProcess {
+    RexProcess {
+        child: None,
+        foreground: None,
+        ancestors: Vec::new(),
+    }
+}
+
+#[test]
+fn parse_process_of_an_exited_block_has_no_child() {
+    let process = parse_process(EXITED_ANSWER).unwrap();
+    assert_eq!(process.child, None);
+    assert_eq!(process.foreground, None);
+    assert!(process.ancestors.is_empty());
+}
+
+#[test]
+fn parse_process_of_an_exited_block_with_a_null_child_has_no_child() {
+    let process =
+        parse_process(r#"{"child":null,"last_exit":{"exit_code":1,"error":"exit status 1"}}"#)
+            .unwrap();
+    assert_eq!(process, exited_process());
+}
+
+#[test]
+fn parse_process_with_neither_child_nor_last_exit_is_malformed() {
+    assert_eq!(parse_process(r#"{"home":"/x"}"#), Err(RexError::Malformed));
+}
+
+#[test]
+fn parse_process_with_child_and_last_exit_keeps_the_child() {
+    let process = parse_process(
+        r#"{"child":{"pid":7,"name":"login"},"last_exit":{"exit_code":1,"error":"x"}}"#,
+    )
+    .unwrap();
+    assert_eq!(process.child.unwrap().pid, 7);
+}
+
+#[test]
+fn find_agent_finds_nothing_in_an_exited_block() {
+    assert!(find_agent(&exited_process(), &settings()).is_none());
+}
+
+#[test]
+fn is_current_is_false_for_an_exited_block() {
+    let _directory = directory_test_lock();
+    let live = process(
+        1,
+        Some(proc(5, "claude", None)),
+        vec![proc(1, "login", None)],
+    );
+    let api = Arc::new(fake(&[("block:a", Ok(live))]));
+    let inventory = RexAgentInventory::new(api.clone(), settings(), inert_status());
+    let incarnation = inventory.scan().unwrap()[0].incarnation.clone();
+    assert!(inventory.is_current(&incarnation).unwrap());
+
+    api.processes
+        .lock()
+        .unwrap()
+        .insert("block:a".into(), Ok(exited_process()));
+    assert_eq!(inventory.is_current(&incarnation), Ok(false));
 }
 
 #[test]
