@@ -212,10 +212,11 @@ jobs:
         run: |
           set -euo pipefail
           package="harold-x86_64-unknown-linux-gnu"
+          image="archlinux:base@sha256:DIGEST_PENDING_APPROVAL"
           mkdir -p smoke
           tar -xzf "dist/$package.tar.gz" -C smoke
-          docker run --rm -v "$PWD/smoke/$package:/package:ro" archlinux:base@sha256:DIGEST_PENDING_APPROVAL /package/harold --help
-          docker run --rm -v "$PWD/smoke/$package:/package:ro" archlinux:base@sha256:DIGEST_PENDING_APPROVAL /package/harold --build-features
+          docker run --rm -v "$PWD/smoke/$package:/package:ro" "$image" /package/harold --help
+          docker run --rm -v "$PWD/smoke/$package:/package:ro" "$image" /package/harold --build-features
 
       - name: Upload release assets
         if: github.event_name == 'release'

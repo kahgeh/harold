@@ -707,7 +707,7 @@ def write_unit(path, metadata):
              'ExecStart=' + unit_quoted(str(bundle / 'harold')).replace('$', '$$'),
              'WorkingDirectory=' + unit_path(str(bundle))]
     lines += [unit_environment(name, value) for name, value in environment.items()]
-    lines += ['Restart=on-failure', 'RestartSec=30', 'TimeoutStopSec=10',
+    lines += ['Restart=on-failure', 'RestartSec=30', 'TimeoutStopSec=8',
               'StandardOutput=append:' + log, 'StandardError=append:' + log, '',
               '[Install]', 'WantedBy=default.target', '']
     path.parent.mkdir(parents=True, exist_ok=True)

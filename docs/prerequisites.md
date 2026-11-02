@@ -34,7 +34,7 @@ No Rust toolchain or source checkout is needed. Follow [install or reinstall Har
 
 The Linux install needs Arch Linux or omarchy on x86_64, Python 3.9 or newer, and a running Rex server. Agents run in Rex. Run the installer as your normal user, in a login session.
 
-The installer checks for `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. `lsof` and `systemctl` are prerequisites. Install the others with your own `sudo pacman` and AUR steps:
+The installer checks for `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. `systemctl` comes with Arch. Install the others with your own `sudo pacman` and AUR steps:
 
 ```sh
 sudo pacman -S --needed python curl lsof inetutils base-devel pipewire

@@ -267,7 +267,9 @@ def _show(*properties):
 
 def unit_state():
     values = _show('ActiveState', 'NRestarts')
-    return {'ActiveState': values.get('ActiveState', ''), 'NRestarts': values.get('NRestarts', '')}
+    restarts = values.get('NRestarts', '')
+    return {'ActiveState': values.get('ActiveState', ''),
+            'NRestarts': int(restarts) if restarts.isdigit() else None}
 
 
 def main_pid():
@@ -285,7 +287,11 @@ def _linux_disabled(metadata):
 
 def _linux_unload(metadata):
     """Stops the unit and waits for its process to end. It stays enabled for the next login."""
-    _systemctl_checked('Cannot unload service', 'stop', UNIT)
+    result = systemctl('stop', UNIT)
+    # Exit code 5 means the unit file is missing, so there is nothing to stop.
+    if result.returncode not in (0, 5):
+        raise RuntimeError('Cannot unload service: systemctl --user stop {}: {}'.format(
+            UNIT, result.stderr.strip()))
 
 
 def _linux_stop(metadata):
@@ -321,6 +327,8 @@ def _linux_launch(metadata, timeout=30):
 
 def _linux_start(metadata, timeout=30):
     _systemctl_checked('Cannot enable service', 'enable', UNIT)
+    # The start limit also counts manual starts, so clear it. The exit code does not matter.
+    systemctl('reset-failed', UNIT)
     crash_file(metadata).unlink(missing_ok=True)
     return _linux_launch(metadata, timeout)
 

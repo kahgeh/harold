@@ -1788,7 +1788,7 @@ class LinuxInstallTests(unittest.TestCase):
         self.run_install()
         lines = self.unit.read_text().splitlines()
         bundle = str(self.bundle)
-        for line in ('Restart=on-failure', 'RestartSec=30', 'StartLimitIntervalSec=600', 'StartLimitBurst=5',
+        for line in ('Restart=on-failure', 'RestartSec=30', 'TimeoutStopSec=8', 'StartLimitIntervalSec=600', 'StartLimitBurst=5',
                      'Environment=HAROLD_LAUNCHD=1', 'WantedBy=default.target',
                      # The bundle path has a space: ExecStart quotes it; the path settings take it whole.
                      'ExecStart="{}/harold"'.format(bundle),

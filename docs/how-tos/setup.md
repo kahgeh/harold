@@ -6,7 +6,7 @@ The installer starts Harold to verify installation, and launchd starts it again 
 
 ## Install on Linux
 
-This path is for Arch Linux and omarchy on x86_64. It installs the Linux package. Harold runs there as a systemd user service, as a Harold on its own.
+This path is for Arch Linux and omarchy on x86_64. It installs the Linux package. Harold runs there as a systemd user service, as a stand-alone Harold.
 
 Do these steps as your normal user, in a login session. The steps that use `sudo pacman` and the AUR are yours to run. The installer does not run them.
 
@@ -15,7 +15,7 @@ Do these steps as your normal user, in a login session. The steps that use `sudo
    sudo pacman -S --needed python curl lsof inetutils base-devel pipewire
    ```
    Rex and Tailscale are already on omarchy.
-2. Install `grpcurl` from the AUR package `grpcurl-bin`. First check the package and approve it (see [dependency audits](../references/dependency-audits.md)). Then run `makepkg -si` in the package folder. The installer uses `grpcurl` to check that Harold answers.
+2. Install `grpcurl` from the AUR package `grpcurl-bin`. First check the package and approve it (see [dependency audits](../references/dependency-audits.md)). Then run `makepkg -si` in the package folder. The hooks use `grpcurl` to report to Harold.
 3. Run the one-line install:
    ```sh
    curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
@@ -28,7 +28,7 @@ The installer needs `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. It stops, 
 
 On Linux, `haroldctl status` prints the Mac fields and two more. `active_state` is the unit's `ActiveState`. `n_restarts` is the number of times systemd started Harold again.
 
-Read the log with `journalctl --user -u harold`. Harold also writes `harold.log` in the installation.
+`journalctl --user -u harold` shows the start and stop lines of systemd. The lines of Harold are in `harold.log`.
 
 systemd stops your user services when you log out, unless lingering is on. The installer only warns you about this. To keep Harold running after logout, run `loginctl enable-linger`. The decision is yours.
 

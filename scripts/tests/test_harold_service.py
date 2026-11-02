@@ -121,7 +121,9 @@ class FakeSystemctl:
     def systemctl(self, args, rest):
         command = rest[0]
         if command in self.fail:
-            return subprocess.CompletedProcess(args, 1, '', self.fail[command])
+            failure = self.fail[command]
+            code, message = failure if isinstance(failure, tuple) else (1, failure)
+            return subprocess.CompletedProcess(args, code, '', message)
         ok = subprocess.CompletedProcess(args, 0, '', '')
         if command == 'show' and rest[2:] == ['-p', 'ActiveState', '-p', 'NRestarts']:
             return subprocess.CompletedProcess(args, 0, 'ActiveState={}\nNRestarts={}\n'.format(
@@ -133,6 +135,8 @@ class FakeSystemctl:
                 args, 0 if self.enabled else 1, 'enabled\n' if self.enabled else 'disabled\n', '')
         if command == 'enable':
             self.enabled = True
+        elif command == 'reset-failed':
+            pass
         elif command == 'start':
             self.active = True
         elif command == 'stop':
@@ -324,6 +328,23 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertLess(systemctl.calls.index(enable), systemctl.calls.index(start))
         self.assertFalse((self.bundle / 'data/crashes').exists())
 
+    def test_start_resets_the_failed_state_before_it_starts(self):
+        systemctl = self.fake(fail={'reset-failed': 'Unit harold.service not loaded.'})
+        self.assertEqual(service.start(self.metadata), PID)
+        reset, start = ['reset-failed', service.UNIT], ['start', service.UNIT]
+        self.assertIn(reset, systemctl.calls)
+        self.assertLess(systemctl.calls.index(reset), systemctl.calls.index(start))
+
+    def test_unload_ignores_a_missing_unit(self):
+        systemctl = self.fake(fail={'stop': (5, 'Unit harold.service not loaded.')})
+        service.unload(self.metadata)
+        self.assertEqual(systemctl.calls, [['stop', service.UNIT]])
+
+    def test_unload_still_fails_on_other_errors(self):
+        self.fake(fail={'stop': (1, 'Failed to connect to bus')})
+        with self.assertRaises(RuntimeError):
+            service.unload(self.metadata)
+
     def test_stop_disables_and_stops(self):
         systemctl = self.fake(active=True)
         service.stop(self.metadata)
@@ -350,11 +371,11 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(printed), {
             'ready': True, 'pid': PID, 'grpc_addr': '127.0.0.1:50060', 'autostart': 'on',
-            'active_state': 'active', 'n_restarts': '2'})
+            'active_state': 'active', 'n_restarts': 2})
 
     def test_unit_state_and_main_pid(self):
         self.fake(active=True)
-        self.assertEqual(service.unit_state(), {'ActiveState': 'active', 'NRestarts': '2'})
+        self.assertEqual(service.unit_state(), {'ActiveState': 'active', 'NRestarts': 2})
         self.assertEqual(service.main_pid(), PID)
         self.fake(active=False)
         self.assertIsNone(service.main_pid())
