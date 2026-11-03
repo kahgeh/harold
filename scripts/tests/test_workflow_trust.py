@@ -8,7 +8,9 @@ import re
 import unittest
 
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
-CACHE_PIN = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+PIN_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+RESTORE_PIN = "actions/cache/restore@" + PIN_SHA + " # v6.1.0"
+SAVE_PIN = "actions/cache/save@" + PIN_SHA + " # v6.1.0"
 PUSH_ONLY = ("macos-checks.yml", "linux-tests.yml")
 CACHE_PATHS = ("~/.cargo/registry", "~/.cargo/git", "target")
 
@@ -24,23 +26,32 @@ def trigger_block(text):
 
 
 def cache_steps(text):
-    """Return (job, key) for each use of actions/cache."""
+    """Return (job, kind, key, has_always, line) for each use of actions/cache/restore or save."""
     found = []
     job = None
     lines = text.splitlines()
+    step_start = 0
     for index, line in enumerate(lines):
         match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
         if match:
             job = match.group(1)
-        if "actions/cache" in line:
-            key = None
-            for follow in lines[index + 1:index + 12]:
-                if follow.startswith("      - "):
-                    break
-                m = re.match(r"^\s+key: (.*)$", follow)
-                if m:
-                    key = m.group(1)
-            found.append((job, key))
+        if line.startswith("      - "):
+            step_start = index
+        kind = re.search(r"uses: actions/cache/(restore|save)@", line)
+        if not kind:
+            continue
+        step_end = index + 1
+        while step_end < len(lines) and not lines[step_end].startswith("      - ") and not re.match(r"^  [A-Za-z0-9_-]+:\s*$", lines[step_end]):
+            step_end += 1
+        key = None
+        has_always = False
+        for follow in lines[step_start:step_end]:
+            m = re.match(r"^\s+key: (.*)$", follow)
+            if m:
+                key = m.group(1)
+            if re.match(r"^\s+if: always\(\)\s*$", follow):
+                has_always = True
+        found.append((job, kind.group(1), key, has_always, index))
     return found
 
 
@@ -63,23 +74,50 @@ class WorkflowTrustTest(unittest.TestCase):
     def test_push_workflows_have_no_if_and_no_paths(self):
         for name in PUSH_ONLY:
             text = read(name)
-            self.assertIsNone(re.search(r"^\s*if:", text, re.M), name)
+            ifs = re.findall(r"^\s*if:.*$", text, re.M)
+            self.assertEqual([i.strip() for i in ifs], ["if: always()"] * len(ifs), name)
             self.assertIsNone(re.search(r"^\s*paths(-ignore)?:", text, re.M), name)
 
     def test_push_workflows_pin_the_cache(self):
         for name in PUSH_ONLY:
             text = read(name)
-            self.assertIn(CACHE_PIN + " # v6.1.0", text, name)
-            self.assertEqual(len(re.findall(r"actions/cache@", text)), len(cache_steps(text)), name)
+            self.assertIn(RESTORE_PIN, text, name)
+            self.assertIn(SAVE_PIN, text, name)
+            self.assertNotIn("actions/cache@", text, name)
             self.assertNotIn("save-always", text, name)
+            uses = re.findall(r"uses: (actions/cache/[a-z]+@\S+ # \S+)", text)
+            self.assertEqual(sorted(set(uses)), sorted([RESTORE_PIN, SAVE_PIN]), name)
             for path in CACHE_PATHS:
                 self.assertIn(path, text, name)
+
+    def test_each_job_restores_then_saves_with_always(self):
+        for name in PUSH_ONLY:
+            text = read(name)
+            steps = cache_steps(text)
+            jobs = sorted({job for job, *_ in steps})
+            self.assertTrue(jobs, name)
+            for job in jobs:
+                mine = [s for s in steps if s[0] == job]
+                self.assertEqual([s[1] for s in mine], ["restore", "save"], f"{name} {job}")
+                self.assertTrue(mine[1][3], f"{name} {job}: the save needs if: always()")
+                self.assertFalse(mine[0][3], f"{name} {job}: the restore must not use if: always()")
+                self.assertEqual(mine[0][2], mine[1][2], f"{name} {job}: the keys differ")
+
+    def test_save_comes_after_the_work_steps(self):
+        for name in PUSH_ONLY:
+            text = read(name)
+            for job, kind, _key, _always, line in cache_steps(text):
+                if kind != "save":
+                    continue
+                job_text = "\n".join(text.splitlines()[line:])
+                job_text = re.split(r"(?m)^  [A-Za-z0-9_-]+:\s*$", job_text)[0]
+                self.assertNotIn("run:", job_text, f"{name} {job}: a work step follows the save")
 
     def test_cache_key_holds_the_job_name(self):
         for name in PUSH_ONLY:
             steps = cache_steps(read(name))
             self.assertTrue(steps, name)
-            for job, key in steps:
+            for job, _kind, key, _always, _line in steps:
                 self.assertIsNotNone(key, name)
                 self.assertTrue(
                     "${{ github.job }}" in key or f"-{job}-" in key, f"{name} {job} {key}"

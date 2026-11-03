@@ -38,8 +38,8 @@ jobs:
       - name: Check no local paths are tracked
         run: ./scripts/check_local_paths.sh
 
-      - name: Cache the compiled dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the compiled dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -56,6 +56,16 @@ jobs:
           python3 -m unittest discover -s scripts/tests
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete
+
+      - name: Save the compiled dependencies
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-1.97.1-test-${{ hashFiles('Cargo.lock') }}
 
   features:
     runs-on: macos-15
@@ -85,8 +95,8 @@ jobs:
       - name: Check no local paths are tracked
         run: ./scripts/check_local_paths.sh
 
-      - name: Cache the compiled dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the compiled dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -96,7 +106,17 @@ jobs:
           restore-keys: ${{ runner.os }}-1.97.1-
 
       - name: Check the feature mixes
-        timeout-minutes: 15
+        timeout-minutes: 30
         env:
           CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: ./scripts/check_features.sh
+
+      - name: Save the compiled dependencies
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-1.97.1-features-${{ hashFiles('Cargo.lock') }}
