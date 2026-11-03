@@ -473,6 +473,13 @@ class AttemptTests(ReleaseTestCase):
         self.assertEqual(code, 1)
         self.assert_recorded('failed', 'checks', ['checks'])
 
+    def test_a_failure_in_install_records_failed_and_the_steps_before_it(self):
+        self.installer_code = 1
+        code, _, _ = self.release()
+        self.assertEqual(code, 1)
+        # The failed step keeps its own seconds, as in the github_build test.
+        self.assert_recorded('failed', 'install', list(release.STEP_NAMES))
+
     def test_an_interrupt_in_github_build_records_stopped(self):
         def interrupt(seconds):
             raise KeyboardInterrupt
