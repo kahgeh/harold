@@ -75,7 +75,7 @@ class WorkflowTrustTest(unittest.TestCase):
         for name in PUSH_ONLY:
             text = read(name)
             ifs = re.findall(r"^\s*if:.*$", text, re.M)
-            self.assertEqual([i.strip() for i in ifs], ["if: always()"] * len(ifs), name)
+            self.assertEqual(ifs, ["        if: always()"] * len(ifs), name)
             self.assertIsNone(re.search(r"^\s*paths(-ignore)?:", text, re.M), name)
 
     def test_push_workflows_pin_the_cache(self):
