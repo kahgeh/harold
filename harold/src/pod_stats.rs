@@ -436,6 +436,118 @@ pub(crate) fn tips_file(store_path: &Path) -> PathBuf {
         .join("tips")
 }
 
+/// The name of the notices file in Harold's data folder.
+const NOTICES_FILE: &str = "pod-notices.json";
+
+/// The pod notices: the keys of the pod-file faults Harold has warned about, each with
+/// the time of its warning, kept in `pod-notices.json` in Harold's data folder so a
+/// restart does not warn again. The file is a JSON object of key to RFC 3339 time.
+pub(crate) struct PodNotices {
+    file: PathBuf,
+    warned: BTreeMap<String, String>,
+    /// Whether `warned` differs from the file.
+    dirty: bool,
+    /// Whether a failed save has been logged since the last save that worked.
+    save_failed: bool,
+}
+
+impl PodNotices {
+    /// The notices in `file`. A missing file gives none. A file that cannot be read or
+    /// is not a JSON object of strings gives none, logs one `pod notices unreadable` line
+    /// and is replaced at the next save.
+    pub(crate) fn load(file: PathBuf) -> Self {
+        let (warned, dirty) = match read_notices(&file) {
+            Ok(warned) => (warned, false),
+            Err(reason) => {
+                warn!(reason, "pod notices unreadable");
+                (BTreeMap::new(), true)
+            }
+        };
+        Self {
+            file,
+            warned,
+            dirty,
+            save_failed: false,
+        }
+    }
+
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.warned.contains_key(key)
+    }
+
+    /// Records `key` as warned about at `at`.
+    pub(crate) fn insert(&mut self, key: String, at: OffsetDateTime) {
+        self.warned.insert(key, rfc3339(at));
+        self.dirty = true;
+    }
+
+    /// Removes the keys of `product` that are not in `keep`. The keys of other products
+    /// stay.
+    pub(crate) fn retain_product(&mut self, product: &str, keep: &HashSet<String>) {
+        let prefix = format!("{product}\0");
+        let before = self.warned.len();
+        self.warned
+            .retain(|key, _| !key.starts_with(&prefix) || keep.contains(key));
+        if self.warned.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    /// Writes the notices to the file when they differ from it: a temporary file with
+    /// mode 0600, then a rename. A failure logs one `warn` line until a save works, and
+    /// the next call tries again.
+    pub(crate) fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        match write_notices(&self.file, &self.warned) {
+            Ok(()) => {
+                self.dirty = false;
+                self.save_failed = false;
+            }
+            Err(error) => {
+                if !self.save_failed {
+                    self.save_failed = true;
+                    warn!(reason = "save", error = %error, "pod notices unreadable");
+                }
+            }
+        }
+    }
+}
+
+/// The notices in `file`, or the reason it cannot be used. A missing file holds none.
+fn read_notices(file: &Path) -> Result<BTreeMap<String, String>, &'static str> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err("permission");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Err("parse"),
+        Err(_) => return Err("io"),
+    };
+    serde_json::from_str(&text).map_err(|_| "parse")
+}
+
+fn write_notices(file: &Path, warned: &BTreeMap<String, String>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bytes = serde_json::to_vec_pretty(warned)?;
+    let temp = file.with_extension("json.tmp");
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)?;
+    // A temporary file left by an earlier run keeps its mode, so the mode is set again.
+    out.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    out.write_all(&bytes)?;
+    out.sync_all()?;
+    std::fs::rename(&temp, file)
+}
+
 /// The tip of each product's base branch at its last counted poll, kept in the tip file
 /// as one `<product> <hash>` line each so a start can count the merges made while Harold
 /// was stopped.
@@ -1734,8 +1846,9 @@ pub(crate) struct PodStats<G: Git> {
     agents: AgentSource,
     /// The chief's folder, from `[notify] chief`.
     chief: Option<String>,
-    /// The warnings about a spec's merges that were logged, so each is logged once.
-    warned: HashSet<String>,
+    /// The warnings about a spec's merges that were logged, so each is logged once, also
+    /// across restarts.
+    warned: PodNotices,
     /// The pod files that did not parse and were logged: (product, file) -> what the file
     /// held then.
     unreadable: HashMap<(String, String), String>,
@@ -1760,6 +1873,12 @@ impl<G: Git> PodStats<G> {
         agents: AgentSource,
         chief: Option<String>,
     ) -> Self {
+        // The tip file is `<data folder>/pod/tips`.
+        let data_folder = tips_file
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."));
+        let warned = PodNotices::load(data_folder.join(NOTICES_FILE));
         Self {
             registry,
             git,
@@ -1776,7 +1895,7 @@ impl<G: Git> PodStats<G> {
             counted_from_zero: HashSet::new(),
             agents,
             chief,
-            warned: HashSet::new(),
+            warned,
             unreadable: HashMap::new(),
         }
     }
@@ -2054,8 +2173,13 @@ impl<G: Git> PodStats<G> {
     }
 
     /// Logs what the specs of `product` show about merges and unreadable files, once each.
+    /// A merge warning is kept in the pod notices until the specs of `product` no longer
+    /// show it, so it is logged again only if it comes back. This runs only for a product
+    /// whose specs were read, so an unavailable product keeps its keys.
     fn log_notices(&mut self, product: &str, notices: &[Notice]) {
         let mut unreadable_now: HashSet<&str> = HashSet::new();
+        let mut warned_now: HashSet<String> = HashSet::new();
+        let now = OffsetDateTime::now_utc();
         for notice in notices {
             match notice {
                 Notice::Unreadable { id, file, content } => {
@@ -2077,7 +2201,10 @@ impl<G: Git> PodStats<G> {
                     merged_at,
                     commit,
                 } => {
-                    if self.warned.insert(format!("{product}\0completed\0{id}")) {
+                    let key = format!("{product}\0completed\0{id}");
+                    warned_now.insert(key.clone());
+                    if !self.warned.contains(&key) {
+                        self.warned.insert(key, now);
                         warn!(
                             pod.product = %product,
                             spec.id = %id,
@@ -2088,10 +2215,10 @@ impl<G: Git> PodStats<G> {
                     }
                 }
                 Notice::StageMergedWithoutFile { id, stage } => {
-                    if self
-                        .warned
-                        .insert(format!("{product}\0stage\0{id}\0{stage}"))
-                    {
+                    let key = format!("{product}\0stage\0{id}\0{stage}");
+                    warned_now.insert(key.clone());
+                    if !self.warned.contains(&key) {
+                        self.warned.insert(key, now);
                         warn!(
                             pod.product = %product,
                             spec.id = %id,
@@ -2105,6 +2232,10 @@ impl<G: Git> PodStats<G> {
         // A file that parses again, or went, is logged again if it fails again.
         self.unreadable
             .retain(|(known, file), _| known != product || unreadable_now.contains(file.as_str()));
+        // A spec that got its merged file, or went, is warned about again if the gap
+        // comes back.
+        self.warned.retain_product(product, &warned_now);
+        self.warned.save();
     }
 
     /// Notes the busy worktrees and, when `check` is set, waits on each spec worktree that

@@ -3954,3 +3954,283 @@ fn an_approval_at_the_cutoff_counts() {
     assert_eq!(idle, 2);
     assert_eq!(lists["approved_not_started"].items, 1);
 }
+
+
+// --- pod notices: the warnings kept across restarts ---
+
+/// The notices file the `stats` of `pod`'s registry use: `<data folder>/pod-notices.json`.
+fn notices_path(pod: &Pod) -> PathBuf {
+    pod.root.join("data/pod-notices.json")
+}
+
+/// A product whose spec `s` started 20 days ago and merged without a stage 8 days ago,
+/// with no merged file: each poll reads it as completed without its merged file.
+async fn completed_without_file(pod: &Pod) -> (PathBuf, PathBuf) {
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    put_started(
+        &pod_files(&repo),
+        "s",
+        &rfc(OffsetDateTime::now_utc() - time::Duration::days(20)),
+    );
+    merge_branch_days_ago(&repo, "s", "x\n", 8);
+    let registry = one_product(pod, &repo);
+    (registry, repo)
+}
+
+fn completed_line(pod: &Pod) -> String {
+    format!(
+        "spec completed without merged file pod.product={} spec.id=s",
+        pod.name
+    )
+}
+
+/// The keys in the notices file, which must be a JSON object.
+fn notice_keys(pod: &Pod) -> Vec<String> {
+    let text = std::fs::read_to_string(notices_path(pod)).expect("the notices file");
+    let saved: BTreeMap<String, String> =
+        serde_json::from_str(&text).expect("the notices file is a JSON object");
+    saved.into_keys().collect()
+}
+
+fn completed_key(pod: &Pod) -> String {
+    format!("{}\0completed\0s", pod.name)
+}
+
+#[tokio::test]
+async fn a_restart_does_not_warn_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pod = Pod::new();
+    let (registry, _repo) = completed_without_file(&pod).await;
+    let logs = CapturedLogs::start();
+
+    let (mut first, _) = stats(registry.clone());
+    first.poll().await;
+    first.poll().await;
+    assert_eq!(logs.text().matches(&completed_line(&pod)).count(), 1);
+    drop(first);
+    let restarted = CapturedLogs::start();
+    let (mut second, _) = stats(registry);
+    second.poll().await;
+    second.poll().await;
+
+    let text = restarted.text();
+    assert_eq!(text.matches(&completed_line(&pod)).count(), 0, "{text}");
+    assert!(!text.contains("pod notices unreadable"), "{text}");
+    let mode = std::fs::metadata(notices_path(&pod))
+        .expect("the notices file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(notice_keys(&pod), vec![completed_key(&pod)]);
+}
+
+#[tokio::test]
+async fn a_merged_file_clears_the_key_and_a_later_gap_warns_again() {
+    let pod = Pod::new();
+    let (registry, repo) = completed_without_file(&pod).await;
+    let logs = CapturedLogs::start();
+    let (mut stats, _) = stats(registry);
+    stats.poll().await;
+
+    put_merged(
+        &pod_files(&repo),
+        "s",
+        &rfc(OffsetDateTime::now_utc()),
+        COMMIT,
+    );
+    stats.poll().await;
+    assert_eq!(notice_keys(&pod), Vec::<String>::new());
+    std::fs::remove_file(pod_files(&repo).join("merged/s.md")).unwrap();
+    stats.poll().await;
+
+    let text = logs.text();
+    assert_eq!(text.matches(&completed_line(&pod)).count(), 2, "{text}");
+    assert_eq!(notice_keys(&pod), vec![completed_key(&pod)]);
+}
+
+/// Builds `PodStats` over a notices file made by `spoil`, polls twice and checks one
+/// `pod notices unreadable` line with `reason`, the spec warning once more and a valid
+/// file afterwards.
+async fn check_unreadable_notices(spoil: impl FnOnce(&Path) -> bool, reason: &str) {
+    let pod = Pod::new();
+    let (registry, _repo) = completed_without_file(&pod).await;
+    let file = notices_path(&pod);
+    write(&file, "");
+    if !spoil(&file) {
+        // The file stays readable, as for root: there is nothing to check.
+        return;
+    }
+    let logs = CapturedLogs::start();
+
+    let (mut stats, _) = stats(registry);
+    stats.poll().await;
+    stats.poll().await;
+
+    let text = logs.text();
+    let line = format!("pod notices unreadable reason=\"{reason}\"");
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert_eq!(text.matches("pod notices unreadable").count(), 1, "{text}");
+    assert_eq!(text.matches(&completed_line(&pod)).count(), 1, "{text}");
+    assert_eq!(notice_keys(&pod), vec![completed_key(&pod)]);
+}
+
+#[tokio::test]
+async fn unreadable_notices_file_is_replaced_and_warns_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for text in ["not json", "", "[]", "[\"a\"]", "{\"k\": 1}"] {
+        check_unreadable_notices(
+            |file| {
+                std::fs::write(file, text).unwrap();
+                true
+            },
+            "parse",
+        )
+        .await;
+    }
+    check_unreadable_notices(
+        |file| {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::fs::read(file).is_err()
+        },
+        "permission",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_unavailable_product_keeps_its_keys() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pod = Pod::new();
+    let (registry, repo) = completed_without_file(&pod).await;
+    let specs = pod_files(&repo).join("specs");
+    let logs = CapturedLogs::start();
+    let (mut running, _) = stats(registry.clone());
+    running.poll().await;
+
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    running.poll().await;
+    drop(running);
+    // A restart while the product is still unavailable.
+    let (mut restarted, _) = stats(registry);
+    restarted.poll().await;
+    assert_eq!(notice_keys(&pod), vec![completed_key(&pod)]);
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    restarted.poll().await;
+
+    let text = logs.text();
+    assert_eq!(text.matches(&completed_line(&pod)).count(), 1, "{text}");
+    assert_eq!(notice_keys(&pod), vec![completed_key(&pod)]);
+}
+
+#[tokio::test]
+async fn the_stage_warning_survives_a_restart() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    put_started(
+        &pod_files(&repo),
+        "s",
+        &rfc(OffsetDateTime::now_utc() - time::Duration::days(20)),
+    );
+    merge_branch_days_ago(&repo, "s-1b", "x\n", 8);
+    let registry = one_product(&pod, &repo);
+    let logs = CapturedLogs::start();
+
+    let (mut first, _) = stats(registry.clone());
+    first.poll().await;
+    drop(first);
+    let (mut second, _) = stats(registry);
+    second.poll().await;
+
+    let text = logs.text();
+    let line = format!(
+        "spec stage merged without merged file pod.product={} spec.id=s spec.stage=1b",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert_eq!(
+        notice_keys(&pod),
+        vec![format!("{}\0stage\0s\01b", pod.name)]
+    );
+}
+
+#[tokio::test]
+async fn a_read_only_data_folder_still_warns_once_in_memory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pod = Pod::new();
+    let (registry, _repo) = completed_without_file(&pod).await;
+    let data = pod.root.join("data");
+    std::fs::create_dir_all(data.join("pod")).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let logs = CapturedLogs::start();
+
+    let (mut stats, _) = stats(registry);
+    stats.poll().await;
+    stats.poll().await;
+    stats.poll().await;
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let text = logs.text();
+    assert_eq!(text.matches(&completed_line(&pod)).count(), 1, "{text}");
+    // Root can write the folder, and then the save does not fail.
+    if !notices_path(&pod).exists() {
+        assert_eq!(
+            text.matches("pod notices unreadable reason=\"save\"")
+                .count(),
+            1,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_data_folder_fails_the_save_once_and_keeps_the_keys() {
+    let pod = Pod::new();
+    let file = pod.root.join("missing/pod-notices.json");
+    let logs = CapturedLogs::start();
+
+    let mut notices = PodNotices::load(file.clone());
+    notices.insert("p\0completed\0s".into(), OffsetDateTime::now_utc());
+    notices.save();
+    notices.insert("p\0completed\0t".into(), OffsetDateTime::now_utc());
+    notices.save();
+
+    assert!(notices.contains("p\0completed\0s"));
+    assert!(notices.contains("p\0completed\0t"));
+    assert!(!file.exists());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("pod notices unreadable reason=\"save\"")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(text.matches("pod notices unreadable").count(), 1, "{text}");
+}
+
+#[test]
+fn retain_product_removes_only_that_products_keys_that_were_not_seen() {
+    let pod = Pod::new();
+    let mut notices = PodNotices::load(pod.root.join("pod-notices.json"));
+    let now = OffsetDateTime::now_utc();
+    for key in [
+        "p\0completed\0a",
+        "p\0completed\0b",
+        "pq\0completed\0a",
+        "q\0completed\0a",
+    ] {
+        notices.insert(key.into(), now);
+    }
+
+    notices.retain_product("p", &HashSet::from(["p\0completed\0a".to_owned()]));
+
+    assert!(notices.contains("p\0completed\0a"));
+    assert!(!notices.contains("p\0completed\0b"));
+    assert!(notices.contains("pq\0completed\0a"));
+    assert!(notices.contains("q\0completed\0a"));
+}
