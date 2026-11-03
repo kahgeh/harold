@@ -30,6 +30,11 @@ impl<G: Git> ReleaseToolService<G> {
         Self { registry, git }
     }
 
+    /// The path of `products.toml`, which tells one service from another.
+    pub(super) fn registry(&self) -> Option<&std::path::Path> {
+        self.registry.as_deref()
+    }
+
     /// The lists of the named product, or of every product when `name` is empty.
     pub(super) async fn products(
         &self,

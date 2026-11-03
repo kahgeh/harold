@@ -4,6 +4,7 @@
 //! It only reads: it runs `ReleaseToolService::products`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -32,11 +33,18 @@ const LIST: &str = "merged_not_released";
 
 /// The stats of the list of each product that has a read. A paused product and a product
 /// with no git answer have no entry.
-static STORE: Mutex<BTreeMap<String, ListStats>> = Mutex::new(BTreeMap::new());
+static STORE: Mutex<BTreeMap<String, Entry>> = Mutex::new(BTreeMap::new());
+
+/// The stats of one product and the registry that listed it. A publish drops only the
+/// products of its own registry, so two services never drop each other's series.
+struct Entry {
+    registry: Option<PathBuf>,
+    stats: ListStats,
+}
 
 static REGISTERED: OnceLock<(ObservableGauge<u64>, [ObservableGauge<f64>; 2])> = OnceLock::new();
 
-fn store() -> MutexGuard<'static, BTreeMap<String, ListStats>> {
+fn store() -> MutexGuard<'static, BTreeMap<String, Entry>> {
     STORE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -57,7 +65,7 @@ pub(super) fn register() {
             .u64_observable_gauge(INVENTORY_ITEMS.0)
             .with_unit(INVENTORY_ITEMS.1)
             .with_callback(|observer| {
-                for (product, stats) in store().iter() {
+                for (product, Entry { stats, .. }) in store().iter() {
                     observer.observe(stats.items, &attributes(product));
                 }
             })
@@ -67,7 +75,7 @@ pub(super) fn register() {
                 .f64_observable_gauge(name)
                 .with_unit(unit)
                 .with_callback(move |observer| {
-                    for (product, stats) in store().iter() {
+                    for (product, Entry { stats, .. }) in store().iter() {
                         observer.observe(pick(stats), &attributes(product));
                     }
                 })
@@ -95,14 +103,26 @@ pub(super) async fn publish<G: Git>(
     let Ok(products) = service.products("", now, offset).await else {
         return;
     };
+    let registry = service.registry().map(PathBuf::from);
     let mut store = store();
+    // A product that left the registry ends its series.
+    store.retain(|name, entry| {
+        entry.registry != registry || products.iter().any(|product| &product.name == name)
+    });
     for product in products {
         if product.paused || product.unavailable.is_some() {
             store.remove(&product.name);
             continue;
         }
         let ages: Vec<_> = product.merged_at.iter().map(|at| now - *at).collect();
-        store.insert(product.name, list_stats(&ages));
+        let stats = list_stats(&ages);
+        store.insert(
+            product.name,
+            Entry {
+                registry: registry.clone(),
+                stats,
+            },
+        );
     }
 }
 

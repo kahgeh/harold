@@ -23,14 +23,14 @@ fn write(path: PathBuf, text: &str) {
     std::fs::write(path, text).expect("write the file");
 }
 
-/// A fresh product name, so a test reads only its own series from the shared store.
 /// Lets the spawned task run to its next wait.
-async fn settle() {
+async fn let_task_run() {
     for _ in 0..5 {
         tokio::task::yield_now().await;
     }
 }
 
+/// A fresh product name, so a test reads only its own series from the shared store.
 fn unique_name() -> String {
     format!("release-test-{}", uuid::Uuid::new_v4())
 }
@@ -119,14 +119,6 @@ async fn the_series_uses_the_names_and_units_pod_stats_exports() {
     let (service, _fixture) = two_merged(&folder, &name);
     publish(&service, now(), UtcOffset::UTC).await;
 
-    let attrs = [
-        ("pod.product", name.as_str()),
-        ("list", "merged_not_released"),
-    ];
-    assert_eq!(
-        test_support::gauge_value(INVENTORY_ITEMS.0, &attrs),
-        Some(2)
-    );
     for (constant, expected_name) in [
         (INVENTORY_ITEMS, "pod.inventory.items"),
         (INVENTORY_OLDEST_HOURS, "pod.inventory.oldest_hours"),
@@ -192,13 +184,13 @@ async fn the_task_publishes_every_ten_minutes() {
     super::PUBLISHES.with(|count| count.set(0));
 
     let task = tokio::spawn(run(service, PERIOD, receiver));
-    settle().await;
+    let_task_run().await;
     let at_start = super::PUBLISHES.with(|count| count.get());
     tokio::time::advance(PERIOD).await;
-    settle().await;
+    let_task_run().await;
     let after_one_period = super::PUBLISHES.with(|count| count.get());
     tokio::time::advance(PERIOD).await;
-    settle().await;
+    let_task_run().await;
     let after_two_periods = super::PUBLISHES.with(|count| count.get());
 
     assert_eq!((at_start, after_one_period, after_two_periods), (1, 2, 3));
@@ -213,7 +205,7 @@ async fn the_task_ends_at_shutdown() {
     let (service, _fixture) = two_merged(&folder, &unique_name());
     let (shutdown, receiver) = watch::channel(());
     let task = tokio::spawn(run(service, PERIOD, receiver));
-    settle().await;
+    let_task_run().await;
 
     shutdown.send(()).expect("a receiver is listening");
 
@@ -221,4 +213,46 @@ async fn the_task_ends_at_shutdown() {
         .await
         .expect("the task ends within a second")
         .expect("the task does not panic");
+}
+
+fn items_of(name: &str) -> Option<u64> {
+    test_support::gauge_value(
+        INVENTORY_ITEMS.0,
+        &[("pod.product", name), ("list", "merged_not_released")],
+    )
+}
+
+#[tokio::test]
+async fn a_product_that_left_the_registry_ends_its_series() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, fixture) = two_merged(&folder, &name);
+    publish(&service, now(), UtcOffset::UTC).await;
+    assert_eq!(items_of(&name), Some(2));
+
+    // The same registry file now lists another product.
+    let other = unique_name();
+    registry(&folder, &fixture, &other, false);
+    publish(&service, now(), UtcOffset::UTC).await;
+
+    assert_eq!(items_of(&name), None);
+    assert_eq!(items_of(&other), Some(2));
+}
+
+#[tokio::test]
+async fn a_failed_read_keeps_the_last_numbers() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = two_merged(&folder, &name);
+    publish(&service, now(), UtcOffset::UTC).await;
+    assert_eq!(items_of(&name), Some(2));
+
+    std::fs::write(folder.0.join("products.toml"), "not [ valid toml").expect("break the registry");
+    publish(&service, now(), UtcOffset::UTC).await;
+
+    assert_eq!(items_of(&name), Some(2));
 }
