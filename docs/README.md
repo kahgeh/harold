@@ -6,6 +6,7 @@
 - [Setup Agent Monitor Hooks](how-tos/setup-agent-monitor-hooks.md)
 - [Release](how-tos/release.md)
 - [Run the timing tests](how-tos/run-the-timing-tests.md)
+- [Keep test logs](how-tos/keep-test-logs.md)
 
 ## Prerequisites
 
@@ -38,3 +39,4 @@
 - [25. Harold keeps transcript text in memory and shows it only in the control-tower](adr/0025-harold-keeps-transcript-text-in-memory-and-shows-it-only-in-the-control-tower.md)
 - [26. A release publishes only a commit whose Linux tests passed](adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)
 - [27. Harold reads agents on other Rex hosts, read-only, through Rex](adr/0027-harold-reads-agents-on-other-rex-hosts-read-only-through-rex.md)
+- [29. A test run keeps one log in one format](adr/0029-a-test-run-keeps-one-log-in-one-format.md)
