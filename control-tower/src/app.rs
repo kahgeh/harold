@@ -3698,6 +3698,44 @@ mod tests {
     }
 
     #[test]
+    fn switching_from_newer_to_older_harold_starts_the_local_rule_clean() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        // An older Harold: the local rule marks %1 and %2, and the probe reads %3.
+        app.observe_focus(FocusReading::Active("%3".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        assert!(app.focus_tracking());
+
+        // A newer Harold serves its own marks. The local list and the reading go.
+        app.apply_later_snapshot(served(
+            fleet([Idle, Idle, Working], 3),
+            &[("%2", 100)],
+            true,
+        ))
+        .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2"]);
+        assert_eq!(app.active_pane, None);
+
+        // An older Harold again: no stale local mark returns, the probe starts clean and
+        // the focus tracking stays off until a reading arrives.
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 4))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+        assert_eq!(app.active_pane, None);
+        assert!(!app.focus_tracking());
+
+        // An agent that rests now is marked by the local rule, and a reading arrives.
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 5))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert!(app.focus_tracking());
+    }
+
+    #[test]
     fn a_newer_harold_snapshot_never_uses_the_local_rule() {
         for focus_known in [false, true] {
             let mut app = empty_app();
