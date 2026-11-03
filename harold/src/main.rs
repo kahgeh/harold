@@ -1659,6 +1659,15 @@ fn print_help() {
     println!("  harold tool backlog export PRODUCT");
     println!("                          Print a product's backlog as markdown; 30s timeout");
     println!("  harold tool backlog queue export    Print the queue as markdown; 30s timeout");
+    println!(
+        "  harold tool telemetry declare NAME counter|gauge|event \"MEANING\" [--attr KEY=V1,V2]"
+    );
+    println!("                          Declare an agent signal; NAME is PREFIX.REST");
+    println!("  harold tool telemetry count NAME [N] [--attr KEY=VALUE]   Add N (default 1)");
+    println!("  harold tool telemetry gauge NAME VALUE [--attr KEY=VALUE]   Set a gauge");
+    println!("  harold tool telemetry event NAME [--attr KEY=VALUE]   Write one event line");
+    println!("  harold tool telemetry list [PREFIX]   List the declared signals");
+    println!("  harold tool telemetry remove NAME   Remove a declaration; its data stays");
     println!("  harold tool work list [--all]       List the open work records, focus first");
     println!("                          --all adds the closed ones; names long waits for the user");
     println!("  harold tool work show NAME          Print a work record, its decisions and links");
