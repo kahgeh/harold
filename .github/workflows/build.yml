@@ -212,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           package="harold-x86_64-unknown-linux-gnu"
-          image="archlinux:base@sha256:DIGEST_PENDING_APPROVAL"
+          image="archlinux:base@sha256:ece6c971fec3c532fd508bce299a446deaf469feecbfe7c353e995bc1a5e7bba"
           mkdir -p smoke
           tar -xzf "dist/$package.tar.gz" -C smoke
           docker run --rm -v "$PWD/smoke/$package:/package:ro" "$image" /package/harold --help
