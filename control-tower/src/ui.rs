@@ -7870,3 +7870,170 @@ mod tests {
         assert_eq!(col("Detail of thing 10."), 19);
     }
 }
+
+#[cfg(test)]
+mod agent_view_golden {
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::render;
+    use crate::app::{
+        AgentIncarnation, AgentRow, AgentState, App, ConnectionState, MonitorHealth,
+        MonitorHealthState, SearchState, Snapshot,
+    };
+
+    fn agent(pane_id: &str, session: &str, state: AgentState, summary: &str) -> AgentRow {
+        AgentRow {
+            host: String::new(),
+            host_icon: String::new(),
+            window_name: String::new(),
+            role: String::new(),
+            pod_product: String::new(),
+            incarnation: AgentIncarnation {
+                pane_id: pane_id.into(),
+                pane_pid: 10,
+                agent_pid: 20,
+                agent_started_at_ms: 1_776_999_000_020,
+                provider_id: "agent".into(),
+            },
+            provider_display_name: "Agent".into(),
+            tmux_target: format!("{session}:0.1"),
+            session_name: session.into(),
+            window_index: 0,
+            pane_index: 1,
+            working_directory: format!("/p/{session}"),
+            work_summary: Some(summary.into()),
+            current_step: None,
+            recap: None,
+            recap_at_ms: 0,
+            state,
+            last_transition_at_ms: 40_000,
+        }
+    }
+
+    fn question_queue() -> crate::questions::Queue {
+        use crate::questions::{DecisionView, OptionView, QuestionView, Queue};
+        let option = |key: &str, label: &str, suggested: bool| OptionView {
+            key: key.into(),
+            label: label.into(),
+            impact: "the impact".into(),
+            suggested,
+            free: false,
+        };
+        Queue {
+            questions: vec![QuestionView {
+                id: "Q7".into(),
+                product: "harold".into(),
+                spec: "work-view".into(),
+                sha: "d265e20ba372".into(),
+                link: "https://example.com/spec".into(),
+                intro: "The list needs a second view.".into(),
+                version: 1,
+                title: String::new(),
+                steps: vec![],
+                ticked: vec![],
+                picks: vec![],
+                decisions: vec![DecisionView {
+                    ask: "Which key?".into(),
+                    options: vec![option("v", "capital V", true), option("w", "w", false)],
+                }],
+            }],
+            waiting: 1,
+            dismissed: Vec::new(),
+        }
+    }
+
+    /// The agent view at 118 columns, with two groups and a question row, as it was on
+    /// `main` before the work view.
+    fn golden_app() -> App {
+        let rows = vec![
+            agent(
+                "%1",
+                "chief",
+                AgentState::Working,
+                "We ship the release with the row names fix and the long summary is cut at the end",
+            ),
+            agent("%2", "harold", AgentState::Idle, "I coordinate the pod"),
+            agent("%3", "harold", AgentState::Blocked, "Waits for a review"),
+        ];
+        let selected = rows[1].incarnation.clone();
+        let mut app = App::new(
+            ConnectionState::Live,
+            Snapshot {
+                harold_version: None,
+                tts_muted: false,
+                messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
+                through_event_version: 42,
+                // No server time, so the clock shows `--:--:--` in every time zone.
+                server_time_ms: 0,
+                monitor_health: vec![MonitorHealth {
+                    component: "inventory".into(),
+                    state: MonitorHealthState::Healthy,
+                    reason_code: "ok".into(),
+                    observed_at_ms: 99_000,
+                }],
+                rows,
+            },
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            Some(selected),
+        );
+        app.observe_questions(question_queue());
+        app.handle_key(KeyCode::Char('j'));
+        app
+    }
+
+    const GOLDEN: &str = "\
+        ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n\
+        │ HAROLD / CONTROL-TOWER  source  ·  TRANSPORT LIVE  ·  REV #00042  ·  ● VOICE ON                                    │\n\
+        └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n\
+        │ MONITOR HEALTHY                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n\
+        │ WORKING 01     BLOCKED 01     IDLE 01     SERVER TIME --:--:--                                                     │\n\
+        └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n\
+        │ FILTER  f   [ACTIVE]                                                                                  3 OF 3 LOCAL │\n\
+        │                                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        ┌ AGENT BLOCK OCCUPANCY ─────────────────────────────────────────────────────────────────────── (focus tracking off) ┐\n\
+        │STATE         WHERE                     WORK SUMMARY                                                         AGE    │\n\
+        │    ▸ 1 todo waiting · from the chief                                                                               │\n\
+        │                                                                                                                    │\n\
+        │              chief                                                                                                 │\n\
+        │  ● WORKING     chief                ag We ship the release with the row names fix and the long summary is c 1m     │\n\
+        │                                                                                                                    │\n\
+        │              harold                                                                                                │\n\
+        │  ● IDLE        harold :0.1          ag I coordinate the pod                                                 1m     │\n\
+        │▶ ◐ BLOCKED     harold :0.1          ag Waits for a review                                                   1m     │\n\
+        │                                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        │                                                                                                                    │\n\
+        └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘";
+
+    #[test]
+    fn agent_view_is_unchanged() {
+        let backend = TestBackend::new(118, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &golden_app(), 100_000))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        // The footer (the last three rows) lists the command table, which now has the
+        // view command, so it is not part of the golden.
+        let text = rows[..rows.len() - 3].join("\n");
+        assert_eq!(text, GOLDEN);
+    }
+}
