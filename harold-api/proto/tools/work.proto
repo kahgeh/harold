@@ -27,7 +27,8 @@
 //            not agree with its specs or its questions. None when all agree.
 //   Rotate   with `dry_run` true: what a rotation would copy now. It changes
 //            nothing.
-//   History  a work record from the newest work file that holds it.
+//   History  a work record from the newest work file that holds it, with its
+//            status moves, oldest first.
 //   Search   the work records that hold a word, newest file first.
 //
 // Values:
@@ -260,6 +261,15 @@ message HistoryResponse {
   // The work file that holds the work record.
   string file = 1;
   WorkRecord record = 2;
+  // The status moves of the work record, oldest first.
+  repeated Move moves = 3;
+}
+
+// One change of status. A new work record has one move with an empty `from`.
+message Move {
+  string from = 1;
+  string to = 2;
+  int64 at_ms = 3;
 }
 
 message SearchRequest {

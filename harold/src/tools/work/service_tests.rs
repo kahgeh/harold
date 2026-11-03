@@ -293,6 +293,7 @@ async fn a_read_from_any_pane_works() {
         .unwrap()
         .into_inner();
     assert_eq!(history.file, "work-2026-11-03.db");
+    assert_eq!(history.moves.len(), 1);
     let found = service
         .search(Request::new(pb::SearchRequest {
             word: "title".into(),
@@ -630,6 +631,35 @@ async fn an_unreadable_registry_gives_no_missing_spec_line() {
         .into_inner();
 
     assert!(checked.mismatches.is_empty(), "{:?}", checked.mismatches);
+}
+
+#[tokio::test]
+async fn history_returns_moves_oldest_first() {
+    let setup = Setup::new();
+    let service = setup.service();
+    put(&service, CHIEF, record("a")).await.unwrap();
+    set_status(&service, "a", "spec drafted").await;
+    set_status(&service, "a", "approved").await;
+    let history = service
+        .history(Request::new(pb::HistoryRequest { name: "a".into() }))
+        .await
+        .unwrap()
+        .into_inner();
+    let steps: Vec<(&str, &str)> = history
+        .moves
+        .iter()
+        .map(|m| (m.from.as_str(), m.to.as_str()))
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("", "idea"),
+            ("idea", "spec drafted"),
+            ("spec drafted", "approved")
+        ]
+    );
+    assert!(history.moves.iter().all(|m| m.at_ms > 0));
+    assert!(history.moves.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
 }
 
 #[tokio::test]

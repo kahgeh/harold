@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::schema::Record;
-use super::store::{StoreError, WorkFile};
+use super::store::{Move, StoreError, WorkFile};
 
 const PREFIX: &str = "work-";
 const SUFFIX: &str = ".db";
@@ -42,12 +42,17 @@ impl WorkFiles {
     }
 
     /// The record of `name` from the first file that holds it, with that
-    /// file's name. The files are read newest first.
-    pub(super) async fn history(&self, name: &str) -> Result<Option<(String, Record)>, StoreError> {
+    /// file's name and its moves, oldest first. The files are read newest
+    /// first.
+    pub(super) async fn history(
+        &self,
+        name: &str,
+    ) -> Result<Option<(String, Record, Vec<Move>)>, StoreError> {
         for path in self.list_newest_first() {
             let file = WorkFile::open_read_only(&path).await?;
             if let Some(record) = file.get(name).await? {
-                return Ok(Some((file_name_of(&path), record)));
+                let moves = file.moves(name).await?;
+                return Ok(Some((file_name_of(&path), record, moves)));
             }
         }
         Ok(None)

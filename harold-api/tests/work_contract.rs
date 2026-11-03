@@ -172,7 +172,7 @@ fn record_decision_and_mismatch_fields_keep_their_numbers() {
 
 #[test]
 fn request_and_response_fields_keep_their_numbers() {
-    let expected: [(&str, &[(&str, i32)]); 8] = [
+    let expected: [(&str, &[(&str, i32)]); 9] = [
         ("PutRequest", &[("record", 1), ("caller_pane", 2)]),
         (
             "DecideRequest",
@@ -197,7 +197,11 @@ fn request_and_response_fields_keep_their_numbers() {
             &[("name", 1), ("link", 2), ("caller_pane", 3)],
         ),
         ("ListResponse", &[("records", 1), ("file", 2)]),
-        ("HistoryResponse", &[("file", 1), ("record", 2)]),
+        (
+            "HistoryResponse",
+            &[("file", 1), ("record", 2), ("moves", 3)],
+        ),
+        ("Move", &[("from", 1), ("to", 2), ("at_ms", 3)]),
         ("Found", &[("file", 1), ("record", 2)]),
     ];
     for (message, numbers) in expected {

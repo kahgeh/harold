@@ -729,7 +729,7 @@ impl WorkService for WorkToolService {
         request: Request<pb::HistoryRequest>,
     ) -> Result<Response<pb::HistoryResponse>, Status> {
         let name = request.into_inner().name;
-        let (file, record) = self
+        let (file, record, moves) = self
             .files
             .history(&name)
             .await
@@ -738,6 +738,14 @@ impl WorkService for WorkToolService {
         Ok(Response::new(pb::HistoryResponse {
             file,
             record: Some(record_to_proto(record)),
+            moves: moves
+                .into_iter()
+                .map(|m| pb::Move {
+                    from: m.from_status,
+                    to: m.to_status,
+                    at_ms: m.at_ms,
+                })
+                .collect(),
         }))
     }
 

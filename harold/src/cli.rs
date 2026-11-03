@@ -3677,10 +3677,15 @@ async fn work_call(
                 .await
                 .map_err(refused)?
                 .into_inner();
+            let moves = match history.moves.is_empty() {
+                true => "moves: none".to_string(),
+                false => format!("moves:\n{}", work_moves_text(&history.moves)),
+            };
             format!(
-                "in {}\n{}",
+                "in {}\n{}\n{}",
                 history.file,
-                work_record_text(&history.record.unwrap_or_default())
+                work_record_text(&history.record.unwrap_or_default()),
+                moves
             )
         }
         C::Search { word } => {
@@ -3707,6 +3712,27 @@ async fn work_call(
         }
     };
     Ok(WorkOutput::text(text))
+}
+
+/// The status moves of a work record, one line each, oldest first, in UTC.
+/// An empty `from` prints as `created`.
+fn work_moves_text(moves: &[work_api::Move]) -> String {
+    moves
+        .iter()
+        .map(|m| {
+            let from = match m.from.is_empty() {
+                true => "created",
+                false => m.from.as_str(),
+            };
+            format!(
+                "{}  {} → {}",
+                minute_text(m.at_ms, time::UtcOffset::UTC),
+                from,
+                m.to
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---- End of the work tool ----
@@ -8515,6 +8541,26 @@ mod tests {
             assert!(!work_list_text(&calm, now_ms).contains("more than a day"));
             let empty = work_api::ListResponse::default();
             assert_eq!(work_list_text(&empty, now_ms), "no open work records");
+        }
+
+        #[test]
+        fn moves_text_shows_each_move_oldest_first() {
+            let mv = |from: &str, to: &str, at_ms: i64| work_api::Move {
+                from: from.into(),
+                to: to.into(),
+                at_ms,
+            };
+            let moves = vec![
+                mv("", "idea", 1_793_697_000_000),
+                mv("imported", "spec drafted", 1_793_697_060_000),
+                mv("spec drafted", "architect checked", 1_793_697_120_000),
+            ];
+            assert_eq!(
+                work_moves_text(&moves),
+                "2026-11-03 09:10  created → idea\n\
+                 2026-11-03 09:11  imported → spec drafted\n\
+                 2026-11-03 09:12  spec drafted → architect checked"
+            );
         }
 
         /// The work tool over a temp folder; `%2` is the chief.

@@ -90,7 +90,7 @@ async fn history_finds_closed_record_in_old_file() {
     make_file(&folder, "2026-10-01", vec![closed, record("open-1")]).await;
     make_file(&folder, "2026-11-03", vec![record("open-1")]).await;
     let files = WorkFiles::new(folder.0.clone());
-    let (file, rec) = files.history("done-1").await.unwrap().unwrap();
+    let (file, rec, _) = files.history("done-1").await.unwrap().unwrap();
     assert_eq!(file, "work-2026-10-01.db");
     assert_eq!(rec.status, Status::CheckedByTheUser);
     assert_eq!(rec.decisions, vec![decision("kept")]);
@@ -107,7 +107,7 @@ async fn history_first_file_wins() {
     make_file(&folder, "2026-10-01", vec![old]).await;
     make_file(&folder, "2026-11-03", vec![new]).await;
     let files = WorkFiles::new(folder.0.clone());
-    let (file, rec) = files.history("same").await.unwrap().unwrap();
+    let (file, rec, _) = files.history("same").await.unwrap().unwrap();
     assert_eq!(file, "work-2026-11-03.db");
     assert_eq!(rec.title, "new");
 }
