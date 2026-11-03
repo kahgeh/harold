@@ -409,6 +409,11 @@ fn insert_pressed_is_an_allowed_field() {
 }
 
 #[test]
+fn the_count_of_remote_order_saved_is_an_allowed_field() {
+    assert!(ALLOWED_FIELDS.contains(&"products"));
+}
+
+#[test]
 fn every_allowed_field_is_in_a_docs_table() {
     // Does the docs name `doc` match the field? `<n>` is one or more digits and a closing
     // `…` is any rest.

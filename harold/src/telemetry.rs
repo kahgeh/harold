@@ -132,6 +132,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "alert",
     "pod.product",
     "product",
+    "products",
     "id",
     "listener",
     "sha",

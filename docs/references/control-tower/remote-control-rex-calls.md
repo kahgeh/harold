@@ -31,7 +31,7 @@ The chief is not in the file. The chief is always 0.
 
 Two log lines show the state of the file:
 
-| Log line | Level | Field | Meaning |
+| Log line | Level | Fields | Meaning |
 | --- | --- | --- | --- |
 | `remote order saved` | info | `products`: the number of products saved | `SetRemoteOrder` wrote the file. |
 | `remote order unreadable` | warn | `reason`: `missing`, `malformed` or `unreadable` | Harold could not read the file. It uses the alphabetical order of the product names, and the next change writes a good file. |
