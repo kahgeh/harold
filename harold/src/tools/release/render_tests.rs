@@ -7,6 +7,7 @@ fn line(id: &str, title: &str) -> Line {
         id: id.into(),
         title: title.into(),
         commits: 0,
+        commits_known: false,
     }
 }
 
@@ -17,6 +18,7 @@ fn harold() -> ProductNext {
         merged: vec![line("timing-tests-local", "Run the tests locally")],
         in_progress: vec![Line {
             commits: 4,
+            commits_known: true,
             ..line("row-names-plain", "Name each row")
         }],
         approved: vec![line("feature-build-gaps", "Hold back messages, …")],
@@ -159,4 +161,35 @@ fn in_progress_line_with_no_known_count_shows_no_suffix() {
 
     assert!(actual.contains("    alpha  First\n"), "{actual}");
     assert!(!actual.contains("commits)"), "{actual}");
+    let value: serde_json::Value = serde_json::from_str(&json(&NextResponse {
+        products: vec![ProductNext {
+            in_progress: vec![line("alpha", "First")],
+            ..Default::default()
+        }],
+    }))
+    .unwrap();
+    assert!(
+        value["products"][0]["in_progress"][0]
+            .get("commits")
+            .is_none()
+    );
+}
+
+#[test]
+fn in_progress_line_with_a_known_zero_shows_zero_commits() {
+    let known = Line {
+        commits_known: true,
+        ..line("alpha", "First")
+    };
+    let response = NextResponse {
+        products: vec![ProductNext {
+            name: "keymap".into(),
+            in_progress: vec![known],
+            ..Default::default()
+        }],
+    };
+
+    assert!(text(&response).contains("    alpha  First  (0 commits)\n"));
+    let value: serde_json::Value = serde_json::from_str(&json(&response)).unwrap();
+    assert_eq!(value["products"][0]["in_progress"][0]["commits"], 0);
 }

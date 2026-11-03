@@ -98,7 +98,8 @@ fn lines(lines: Vec<Line>) -> Vec<pb::Line> {
         .map(|line| pb::Line {
             id: line.id,
             title: line.title,
-            commits: line.commits,
+            commits: line.commits.unwrap_or(0),
+            commits_known: line.commits.is_some(),
         })
         .collect()
 }

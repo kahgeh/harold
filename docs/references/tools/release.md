@@ -52,7 +52,7 @@ buckwal
 
 - Each line is a spec id and its title. The title is the text after `<id>: ` in the first `# ` heading of `specs/<id>.md`.
 - The lists "merged since the release", "in progress" and "approved, not started" print `none` when they are empty. The other lists print nothing when they are empty.
-- The "in progress" lines also show the commits of the spec's branch over `origin/<base>`, for example `(4 commits)` or `(1 commit)`. When git cannot count them (for example the product has no `origin/<base>`), the line shows no count.
+- The "in progress" lines also show the commits of the spec's branch over `origin/<base>`, for example `(4 commits)`, `(1 commit)` or `(0 commits)` for a spec just started. When git cannot count them (for example the product has no `origin/<base>`), the line shows no count.
 - A paused product prints one line: `paused: last release <tag>` or `paused: no release yet`.
 - A product whose git read fails prints `unavailable: <reason>` and no lists.
 
@@ -60,7 +60,7 @@ buckwal
 
 | List | A spec is in it when |
 | --- | --- |
-| merged since the release | Its state is `completed` and its merged commit is not in the release tag (one `git rev-list --no-walk=unsorted ^<tag> <commits>` call lists the commits that the tag does not reach; one `git merge-base --is-ancestor` call per commit answers if that call fails). A completed spec with no merged commit is in the list when its merge time is after the commit time of the tag. |
+| merged since the release | Its state is `completed` and its merged commit is not in the release tag (one `git rev-list ^<tag> <commits>` call lists the commits in the history of the given commits that the tag does not reach; one `git merge-base --is-ancestor` call per commit answers if that call fails). A completed spec with no merged commit is in the list when its merge time is after the commit time of the tag. |
 | in progress | Its state is `in_progress`, it has no parked handoff file and its worktree has a branch. |
 | approved, not started | Its state is `approved`, it has no parked handoff file and it was approved on or after the product's first merged file. An older approval is history. |
 | parked | The file `parked/<id>-handoff.md` exists, whatever the state of the spec. A parked spec is in no other list. |
@@ -69,7 +69,7 @@ buckwal
 
 - **The release** is the newest tag that matches `v[0-9]*` on the base branch of the product (`git describe --tags --abbrev=0 --match 'v[0-9]*' origin/<base>`). Other tags are not releases.
 - **No release.** The "merged" list holds each completed spec merged in the last 14 days, under the heading `no release yet: merged in the last 14 days`.
-- **Other commits since the release** is one count: the commits on `origin/<base>` after the tag that no commit of a listed merged spec reaches (`git rev-list --count origin/<base> ^<tag> ^<commit> ...`). A spec that merged as several commits adds none. If the count fails, it shows 0. A direct fix does not stay hidden. The text shows it only when the product has a release.
+- **Other commits since the release** is one count: the commits on `origin/<base>` after the tag that no commit of a listed merged spec reaches (`git rev-list --count origin/<base> ^<tag> ^<commit> ...`). A spec that merged as several commits adds none. If the count fails, it shows 0. A merged file holds only the tip commit of a spec, and the base branch is linear. So a direct commit made before the newest listed merge is not counted. Only the direct commits after the newest listed merge are counted. The text shows it only when the product has a release.
 - Each list is sorted by spec id.
 
 ## Where the spec state comes from
@@ -91,7 +91,7 @@ A product is paused when its entry in `products.toml` has `paused = true`. The t
 | `name` | The product name |
 | `paused` | `true` for a paused product |
 | `release` | The newest release tag; an empty string means no release |
-| `merged`, `in_progress`, `approved`, `parked`, `awaiting`, `not_clear` | The lists, each an array of `{ "id", "title" }`. The `in_progress` lines also hold `"commits"`. |
+| `merged`, `in_progress`, `approved`, `parked`, `awaiting`, `not_clear` | The lists, each an array of `{ "id", "title" }`. The `in_progress` lines also hold `"commits"` when the count is known, and no `"commits"` key when it is unknown. A known count can be 0. In the gRPC `Line`, `commits_known` says if `commits` is a count. |
 | `other_commits` | The count of other commits since the release |
 | `unavailable` | A reason when git gave no answer; an empty string otherwise |
 

@@ -18,6 +18,17 @@ pub(super) struct ReleaseTag {
     pub commit_time: OffsetDateTime,
 }
 
+/// What git says about the branch of an in-progress spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Branch {
+    /// The spec has no worktree branch.
+    None,
+    /// The spec has a branch and git could not count its commits.
+    Unknown,
+    /// The branch commits over `origin/<base>`.
+    Commits(u32),
+}
+
 /// What the pod folder and git say about one product.
 pub(super) struct Facts<'a> {
     pub specs: &'a [SpecFacts],
@@ -25,8 +36,8 @@ pub(super) struct Facts<'a> {
     pub titles: &'a HashMap<String, String>,
     /// The ids that have a parked handoff file.
     pub parked: &'a HashSet<String>,
-    /// Spec id to the branch commits over `origin/<base>`. `None` means no branch.
-    pub branch_commits: &'a HashMap<String, Option<u32>>,
+    /// Spec id to its branch.
+    pub branch_commits: &'a HashMap<String, Branch>,
     /// The merged commits that are ancestors of the release tag.
     pub in_release: &'a HashSet<String>,
     pub release: Option<ReleaseTag>,
@@ -51,7 +62,7 @@ pub(super) fn classify(name: &str, facts: &Facts<'_>) -> ProductNext {
         other_commits: facts.other_commits,
         ..Default::default()
     };
-    let line = |id: &str, commits: u32| Line {
+    let line = |id: &str, commits: Option<u32>| Line {
         id: id.to_string(),
         title: facts.titles.get(id).cloned().unwrap_or_default(),
         commits,
@@ -64,20 +75,21 @@ pub(super) fn classify(name: &str, facts: &Facts<'_>) -> ProductNext {
         }
         match spec.state {
             SpecState::Completed if is_merged_since_release(spec, facts) => {
-                next.merged.push(line(id, 0));
+                next.merged.push(line(id, None));
             }
-            SpecState::InProgress => match facts.branch_commits.get(id).copied().flatten() {
-                Some(commits) => next.in_progress.push(line(id, commits)),
-                None => next.not_clear.push(line(id, 0)),
+            SpecState::InProgress => match facts.branch_commits.get(id).copied() {
+                Some(Branch::Commits(commits)) => next.in_progress.push(line(id, Some(commits))),
+                Some(Branch::Unknown) => next.in_progress.push(line(id, None)),
+                Some(Branch::None) | None => next.not_clear.push(line(id, None)),
             },
             SpecState::Approved if is_current_approval(spec, facts) => {
-                next.approved.push(line(id, 0));
+                next.approved.push(line(id, None));
             }
-            SpecState::Open if facts.awaiting.contains(id) => next.awaiting.push(line(id, 0)),
+            SpecState::Open if facts.awaiting.contains(id) => next.awaiting.push(line(id, None)),
             _ => {}
         }
     }
-    next.parked = facts.parked.iter().map(|id| line(id, 0)).collect();
+    next.parked = facts.parked.iter().map(|id| line(id, None)).collect();
     for list in [
         &mut next.merged,
         &mut next.in_progress,

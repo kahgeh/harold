@@ -191,9 +191,7 @@ fn ancestor(commit: &str) -> [&str; 4] {
 
 /// The one call that lists the merged commits that the tag does not reach.
 fn unreached(commits: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = ["rev-list", "--no-walk=unsorted", "^v1.0.0"]
-        .map(String::from)
-        .into();
+    let mut args: Vec<String> = ["rev-list", "^v1.0.0"].map(String::from).into();
     args.extend(commits.iter().map(|commit| commit.to_string()));
     args
 }
@@ -292,6 +290,48 @@ async fn an_unreached_commit_matches_by_prefix() {
 }
 
 #[tokio::test]
+async fn ancestor_hashes_in_the_batch_output_change_nothing() {
+    let fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    fixture.spec("beta", "# beta: Second\n");
+    let beta = "fedcba9876543210fedcba9876543210fedcba98";
+    fixture.merge("beta", beta);
+    // Git prints every commit after the tag in the history of the two commits, not only
+    // the two commits. Here `beta` is in the tag and `alpha` is after it.
+    let other = "1111111111111111111111111111111111111111";
+    let git = fixture
+        .git_with_tag()
+        .answer(
+            &strs(&unreached(&[COMMIT, beta])),
+            true,
+            &format!("{COMMIT}\n{other}\n\n"),
+        )
+        .answer(&strs(&others(&[COMMIT])), true, "0\n");
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(ids(&next.merged), ["alpha"]);
+}
+
+#[tokio::test]
+async fn a_branch_with_no_commits_yet_is_a_known_zero() {
+    let mut fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.start("alpha");
+    fixture.worktree("alpha", "alpha-work");
+    let git = fixture.git().answer(
+        &["rev-list", "--count", "origin/main..refs/heads/alpha-work"],
+        true,
+        "0\n",
+    );
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(next.in_progress[0].commits, Some(0));
+}
+
+#[tokio::test]
 async fn a_failed_batch_call_falls_back_to_one_call_per_commit() {
     let fixture = Fixture::new();
     fixture.spec("alpha", "# alpha: First\n");
@@ -356,7 +396,7 @@ async fn started_spec_with_a_branch_counts_its_commits() {
     let next = fixture.next(&git).await;
 
     assert_eq!(ids(&next.in_progress), ["alpha"]);
-    assert_eq!(next.in_progress[0].commits, 4);
+    assert_eq!(next.in_progress[0].commits, Some(4));
     assert!(next.not_clear.is_empty());
 }
 
@@ -372,7 +412,7 @@ async fn a_branch_whose_count_fails_stays_in_progress() {
     let next = fixture.next(&git).await;
 
     assert_eq!(ids(&next.in_progress), ["alpha"]);
-    assert_eq!(next.in_progress[0].commits, 0);
+    assert_eq!(next.in_progress[0].commits, None);
     assert!(next.not_clear.is_empty());
 }
 

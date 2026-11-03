@@ -39,7 +39,7 @@ struct Fixture {
     specs: Vec<SpecFacts>,
     titles: HashMap<String, String>,
     parked: HashSet<String>,
-    branch_commits: HashMap<String, Option<u32>>,
+    branch_commits: HashMap<String, Branch>,
     in_release: HashSet<String>,
     release: Option<ReleaseTag>,
     first_merged_file: Option<OffsetDateTime>,
@@ -108,7 +108,7 @@ fn commit_after_the_tag_is_listed() {
         vec![Line {
             id: "new".to_string(),
             title: "A new thing".to_string(),
-            commits: 0,
+            commits: None,
         }]
     );
 }
@@ -143,10 +143,10 @@ fn in_progress_shows_the_branch_commits() {
     fixture.specs = vec![spec("building", SpecState::InProgress)];
     fixture
         .branch_commits
-        .insert("building".to_string(), Some(4));
+        .insert("building".to_string(), Branch::Commits(4));
     let next = fixture.run();
     assert_eq!(next.in_progress.len(), 1);
-    assert_eq!(next.in_progress[0].commits, 4);
+    assert_eq!(next.in_progress[0].commits, Some(4));
     assert!(next.not_clear.is_empty());
 }
 
@@ -157,7 +157,9 @@ fn started_spec_with_no_branch_is_not_clear() {
         spec("lost", SpecState::InProgress),
         spec("unknown-branch", SpecState::InProgress),
     ];
-    fixture.branch_commits.insert("lost".to_string(), None);
+    fixture
+        .branch_commits
+        .insert("lost".to_string(), Branch::None);
     let next = fixture.run();
     assert_eq!(ids(&next.not_clear), vec!["lost", "unknown-branch"]);
     assert!(next.in_progress.is_empty());
@@ -177,7 +179,7 @@ fn parked_spec_is_in_no_other_list() {
     ];
     fixture
         .branch_commits
-        .insert("p-progress".to_string(), Some(2));
+        .insert("p-progress".to_string(), Branch::Commits(2));
     fixture.awaiting = set(&["p-open"]);
     fixture.parked = set(&["p-progress", "p-none", "p-approved", "p-open", "p-gone"]);
     let next = fixture.run();

@@ -40,4 +40,6 @@ message Line {
   string title = 2;
   // Used in in_progress only.
   uint32 commits = 3;
+  // True when `commits` is a count. False when the count is unknown.
+  bool commits_known = 4;
 }

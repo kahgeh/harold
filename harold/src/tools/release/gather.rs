@@ -6,7 +6,7 @@ use std::path::Path;
 
 use time::{OffsetDateTime, UtcOffset};
 
-use super::classify::{Facts, ReleaseTag, classify};
+use super::classify::{Branch, Facts, ReleaseTag, classify};
 use super::model::ProductNext;
 use super::title::spec_title;
 use crate::pod_stats::{
@@ -105,14 +105,13 @@ async fn gather(
                 let range = format!("{origin}..refs/heads/{branch}");
                 let count = ask(git, &product.repo, &["rev-list", "--count", &range]).await?;
                 // The spec has a branch. When the count fails (for example the product
-                // has no `origin/<base>`), the count is unknown and shows as 0.
-                Some(
-                    count
-                        .and_then(|text| text.trim().parse::<u32>().ok())
-                        .unwrap_or(0),
-                )
+                // has no `origin/<base>`), the count is unknown.
+                match count.and_then(|text| text.trim().parse::<u32>().ok()) {
+                    Some(commits) => Branch::Commits(commits),
+                    None => Branch::Unknown,
+                }
             }
-            None => None,
+            None => Branch::None,
         };
         branch_commits.insert(spec.id.clone(), commits);
     }
@@ -181,8 +180,9 @@ async fn ask(git: &impl Git, repo: &Path, args: &[&str]) -> Result<Option<String
     Ok(output.success.then_some(output.stdout))
 }
 
-/// The commits that the tag reaches. One call lists the commits that the tag does not
-/// reach. When that call fails (for example, a commit is unknown), one call per commit
+/// The commits that the tag reaches. One call lists the commits that are in the history
+/// of the given commits but not in the tag. That output can hold more hashes than the
+/// given commits. A commit that it prints is not in the tag. When that call fails (for example, a commit is unknown), one call per commit
 /// answers instead. A hash that git prints matches a commit by prefix.
 async fn in_release(
     git: &impl Git,
@@ -194,10 +194,14 @@ async fn in_release(
         return Ok(HashSet::new());
     }
     let exclusion = format!("^{tag}");
-    let mut args = vec!["rev-list", "--no-walk=unsorted", exclusion.as_str()];
+    let mut args = vec!["rev-list", exclusion.as_str()];
     args.extend(commits);
     if let Some(text) = ask(git, repo, &args).await? {
-        let printed: Vec<&str> = text.lines().map(str::trim).collect();
+        let printed: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|hash| !hash.is_empty())
+            .collect();
         return Ok(commits
             .iter()
             .filter(|commit| {

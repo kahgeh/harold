@@ -143,7 +143,12 @@ fn messages_keep_their_field_numbers() {
     );
     assert_eq!(
         message_fields("Line"),
-        fields(&[("id", 1), ("title", 2), ("commits", 3)])
+        fields(&[
+            ("id", 1),
+            ("title", 2),
+            ("commits", 3),
+            ("commits_known", 4)
+        ])
     );
 }
 
@@ -153,6 +158,7 @@ fn a_response_round_trips_every_field() {
         id: "a-1".to_string(),
         title: "title".to_string(),
         commits: 2,
+        commits_known: true,
     };
     let response = NextResponse {
         products: vec![ProductNext {

@@ -6,8 +6,9 @@ pub(super) struct Line {
     pub id: String,
     /// Empty when the spec has no readable title.
     pub title: String,
-    /// The branch commits over the base branch. Only an in-progress line sets it.
-    pub commits: u32,
+    /// The branch commits over the base branch. Only an in-progress line sets it. `None`
+    /// means the count is unknown, which is not the same as a count of 0.
+    pub commits: Option<u32>,
 }
 
 /// The lists of one product.
