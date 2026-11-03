@@ -165,6 +165,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `gg` / `G` | First / last row | First / last todo | Same | Same | Same | Types |
 | `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected, when Harold serves the knowledge tool) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
+| `m` / `p` / `C` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call. Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -183,6 +184,9 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   now while the call is speaking.
 - **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
+  Each row shows its key at the right: `m` voice, `p` messaging, `C` call. These keys
+  also run the command from the list with the palette closed. The keys `v` and `w`
+  are kept for later and no command uses them.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
   todo row, under a `TODO` label, it lists the row's own keys first, then `j/k` move,
