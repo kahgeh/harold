@@ -1,58 +1,14 @@
-use crate::store::EventVersion;
-
-use super::domain::{
-    AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot, EffectiveAgentState,
-};
-use super::waiting::{Focus, WaitingEvent, WaitingTracker};
+use super::domain::EffectiveAgentState;
+use super::waiting::{Focus, TrackedRow, WaitingEvent, WaitingTracker};
 
 use EffectiveAgentState::{Blocked, Done, Error, Idle, Unknown, Working};
 
-fn pane(pane_id: &str, agent_pid: u32, state: EffectiveAgentState) -> AgentPaneProjection {
-    AgentPaneProjection {
-        pane: AgentPaneObservation {
-            incarnation: AgentIncarnation {
-                pane_id: pane_id.into(),
-                pane_pid: 1,
-                agent_pid,
-                agent_started_at_ms: 1_000,
-                provider_id: "p".into(),
-            },
-            tmux_target: "s:1.1".into(),
-            session_name: "s".into(),
-            window_index: 1,
-            pane_index: 1,
-            working_directory: "/w".into(),
-            provider_display_name: "P".into(),
-            observed_at_ms: 1,
-        },
-        hook_state: None,
-        hook_observed_at_ms: None,
-        lifecycle_adapter_id: None,
-        screen_state: None,
-        screen_classifier_id: None,
-        screen_observed_at_ms: None,
-        effective_state: state,
-        explicit_work_summary: None,
-        explicit_work_summary_updated_at_ms: None,
-        screen_work_summary: None,
-        screen_work_summary_updated_at_ms: None,
-        summary_basis_version: EventVersion::start(),
-        generated_work_summary: None,
-        generated_summary_basis_version: None,
-        work_summary: None,
-        last_transition_at_ms: 1,
-        last_event_version: EventVersion::start(),
-    }
-}
-
-fn snap(panes: Vec<AgentPaneProjection>) -> AgentSnapshot {
-    AgentSnapshot {
-        tts_muted: false,
-        messaging_paused: false,
-        through_event_version: EventVersion::start(),
-        server_time_ms: 1,
-        monitor_health: Vec::new(),
-        panes,
+fn pane(pane_id: &str, agent_pid: u32, state: EffectiveAgentState) -> TrackedRow {
+    TrackedRow {
+        pane_id: pane_id.into(),
+        agent_pid,
+        agent_started_at_ms: 1_000,
+        state,
     }
 }
 
@@ -62,11 +18,11 @@ fn role(pane_id: &str) -> String {
 
 fn observe(
     t: &mut WaitingTracker,
-    panes: Vec<AgentPaneProjection>,
+    panes: Vec<TrackedRow>,
     focus: &Focus,
     now: i64,
 ) -> Vec<WaitingEvent> {
-    t.observe(&snap(panes), focus, now, &role)
+    t.observe(&panes, focus, now, &role)
 }
 
 fn on(p: &str) -> Focus {

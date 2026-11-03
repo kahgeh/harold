@@ -990,7 +990,8 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
 pub(crate) fn note_agents_waiting(counts: Vec<WaitingCount>) {
     // The rows are one value for the whole process. In a test build the waiting tasks of
     // many tests run at once, so only the gauge test writes the rows, with
-    // `note_agents_waiting_for`.
+    // `note_agents_waiting_for`. So no test build covers the wiring from this function to
+    // the gauge.
     #[cfg(not(test))]
     note_agents_waiting_for(counts);
     #[cfg(test)]

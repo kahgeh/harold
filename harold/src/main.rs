@@ -977,9 +977,12 @@ fn with_waiting(
 
 /// Starts the task that decides the agents that wait for the user. It reads the focused
 /// pane at each `interval` off the async threads, and applies each agent snapshot change
-/// with the last focus reading. It sends a new view on `views` only when the view changed.
+/// and each Rex host change with the last focus reading. It sends a new view on `views`
+/// only when the view changed.
+#[allow(clippy::too_many_arguments)]
 fn spawn_waiting_task(
     mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
+    hosts: agent::rex_host_runner::HostAgents,
     port: Arc<dyn agent::focus::FocusPort>,
     roles: RoleSources,
     interval: Duration,
@@ -997,6 +1000,8 @@ fn spawn_waiting_task(
         let mut in_rex = false;
         // Whether the last focus reading failed. No reading yet is not a failed reading.
         let mut read_unknown = false;
+        let mut host_versions = hosts.subscribe();
+        let mut hosts_open = true;
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1032,9 +1037,25 @@ fn spawn_waiting_task(
                         break;
                     }
                 }
+                changed = host_versions.changed(), if hosts_open => {
+                    if changed.is_err() {
+                        // The host agents are gone: their last rows stay.
+                        hosts_open = false;
+                    }
+                    host_versions.borrow_and_update();
+                }
             }
             let snapshot = snapshots.borrow_and_update().clone();
-            observe_waiting(&mut tracker, &snapshot, &focus, clock(), &roles, &views);
+            let rows = tracked_rows(&snapshot, &hosts);
+            observe_waiting(
+                &mut tracker,
+                &snapshot,
+                &rows,
+                &focus,
+                clock(),
+                &roles,
+                &views,
+            );
         }
     })
 }
@@ -1059,11 +1080,42 @@ fn first_local_pane_in_rex(snapshot: &agent::domain::AgentSnapshot) -> Option<bo
         .map(|pane_id| pane_id.starts_with(agent::rex::BLOCK_PREFIX))
 }
 
-/// Applies one snapshot and the focus to `tracker`. It logs each agent that begins to wait
+/// The agents the waiting task follows: the panes of this machine, then the agents of the
+/// Rex hosts, with the pane id, pid, start time and state that `map_host_agent` serves.
+fn tracked_rows(
+    snapshot: &agent::domain::AgentSnapshot,
+    hosts: &agent::rex_host_runner::HostAgents,
+) -> Vec<agent::waiting::TrackedRow> {
+    use agent::waiting::TrackedRow;
+    let local = snapshot.panes.iter().map(|projection| {
+        let incarnation = &projection.pane.incarnation;
+        TrackedRow {
+            pane_id: incarnation.pane_id.clone(),
+            agent_pid: incarnation.agent_pid,
+            agent_started_at_ms: incarnation.agent_started_at_ms,
+            state: projection.effective_state,
+        }
+    });
+    let remote = hosts
+        .snapshot()
+        .into_iter()
+        .map(|row| row.agent)
+        .filter(|agent| agent.pid != 0)
+        .map(|agent| TrackedRow {
+            pane_id: agent.host_pane_id,
+            agent_pid: agent.pid,
+            agent_started_at_ms: agent.first_seen_ms,
+            state: agent.state.effective(),
+        });
+    local.chain(remote).collect()
+}
+
+/// Applies the agent rows and the focus to `tracker`. It logs each agent that begins to wait
 /// and each agent the user sees, notes the waiting counts, and sends the view when it changed.
 fn observe_waiting(
     tracker: &mut agent::waiting::WaitingTracker,
     snapshot: &agent::domain::AgentSnapshot,
+    rows: &[agent::waiting::TrackedRow],
     focus: &agent::waiting::Focus,
     now_ms: i64,
     roles: &RoleSources,
@@ -1080,10 +1132,16 @@ fn observe_waiting(
         _ => None,
     };
     let pod_roles = roles.pod_roles();
-    let role_and_product = |pane_id: &str| pane_role(pane_id, chief_pane.as_deref(), &pod_roles);
+    // An agent of a Rex host has no role, as `map_host_agent` serves it.
+    let role_and_product = |pane_id: &str| {
+        if pane_id.starts_with("rex:") {
+            return (String::new(), String::new());
+        }
+        pane_role(pane_id, chief_pane.as_deref(), &pod_roles)
+    };
     let role_of = |pane_id: &str| role_and_product(pane_id).0;
 
-    for event in tracker.observe(snapshot, focus, now_ms, &role_of) {
+    for event in tracker.observe(rows, focus, now_ms, &role_of) {
         match event {
             WaitingEvent::Began { pane_id, role } => {
                 info!(pane_id = %pane_id, role = %role, "agent waiting");
@@ -1101,7 +1159,7 @@ fn observe_waiting(
     }
 
     let view = tracker.view();
-    telemetry::note_agents_waiting(waiting_counts(snapshot, &view, &role_and_product));
+    telemetry::note_agents_waiting(waiting_counts(rows, &view, &role_and_product));
 
     views.send_if_modified(|current| {
         if *current == view {
@@ -1112,16 +1170,16 @@ fn observe_waiting(
     });
 }
 
-/// The rows of `harold.agents.waiting`: one row for each role and product in the snapshot,
+/// The rows of `harold.agents.waiting`: one row for each role and product of the agent rows,
 /// with 0 when no agent of it waits. `role_and_product` maps a pane id to its role and product.
 fn waiting_counts(
-    snapshot: &agent::domain::AgentSnapshot,
+    rows: &[agent::waiting::TrackedRow],
     view: &agent::waiting::WaitingView,
     role_and_product: &dyn Fn(&str) -> (String, String),
 ) -> Vec<telemetry::WaitingCount> {
     let mut counts = std::collections::BTreeMap::<(String, String), u64>::new();
-    for projection in &snapshot.panes {
-        let pane_id = projection.pane.incarnation.pane_id.as_str();
+    for row in rows {
+        let pane_id = row.pane_id.as_str();
         let count = counts.entry(role_and_product(pane_id)).or_default();
         if view.since_ms.contains_key(pane_id) {
             *count += 1;
@@ -2048,6 +2106,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let (waiting_tx, waiting_rx) = watch::channel(agent::waiting::WaitingView::default());
     spawn_waiting_task(
         snapshots.subscribe(),
+        host_agents.clone(),
         Arc::new(agent::focus::CommandFocusPort::new(
             cfg.agent_monitor.rex.clone(),
         )),

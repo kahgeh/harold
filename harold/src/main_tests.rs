@@ -18,7 +18,7 @@ use super::agent::rex_hosts::{HostAgentState, RexHostAgent};
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
-use super::agent::waiting::WaitingView;
+use super::agent::waiting::{TrackedRow, WaitingView};
 use super::harold::harold_server::Harold;
 use super::harold::{
     AgentState, GetHaroldStateRequest, GetRemoteOrderRequest, MonitorHealthState,
@@ -4186,12 +4186,25 @@ fn waiting_task_stream(
     watch::Sender<()>,
     AgentSnapshotHub,
 ) {
+    waiting_task_stream_with(port, HostAgents::default())
+}
+
+/// Like `waiting_task_stream`, with the Rex host agents the task and the stream read.
+fn waiting_task_stream_with(
+    port: Arc<ScriptedFocus>,
+    hosts: HostAgents,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+) {
     let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
     let (waiting, waiting_rx) = watch::channel(WaitingView::default());
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     let (shutdown, shutdown_rx) = watch::channel(());
     spawn_waiting_task(
         hub.subscribe(),
+        hosts.clone(),
         port,
         RoleSources::default(),
         std::time::Duration::from_millis(20),
@@ -4203,7 +4216,7 @@ fn waiting_task_stream(
         hub.subscribe(),
         CurrentSteps::default(),
         Recaps::default(),
-        HostAgents::default(),
+        hosts,
         WindowNames::default(),
         String::new(),
         RoleSources::default(),
@@ -4275,6 +4288,7 @@ async fn the_waiting_task_stops_at_shutdown() {
     let (shutdown, shutdown_rx) = watch::channel(());
     let task = spawn_waiting_task(
         hub.subscribe(),
+        HostAgents::default(),
         ScriptedFocus::focused_on("%1"),
         RoleSources::default(),
         std::time::Duration::from_millis(20),
@@ -4291,13 +4305,15 @@ async fn the_waiting_task_stops_at_shutdown() {
 
 #[test]
 fn waiting_counts_give_one_row_for_each_role_with_zero_when_none_waits() {
-    let mut snapshot = populated_snapshot(1, None);
-    let template = snapshot.panes[0].clone();
-    for pane_id in ["%9", "%10"] {
-        let mut pane = template.clone();
-        pane.pane.incarnation.pane_id = pane_id.to_owned();
-        snapshot.panes.push(pane);
-    }
+    let rows: Vec<TrackedRow> = ["%8", "%9", "%10"]
+        .into_iter()
+        .map(|pane_id| TrackedRow {
+            pane_id: pane_id.to_owned(),
+            agent_pid: STEP_PID,
+            agent_started_at_ms: 8_000,
+            state: EffectiveAgentState::Done,
+        })
+        .collect();
     let role_and_product = |pane_id: &str| match pane_id {
         "%8" | "%9" => ("coordinator".to_owned(), "alpha".to_owned()),
         _ => (String::new(), String::new()),
@@ -4308,11 +4324,11 @@ fn waiting_counts_give_one_row_for_each_role_with_zero_when_none_waits() {
         count,
     };
 
-    let none = waiting_counts(&snapshot, &waiting_view(&[], true), &role_and_product);
+    let none = waiting_counts(&rows, &waiting_view(&[], true), &role_and_product);
     assert_eq!(none, vec![row("", "", 0), row("coordinator", "alpha", 0)]);
 
     let view = waiting_view(&[("%8", 1), ("%9", 2), ("%gone", 3)], true);
-    let some = waiting_counts(&snapshot, &view, &role_and_product);
+    let some = waiting_counts(&rows, &view, &role_and_product);
     assert_eq!(some, vec![row("", "", 0), row("coordinator", "alpha", 2)]);
 }
 
@@ -4339,4 +4355,42 @@ fn the_first_pane_of_this_machine_decides_rex_or_tmux_for_the_focus() {
     );
     assert_eq!(in_rex(&["rex:host/block:1"]), None);
     assert_eq!(in_rex(&[]), None);
+}
+
+#[tokio::test]
+async fn an_agent_of_a_rex_host_waits_until_it_works_again() {
+    const HOST_PANE: &str = "rex:omarchy/block:b1";
+    let hosts = HostAgents::new(vec!["omarchy".into()]);
+    hosts.record("omarchy", reached(ObservedAgentState::Working), 9_000);
+    let port = ScriptedFocus::focused_on("%1");
+    let (mut receiver, _shutdown, _hub) =
+        waiting_task_stream_with(Arc::clone(&port), hosts.clone());
+    let host_row = |item: &super::harold::AgentStateSnapshot| {
+        item.panes
+            .iter()
+            .find(|pane| pane.pane_id == HOST_PANE)
+            .cloned()
+            .expect("the host row is served")
+    };
+    item_where(&mut receiver, |item| item.focus_known == Some(true)).await;
+
+    hosts.record("omarchy", reached(ObservedAgentState::Done), 9_500);
+    let waiting = item_where(&mut receiver, |item| host_row(item).waiting).await;
+    assert_eq!(host_row(&waiting).waiting_since_ms, WAITING_CLOCK_MS);
+
+    // A focus on the host pane id does not clear it: this machine cannot see that pane.
+    port.set(Ok(ScriptedFocus::line(HOST_PANE)));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    while let Ok(item) = receiver.try_recv() {
+        let item = item.expect("an item, not an error");
+        assert!(
+            host_row(&item).waiting,
+            "a focus on a host pane does not clear it"
+        );
+    }
+
+    hosts.record("omarchy", reached(ObservedAgentState::Working), 10_000);
+    let working = item_where(&mut receiver, |item| !host_row(item).waiting).await;
+    assert_eq!(host_row(&working).waiting_since_ms, 0);
+    assert_eq!(host_row(&working).state, i32::from(AgentState::Working));
 }

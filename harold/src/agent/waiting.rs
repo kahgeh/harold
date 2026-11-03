@@ -2,7 +2,16 @@
 
 use std::collections::BTreeMap;
 
-use super::domain::{AgentSnapshot, EffectiveAgentState};
+use super::domain::EffectiveAgentState;
+
+/// One agent the tracker follows: a pane of this machine or an agent of a Rex host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrackedRow {
+    pub pane_id: String,
+    pub agent_pid: u32,
+    pub agent_started_at_ms: i64,
+    pub state: EffectiveAgentState,
+}
 
 /// The pane the user looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,10 +68,10 @@ impl WaitingTracker {
         Self::default()
     }
 
-    /// Apply one snapshot and the focus. `role_of` maps a pane id to its role.
+    /// Apply the current agent rows and the focus. `role_of` maps a pane id to its role.
     pub(crate) fn observe(
         &mut self,
-        snapshot: &AgentSnapshot,
+        rows: &[TrackedRow],
         focus: &Focus,
         now_ms: i64,
         role_of: &dyn Fn(&str) -> String,
@@ -73,12 +82,7 @@ impl WaitingTracker {
         let gone: Vec<String> = self
             .tracked
             .keys()
-            .filter(|id| {
-                !snapshot
-                    .panes
-                    .iter()
-                    .any(|p| &p.pane.incarnation.pane_id == *id)
-            })
+            .filter(|id| !rows.iter().any(|row| &row.pane_id == *id))
             .cloned()
             .collect();
         for id in gone {
@@ -88,10 +92,9 @@ impl WaitingTracker {
             }
         }
 
-        for projection in &snapshot.panes {
-            let inc = &projection.pane.incarnation;
+        for inc in rows {
             let id = inc.pane_id.as_str();
-            let state = projection.effective_state;
+            let state = inc.state;
 
             let previous = match self.tracked.get(id) {
                 Some(t)
