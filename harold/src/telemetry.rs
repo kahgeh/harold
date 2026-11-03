@@ -985,8 +985,9 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
     note_agent_counts_for(configured_multiplexer(), counts);
 }
 
-/// Replaces the rows `harold.agents.waiting` reads. A role with no waiting agent has a row
-/// with count 0.
+/// Replaces the rows `harold.agents.waiting` reads. The gauge reports only the rows the
+/// caller passes. Harold sends one row for each role it holds, with 0 for a role with no
+/// waiting agent.
 #[allow(dead_code)] // Task 5 removes this.
 pub(crate) fn note_agents_waiting(counts: Vec<WaitingCount>) {
     note_agents_waiting_for(counts);

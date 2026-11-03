@@ -2010,6 +2010,8 @@ const METRICS: &[&str] = &[
     "harold.multiplexer.calls",
     "harold.multiplexer.call.duration",
     "harold.agents",
+    "harold.agents.waiting",
+    "harold.agent.waiting.duration",
     "harold.agent.state.duration",
     "harold.agent.state_observed",
     "harold.agent.recap_read",
@@ -2626,7 +2628,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 11] = [
+const AGENT_CARDS: [&str; 13] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2638,6 +2640,8 @@ const AGENT_CARDS: [&str; 11] = [
     "Recap reads, found and none, by day",
     "Slow inventory scans against load, by hour",
     UNREADABLE_BLOCKS_CARD,
+    "Now: agents waiting beside agents working",
+    "Work waiting: p50 of the time before you look, by bucket",
 ];
 /// The work records group's cards, in the order the dashboard lists them.
 const WORK_CARDS: [&str; 3] = [
@@ -2907,8 +2911,9 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // The agents group adds five: calls, failed calls, time in each state, call time and
     // the share of observations read from the screen.
     // The recap card makes one more.
+    // The work waiting card makes one more.
     // The work group adds two: time at each status and the check mismatches.
-    assert_eq!(counted, 31);
+    assert_eq!(counted, 32);
 }
 
 #[test]
@@ -4973,7 +4978,7 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             .unwrap_or_else(|| panic!("no card {name}"))
     };
     // (card, metrics read, the counter rule, the histogram rule)
-    let expected: [(&str, &[&str], bool, bool); 8] = [
+    let expected: [(&str, &[&str], bool, bool); 10] = [
         (AGENT_CARDS[0], &["harold.agents"], false, false),
         (AGENT_CARDS[1], &["harold.agents"], false, false),
         (
@@ -5001,6 +5006,18 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             &["harold.agent.state_observed"],
             true,
             false,
+        ),
+        (
+            AGENT_CARDS[11],
+            &["harold.agents", "harold.agents.waiting"],
+            false,
+            false,
+        ),
+        (
+            AGENT_CARDS[12],
+            &["harold.agent.waiting.duration"],
+            false,
+            true,
         ),
     ];
     for (name, reads, counter, histogram) in expected {
@@ -5086,6 +5103,26 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
     ] {
         assert!(state_time.contains(piece), "{piece} in {state_time}");
     }
+    // The waiting cards: the gauge beside the working count, and the p50 by role.
+    let now = card(AGENT_CARDS[11])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    assert!(now.contains("INTERVAL 5 MINUTE"), "{now}");
+    assert!(now.contains("Attributes['state'] = 'working'"), "{now}");
+    assert!(now.contains("'waiting'"), "{now}");
+    let waited = card(AGENT_CARDS[12])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    for piece in [
+        "BucketCounts",
+        "ExplicitBounds",
+        "sumForEach",
+        "AS p50_s",
+        "Attributes['role'] AS role",
+    ] {
+        assert!(waited.contains(piece), "{piece} in {waited}");
+    }
+    assert!(!waited.contains("p95"), "{waited}");
     // The call time card: the p95 from the buckets and the mean from the rise of the sum
     // over the rise of the count.
     let call_time = card(AGENT_CARDS[5])["config"]["sqlTemplate"]
