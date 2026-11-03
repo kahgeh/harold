@@ -123,6 +123,11 @@ def is_tool_result_line(message: dict[str, Any]) -> bool:
     )
 
 
+def continues_a_turn(data: dict[str, Any], message: dict[str, Any]) -> bool:
+    # A tool result, or a line Claude Code ties to a tool call (a Skill load), is part of its turn.
+    return is_tool_result_line(message) or "sourceToolUseID" in data
+
+
 def extract_turn_usage(transcript_path: str | None) -> dict[str, Any]:
     if not isinstance(transcript_path, str) or not transcript_path or not os.path.isfile(transcript_path):
         return {}
@@ -130,6 +135,7 @@ def extract_turn_usage(transcript_path: str | None) -> dict[str, Any]:
     # One assistant message can span several lines; each line repeats its usage.
     by_message: dict[str, dict[str, int]] = {}
     model = ""
+    boundary_seen = False
     with open(transcript_path, encoding="utf-8") as f:
         for line in f:
             try:
@@ -143,11 +149,12 @@ def extract_turn_usage(transcript_path: str | None) -> dict[str, Any]:
                 continue
 
             if data.get("type") == "user":
-                if not is_tool_result_line(message):
+                if not continues_a_turn(data, message):
+                    boundary_seen = True
                     by_message = {}
                     model = ""
                 continue
-            if data.get("type") != "assistant":
+            if data.get("type") != "assistant" or not boundary_seen:
                 continue
 
             if isinstance(message.get("model"), str) and message["model"]:

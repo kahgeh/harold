@@ -2023,8 +2023,8 @@ impl<G: Git> PodStats<G> {
         *lock(&self.snapshot) = snapshot;
     }
 
-    /// The live agents by role: the panes the pods claimed, the chief's pane or panes, and
-    /// the rest as `other`. Every pod role of every product has a count, 0 included.
+    /// Adds the live panes the pods did not claim: the chief's pane or panes as `Chief`,
+    /// and the rest as `Other`. It returns the claimed panes with their role and product.
     fn claim_the_rest(
         &self,
         live: &[LivePane],
@@ -2047,30 +2047,28 @@ fn tally(
     live: &[LivePane],
     claimed: &HashMap<String, (Role, Option<String>)>,
 ) -> (AgentCounts, AgentStateCounts) {
-    {
-        let mut counts = BTreeMap::new();
-        for product in products {
-            for role in Role::POD {
-                counts.insert((role, Some(product.name.clone())), 0);
-            }
+    let mut counts = BTreeMap::new();
+    for product in products {
+        for role in Role::POD {
+            counts.insert((role, Some(product.name.clone())), 0);
         }
-        counts.insert((Role::Chief, None), 0);
-        counts.insert((Role::Other, None), 0);
-        let mut by_state = BTreeMap::new();
-        for (role, product) in counts.keys() {
-            for state in ALL_AGENT_STATES {
-                by_state.insert((*role, product.clone(), state), 0);
-            }
-        }
-        for (pane_id, key) in claimed {
-            if let Some(pane) = live.iter().find(|pane| pane.pane_id == *pane_id) {
-                let (role, product) = key.clone();
-                *by_state.entry((role, product, pane.state)).or_insert(0) += 1;
-            }
-            *counts.entry(key.clone()).or_insert(0) += 1;
-        }
-        (counts, by_state)
     }
+    counts.insert((Role::Chief, None), 0);
+    counts.insert((Role::Other, None), 0);
+    let mut by_state = BTreeMap::new();
+    for (role, product) in counts.keys() {
+        for state in ALL_AGENT_STATES {
+            by_state.insert((*role, product.clone(), state), 0);
+        }
+    }
+    for (pane_id, key) in claimed {
+        if let Some(pane) = live.iter().find(|pane| pane.pane_id == *pane_id) {
+            let (role, product) = key.clone();
+            *by_state.entry((role, product, pane.state)).or_insert(0) += 1;
+        }
+        *counts.entry(key.clone()).or_insert(0) += 1;
+    }
+    (counts, by_state)
 }
 
 impl<G: Git> PodStats<G> {

@@ -292,7 +292,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery` | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
 
-**Turn tokens.** The hook sums the tokens of one turn from the agent's transcript and sends them with `turn_complete`. Only Claude Code sends them. A Codex turn counts as a turn with no tokens. The hook reads no message text for this. A subagent's tokens are in its own transcript file, so they are not counted.
+**Turn tokens.** The hook sums the tokens of one turn from the agent's transcript and sends them with `turn_complete`. Only Claude Code sends them. A Codex turn counts as a turn with no tokens. The hook reads no message text for this. The turn starts at the last user line that is not a tool result and has no `sourceToolUseID`. The Claude Code hook skips a line with `sourceToolUseID` because Claude Code writes it for a Skill load inside a turn, so that load does not start a turn. An injected prompt, such as a task notification, does start one. A subagent's tokens are in its own transcript file, so they are not counted.
 
 | Fields | Meaning |
 |---|---|

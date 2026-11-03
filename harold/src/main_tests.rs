@@ -2321,8 +2321,10 @@ mod one_trace_per_turn {
     async fn turn_complete_from_a_pane_not_in_the_last_poll_counts_as_other() {
         let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
         let pane = unique_pane();
+        // A model no other test uses, so the counter point is this test's alone.
+        let model = format!("model-{}", uuid::Uuid::new_v4().simple());
 
-        complete_with_tokens(&pane, "claude-sonnet-5-5", [1, 0, 0, 0]).await;
+        complete_with_tokens(&pane, &model, [1, 0, 0, 0]).await;
 
         assert_eq!(
             test_support::counter_value(
@@ -2332,16 +2334,16 @@ mod one_trace_per_turn {
             Some(1)
         );
         assert_eq!(
-            test_support::counter_value(
+            test_support::exact_counter_value(
                 "harold.turn.tokens",
-                &[
-                    ("role", "other"),
-                    ("model", "claude-sonnet-5-5"),
-                    ("kind", "input")
-                ],
-            )
-            .map(|n| n >= 1),
-            Some(true)
+                &[("role", "other"), ("model", &model), ("kind", "input")],
+            ),
+            Some(1)
+        );
+        // The pane has no spec, so no by-spec series is recorded for it.
+        assert_eq!(
+            test_support::counter_value("harold.turn.tokens.by_spec", &[("spec.id", "")]),
+            None
         );
     }
 

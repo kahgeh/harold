@@ -199,6 +199,33 @@ class ProviderHooksTest(unittest.TestCase):
         ])
         self.assertEqual(usage["output_tokens"], 2)
 
+    def test_usage_is_empty_when_no_line_starts_the_turn(self):
+        tool_result = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}}
+        usage = self.usage_of([self.asst("a", output_tokens=5), tool_result, self.asst("b", output_tokens=6)])
+        self.assertEqual(usage, {})
+
+    def test_usage_skill_load_line_does_not_start_a_turn(self):
+        skill_load = {
+            "type": "user", "isMeta": True, "sourceToolUseID": "toolu_made_up", "turnCompanion": True,
+            "message": {"content": [{"type": "text", "text": "Base directory for this skill: /made/up/path"}]},
+        }
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", output_tokens=1, cache_creation_input_tokens=10),
+            skill_load,
+            self.asst("b", output_tokens=2, cache_creation_input_tokens=20),
+        ])
+        self.assertEqual((usage["output_tokens"], usage["cache_write_tokens"]), (3, 30))
+
+    def test_usage_injected_prompt_without_source_tool_use_id_starts_a_turn(self):
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", output_tokens=100),
+            {"type": "user", "message": {"content": "<task-notification>done</task-notification>"}},
+            self.asst("b", output_tokens=2),
+        ])
+        self.assertEqual(usage["output_tokens"], 2)
+
     def test_usage_model_is_the_last_assistant_message_model(self):
         usage = self.usage_of([
             {"type": "user", "message": {"content": "go"}},
