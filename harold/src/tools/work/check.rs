@@ -1,5 +1,5 @@
 //! The work check: it compares each work record with the facts outside it.
-//! `check` is a pure function. Task 6 builds the real `Facts`.
+//! `check` is a pure function over a `Facts` port.
 
 use super::schema::{Mark, Record, Status};
 
@@ -12,6 +12,13 @@ pub(super) struct SpecFacts {
     pub(super) approved: bool,
     /// False when the registry or the product folder cannot be read.
     pub(super) registry_ok: bool,
+}
+
+impl SpecFacts {
+    /// The spec has a file in `specs/`, `merged/`, `withdrawn/` or `approvals/`.
+    fn present(&self) -> bool {
+        self.exists || self.merged || self.withdrawn || self.approved
+    }
 }
 
 /// What the question tool says about one question.
@@ -95,7 +102,7 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
     }
     if record.status.ordinal() < Status::Merged.ordinal() {
         for (product, id, spec) in &specs {
-            if spec.exists && spec.merged {
+            if spec.present() && spec.merged {
                 add(
                     "merged_status_behind",
                     format!(
@@ -108,7 +115,7 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
     }
     if record.status.is_open() {
         for (product, id, spec) in &specs {
-            if spec.exists && spec.withdrawn {
+            if spec.present() && spec.withdrawn {
                 add(
                     "withdrawn_open",
                     format!("is open but spec {product}/{id} is withdrawn."),
@@ -118,7 +125,7 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
     }
     if record.status.ordinal() < Status::Approved.ordinal() {
         for (product, id, spec) in &specs {
-            if spec.exists && spec.approved {
+            if spec.present() && spec.approved {
                 add(
                     "approved_status_behind",
                     format!(
@@ -140,7 +147,7 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
         }
     }
     for (product, id, spec) in &specs {
-        if spec.registry_ok && !spec.exists {
+        if spec.registry_ok && !spec.present() {
             add(
                 "missing_link",
                 format!("links spec {product}/{id}, which does not exist."),

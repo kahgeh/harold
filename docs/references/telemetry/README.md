@@ -383,6 +383,12 @@ These agent monitor lines carry the fields below:
 | `agent blocked long` | `pane_id`, `provider_id`. Logged at `warn` once for each blocked spell, 15 minutes after the first sample that showed `blocked` |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
 | `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
+| `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
+| `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
+| `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
+| `agent inventory scan slow` | `ps_ms` (the time of `ps`; with Rex, the time of the start time reads), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it) or `rex_ms` (the time of the Rex listing, in place of `tmux_ms` when the multiplexer is Rex), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |
+| `agent pane resolve slow` | `wait_ms` (from the send to the moment the monitor takes the command), `elapsed_ms` (from the send to the answer), `outcome` (`ok`, `not_found` or `inventory_unavailable`). `warn`, only for a resolve over 1 s or one that is not `ok`. The `agent inventory scan slow` line just before it gives the resolve's `ps_ms` |
+| `agent inventory full read` | `reason` (`chain_broken` or `chain_joined`), `pane_id`. `warn`, one line per full read (`ps -ax`) of a scan. On `chain_joined`, `pane_id` is the pane that joined; on `chain_broken`, it is the first pane whose chain stayed broken |
 
 The work tool logs its rotation. Harold logs `work rotation failed` once when a failure begins for a file. A retry that fails again logs `work rotation failed again` at `debug` only. A rotation that then works logs `work rotation done`.
 
@@ -390,13 +396,8 @@ The work tool logs its rotation. Harold logs `work rotation failed` once when a 
 |---|---|
 | `work rotation done` (`info`) | `open_records`, `decisions`, `links` (the counts that were copied), `file` (the old current file), `new_file` |
 | `work rotation failed` (`warn`) | `file`, `reason` (`count_mismatch`, `write_failed` or `rename_failed`), `since` (the UTC date and time when the failure began) |
-| `harold.work.check.mismatches` (counter attributes) | `record` (the work record's name), `kind` (the mismatch rule) |
-| `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
-| `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
-| `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
-| `agent inventory scan slow` | `ps_ms` (the time of `ps`; with Rex, the time of the start time reads), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it) or `rex_ms` (the time of the Rex listing, in place of `tmux_ms` when the multiplexer is Rex), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |
-| `agent pane resolve slow` | `wait_ms` (from the send to the moment the monitor takes the command), `elapsed_ms` (from the send to the answer), `outcome` (`ok`, `not_found` or `inventory_unavailable`). `warn`, only for a resolve over 1 s or one that is not `ok`. The `agent inventory scan slow` line just before it gives the resolve's `ps_ms` |
-| `agent inventory full read` | `reason` (`chain_broken` or `chain_joined`), `pane_id`. `warn`, one line per full read (`ps -ax`) of a scan. On `chain_joined`, `pane_id` is the pane that joined; on `chain_broken`, it is the first pane whose chain stayed broken |
+
+The counter `harold.work.check.mismatches` has the attributes `record` (the work record's name) and `kind` (the mismatch rule).
 
 **Rex reads slow.** The card "Rex reads slow, by day" in the Pods group counts `agent inventory scan slow` lines with `rex_ms` and `agent screen read slow` lines for each day. It is a card, not an alert. A day with more than 20 needs a look. `scrollback_bytes` on the screen line shows whether a long scrollback caused the slow read.
 

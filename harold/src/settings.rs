@@ -202,7 +202,7 @@ pub(crate) const MAX_ROTATION_DAYS: u32 = 365;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct WorkSettings {
-    /// Days to keep a record. From 0 to 365. The load step refuses negatives, because it
+    /// The age in days at which the current work file rotates. From 0 to 365. The load step refuses negatives, because it
     /// reads an `i64`. `validate` refuses values above 365.
     #[serde(deserialize_with = "rotation_days_from_signed")]
     pub rotation_days: u32,

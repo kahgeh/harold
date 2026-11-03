@@ -176,3 +176,15 @@ fn malformed_spec_link_gives_missing_link() {
     assert_eq!(m.kind, "missing_link");
     assert_eq!(m.line, "a links spec:nothing, which names no spec.");
 }
+
+#[test]
+fn a_spec_that_exists_only_in_withdrawn_gives_withdrawn_open_not_missing_link() {
+    let fake = fake_spec(spec_facts(|s| {
+        s.exists = false;
+        s.withdrawn = true;
+    }));
+    let records = [linked("c", Status::Building, "spec:p/s1")];
+    let m = one(&records, &fake);
+    assert_eq!(m.kind, "withdrawn_open");
+    assert_eq!(m.line, "c is open but spec p/s1 is withdrawn.");
+}

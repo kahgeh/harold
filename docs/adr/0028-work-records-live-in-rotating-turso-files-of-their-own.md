@@ -15,6 +15,7 @@ The chief keeps work records with a priority, a status and decisions. The chief'
 4. A failed rotation leaves the old file current and unchanged. Harold tries again at the next daily check. After a rotation, Harold opens the old file read-only.
 5. `list` and `show` read the current file. `history` and `search` read the files newest first. The first file that holds a name gives the answer.
 6. The work tool is a module of Harold with a `WorkService` gRPC service on loopback. It trusts local callers (0002). Only the chief's pane writes.
+7. The work tool reads the question tool and the queue through Harold's own gRPC address on loopback (`ToolContext::grpc_addr`), as a local caller (ADR 0002), never through their stores.
 
 ## Consequences
 

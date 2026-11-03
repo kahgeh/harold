@@ -146,7 +146,7 @@ The heading gives the name and the title. `:`, `-`, `–` or `—` may separate 
 - **Without `--apply`:** the command prints what it would store, and each line that it cannot place, with its file and line. It stores nothing.
 - **With `--apply`:** the command stores all the work records in one transaction, or none. It refuses while any line is unplaced (`unplaced_lines <count>`). It also refuses a name that the current file holds (`name_in_use <name>`). It refuses a work record that would be a third in `focus` (`focus_full <name>`). Nothing is lost silently.
 - **Import is for the chief's files only.** No queue item comes in unless you name it.
-- **`--queue N12,N34`:** imports only the named queue items. Each becomes a work record named `queue-<id>` in lower case. Its status is `idea` and its priority is `later`. The first line of its text is the next step. The command refuses an id that is not an open queue item (the Now item or a parked item) with `not_open_queue_item <id>`. The queue keeps every item.
+- **`--queue N12,N34`:** imports only the named queue items. Each becomes a work record named `queue-<id>` in lower case. Its status is `idea` and its priority is `later`. The first line of its text is the next step, and the rest of the text is not copied. The queue keeps the full item. The command refuses an id that is not an open queue item (the Now item or a parked item) with `not_open_queue_item <id>`. The queue keeps every item.
 
 An unplaced line with the number 0 is a whole-file problem. It means a file that cannot be read, a file with no heading, or a name that two files use.
 
