@@ -6,6 +6,7 @@ mod build_features;
 mod channels;
 mod cli;
 mod crash_guard;
+mod cron;
 mod inbound;
 mod log_trim;
 mod machine_stats;
