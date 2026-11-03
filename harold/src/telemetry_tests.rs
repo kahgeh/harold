@@ -2416,6 +2416,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .chain([
             INVENTORY_FULL_READS_CARD.to_string(),
             REX_READS_SLOW_CARD.to_string(),
+            REMOTE_ORDER_UNREADABLE_CARD.to_string(),
         ])
         .chain(AGENT_CARDS.map(str::to_string))
         .collect();
@@ -2590,6 +2591,7 @@ const AGENT_CARDS: [&str; 11] = [
 const UNREADABLE_BLOCKS_CARD: &str = "Unreadable blocks, last 24 h, by pane";
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
+const REMOTE_ORDER_UNREADABLE_CARD: &str = "Remote order unreadable, by day";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
@@ -2759,7 +2761,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         let filtered = containers[tile["containerId"].as_str().unwrap()]
             && name != SPOKEN_LINES_DROPPED_CARD
             && name != INVENTORY_FULL_READS_CARD
-            && name != REX_READS_SLOW_CARD;
+            && name != REX_READS_SLOW_CARD
+            && name != REMOTE_ORDER_UNREADABLE_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.
