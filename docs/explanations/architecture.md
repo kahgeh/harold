@@ -146,7 +146,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-26: ADR 0020, each machine runs one TTS server, built for its platform (the MLX worker on macOS, the ONNX worker on Linux), with Kokoro by default and other models only when they are on the approved model list. The user approved two exceptions: Kokoro for Linux from a GitHub release pinned by SHA-256, and NVIDIA's proprietary CUDA wheels. [ADR 0020](../adr/0020-each-machine-runs-one-tts-server-built-for-its-platform-and-downloads-only-approved-models.md)
 - 2026-10-26: ADR 0021, the pod's shared tools write `withdrawn/`, `started/` and `merged/` files once, and Harold reads them first, with the older git and worktree sources as a fallback. `pod_stats` also reads the agent snapshot, pane ids and folders only, to count pods and agents by role. [ADR 0021](../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)
 - 2026-11-03: ADR 0028, work records live in their own Turso files, and Harold itself moves the open ones to a new file every `rotation_days` days after a count check. [ADR 0028](../adr/0028-work-records-live-in-rotating-turso-files-of-their-own.md)
-- 2026-11-03: The release tool only reads: it takes each spec's state from `read_specs` in `pod_stats.rs`, so the pod metrics and the next release cannot disagree. [Release reference](../references/tools/release.md)
+- 2026-11-03: The release tool only reads: it takes each spec's state from `read_specs` in `pod_stats.rs`, so the pod metrics and the next release use one rule. They differ only where the poller's record of worktrees seen to go is the only source of a merge. [Release reference](../references/tools/release.md)
 
 ## Departures from the standards
 

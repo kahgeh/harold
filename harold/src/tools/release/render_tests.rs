@@ -144,3 +144,19 @@ fn json_holds_the_same_lists() {
     assert_eq!(product["not_clear"][0]["id"], "harold-agent-metrics");
     assert_eq!(product["other_commits"], 0);
 }
+
+#[test]
+fn in_progress_line_with_no_known_count_shows_no_suffix() {
+    let product = ProductNext {
+        name: "keymap".into(),
+        in_progress: vec![line("alpha", "First")],
+        ..Default::default()
+    };
+
+    let actual = text(&NextResponse {
+        products: vec![product],
+    });
+
+    assert!(actual.contains("    alpha  First\n"), "{actual}");
+    assert!(!actual.contains("commits)"), "{actual}");
+}

@@ -83,19 +83,16 @@ async fn gather(
         },
     )?;
 
-    // Ancestry: a completed spec is in the release when its commit is in the tag.
-    let mut in_release = HashSet::new();
-    if let Some(tag) = &release {
-        for spec in specs.iter().filter(|s| s.state == SpecState::Completed) {
-            let Some(commit) = &spec.merged_commit else {
-                continue;
-            };
-            let args = ["merge-base", "--is-ancestor", commit, &tag.name];
-            if ask(git, &product.repo, &args).await?.is_some() {
-                in_release.insert(commit.clone());
-            }
-        }
-    }
+    // Ancestry: a completed spec is in the release when the tag reaches its commit.
+    let commits: Vec<&str> = specs
+        .iter()
+        .filter(|spec| spec.state == SpecState::Completed)
+        .filter_map(|spec| spec.merged_commit.as_deref())
+        .collect();
+    let in_release = match &release {
+        Some(tag) => in_release(git, &product.repo, &tag.name, &commits).await?,
+        None => HashSet::new(),
+    };
 
     // Branches: the commits of each in-progress spec over the base branch.
     let listing = ask(git, &product.repo, &["worktree", "list", "--porcelain"]).await?;
@@ -104,9 +101,16 @@ async fn gather(
     for spec in specs.iter().filter(|s| s.state == SpecState::InProgress) {
         let commits = match branches.get(&spec.id) {
             Some(branch) => {
-                let range = format!("{origin}..{branch}");
+                // `refs/heads/` stops a tag with the branch name from taking its place.
+                let range = format!("{origin}..refs/heads/{branch}");
                 let count = ask(git, &product.repo, &["rev-list", "--count", &range]).await?;
-                count.and_then(|text| text.trim().parse::<u32>().ok())
+                // The spec has a branch. When the count fails (for example the product
+                // has no `origin/<base>`), the count is unknown and shows as 0.
+                Some(
+                    count
+                        .and_then(|text| text.trim().parse::<u32>().ok())
+                        .unwrap_or(0),
+                )
             }
             None => None,
         };
@@ -144,20 +148,28 @@ async fn gather(
         },
     );
 
-    // Other commits: the commits after the tag, less the commits that the merged list
-    // holds. No release gives 0.
+    // Other commits: the commits on the base branch after the tag that no commit of a
+    // listed merged spec reaches. A spec merges as several commits, so the count walks
+    // from each of them. No release gives 0. When the count fails, it stays 0.
     if let Some(tag) = &release {
-        let range = format!("{}..{origin}", tag.name);
-        let count = ask(git, &product.repo, &["rev-list", "--count", &range]).await?;
-        let after_tag = count
-            .and_then(|text| text.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        let listed = specs
+        let listed: Vec<String> = specs
             .iter()
             .filter(|spec| next.merged.iter().any(|line| line.id == spec.id))
-            .filter(|spec| spec.merged_commit.is_some())
-            .count();
-        next.other_commits = after_tag.saturating_sub(u32::try_from(listed).unwrap_or(u32::MAX));
+            .filter_map(|spec| spec.merged_commit.as_deref())
+            .map(|commit| format!("^{commit}"))
+            .collect();
+        let tag_exclusion = format!("^{}", tag.name);
+        let mut args = vec![
+            "rev-list",
+            "--count",
+            origin.as_str(),
+            tag_exclusion.as_str(),
+        ];
+        args.extend(listed.iter().map(String::as_str));
+        let count = ask(git, &product.repo, &args).await?;
+        next.other_commits = count
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(0);
     }
     Ok(next)
 }
@@ -167,6 +179,45 @@ async fn gather(
 async fn ask(git: &impl Git, repo: &Path, args: &[&str]) -> Result<Option<String>, &'static str> {
     let output = git.run(repo, args).await.ok_or(NO_ANSWER)?;
     Ok(output.success.then_some(output.stdout))
+}
+
+/// The commits that the tag reaches. One call lists the commits that the tag does not
+/// reach. When that call fails (for example, a commit is unknown), one call per commit
+/// answers instead. A hash that git prints matches a commit by prefix.
+async fn in_release(
+    git: &impl Git,
+    repo: &Path,
+    tag: &str,
+    commits: &[&str],
+) -> Result<HashSet<String>, &'static str> {
+    if commits.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let exclusion = format!("^{tag}");
+    let mut args = vec!["rev-list", "--no-walk=unsorted", exclusion.as_str()];
+    args.extend(commits);
+    if let Some(text) = ask(git, repo, &args).await? {
+        let printed: Vec<&str> = text.lines().map(str::trim).collect();
+        return Ok(commits
+            .iter()
+            .filter(|commit| {
+                !printed
+                    .iter()
+                    .any(|hash| hash.starts_with(**commit) || commit.starts_with(hash))
+            })
+            .map(|commit| commit.to_string())
+            .collect());
+    }
+    let mut reached = HashSet::new();
+    for commit in commits {
+        if ask(git, repo, &["merge-base", "--is-ancestor", commit, tag])
+            .await?
+            .is_some()
+        {
+            reached.insert(commit.to_string());
+        }
+    }
+    Ok(reached)
 }
 
 /// The newest tag that matches `v[0-9]*` on `origin/<base>`, with the time of its commit.

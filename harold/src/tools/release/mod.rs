@@ -1,5 +1,5 @@
 //! The release tool: what each product's next release holds. Outside this module only
-//! `NAME` and `start` are used. The tool only reads, so it keeps no store.
+//! `NAME`, `start` and `render` are used. The tool only reads, so it keeps no store.
 
 use harold_api::tools::release::v1::release_service_server::ReleaseServiceServer;
 use tonic::service::Routes;

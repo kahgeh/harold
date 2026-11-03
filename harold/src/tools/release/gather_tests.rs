@@ -189,6 +189,28 @@ fn ancestor(commit: &str) -> [&str; 4] {
     ["merge-base", "--is-ancestor", commit, "v1.0.0"]
 }
 
+/// The one call that lists the merged commits that the tag does not reach.
+fn unreached(commits: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = ["rev-list", "--no-walk=unsorted", "^v1.0.0"]
+        .map(String::from)
+        .into();
+    args.extend(commits.iter().map(|commit| commit.to_string()));
+    args
+}
+
+/// The count of commits that the tag and the listed commits do not reach.
+fn others(commits: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = ["rev-list", "--count", "origin/main", "^v1.0.0"]
+        .map(String::from)
+        .into();
+    args.extend(commits.iter().map(|commit| format!("^{commit}")));
+    args
+}
+
+fn strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
 #[tokio::test]
 async fn tag_that_is_not_v_star_is_not_a_release() {
     let fixture = Fixture::new();
@@ -211,10 +233,11 @@ async fn merged_commit_inside_the_tag_is_not_listed() {
     let fixture = Fixture::new();
     fixture.spec("alpha", "# alpha: First\n");
     fixture.merge("alpha", COMMIT);
+    // The tag reaches the commit, so the call prints nothing.
     let git = fixture
         .git_with_tag()
-        .answer(&ancestor(COMMIT), true, "")
-        .answer(&["rev-list", "--count", "v1.0.0..origin/main"], true, "0\n");
+        .answer(&strs(&unreached(&[COMMIT])), true, "")
+        .answer(&strs(&others(&[])), true, "0\n");
 
     let next = fixture.next(&git).await;
 
@@ -230,27 +253,79 @@ async fn merged_commit_after_the_tag_is_listed() {
     fixture.merge("alpha", COMMIT);
     let git = fixture
         .git_with_tag()
-        .answer(&ancestor(COMMIT), false, "")
-        .answer(&["rev-list", "--count", "v1.0.0..origin/main"], true, "3\n");
+        .answer(&strs(&unreached(&[COMMIT])), true, &format!("{COMMIT}\n"))
+        .answer(&strs(&others(&[COMMIT])), true, "0\n");
 
     let next = fixture.next(&git).await;
 
     assert_eq!(ids(&next.merged), ["alpha"]);
-    // Three commits after the tag, and the listed spec holds one of them.
-    assert_eq!(next.other_commits, 2);
+    // A spec that merged as several commits leaves no other commit.
+    assert_eq!(next.other_commits, 0);
 }
 
 #[tokio::test]
-async fn other_commits_never_go_below_zero() {
+async fn a_direct_commit_after_the_specs_is_one_other_commit() {
     let fixture = Fixture::new();
     fixture.spec("alpha", "# alpha: First\n");
     fixture.merge("alpha", COMMIT);
     let git = fixture
         .git_with_tag()
-        .answer(&ancestor(COMMIT), false, "")
-        .answer(&["rev-list", "--count", "v1.0.0..origin/main"], true, "0\n");
+        .answer(&strs(&unreached(&[COMMIT])), true, &format!("{COMMIT}\n"))
+        .answer(&strs(&others(&[COMMIT])), true, "1\n");
 
-    assert_eq!(fixture.next(&git).await.other_commits, 0);
+    assert_eq!(fixture.next(&git).await.other_commits, 1);
+}
+
+#[tokio::test]
+async fn an_unreached_commit_matches_by_prefix() {
+    let fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    // Git prints a longer hash than the merged file holds.
+    let long = format!("{COMMIT}{}", "0".repeat(24));
+    let git = fixture
+        .git_with_tag()
+        .answer(&strs(&unreached(&[COMMIT])), true, &format!("{long}\n"))
+        .answer(&strs(&others(&[COMMIT])), true, "0\n");
+
+    assert_eq!(ids(&fixture.next(&git).await.merged), ["alpha"]);
+}
+
+#[tokio::test]
+async fn a_failed_batch_call_falls_back_to_one_call_per_commit() {
+    let fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    fixture.spec("beta", "# beta: Second\n");
+    fixture.merge("beta", "fedcba9876543210fedcba9876543210fedcba98");
+    let beta = "fedcba9876543210fedcba9876543210fedcba98";
+    let git = fixture
+        .git_with_tag()
+        .answer(&strs(&unreached(&[COMMIT, beta])), false, "")
+        .answer(&ancestor(COMMIT), true, "")
+        .answer(&ancestor(beta), false, "")
+        .answer(&strs(&others(&[beta])), true, "0\n");
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(ids(&next.merged), ["beta"]);
+    assert_eq!(next.unavailable, None);
+}
+
+#[tokio::test]
+async fn other_commits_stay_zero_when_the_count_fails() {
+    let fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    let git =
+        fixture
+            .git_with_tag()
+            .answer(&strs(&unreached(&[COMMIT])), true, &format!("{COMMIT}\n"));
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(ids(&next.merged), ["alpha"]);
+    assert_eq!(next.other_commits, 0);
 }
 
 #[tokio::test]
@@ -273,7 +348,7 @@ async fn started_spec_with_a_branch_counts_its_commits() {
     fixture.start("alpha");
     fixture.worktree("alpha", "alpha-work");
     let git = fixture.git().answer(
-        &["rev-list", "--count", "origin/main..alpha-work"],
+        &["rev-list", "--count", "origin/main..refs/heads/alpha-work"],
         true,
         "4\n",
     );
@@ -282,6 +357,22 @@ async fn started_spec_with_a_branch_counts_its_commits() {
 
     assert_eq!(ids(&next.in_progress), ["alpha"]);
     assert_eq!(next.in_progress[0].commits, 4);
+    assert!(next.not_clear.is_empty());
+}
+
+#[tokio::test]
+async fn a_branch_whose_count_fails_stays_in_progress() {
+    let mut fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.start("alpha");
+    fixture.worktree("alpha", "alpha-work");
+    // The product has no `origin/main`, so the count fails.
+    let git = fixture.git();
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(ids(&next.in_progress), ["alpha"]);
+    assert_eq!(next.in_progress[0].commits, 0);
     assert!(next.not_clear.is_empty());
 }
 
@@ -349,7 +440,11 @@ async fn each_spec_list_agrees_with_read_specs_state() {
         "Waiting for your approval.\n\n# waiting: Waiting\n",
     );
     let git = fixture.git().answer(
-        &["rev-list", "--count", "origin/main..building-work"],
+        &[
+            "rev-list",
+            "--count",
+            "origin/main..refs/heads/building-work",
+        ],
         true,
         "2\n",
     );

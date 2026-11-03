@@ -82,7 +82,8 @@ fn section(out: &mut String, heading: &str, lines: &[Line], always: bool, counts
             *out += "  ";
             *out += &line.title;
         }
-        if counts {
+        // A count of 0 means the branch count is unknown.
+        if counts && line.commits > 0 {
             let unit = if line.commits == 1 {
                 "commit"
             } else {
@@ -121,7 +122,8 @@ fn lines_json(lines: &[Line], counts: bool) -> Vec<Value> {
     lines
         .iter()
         .map(|line| {
-            if counts {
+            // A count of 0 means the branch count is unknown.
+            if counts && line.commits > 0 {
                 json!({ "id": line.id, "title": line.title, "commits": line.commits })
             } else {
                 json!({ "id": line.id, "title": line.title })
