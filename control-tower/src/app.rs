@@ -1154,11 +1154,6 @@ impl App {
         self.now_line = None;
         self.focus.clear();
         self.snapshot.harold_version = None;
-        // The view command shows only while live, so a lost connection goes back to the
-        // agent view: the user is never held in the work view.
-        if self.view_mode == ViewMode::Work {
-            self.toggle_view();
-        }
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
         } else {
@@ -1241,11 +1236,12 @@ impl App {
     /// The commands that show now, in table order. Empty when the connection is not live.
     /// It ignores the palette and its query.
     pub fn commands(&self) -> Vec<PaletteEntry> {
-        if self.connection != ConnectionState::Live {
+        let live = self.connection == ConnectionState::Live;
+        let in_work = self.view_mode == ViewMode::Work;
+        if !live && !in_work {
             return Vec::new();
         }
         let [view, voice, messaging, call, watches] = &COMMAND_TABLE;
-        let in_work = self.view_mode == ViewMode::Work;
         // The App runs this entry itself: see `run_entry`.
         let mut all = vec![PaletteEntry {
             label: if in_work { view.on } else { view.off },
@@ -1257,6 +1253,10 @@ impl App {
                 Effect::WorkRefresh
             },
         }];
+        // Without a live connection the work view offers only the way back.
+        if !live {
+            return all;
+        }
         match self.voice() {
             VoiceState::On => all.push(PaletteEntry {
                 label: voice.off,
@@ -1631,6 +1631,14 @@ impl App {
         }
     }
 
+    /// Whether the status line shows the failed work read.
+    fn work_status_shows(&self) -> bool {
+        matches!(
+            &self.runtime_status,
+            Some(RuntimeStatus::SourceError(detail)) if detail == WORK_LIST_UNAVAILABLE
+        )
+    }
+
     /// The list that shows now.
     pub const fn view_mode(&self) -> ViewMode {
         self.view_mode
@@ -1640,8 +1648,7 @@ impl App {
     /// to the last row, and an open record stays open. A good read clears the status
     /// that a failed read set.
     pub fn observe_work_list(&mut self, listing: WorkListing) -> bool {
-        if self.runtime_status == Some(RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.to_owned()))
-        {
+        if self.work_status_shows() {
             self.runtime_status = None;
         }
         let changed =
@@ -1653,10 +1660,10 @@ impl App {
     }
 
     /// Sets the status line after a failed read of the work tool. The last rows stay.
-    /// A retry status stays, because the runtime reads its delay.
+    /// Another status stays, so a work read never hides a retry or a failed action.
     pub fn work_list_failed(&mut self) {
         self.work.pending = None;
-        if matches!(self.runtime_status, Some(RuntimeStatus::Retrying { .. })) {
+        if self.runtime_status.is_some() && !self.work_status_shows() {
             return;
         }
         self.runtime_status = Some(RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.to_owned()));
@@ -1882,10 +1889,6 @@ struct RowLabel {
     suffix_len: usize,
 }
 
-/// Rows sharing a group and name get a suffix so they stay distinguishable:
-/// ` :window.pane` when they share a session, otherwise the session's second
-/// word (or, lacking one, the whole tmux target) is added so same-address panes
-/// of different sessions in one group still differ.
 /// The number of lines a work record shows: its title, the priority and status, the
 /// waits for, the next step, the decisions head, one line for each decision, the links
 /// head and one line for each link. The scroll stops at the last line.
@@ -1893,6 +1896,10 @@ pub fn record_line_count(record: &WorkDetail) -> usize {
     6 + record.decisions.len() + record.links.len()
 }
 
+/// Rows sharing a group and name get a suffix so they stay distinguishable:
+/// ` :window.pane` when they share a session, otherwise the session's second
+/// word (or, lacking one, the whole tmux target) is added so same-address panes
+/// of different sessions in one group still differ.
 fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
     rows.iter()
         .map(|row| {
@@ -3595,34 +3602,68 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_connection_returns_to_the_agent_view() {
+    fn a_stream_drop_keeps_the_work_view_and_the_open_record() {
         let mut app = work_app();
         app.handle_key(KeyCode::Char('l'));
         app.observe_work_record(work_detail("a", 0, 0));
         app.mark_disconnected();
+        assert_eq!(app.view_mode(), ViewMode::Work);
+        assert_eq!(
+            app.work_record().map(|detail| detail.name.as_str()),
+            Some("a")
+        );
+        // Only the way back shows, and it works.
+        let labels: Vec<_> = app.commands().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["View: agents"]);
+        app.handle_key(KeyCode::Char('/'));
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["View: agents"]);
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
         assert_eq!(app.view_mode(), ViewMode::Agents);
-        assert_eq!(app.work_record(), None);
+        // In the agent view a lost connection still hides every command.
+        assert!(app.commands().is_empty());
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
     }
 
     #[test]
-    fn work_list_failed_keeps_another_status() {
+    fn capital_v_leaves_the_work_view_after_a_stream_drop() {
         let mut app = work_app();
-        app.set_runtime_status(RuntimeStatus::CallFailed("x".into()));
-        app.observe_work_list(work_listing(&["a"], 0));
+        app.mark_disconnected();
+        assert_eq!(app.handle_key(KeyCode::Char('m')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+    }
+
+    #[test]
+    fn work_list_failed_never_replaces_another_status() {
+        let others = [
+            RuntimeStatus::CallFailed("x".into()),
+            RuntimeStatus::NavigationFailed("x".into()),
+            RuntimeStatus::NavigationUnavailable,
+            RuntimeStatus::SourceError("Harold stream closed".into()),
+            RuntimeStatus::Retrying {
+                endpoint: "e".into(),
+                detail: "d".into(),
+                delay_ms: 5,
+            },
+        ];
+        for other in others {
+            let mut app = work_app();
+            app.set_runtime_status(other.clone());
+            app.work_list_failed();
+            assert_eq!(app.runtime_status(), Some(&other));
+            // A good read clears only the work status.
+            app.observe_work_list(work_listing(&["a"], 0));
+            assert_eq!(app.runtime_status(), Some(&other));
+        }
+        let mut app = work_app();
+        app.work_list_failed();
+        app.work_list_failed();
         assert_eq!(
             app.runtime_status(),
-            Some(&RuntimeStatus::CallFailed("x".into()))
+            Some(&RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.into()))
         );
-        app.set_runtime_status(RuntimeStatus::Retrying {
-            endpoint: "e".into(),
-            detail: "d".into(),
-            delay_ms: 5,
-        });
-        app.work_list_failed();
-        assert!(matches!(
-            app.runtime_status(),
-            Some(RuntimeStatus::Retrying { .. })
-        ));
     }
 
     fn live_watches_app(running: u32, paused: u32, capped: u32) -> App {
