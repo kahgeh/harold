@@ -59,3 +59,9 @@ pub(crate) mod waiting;
 #[cfg(test)]
 #[path = "waiting_tests.rs"]
 mod waiting_tests;
+
+pub(crate) mod focus;
+
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
