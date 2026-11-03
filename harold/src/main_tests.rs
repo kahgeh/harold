@@ -4646,6 +4646,15 @@ async fn agent_seen_works_with_an_unknown_focus() {
     })
     .await;
     item_where(&mut rig.receiver, |item| item.focus_known == Some(false)).await;
+    let started = std::time::Instant::now();
+    while lines_with(&logs, "focus unknown").is_empty() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "no focus unknown line: {}",
+            logs.text()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
     let unknown = lines_with(&logs, "focus unknown");
     assert_eq!(unknown.len(), 1, "{unknown:?}");
     assert!(unknown[0].contains("reason="), "{}", unknown[0]);
