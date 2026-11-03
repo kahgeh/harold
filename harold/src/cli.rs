@@ -2230,7 +2230,60 @@ fn watch_time(ms: i64, offset: time::UtcOffset) -> String {
     format!("{:02}:{:02}", moment.hour(), moment.minute())
 }
 
-fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String {
+/// The local minute (`YYYY-MM-DD HH:MM`) of `ms` at `offset`.
+fn watch_local_minute(ms: i64, offset: time::UtcOffset) -> String {
+    let moment = time::OffsetDateTime::from_unix_timestamp(ms / 1000)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        moment.year(),
+        u8::from(moment.month()),
+        moment.day(),
+        moment.hour(),
+        moment.minute()
+    )
+}
+
+/// A local minute (`YYYY-MM-DD HH:MM`) as `HH:MM` when it is on the date of `today` (also
+/// `YYYY-MM-DD HH:MM`), and in full on another date.
+fn watch_short_minute(minute: &str, today: &str) -> String {
+    match (minute.get(..10), today.get(..10), minute.get(11..)) {
+        (Some(day), Some(this_day), Some(time)) if day == this_day => time.to_string(),
+        _ => minute.to_string(),
+    }
+}
+
+/// The schedule of a cron watch for `list`: `, cron <expr>, next <time>, checked <time>`.
+/// The next time is the first match after the local minute of `now_ms`. Empty for a watch
+/// at an interval.
+fn watch_cron_part(watch: &watch_api::Watch, offset: time::UtcOffset, now_ms: i64) -> String {
+    if watch.cron.is_empty() {
+        return String::new();
+    }
+    let today = watch_local_minute(now_ms, offset);
+    let mut part = format!(", cron {}", watch.cron);
+    let next = crate::cron::Cron::parse(&watch.cron)
+        .ok()
+        .zip(crate::cron::LocalMinute::parse(&today))
+        .and_then(|(cron, now)| cron.next_after(now));
+    if let Some(next) = next {
+        part.push_str(&format!(
+            ", next {}",
+            watch_short_minute(&next.to_string(), &today)
+        ));
+    }
+    if !watch.checked_local.is_empty() {
+        part.push_str(&format!(
+            ", checked {}",
+            watch_short_minute(&watch.checked_local, &today)
+        ));
+    }
+    part
+}
+
+fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset, now_ms: i64) -> String {
+    let cron = watch_cron_part(watch, offset, now_ms);
     let counts = format!(
         "{}, {}, ${:.2}",
         plural(watch.runs, "run", "runs"),
@@ -2248,7 +2301,7 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
             .map(|ms| format!(" until {}", watch_time(ms, offset)))
             .unwrap_or_default();
         return format!(
-            "{} paused{capped}{until} in {}, {counts}",
+            "{} paused{capped}{until} in {}{cron}, {counts}",
             watch.name, watch.folder
         );
     }
@@ -2258,7 +2311,7 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
             None => "no end".to_string(),
         };
         return format!(
-            "{} running in {} {until}, limit {} s, {counts}",
+            "{} running in {} {until}{cron}, limit {} s, {counts}",
             watch.name, watch.folder, watch.run_limit_secs
         );
     }
@@ -2272,11 +2325,27 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
     format!("{} ended ({why}) in {}, {counts}", watch.name, watch.folder)
 }
 
-fn watch_reminder_line(reminder: &watch_api::Reminder, offset: time::UtcOffset) -> String {
+/// The line of a waiting reminder. A cron reminder can be days away, so its due time has
+/// the date when it is not today, and the line names its expression.
+fn watch_reminder_line(
+    reminder: &watch_api::Reminder,
+    offset: time::UtcOffset,
+    now_ms: i64,
+) -> String {
+    let due = if reminder.cron.is_empty() {
+        watch_time(reminder.due_at_ms, offset)
+    } else {
+        let today = watch_local_minute(now_ms, offset);
+        let due = watch_local_minute(reminder.due_at_ms, offset);
+        format!(
+            "{}, cron {}",
+            watch_short_minute(&due, &today),
+            reminder.cron
+        )
+    };
     format!(
-        "reminder {} due {}, reporting to {}",
+        "reminder {} due {due}, reporting to {}",
         reminder.name,
-        watch_time(reminder.due_at_ms, offset),
         if reminder.report_to.is_empty() {
             "self"
         } else {
@@ -2443,16 +2512,19 @@ pub(crate) async fn watch_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as i64);
                 let mut lines: Vec<String> = listed
                     .watches
                     .iter()
-                    .map(|watch| watch_list_line(watch, offset))
+                    .map(|watch| watch_list_line(watch, offset, now_ms))
                     .collect();
                 lines.extend(
                     listed
                         .reminders
                         .iter()
-                        .map(|reminder| watch_reminder_line(reminder, offset)),
+                        .map(|reminder| watch_reminder_line(reminder, offset, now_ms)),
                 );
                 lines.push(format!("spent today ${:.2}", listed.spent_usd));
                 Ok(lines.join("\n"))
@@ -6790,7 +6862,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            watch_list_line(&running, utc),
+            watch_list_line(&running, utc, 0),
             "after-release running in /work/chief-of-pods until 20:45, limit 300 s, 3 runs, 1 report, $0.03"
         );
         let ended = watch_api::Watch {
@@ -6801,7 +6873,7 @@ mod tests {
             ..running
         };
         assert_eq!(
-            watch_list_line(&ended, utc),
+            watch_list_line(&ended, utc, 0),
             "after-release ended (daily budget spent) in /work/chief-of-pods, 1 run, 2 reports, $0.03"
         );
     }
@@ -7257,7 +7329,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            watch_list_line(&open, utc),
+            watch_list_line(&open, utc, 0),
             "pods running in /work/x no end, limit 300 s, 3 runs, 1 report, $0.03"
         );
         let paused = watch_api::Watch {
@@ -7268,7 +7340,7 @@ mod tests {
             ..open.clone()
         };
         assert_eq!(
-            watch_list_line(&paused, utc),
+            watch_list_line(&paused, utc, 0),
             "pods paused until 16:30 in /work/x, 3 runs, 1 report, $0.03"
         );
         let held = watch_api::Watch {
@@ -7276,7 +7348,7 @@ mod tests {
             ..paused.clone()
         };
         assert_eq!(
-            watch_list_line(&held, utc),
+            watch_list_line(&held, utc, 0),
             "pods paused in /work/x, 3 runs, 1 report, $0.03"
         );
         let capped = watch_api::Watch {
@@ -7285,7 +7357,7 @@ mod tests {
             ..paused
         };
         assert_eq!(
-            watch_list_line(&capped, utc),
+            watch_list_line(&capped, utc, 0),
             "pods paused (budget) until 00:00 in /work/x, 3 runs, 1 report, $0.03"
         );
         let waiting = watch_api::Reminder {
@@ -7295,8 +7367,112 @@ mod tests {
             cron: String::new(),
         };
         assert_eq!(
-            watch_reminder_line(&waiting, utc),
+            watch_reminder_line(&waiting, utc, 0),
             "reminder release-check due 16:30, reporting to chief"
+        );
+    }
+
+    /// The instant of `hour:minute:second` UTC on 2026-11-03, a Tuesday.
+    fn on_3_november_utc(hour: u8, minute: u8, second: u8) -> i64 {
+        time::Date::from_calendar_date(2026, time::Month::November, 3)
+            .unwrap()
+            .with_hms(hour, minute, second)
+            .unwrap()
+            .assume_utc()
+            .unix_timestamp()
+            * 1000
+    }
+
+    #[test]
+    fn a_cron_watch_list_line_shows_its_cron_next_time_and_checked_minute() {
+        let sydney = time::UtcOffset::from_hms(10, 0, 0).unwrap();
+        // 14:31:20 in the local zone.
+        let now = on_3_november_utc(4, 31, 20);
+        let standup = watch_api::Watch {
+            name: "standup".into(),
+            folder: "/work/x".into(),
+            running: true,
+            ends_at_ms: None,
+            runs: 3,
+            reports: 1,
+            cost_usd: 0.03,
+            run_limit_secs: 300,
+            cron: "*/15 9-17 * * mon-fri".into(),
+            checked_local: "2026-11-03 14:31".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            watch_list_line(&standup, sydney, now),
+            "standup running in /work/x no end, cron */15 9-17 * * mon-fri, next 14:45, \
+             checked 14:31, limit 300 s, 3 runs, 1 report, $0.03"
+        );
+        // After 17:45 the next match is the next day: the date is shown.
+        let evening = watch_api::Watch {
+            checked_local: "2026-11-03 17:50".into(),
+            ..standup.clone()
+        };
+        assert_eq!(
+            watch_list_line(&evening, sydney, on_3_november_utc(7, 50, 0)),
+            "standup running in /work/x no end, cron */15 9-17 * * mon-fri, \
+             next 2026-11-04 09:00, checked 17:50, limit 300 s, 3 runs, 1 report, $0.03"
+        );
+        let paused = watch_api::Watch {
+            running: false,
+            paused: true,
+            pause_how: "cli".into(),
+            checked_local: "2026-11-02 23:59".into(),
+            ..standup.clone()
+        };
+        assert_eq!(
+            watch_list_line(&paused, sydney, now),
+            "standup paused in /work/x, cron */15 9-17 * * mon-fri, next 14:45, \
+             checked 2026-11-02 23:59, 3 runs, 1 report, $0.03"
+        );
+        // Not checked yet: no checked minute.
+        let fresh = watch_api::Watch {
+            checked_local: String::new(),
+            ..standup.clone()
+        };
+        assert_eq!(
+            watch_list_line(&fresh, sydney, now),
+            "standup running in /work/x no end, cron */15 9-17 * * mon-fri, next 14:45, \
+             limit 300 s, 3 runs, 1 report, $0.03"
+        );
+        let ended = watch_api::Watch {
+            running: false,
+            stop_reason: "stopped".into(),
+            ..standup
+        };
+        assert_eq!(
+            watch_list_line(&ended, sydney, now),
+            "standup ended (stopped) in /work/x, 3 runs, 1 report, $0.03"
+        );
+    }
+
+    #[test]
+    fn a_cron_reminder_list_line_shows_its_cron_and_due_date() {
+        let sydney = time::UtcOffset::from_hms(10, 0, 0).unwrap();
+        let now = on_3_november_utc(4, 31, 20);
+        // Monday 2026-11-09 08:30 in the local zone.
+        let due = on_3_november_utc(0, 0, 0) + 6 * 86_400_000 - 10 * 3_600_000 + 510 * 60_000;
+        let digest = watch_api::Reminder {
+            name: "digest-check".into(),
+            report_to: "chief".into(),
+            due_at_ms: due,
+            cron: "30 8 * * mon".into(),
+        };
+        assert_eq!(
+            watch_reminder_line(&digest, sydney, now),
+            "reminder digest-check due 2026-11-09 08:30, cron 30 8 * * mon, reporting to chief"
+        );
+        let today = watch_api::Reminder {
+            due_at_ms: on_3_november_utc(5, 0, 0),
+            cron: "0 15 * * *".into(),
+            ..digest
+        };
+        assert_eq!(
+            watch_reminder_line(&today, sydney, now),
+            "reminder digest-check due 15:00, cron 0 15 * * *, reporting to chief"
         );
     }
 

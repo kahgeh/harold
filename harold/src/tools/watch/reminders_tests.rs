@@ -382,11 +382,13 @@ async fn list_shows_each_waiting_reminder_with_its_time() {
                 name: "first".into(),
                 report_to: "chief".into(),
                 due_at_ms: now + 10 * MINUTE_MS,
+                cron: None,
             },
             ReminderInfo {
                 name: "second".into(),
                 report_to: "self".into(),
                 due_at_ms: now + 30 * MINUTE_MS,
+                cron: None,
             },
         ]
     );
@@ -689,7 +691,69 @@ async fn a_cron_reminder_past_120_minutes_is_dropped() {
     assert!(
         text.lines().any(|line| line.contains("reminder ended")
             && line.contains(&name)
-            && line.contains("reason=\"dropped\"")),
+            && line.contains("reason=\"dropped\"")
+            && line.contains("schedule=\"cron\"")),
         "{text}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_reminder_form_logs_its_schedule_with_late_s_and_missed_0() {
+    let logs = CapturedLogs::start();
+    let (h, _local) = harness_utc().await;
+    to_one_past_midnight(UtcOffset::UTC).await;
+    let name = |what: &str| format!("{what}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let (by_in, by_at, by_cron) = (name("in"), name("at"), name("cron"));
+    h.scheduler
+        .remind(remind_in(&h, &by_in, 10, "x"))
+        .await
+        .unwrap();
+    h.scheduler
+        .remind(remind_at(&h, &by_at, "00:21").await)
+        .await
+        .unwrap();
+    h.scheduler
+        .remind(remind_cron(&h, &by_cron, "31 0 * * *").await)
+        .await
+        .unwrap();
+
+    pass(35 * MINUTE).await;
+
+    let text = logs.text();
+    for (reminder, schedule) in [(&by_in, "in"), (&by_at, "at"), (&by_cron, "cron")] {
+        let typed = text
+            .lines()
+            .find(|line| {
+                line.contains("reminder typed")
+                    && line.contains(&format!("reminder=\"{reminder}\""))
+            })
+            .unwrap_or_else(|| panic!("no reminder typed for {reminder}:\n{text}"));
+        for field in [
+            format!("schedule=\"{schedule}\""),
+            " missed=0".into(),
+            " late_s=0".into(),
+        ] {
+            assert!(typed.contains(&field), "{field}: {typed}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn list_shows_the_cron_of_a_cron_reminder() {
+    let (h, _local) = harness_utc().await;
+    let day_start = to_one_past_midnight(UtcOffset::UTC).await;
+    h.scheduler
+        .remind(remind_cron(&h, "digest", "30 8 * * *").await)
+        .await
+        .unwrap();
+    h.scheduler
+        .remind(remind_in(&h, "plain", 10, "x"))
+        .await
+        .unwrap();
+
+    let listed = h.scheduler.list().await.unwrap().reminders;
+    let by_name = |name: &str| listed.iter().find(|r| r.name == name).unwrap().clone();
+    assert_eq!(by_name("digest").cron.as_deref(), Some("30 8 * * *"));
+    assert_eq!(by_name("digest").due_at_ms, day_start + 510 * MINUTE_MS);
+    assert_eq!(by_name("plain").cron, None);
 }

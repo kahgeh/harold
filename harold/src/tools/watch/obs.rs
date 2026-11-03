@@ -169,17 +169,87 @@ pub(super) fn reminder_set(reminder: &str, due_at: &str) {
     info!(reminder, due_at, "reminder set");
 }
 
-/// `reminder typed`, with the seconds after its time.
-pub(super) fn reminder_typed(reminder: &str, late_s: i64) {
-    info!(reminder, late_s, "reminder typed");
+/// `reminder typed`, with the seconds after its time. A reminder is one shot, so
+/// `missed` is always 0.
+pub(super) fn reminder_typed(reminder: &str, late_s: i64, schedule: Schedule) {
+    info!(
+        reminder,
+        late_s,
+        schedule = schedule.as_str(),
+        missed = 0u32,
+        "reminder typed"
+    );
     count_reminder("typed");
 }
 
 /// `reminder ended`: dropped or cancelled.
-pub(super) fn reminder_ended(reminder: &str, reason: ReminderEnd) {
+pub(super) fn reminder_ended(reminder: &str, reason: ReminderEnd, schedule: Schedule) {
     let reason = reason.as_str();
-    info!(reminder, reason, "reminder ended");
+    info!(
+        reminder,
+        reason,
+        schedule = schedule.as_str(),
+        "reminder ended"
+    );
     count_reminder(reason);
+}
+
+/// How a watch or a reminder is timed: the `schedule` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Schedule {
+    /// A watch at an interval (`--every`).
+    Every,
+    /// A reminder at a local time (`--at`).
+    At,
+    /// A reminder after some minutes (`--in`).
+    In,
+    /// A watch or a reminder on a cron expression (`--cron`).
+    Cron,
+}
+
+impl Schedule {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Schedule::Every => "every",
+            Schedule::At => "at",
+            Schedule::In => "in",
+            Schedule::Cron => "cron",
+        }
+    }
+}
+
+/// `watch run skipped` with `reason` `missed`: the newest cron match is older than 120
+/// minutes, so nothing runs. `missed` is the count of matches that gave no run, the
+/// newest one included. Counted as the `missed` outcome of `watch.runs`.
+pub(super) fn run_missed(watch: &str, folder: &str, missed: u32) {
+    warn!(watch, reason = "missed", missed, "watch run skipped");
+    count_run(folder, "missed");
+}
+
+/// The cron expression stored for the watch does not parse, so the watch does not run.
+/// The expression is not logged.
+pub(super) fn cron_not_read(watch: &str) {
+    warn!(watch, reason = "bad_cron", "watch cron not read");
+}
+
+/// The store did not keep the newest checked minute of a cron watch. The task keeps it in
+/// memory and tries again at its next check.
+pub(super) fn checked_not_stored(watch: &str) {
+    warn!(
+        watch,
+        reason = "store_failed",
+        "watch checked minute not stored"
+    );
+}
+
+fn count_run(folder: &str, outcome: &str) {
+    telemetry::instruments().watch_runs.add(
+        1,
+        &[
+            KeyValue::new("folder", folder.to_owned()),
+            KeyValue::new("outcome", outcome.to_owned()),
+        ],
+    );
 }
 
 /// Where a run's time went, in whole milliseconds.
@@ -222,13 +292,19 @@ pub(super) struct RunObs {
     run: u32,
     /// How many folders the skill's `add-dirs` gave the run; never the paths.
     add_dirs: AtomicU32,
-    /// Why the run starts now. The run's log lines do not show it yet.
-    #[allow(dead_code)]
+    /// Why the run starts now, and how late. `watch run finished` shows it.
     due: RunDue,
+    schedule: Schedule,
 }
 
 impl RunObs {
-    pub(super) fn start(watch: &str, folder: &str, run: u32, due: RunDue) -> Self {
+    pub(super) fn start(
+        watch: &str,
+        folder: &str,
+        run: u32,
+        due: RunDue,
+        schedule: Schedule,
+    ) -> Self {
         let span = info_span!(
             target: TRACE_TARGET,
             "harold.watch.run",
@@ -245,6 +321,7 @@ impl RunObs {
             run,
             add_dirs: AtomicU32::new(0),
             due,
+            schedule,
         }
     }
 
@@ -317,6 +394,9 @@ impl RunObs {
                 wait_ms = timing.wait_ms,
                 run_ms = timing.run_ms,
                 add_dirs = self.add_dirs.load(Ordering::Relaxed),
+                schedule = self.schedule.as_str(),
+                late_s = self.due.late_s,
+                missed = self.due.missed,
                 "watch run finished"
             );
         });
@@ -376,13 +456,7 @@ impl RunObs {
     }
 
     fn count_run(&self, outcome: &str) {
-        telemetry::instruments().watch_runs.add(
-            1,
-            &[
-                KeyValue::new("folder", self.folder.clone()),
-                KeyValue::new("outcome", outcome.to_owned()),
-            ],
-        );
+        count_run(&self.folder, outcome);
     }
 
     /// The report this run made, for the lines about it.

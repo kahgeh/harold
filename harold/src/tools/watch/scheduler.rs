@@ -16,7 +16,7 @@ use tracing::Instrument as _;
 use super::answer::{self, Answer, Cause, Failure};
 use super::clock::{LocalOffset, WAKE_EVERY, clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
-use super::obs::{self, EndReason, How, RunDue, RunObs, Timing};
+use super::obs::{self, EndReason, How, RunDue, RunObs, Schedule, Timing};
 use super::reminders::{ReminderInfo, Reminders};
 use super::report::{ReportSlot, Target, Typist};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
@@ -197,8 +197,7 @@ pub(super) struct CronCheck {
     /// The run to start now, or `None`.
     pub run: Option<RunDue>,
     /// The matches that gave no run, because the newest one is older than 120 minutes.
-    /// 0 when none. The log does not show it yet.
-    #[allow(dead_code)]
+    /// 0 when none.
     pub missed_all: u32,
 }
 
@@ -858,8 +857,11 @@ impl Scheduler {
         now_ms: i64,
         memory: &mut Option<LocalMinute>,
     ) -> Option<RunDue> {
-        // `start` checked the expression, so a stored one always parses.
-        let cron = Cron::parse(text).ok()?;
+        // `start` checked the expression, so a stored one parses unless the store changed.
+        let Ok(cron) = Cron::parse(text) else {
+            obs::cron_not_read(&row.name);
+            return None;
+        };
         let now = self.local_now().await;
         let stored = row.checked_local.as_deref().and_then(LocalMinute::parse);
         let checked = stored.max(*memory);
@@ -867,6 +869,9 @@ impl Scheduler {
         let step = cron_check(&cron, checked, &now, now_ms >= row.next_run_at_ms);
         self.store_checked(row, stored, step.checked).await;
         *memory = Some(step.checked);
+        if step.missed_all > 0 {
+            obs::run_missed(&row.name, &row.folder, step.missed_all);
+        }
         step.run
     }
 
@@ -886,11 +891,7 @@ impl Scheduler {
             .set_checked_local(CheckedKind::Watch, &row.name, &minute.to_string())
             .await;
         if written.is_err() {
-            tracing::warn!(
-                watch = row.name.as_str(),
-                reason = "store_failed",
-                "watch checked minute not stored"
-            );
+            obs::checked_not_stored(&row.name);
         }
     }
 
@@ -961,7 +962,12 @@ impl Scheduler {
         slot: &Arc<ReportSlot>,
     ) -> Flow {
         let run_no = row.runs + 1;
-        let obs = RunObs::start(&row.name, &row.folder, run_no, due);
+        let schedule = if row.cron.is_some() {
+            Schedule::Cron
+        } else {
+            Schedule::Every
+        };
+        let obs = RunObs::start(&row.name, &row.folder, run_no, due, schedule);
         let span = obs.span().clone();
         self.run_in_span(row, run_no, &obs, cancelled, shutdown, slot)
             .instrument(span)

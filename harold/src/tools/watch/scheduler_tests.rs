@@ -1818,7 +1818,7 @@ async fn a_capped_watch_stays_paused_over_a_restart_and_resumes_at_the_next_day_
 // ---------------------------------------------------------------------------
 
 /// One task wake-up and a few seconds more, so a task that wakes every minute sees a jump.
-const AFTER_A_WAKE: Duration = Duration::from_secs(65);
+pub(in crate::tools::watch) const AFTER_A_WAKE: Duration = Duration::from_secs(65);
 
 #[tokio::test(start_paused = true)]
 async fn pause_for_resumes_at_its_wall_clock_end_after_a_computer_sleep() {
@@ -2159,12 +2159,12 @@ fn hours(count: i8) -> UtcOffset {
 }
 
 /// The instant the local clock at `offset` reads `text` (`YYYY-MM-DD HH:MM`).
-fn instant(text: &str, offset: UtcOffset) -> i64 {
+pub(in crate::tools::watch) fn instant(text: &str, offset: UtcOffset) -> i64 {
     clock::local_ms(text, offset).unwrap()
 }
 
 /// Moves the test wall clock to `at_ms`, forward or back.
-fn set_wall_clock(at_ms: i64) {
+pub(in crate::tools::watch) fn set_wall_clock(at_ms: i64) {
     clock::jump_wall_clock(at_ms - clock_ms());
 }
 
@@ -2177,7 +2177,12 @@ fn now_at(text: &str) -> LocalNow {
 }
 
 impl Harness {
-    fn cron_checked(&self, name: &str, cron: &str, minutes: u32) -> Checked {
+    pub(in crate::tools::watch) fn cron_checked(
+        &self,
+        name: &str,
+        cron: &str,
+        minutes: u32,
+    ) -> Checked {
         Checked {
             every_minutes: 0,
             cron: Some(Cron::parse(cron).unwrap()),
@@ -2185,7 +2190,7 @@ impl Harness {
         }
     }
 
-    async fn start_cron(&self, name: &str, cron: &str, minutes: u32) {
+    pub(in crate::tools::watch) async fn start_cron(&self, name: &str, cron: &str, minutes: u32) {
         self.scheduler
             .start(self.cron_checked(name, cron, minutes))
             .await
@@ -2504,4 +2509,62 @@ async fn a_cron_watch_with_an_end_ends_and_a_replacement_resets_the_checked_minu
         h.checked_local("w").await.as_deref(),
         Some("2026-11-03 12:26")
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_of_a_cron_watch_with_no_missed_match_runs_nothing() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    pass(5 * MINUTE + Duration::from_secs(5)).await;
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+    // Down from 12:05 to 12:08: no match in between.
+    pass(3 * MINUTE).await;
+
+    let (scheduler, runner, _stop) = restarted(&h);
+    scheduler.resume().await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(runner.calls(), 0, "nothing was missed");
+    pass(MINUTE).await;
+    assert_eq!(runner.calls(), 0);
+    pass(MINUTE).await;
+    assert_eq!(runner.calls(), 1, "12:10");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_pause_of_a_cron_watch_over_three_matches_runs_once_at_its_end() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    pass(5 * MINUTE).await;
+    // Paused from 12:05 to 12:37: 12:10, 12:20 and 12:30 pass while paused.
+    h.pause("w", Some(32)).await;
+    pass(32 * MINUTE - Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 0);
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(h.runner.calls(), 1, "the end of the pause runs once");
+    pass(2 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1, "no older match is added");
+    pass(MINUTE).await;
+    assert_eq!(h.runner.calls(), 2, "12:40");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stored_cron_that_does_not_parse_is_logged_and_runs_nothing() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    set_column(&h, "w", "cron = 'not a cron'").await;
+
+    pass(15 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 0);
+    let text = logs.text();
+    let lines = log_lines(&text, "watch cron not read", "w");
+    assert!(!lines.is_empty(), "{text}");
+    assert!(lines[0].contains("reason=\"bad_cron\""), "{}", lines[0]);
+    assert!(!lines[0].contains("not a cron"), "the expression stays out");
+    assert!(lines.len() <= 16, "at most once a minute: {}", lines.len());
 }

@@ -566,3 +566,39 @@ async fn a_cron_watch_starts_and_a_cron_reminder_answers_its_next_match() {
         )
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn list_sends_the_cron_and_checked_minute_of_a_watch_and_the_cron_of_a_reminder() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let service = service(&h);
+    let mut asked = request(&h, "standup");
+    (asked.every_minutes, asked.cron) = (None, Some("*/15 9-17 * * mon-fri".into()));
+    service.start_watch(Request::new(asked)).await.unwrap();
+    service
+        .remind(Request::new(pb::RemindRequest {
+            name: "digest-check".into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: Some(pb::remind_request::When::Cron("30 8 * * mon".into())),
+            report_to: "chief".into(),
+            text: "read the weekly digest".into(),
+        }))
+        .await
+        .unwrap();
+
+    let listed = service
+        .list_watches(Request::new(pb::ListWatchesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let watch = listed.watches.iter().find(|w| w.name == "standup").unwrap();
+    assert_eq!(watch.cron, "*/15 9-17 * * mon-fri");
+    let row = h.store.get("standup").await.unwrap().unwrap();
+    assert_eq!(Some(watch.checked_local.clone()), row.checked_local);
+    assert_eq!(watch.checked_local.len(), 16, "YYYY-MM-DD HH:MM");
+    let reminder = listed
+        .reminders
+        .iter()
+        .find(|r| r.name == "digest-check")
+        .unwrap();
+    assert_eq!(reminder.cron, "30 8 * * mon");
+}

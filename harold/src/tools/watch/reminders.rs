@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::watch as signal;
 
 use super::clock::{LocalOffset, WAKE_EVERY, clock_ms, local_ms, local_text};
-use super::obs::{self, ReminderEnd, ReportObs};
+use super::obs::{self, ReminderEnd, ReportObs, Schedule};
 use super::report::{ReportSlot, Target, Typist};
 use super::scheduler::{RemindRefusal, interrupted};
 use super::store::{NewReminder, ReminderRow, ReminderState, StoreError, WatchStore};
@@ -42,6 +42,8 @@ pub(super) struct ReminderInfo {
     pub report_to: String,
     /// When it is due, with the local offset in force now.
     pub due_at_ms: i64,
+    /// The cron expression, or `None` for a reminder that is not a cron reminder.
+    pub cron: Option<String>,
 }
 
 struct Task {
@@ -56,6 +58,15 @@ pub(super) struct Reminders {
     retry: Duration,
     shutdown: signal::Receiver<()>,
     tasks: Mutex<HashMap<String, Task>>,
+}
+
+/// How `row` is timed: `--in` keeps a fixed instant, `--at` and `--cron` a local time.
+fn schedule(row: &ReminderRow) -> Schedule {
+    match (&row.cron, row.due_at_ms) {
+        (Some(_), _) => Schedule::Cron,
+        (None, Some(_)) => Schedule::In,
+        (None, None) => Schedule::At,
+    }
 }
 
 /// Who a reminder types to: the chief, or the agent in the folder that set it.
@@ -182,6 +193,7 @@ impl Reminders {
                     name: row.name,
                     report_to: row.report_to,
                     due_at_ms,
+                    cron: row.cron,
                 });
             }
         }
@@ -238,12 +250,17 @@ impl Reminders {
         if let Some(task) = task {
             let _ = task.cancel.send(true);
         }
+        let schedule = schedule(row);
         match state {
             ReminderState::Typed => {
-                obs::reminder_typed(&row.name, ((now - due_at_ms) / 1000).max(0));
+                obs::reminder_typed(&row.name, ((now - due_at_ms) / 1000).max(0), schedule);
             }
-            ReminderState::Dropped => obs::reminder_ended(&row.name, ReminderEnd::Dropped),
-            ReminderState::Cancelled => obs::reminder_ended(&row.name, ReminderEnd::Cancelled),
+            ReminderState::Dropped => {
+                obs::reminder_ended(&row.name, ReminderEnd::Dropped, schedule);
+            }
+            ReminderState::Cancelled => {
+                obs::reminder_ended(&row.name, ReminderEnd::Cancelled, schedule);
+            }
             ReminderState::Waiting => {}
         }
         Ok(true)

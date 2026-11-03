@@ -768,3 +768,156 @@ async fn the_pause_and_resume_lines_carry_only_their_fields_and_no_text() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Schedules: `schedule`, `late_s` and `missed`
+// ---------------------------------------------------------------------------
+
+use super::tests::{AFTER_A_WAKE, instant, set_wall_clock};
+
+/// The number after `field=` on `line`.
+fn number(line: &str, field: &str) -> i64 {
+    let rest = line
+        .split(&format!(" {field}="))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {field} in {line}"));
+    rest.split(|c: char| !c.is_ascii_digit() && c != '-')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap_or_else(|_| panic!("{field} is not a number in {line}"))
+}
+
+fn runs_of(folder: &str, outcome: &str) -> Option<u64> {
+    test_support::exact_counter_value("watch.runs", &[("folder", folder), ("outcome", outcome)])
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_at_an_interval_logs_schedule_every_late_s_and_missed_0() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let name = unique("every");
+    h.start(&name, 10, 120).await;
+    pass(Duration::from_secs(10 * 60 + 5)).await;
+
+    let text = logs.text();
+    let finished = lines(&text, "watch run finished", &name);
+    assert_eq!(finished.len(), 2, "{text}");
+    for line in &finished {
+        assert!(line.contains("schedule=\"every\""), "{line}");
+        assert!(line.contains(" missed=0"), "{line}");
+        assert!((0..=1).contains(&number(line, "late_s")), "{line}");
+    }
+    // The three fields reach the export on the line itself.
+    let exported = exported_logs_of(&name)
+        .iter()
+        .map(|log| format!("{:?}", log.record))
+        .find(|record| record.contains("watch run finished"))
+        .expect("the finished line is exported");
+    for field in ["schedule", "late_s", "missed"] {
+        assert!(exported.contains(field), "{field}: {exported}");
+        assert!(crate::telemetry::ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_run_after_a_sleep_over_three_matches_logs_missed_2_and_no_skip() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let folder = h.folder.0.to_string_lossy().into_owned();
+    set_wall_clock(instant("2026-11-03 12:00", time::UtcOffset::UTC));
+    let name = unique("slept");
+    h.start_cron(&name, "*/10 * * * *", 600).await;
+    assert_eq!(runs_of(&folder, "missed"), Some(0), "counted from 0");
+    pass(Duration::from_secs(5)).await;
+
+    // Asleep from 12:00 to 12:35: 12:10, 12:20 and 12:30 give one run, for 12:30.
+    crate::tools::watch::clock::jump_wall_clock(35 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+
+    let text = logs.text();
+    let finished = lines(&text, "watch run finished", &name);
+    assert_eq!(finished.len(), 1, "{text}");
+    assert!(finished[0].contains("schedule=\"cron\""), "{}", finished[0]);
+    assert!(finished[0].contains(" missed=2"), "{}", finished[0]);
+    let late_s = number(finished[0], "late_s");
+    assert!((5 * 60..=7 * 60).contains(&late_s), "from 12:30: {late_s}");
+    assert!(
+        lines(&text, "watch run skipped", &name).is_empty(),
+        "{text}"
+    );
+    assert_eq!(runs_of(&folder, "missed"), Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_match_past_the_window_logs_a_missed_skip_and_counts_missed() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let folder = h.folder.0.to_string_lossy().into_owned();
+    set_wall_clock(instant("2026-11-03 12:00", time::UtcOffset::UTC));
+    let name = unique("gone");
+    h.start_cron(&name, "5 12 * * *", 600).await;
+    assert_eq!(runs_of(&folder, "missed"), Some(0), "counted from 0");
+    pass(Duration::from_secs(5)).await;
+
+    // Asleep for 3 hours: 12:05 is outside the 120-minute window.
+    crate::tools::watch::clock::jump_wall_clock(180 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+    pass(Duration::from_secs(5 * 60)).await;
+
+    assert_eq!(h.runner.calls(), 0);
+    let text = logs.text();
+    let skipped = lines(&text, "watch run skipped", &name);
+    assert_eq!(skipped.len(), 1, "logged once: {text}");
+    assert!(skipped[0].contains("WARN"), "{}", skipped[0]);
+    assert!(skipped[0].contains("reason=\"missed\""), "{}", skipped[0]);
+    assert!(skipped[0].contains(" missed=1"), "{}", skipped[0]);
+    assert_eq!(runs_of(&folder, "missed"), Some(1));
+    assert_eq!(runs_of(&folder, "skipped"), Some(0), "its own outcome");
+    let exported = exported_logs_of(&name)
+        .iter()
+        .map(|log| format!("{:?}", log.record))
+        .find(|record| record.contains("watch run skipped"))
+        .expect("the skipped line is exported");
+    assert!(exported.contains("missed"), "{exported}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_cron_watch_logs_schedule_cron_with_missed_0() {
+    use crate::tools::watch::validate::{Caller, CheckedPause, CheckedResume, Target as Aim};
+
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", time::UtcOffset::UTC));
+    let name = unique("resumed");
+    h.start_cron(&name, "*/10 * * * *", 600).await;
+    pass(Duration::from_secs(5 * 60)).await;
+    h.scheduler
+        .pause(CheckedPause {
+            target: Aim::Name(name.clone()),
+            for_minutes: None,
+            caller: Caller::Cli,
+        })
+        .await
+        .unwrap();
+    pass(Duration::from_secs(30 * 60)).await;
+    h.scheduler
+        .resume_watches(CheckedResume {
+            target: Aim::Name(name.clone()),
+            caller: Caller::Cli,
+        })
+        .await
+        .unwrap();
+    pass(Duration::from_secs(5)).await;
+
+    let text = logs.text();
+    let finished = lines(&text, "watch run finished", &name);
+    assert_eq!(finished.len(), 1, "{text}");
+    for field in ["schedule=\"cron\"", " missed=0", " late_s=0"] {
+        assert!(finished[0].contains(field), "{field}: {}", finished[0]);
+    }
+}

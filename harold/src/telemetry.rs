@@ -1172,9 +1172,9 @@ pub(crate) fn register_merge_counters(product: &str) {
     }
 }
 
-/// Every `outcome` of `watch.runs` that is a failure or a skipped run, counted from 0 at a
-/// watch's start so HyperDX reads the first one as a rise.
-pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 7] = [
+/// Every `outcome` of `watch.runs` that is a failure, a skipped run or a missed cron run,
+/// counted from 0 at a watch's start so HyperDX reads the first one as a rise.
+pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 8] = [
     "timeout",
     "process_failed",
     "run_budget_reached",
@@ -1182,9 +1182,10 @@ pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 7] = [
     "skill_missing",
     "max_turns_reached",
     "skipped",
+    "missed",
 ];
 
-/// Records 0 once for the failure and skipped outcomes of `watch.runs` and for
+/// Records 0 once for the failure, skipped and missed outcomes of `watch.runs` and for
 /// `watch.cost_usd` of `folder`. The watch tool calls it when a watch starts or resumes.
 pub(crate) fn register_watch_counters(folder: &str) {
     let instruments = instruments();

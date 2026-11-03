@@ -256,7 +256,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 
 The chief's update in a call is the fallback sentence when `harold.call_update` has `outcome = fallback`; its `reason` says why. A run that fails or passes 8 s also writes the WARN line `call update model failed` with `reason` (`failed` or `timeout`) inside the span. No span or line holds the sentence, the prompt or the model's text. To see how the updates go, count `harold.call_update` spans by `outcome` and `reason`, and read their duration, which should be under 5 s. Info only: no alert, because this update is rare and the user hears the fallback sentence.
 
-A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id. The lines `watch run finished` and `watch run failed` carry `wait_ms` (the wait for the model) and `run_ms` (the Claude Code run).
+A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id. The lines `watch run finished` and `watch run failed` carry `wait_ms` (the wait for the model) and `run_ms` (the Claude Code run). `watch run finished` also carries `schedule`, `late_s` and `missed`: see [Watch schedules](#watch-schedules). A cron match that is too old to run makes no span.
 
 `harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list, or the desk rule, kept the update from going out, with `reason` `not_listed` or `at_desk`, and `channel` the key of the list that held it, or `machine_audio_output` for `at_desk`), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
@@ -322,7 +322,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
-| `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`) |
+| `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`). `missed` is a cron match that did not run because it was older than 120 minutes |
 | `watch.cost_usd` | counter, `USD` | `folder` |
 | `harold.multiplexer.calls` | counter, `{call}` | `multiplexer` (`rex` or `tmux`), `host` (the empty string for Harold's own machine, or the label of a Rex host in `rex_hosts`), `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`, `other`), `outcome` (`ok`, `failed`, `timeout`, `absent`, `malformed`), `purpose` (`state`, `prompt`, `writer`; on `screen_read` only). `malformed` means the multiplexer ran and gave output that Harold could not read: a tmux pane listing with a wrong field, or a Rex reply that is not JSON |
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome`, `purpose` (`state`, `prompt`, `writer`; on `screen_read` only) |
@@ -528,8 +528,8 @@ The watch tool logs the pause and resume of a watch and the life of each reminde
 | `watch paused` (`info`) | `watch`, `how` (`cli`, `control_tower`, `timed` or `budget_day`), `paused_until` (the local time the pause ends; absent for a pause with no end) |
 | `watch resumed` (`info`) | `watch`, `how` (the same values: who ended the pause, or `timed` when the time ran out, or `budget_day` when the next day started) |
 | `reminder set` (`info`) | `reminder`. The due time, `due_at`, stays in `harold.log` |
-| `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder) |
-| `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it) |
+| `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder), `schedule` (`in`, `at` or `cron`), `missed` (always 0: a reminder is one shot) |
+| `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it), `schedule` (`in`, `at` or `cron`) |
 
 A reminder also writes the lines of its report slot: `watch report waiting`, `watch report typed` and `watch report replaced`. They carry `watch=<reminder name>` and `run=0`. Read them for the reasons a reminder waited, for example `agent_busy`.
 
@@ -538,7 +538,9 @@ A reminder also writes the lines of its report slot: `watch report waiting`, `wa
 | `reminder` | The name of a reminder. A short name the user or an agent chose, never the text |
 | `paused_until` | The local time a pause ends, as `YYYY-MM-DD HH:MM` |
 | `how` | On `watch paused` and `watch resumed`: `cli`, `control_tower`, `timed` or `budget_day`. On `watch started`: `started`, `replaced` or `resumed` |
-| `late_s` | Seconds. On `reminder typed`: how late the line came |
+| `late_s` | Seconds. On `reminder typed`: how late the line came. On `watch run finished`: how late the run started. See [Watch schedules](#watch-schedules) |
+| `schedule` | How the watch or the reminder is timed: `every`, `at`, `in` or `cron` |
+| `missed` | The count of older cron matches that did not run. See [Watch schedules](#watch-schedules) |
 
 | Metric | Kind | Attributes |
 |---|---|---|
@@ -555,6 +557,29 @@ Harold counts `watch.reminders` from 0 for each of the three outcomes when the w
 **Watches paused over 24 hours.** The card in the Pods group lists each watch whose newest line is a `watch paused` with no `paused_until`, older than 24 hours. It reads only the `watch started`, `watch paused`, `watch resumed` and `watch stopped` lines. The window is the last 30 days, so the card drops a pause older than 30 days. A forgotten pause shows here until then. A pause with an end, such as `budget_day`, ends by itself and is not listed. The exported lines do not hold `ends_at`, so the card cannot tell an open-ended watch from a watch with an end. A watch with an end that has a pause with no end shows too, and that is also a forgotten pause. The card is info only.
 
 **Reminders dropped today.** The card in the Pods group lists each `reminder ended` line with `reason = dropped` since the start of the day, with the reminder name and the time. It is a card, not an alert. A row means a reminder that no one received.
+
+## Watch schedules
+
+A watch runs every few minutes (`--every`) or at the minutes of a cron expression (`--cron`). A reminder is due after some minutes (`--in`), at a local time (`--at`), or at the next minute of a cron expression (`--cron`). These lines answer the question: did my schedule run when I expected?
+
+| Line | Fields |
+|---|---|
+| `watch run finished` (`info`) | `watch`, `run`, `outcome`, `cost_usd`, `duration_ms`, `wait_ms`, `run_ms`, `add_dirs`, and `schedule` (`every` or `cron`), `late_s`, `missed` |
+| `watch run skipped` (`warn`) | `watch`, `reason`. `model_busy`: the run waited more than 60 seconds for the model; the line also has `run`. `missed`: the newest cron match is older than 120 minutes, so nothing runs; the line also has `missed` |
+| `watch checked minute not stored` (`warn`) | `watch`, `reason` (`store_failed`). The store did not keep the newest minute a cron watch checked. The watch keeps the minute in memory and goes on. While the store fails, the line comes once a minute, at each check |
+| `watch cron not read` (`warn`) | `watch`, `reason` (`bad_cron`). The stored cron expression does not parse, so the watch does not run. The line comes once a minute. The expression is not logged. `start` refuses a bad expression, so expected: 0 |
+
+- `late_s` is the seconds from the time the run or the typing was for, to the run or the typing. That time is the matched minute (`cron`), the set time (`at`), the due time (`in`) or the slot (`every`). The run at once after a resume has `late_s` 0.
+- `missed` on `watch run finished` is the count of older cron matches skipped before this run, 0 when none. A sleep or a restart over three matches gives one run, for the newest match, with `missed` 2. That run logs no `watch run skipped`. `missed` is always 0 for `every`, `at` and `in`.
+- `missed` on `watch run skipped` is the count of matches that gave no run, the newest one included. Each such line counts the `missed` outcome of `watch.runs`, not `skipped`. Harold counts `missed` from 0 for each folder when a watch starts or resumes.
+- A cron reminder whose match is older than 120 minutes logs `reminder ended` with `reason = dropped` and `schedule = cron`.
+- `harold tool watch list` shows a cron watch as `cron */15 9-17 * * mon-fri, next 14:45, checked 14:31`. `next` is the first match after now. `checked` is the newest minute the watch checked. Each time has the date (`YYYY-MM-DD HH:MM`) when it is not today. A cron reminder shows its due time and `cron <expression>`.
+
+**Question this answers.** Did my schedule run when I expected?
+
+- Optimisation: none. A schedule costs one check a minute.
+- Detection: any `missed` outcome of `watch.runs` in a day is a cue to look (info, not an alert). No card in `dashboard.json` shows it yet. To read it, use [the counter rule](#the-counter-rule) on `watch.runs` with `outcome = missed`, by `folder`, over the last 24 hours. A rise above 0 names the folder.
+- Diagnosis: `late_s` and `missed` on the line, and the watch's `checked` minute in `harold tool watch list`.
 
 ## The dashboards
 

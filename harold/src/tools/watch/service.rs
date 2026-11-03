@@ -158,8 +158,7 @@ impl WatchService for WatchToolService {
                     name: reminder.name,
                     report_to: reminder.report_to,
                     due_at_ms: reminder.due_at_ms,
-                    // Task 7 fills this in; the list holds no cron reminder yet.
-                    cron: String::new(),
+                    cron: reminder.cron.unwrap_or_default(),
                 })
                 .collect(),
         }))
