@@ -418,7 +418,7 @@ hides that agent, the filter is cleared.
 
 ### Focus tracking
 
-Harold, not the control-tower, reads the focused pane once a second.
+A newer Harold, not the control-tower, reads the focused pane once a second. With an older Harold, the control-tower still reads the focused pane itself.
 
 For Rex agents (`block:` ids) Harold reads `rex client ls --json` and `session.view`
 and counts the focused block of the active window as seen. Rex does not say which
@@ -430,7 +430,8 @@ client's active pane counts as seen. Focus is sampled once a second, so leaving 
 than about a second before its agent finishes can keep that agent from waiting.
 
 The top border of the agent list shows `(focus tracking off)` when Harold has no reading
-(`focus_known` is false) and before the first snapshot. While it is off, a finishing agent
+(`focus_known` is false). Before the first snapshot and with an older Harold, the
+control-tower's own probe decides. With a newer Harold, `focus_known` decides. While it is off, a finishing agent
 is still marked. It stops waiting when it is seen by `AgentSeen` or when it goes Working again.
 
 The detail panel (the `AGENT DETAILS` box) shows the lines `STATE`, `TARGET`, `PANE ID`,

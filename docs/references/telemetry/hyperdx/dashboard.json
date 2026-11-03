@@ -1296,7 +1296,7 @@
     },
     {
       "id": "work-waiting-p50",
-      "name": "Work waiting: p50 of the time before you look, by bucket",
+      "name": "Work waiting: p50 of the time before it was seen, by bucket",
       "x": 0,
       "y": 80,
       "w": 12,

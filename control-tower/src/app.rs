@@ -1452,7 +1452,7 @@ impl App {
                 };
                 // A newer Harold clears the agent's mark when the focus moves to its pane.
                 // An older Harold does not: without a focus probe, jumping from the
-                // control-tower is the only visit the local rule can see.
+                // control-tower is the only way the local rule can see that the agent was seen.
                 if self.snapshot.focus_known.is_none() && !self.focus_tracking {
                     self.waiting.retain(|waiting| *waiting != incarnation);
                 }
@@ -3961,7 +3961,7 @@ mod tests {
         assert_eq!(
             waiting_panes(&app),
             ["%2"],
-            "tracking on: only a real visit clears it"
+            "tracking on: only a real seen clears it"
         );
     }
 

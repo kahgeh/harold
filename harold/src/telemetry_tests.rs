@@ -2641,7 +2641,7 @@ const AGENT_CARDS: [&str; 13] = [
     "Slow inventory scans against load, by hour",
     UNREADABLE_BLOCKS_CARD,
     "Now: agents waiting beside agents working",
-    "Work waiting: p50 of the time before you look, by bucket",
+    "Work waiting: p50 of the time before it was seen, by bucket",
 ];
 /// The work records group's cards, in the order the dashboard lists them.
 const WORK_CARDS: [&str; 3] = [

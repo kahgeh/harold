@@ -985,7 +985,7 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
 }
 
 /// Replaces the rows `harold.agents.waiting` reads. The gauge reports only the rows the
-/// caller passes. Harold sends one row for each role it holds, with 0 for a role with no
+/// caller passes. Harold sends one row for each role and `pod.product` pair it holds, with 0 for a role with no
 /// waiting agent.
 pub(crate) fn note_agents_waiting(counts: Vec<WaitingCount>) {
     // The rows are one value for the whole process. In a test build the waiting tasks of
