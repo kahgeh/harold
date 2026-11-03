@@ -136,10 +136,15 @@ pub(super) async fn run<G: Git>(
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            biased;
             _ = shutdown.changed() => return,
-            _ = ticks.tick() => {
-                publish(&service, OffsetDateTime::now_utc(), crate::telemetry::local_offset()).await;
-            }
+            _ = ticks.tick() => {}
+        }
+        // Shutdown also drops a publish under way: it only reads.
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => return,
+            () = publish(&service, OffsetDateTime::now_utc(), crate::telemetry::local_offset()) => {}
         }
     }
 }

@@ -3107,6 +3107,67 @@ async fn a_large_spec_that_is_not_approved_is_not_logged() {
     );
 }
 
+async fn large_spec_log_count(prepare: impl FnOnce(&Path)) -> usize {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    prepare(&files);
+    let logs = CapturedLogs::start();
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    stats.poll().await;
+    let line = format!("large spec approved pod.product={} spec.id=big", pod.name);
+    logs.text().matches(&line).count()
+}
+
+#[tokio::test]
+async fn a_completed_large_spec_is_not_logged() {
+    let count = large_spec_log_count(|files| {
+        write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+        put_started(files, "big", "2026-10-15T10:00:00Z");
+        put_merged(files, "big", "2026-10-16T10:00:00Z", COMMIT);
+        std::thread::sleep(Duration::from_millis(100));
+        put_approval(files, "big");
+    })
+    .await;
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn an_in_progress_large_spec_is_not_logged() {
+    let count = large_spec_log_count(|files| {
+        write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+        put_approval(files, "big");
+        put_started(files, "big", "2026-10-15T10:00:00Z");
+    })
+    .await;
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn a_large_spec_approved_before_the_first_merged_file_is_not_logged() {
+    let count = large_spec_log_count(|files| {
+        write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+        put_approval(files, "big");
+        std::thread::sleep(Duration::from_millis(100));
+        write(&files.join("merged/old.md"), "merged\n");
+    })
+    .await;
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn a_large_spec_approved_after_the_first_merged_file_is_logged_once() {
+    let count = large_spec_log_count(|files| {
+        write(&files.join("merged/old.md"), "merged\n");
+        std::thread::sleep(Duration::from_millis(100));
+        write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+        put_approval(files, "big");
+    })
+    .await;
+    assert_eq!(count, 1);
+}
+
 // --- the counted-tip file ---
 
 fn merges_of(pod: &Pod, spec: &str) -> Option<u64> {

@@ -1920,7 +1920,8 @@ impl<G: Git> PodStats<G> {
         self.tips.save(&product.name, &history.tip)?;
         let changes = self.specs.observe(&product.name, &specs);
         self.log_notices(&product.name, &notices);
-        self.log_large_specs(&product.name, &specs);
+        let cutoff = first_merged_file(&product.repo.join(POD_FOLDER), self.offset);
+        self.log_large_specs(&product.name, &specs, cutoff);
         if let TipMove::Merges(merges) = &moved {
             let is_spec = |id: &str| specs.iter().any(|spec| spec.id == id);
             for merge in merges {
@@ -2007,13 +2008,20 @@ impl<G: Git> PodStats<G> {
             .is_some_and(|output| output.success)
     }
 
-    /// Logs each large spec of `product` that has an approval, once.
-    fn log_large_specs(&mut self, product: &str, specs: &[SpecFacts]) {
+    /// Logs each large spec of `product` that is approved and not started, once. An
+    /// approval before `cutoff` (the earliest merged file) is history and is not logged;
+    /// with no `cutoff`, every approval counts.
+    fn log_large_specs(
+        &mut self,
+        product: &str,
+        specs: &[SpecFacts],
+        cutoff: Option<OffsetDateTime>,
+    ) {
         for spec in specs {
-            let approved = matches!(
-                spec.state,
-                SpecState::Approved | SpecState::InProgress | SpecState::Completed
-            ) && spec.approved_at.is_some();
+            let approved = spec.state == SpecState::Approved
+                && spec
+                    .approved_at
+                    .is_some_and(|at| cutoff.is_none_or(|cutoff| at >= cutoff));
             if spec.size != SpecSize::Large || !approved {
                 continue;
             }

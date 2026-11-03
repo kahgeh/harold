@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use time::format_description::well_known::Rfc3339;
@@ -6,7 +6,9 @@ use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
 use super::{PERIOD, publish, register, run};
-use crate::pod_stats::{INVENTORY_ITEM_DAYS, INVENTORY_ITEMS, INVENTORY_OLDEST_HOURS, POD_FOLDER};
+use crate::pod_stats::{
+    Git, GitOutput, INVENTORY_ITEM_DAYS, INVENTORY_ITEMS, INVENTORY_OLDEST_HOURS, POD_FOLDER,
+};
 use crate::telemetry::test_support;
 use crate::tools::release::gather::gather_tests::{FakeGit, Fixture};
 use crate::tools::release::service::ReleaseToolService;
@@ -255,4 +257,38 @@ async fn a_failed_read_keeps_the_last_numbers() {
     publish(&service, now(), UtcOffset::UTC).await;
 
     assert_eq!(items_of(&name), Some(2));
+}
+
+/// A `Git` that waits an hour of (paused) time before it asks the `FakeGit`.
+struct SlowGit(FakeGit);
+
+impl Git for SlowGit {
+    async fn run(&self, repo: &Path, args: &[&str]) -> Option<GitOutput> {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        self.0.run(repo, args).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drops_a_publish_in_flight() {
+    let folder = TempFolder::new();
+    let fixture = Fixture::new();
+    merge_on(&fixture, "alpha", "2026-11-01T00:00:00Z");
+    let registry = registry(&folder, &fixture, &unique_name(), false);
+    let service = ReleaseToolService::with_git(Some(registry), SlowGit(fixture.git()));
+    let (shutdown, receiver) = watch::channel(());
+    super::PUBLISHES.with(|count| count.set(0));
+
+    let task = tokio::spawn(run(service, PERIOD, receiver));
+    let_task_run().await;
+    // The first publish has started and waits on the slow git.
+    assert_eq!(super::PUBLISHES.with(|count| count.get()), 1);
+    assert!(!task.is_finished());
+
+    shutdown.send(()).expect("a receiver is listening");
+    let_task_run().await;
+
+    // No time passes: the task ends at once and does not wait for the git calls.
+    assert!(task.is_finished());
+    task.await.expect("the task does not panic");
 }
