@@ -74,6 +74,8 @@ pub(crate) struct Product {
     /// The base branch.
     pub base: String,
     pub slots: u32,
+    /// The registry marks the product with `paused = true`.
+    pub paused: bool,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +91,8 @@ struct Row {
     base: String,
     #[serde(default = "default_slots")]
     slots: u32,
+    #[serde(default)]
+    paused: bool,
 }
 
 fn default_slots() -> u32 {
@@ -113,6 +117,7 @@ pub(crate) fn read_registry(path: &Path) -> Result<Vec<Product>, String> {
             repo: expand_tilde(row.repo.trim()).into(),
             base: row.base,
             slots: row.slots,
+            paused: row.paused,
         })
         .collect())
 }

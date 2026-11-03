@@ -27,19 +27,24 @@ fn write(path: &Path, text: &str) {
 /// A `Git` that answers from a map. An argument list that the map lacks fails like a git
 /// command that exits with an error. `None` in the map is a git call with no answer.
 #[derive(Default)]
-struct FakeGit {
+pub(in crate::tools::release) struct FakeGit {
     answers: HashMap<Vec<String>, Option<(bool, String)>>,
 }
 
 impl FakeGit {
-    fn answer(mut self, args: &[&str], success: bool, stdout: &str) -> Self {
+    pub(in crate::tools::release) fn answer(
+        mut self,
+        args: &[&str],
+        success: bool,
+        stdout: &str,
+    ) -> Self {
         let key = args.iter().map(|arg| arg.to_string()).collect();
         self.answers
             .insert(key, Some((success, stdout.to_string())));
         self
     }
 
-    fn no_answer(mut self, args: &[&str]) -> Self {
+    pub(in crate::tools::release) fn no_answer(mut self, args: &[&str]) -> Self {
         let key = args.iter().map(|arg| arg.to_string()).collect();
         self.answers.insert(key, None);
         self
@@ -101,6 +106,7 @@ impl Fixture {
             repo: self.repo.clone(),
             base: "main".into(),
             slots: 3,
+            paused: false,
         }
     }
 

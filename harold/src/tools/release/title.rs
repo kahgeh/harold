@@ -2,10 +2,6 @@
 
 /// Returns the text after `<id>: ` in the first line that starts with `# `.
 /// Returns an empty string when there is no such line or no `<id>: ` prefix.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the service calls it in a later task")
-)]
 pub(super) fn spec_title(id: &str, markdown: &str) -> String {
     let Some(heading) = markdown.lines().find_map(|line| line.strip_prefix("# ")) else {
         return String::new();

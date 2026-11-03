@@ -35,6 +35,21 @@ pub(super) async fn next_for(
     }
 }
 
+/// A paused product has no lists: only its newest release.
+pub(super) async fn paused_for(git: &impl Git, product: &Product) -> ProductNext {
+    let origin = format!("origin/{}", product.base);
+    let mut next = ProductNext {
+        name: product.name.clone(),
+        paused: true,
+        ..Default::default()
+    };
+    match read_release(git, product, &origin).await {
+        Ok(tag) => next.release = tag.map(|tag| tag.name).unwrap_or_default(),
+        Err(reason) => next.unavailable = Some(reason),
+    }
+    next
+}
+
 async fn gather(
     git: &impl Git,
     product: &Product,
@@ -233,4 +248,4 @@ fn first_merged_file(pod: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
 
 #[cfg(test)]
 #[path = "gather_tests.rs"]
-mod gather_tests;
+pub(in crate::tools::release) mod gather_tests;

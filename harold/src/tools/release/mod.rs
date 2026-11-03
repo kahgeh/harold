@@ -6,21 +6,14 @@ use tonic::service::Routes;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the service calls them in a later task")
-)]
 mod classify;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the service calls them in a later task")
-)]
 mod gather;
+mod model;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the service calls them in a later task")
+    expect(dead_code, reason = "the CLI prints with it in a later task")
 )]
-mod model;
+mod render;
 mod service;
 mod title;
 

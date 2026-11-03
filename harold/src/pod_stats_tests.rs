@@ -50,6 +50,7 @@ impl Pod {
             repo: repo.to_path_buf(),
             base: "main".into(),
             slots,
+            paused: false,
         }
     }
 
@@ -213,6 +214,24 @@ fn the_registry_lists_products_in_the_alphabetical_order_of_their_names() {
 }
 
 #[test]
+fn the_registry_reads_the_paused_key_and_defaults_to_not_paused() {
+    let pod = Pod::new();
+    let path = registry(
+        &pod,
+        "[products.a]\nrepo = \"/a\"\nbase = \"main\"\npaused = true\n\n\
+         [products.b]\nrepo = \"/b\"\nbase = \"main\"\n",
+    );
+
+    let paused: Vec<(String, bool)> = read_registry(&path)
+        .unwrap()
+        .into_iter()
+        .map(|product| (product.name, product.paused))
+        .collect();
+
+    assert_eq!(paused, [("a".to_string(), true), ("b".to_string(), false)]);
+}
+
+#[test]
 fn the_registry_reads_products_and_defaults_slots_to_three() {
     let pod = Pod::new();
     let path = registry(
@@ -232,12 +251,14 @@ fn the_registry_reads_products_and_defaults_slots_to_three() {
                 repo: PathBuf::from(format!("{home}/x")),
                 base: "main".into(),
                 slots: 1,
+                paused: false,
             },
             Product {
                 name: "b".into(),
                 repo: PathBuf::from("/y"),
                 base: "trunk".into(),
                 slots: 3,
+                paused: false,
             },
         ]
     );
@@ -2638,6 +2659,7 @@ fn product_at(name: &str, repo: &Path) -> Product {
         repo: repo.to_path_buf(),
         base: "main".into(),
         slots: 1,
+        paused: false,
     }
 }
 
