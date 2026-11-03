@@ -2265,8 +2265,6 @@ fn watch_reminder_line(reminder: &watch_api::Reminder, offset: time::UtcOffset) 
     )
 }
 
-/// The count line for `pause --all` and `resume --all`. The daemon skips only the
-/// watches that the daily budget caps.
 /// The line for a pause. It names only what the daemon paused: a named watch that the
 /// daemon did not pause gives `paused 0`.
 fn watch_pause_line(
@@ -2295,6 +2293,8 @@ fn watch_resume_line(name: Option<&str>, resumed: &watch_api::ResumeResponse) ->
     }
 }
 
+/// The count line for `pause --all` and `resume --all`. The daemon skips only the
+/// watches that the daily budget caps.
 fn watch_count_line(verb: &str, done: &[String], skipped: &[String]) -> String {
     let mut line = format!("{verb} {}", done.len());
     if !skipped.is_empty() {

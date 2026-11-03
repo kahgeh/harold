@@ -1953,3 +1953,47 @@ async fn local_now_is_the_local_date_and_seconds_of_day_at_the_offset_now() {
         assert_eq!(now.day.len(), 10, "YYYY-MM-DD");
     }
 }
+
+/// Sets one column of the watch row `name` through a second connection to `watch.db`.
+async fn set_column(h: &Harness, name: &str, assignment: &str) {
+    let path = h._data.0.join("watch.db");
+    let database = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        &format!("UPDATE watches SET {assignment} WHERE name = ?1"),
+        [name],
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_store_read_is_logged_and_tried_again_and_the_watch_goes_on() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    // A text in an integer column: each read of the row fails.
+    set_column(&h, "w", "runs = 'x'").await;
+    pass(5 * MINUTE).await;
+    assert!(
+        !log_lines(&logs.text(), "watch store read failed", "w").is_empty(),
+        "{}",
+        logs.text()
+    );
+    set_column(&h, "w", "runs = 1").await;
+    pass(6 * MINUTE).await;
+
+    assert_eq!(
+        h.runner.calls(),
+        2,
+        "the task lived on and ran at 10 minutes"
+    );
+    let line = log_lines(&logs.text(), "watch store read failed", "w")[0].to_owned();
+    assert!(line.contains("reason=\"store_failed\""), "{line}");
+}

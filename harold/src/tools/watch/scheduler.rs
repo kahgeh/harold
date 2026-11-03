@@ -652,8 +652,22 @@ impl Scheduler {
             if *cancelled.borrow() {
                 return;
             }
-            let Ok(Some(row)) = self.deps.store.get(&name).await else {
-                return;
+            let row = match self.deps.store.get(&name).await {
+                Ok(Some(row)) => row,
+                Ok(None) => return,
+                Err(_) => {
+                    // A store that fails for a short time must not end the watch.
+                    tracing::warn!(
+                        watch = name.as_str(),
+                        reason = "store_failed",
+                        "watch store read failed"
+                    );
+                    tokio::select! {
+                        () = tokio::time::sleep(self.retry) => {}
+                        () = interrupted(&mut cancelled, &mut shutdown) => return,
+                    }
+                    continue;
+                }
             };
             // A resume or a stop can cancel this task while it reads the store.
             if *cancelled.borrow() {

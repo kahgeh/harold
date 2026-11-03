@@ -267,6 +267,7 @@ No line carries the text of a reminder or any of the skill's text, its `allowed-
 | A watch is paused | info | `watch paused` | `watch`, `how` (`cli`, `control_tower`, `timed` or `budget_day`), `paused_until` (local time; left out when the pause has no end) |
 | A watch resumes from a pause | info | `watch resumed` | `watch`, `how` (as for `watch paused`) |
 | The store fails on a pause or a resume of `--all`, at the timed end of a pause, or at a cap | warn | `watch not paused` or `watch not resumed` | `watch`, `reason` (`store_failed`). A timed resume tries again after 5 seconds |
+| A watch's task cannot read its row from the store | warn | `watch store read failed` | `watch`, `reason` (`store_failed`). The task tries again after 5 seconds |
 | A reminder is set | info | `reminder set` | `reminder`, `due_at` |
 | A reminder is typed | info | `reminder typed` | `reminder`, `late_s` |
 | A reminder is dropped or cancelled | info | `reminder ended` | `reminder`, `reason` (`dropped` or `cancelled`) |
