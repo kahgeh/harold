@@ -1,6 +1,6 @@
 # Watch Tool
 
-A **watch** is a schedule an agent asks Harold for: run one of its skills with a model every few minutes, for a set time or with no end, and report to the chief or to the agent itself. The tool also holds one-time reminders, which run no model. It is not the agent monitor's watching of agents (the glossary's "Watching agents"), and not the `WatchAgentStates` stream.
+A **watch** is a schedule an agent asks Harold for: run one of its skills with a model every few minutes or on a cron expression, for a set time or with no end, and report to the chief or to the agent itself. The tool also holds one-time reminders, which run no model. It is not the agent monitor's watching of agents (the glossary's "Watching agents"), and not the `WatchAgentStates` stream.
 
 The watch tool is a [tool](README.md) that holds the watches, runs them and types their reports. The service is `harold.tools.watch.v1.WatchService`. It trusts local callers (ADR 0002): there is no token, and it checks every field itself. The proto is `harold-api/proto/tools/watch.proto`.
 
@@ -12,6 +12,8 @@ harold tool watch start after-release --skill pod-watch --every 10 --for 120
 harold tool watch start after-release --skill pod-watch --every 5 --for 60 --report-to chief --run-budget 0.03 --every-run
 harold tool watch start pods --skill pod-watch --every 10 --report-to chief
 #   started pods in /Users/you/code/chief-of-pods with no end, every 10 minutes, reporting to chief
+harold tool watch start standup --skill pod-watch --cron "*/15 9-17 * * mon-fri" --report-to chief
+#   started standup in /Users/you/code/chief-of-pods with no end, on cron */15 9-17 * * mon-fri, reporting to chief
 harold tool watch pause pods --for 2h       # paused pods for 120 minutes
 harold tool watch resume pods               # resumed pods
 harold tool watch pause --all               # paused 2
@@ -29,6 +31,7 @@ Each command prints one line. `list` prints one line for each watch and one for 
 | `<name>` | Names the watch in the commands, the reports and the log | 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `-` and `_` |
 | `--skill` | The skill to run, by its folder name under `<folder>/.claude/skills/` | The same characters as a name, so no `/`, `.` or `..`. `<folder>/.claude/skills/<skill>/SKILL.md` must exist, and its real path, with links followed, must lie inside `<folder>/.claude/skills/` or inside a folder in `[watch] skill_folders` |
 | `--every` | Minutes from the start of one run to the start of the next | 2 to 240 |
+| `--cron` | A cron expression: the local minutes at which the watch runs. Give `--every` or `--cron`, not both (see [Cron schedules](#cron-schedules)) | Five fields, `minute hour day month weekday`. Two runs must be at least 2 minutes apart |
 | `--for` | How long the watch runs from now. Left out, the watch has no end (an open-ended watch) | A time, 1 minute to 24 hours (see Time forms) |
 | `--report-to` | Who gets the reports | `chief`, or `self` for the watch's own folder. `self` when left out. No other folder |
 | `--run-budget` | The most one run may spend, in US dollars | 0.01 or more, and no more than `[watch] max_run_budget_usd` when that is set. Left out, `[watch] run_budget_usd` when set, else no run limit |
@@ -36,21 +39,25 @@ Each command prints one line. `list` prints one line for each watch and one for 
 | `--every-run` | Type a line after every run, not only when the run answers `REPORT` | Present or left out. Left out, a `QUIET` run types nothing |
 
 - **The folder** is the working directory of the `harold tool watch start` command. The CLI sends it, and the tool does not trust it: it must be an absolute path that exists and is a folder, and Harold stores its canonical form, with links followed and no trailing slash. Otherwise `start` refuses with `invalid folder`.
-- **`start`** runs the first check at once, then one every `--every` minutes until the `--for` time has passed. With no `--for`, it runs until `watch stop`. `start` with the name of a running or paused watch replaces it: its settings, its end and its run count start over.
+- **`start`** with `--every` runs the first check at once, then one every `--every` minutes until the `--for` time has passed. `start` with `--cron` does not run at once: the first run is at the first matching minute after the start. With no `--for`, it runs until `watch stop`. `start` with the name of a running or paused watch replaces it: its settings, its end and its run count start over.
 - **`stop`** ends a running or paused watch at once. A run in progress is stopped and its report is not typed. No closing line is typed, since an agent asked for it. `stop` also cancels a waiting reminder of that name.
 - **A watch also ends** when its time is up (a watch with an end), when a daily budget is set and spent (a watch with an end), or after 3 failed runs in a row. An open-ended watch never ends by time.
-- **`start` refuses** with `unknown skill <skill>`, `too many watches` (5 are running or paused), `daily budget spent`, `daily budget not set`, `name <name> is in use`, and `invalid <flag>` for a value outside the table. At the service these are `InvalidArgument` `invalid <field>` (`invalid name`, `invalid folder`, `invalid skill`, `invalid every_minutes`, `invalid for_minutes`, `invalid report_to`, `invalid run_budget_usd`, and `run_limit_secs is above [watch] max_run_limit_secs (N)` for a run limit above the setting), `NotFound` `unknown_skill`, and `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset` or `name_in_use`. `stop` refuses `NotFound` `unknown_watch` and `FailedPrecondition` `not_running`.
+- **`start` refuses** with `unknown skill <skill>`, `too many watches` (5 are running or paused), `daily budget spent`, `daily budget not set`, `name <name> is in use`, and `invalid <flag>` for a value outside the table, and, for `--cron`, the plain sentences in [Cron schedules](#cron-schedules). At the service these are `InvalidArgument` `invalid <field>` (`invalid name`, `invalid folder`, `invalid skill`, `invalid every_minutes`, `invalid for_minutes`, `invalid report_to`, `invalid run_budget_usd`, and `run_limit_secs is above [watch] max_run_limit_secs (N)` for a run limit above the setting), `NotFound` `unknown_skill`, and `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset` or `name_in_use`. `stop` refuses `NotFound` `unknown_watch` and `FailedPrecondition` `not_running`.
 - **`list`** shows every running or paused watch, every watch that ended today with why it ended, every waiting reminder, and the day's spend for every watch together. The forms:
 
 ```text
 pods running in /Users/you/code/chief-of-pods no end, limit 120 s, 14 runs, 2 reports, $0.06
+standup running in /Users/you/code/chief-of-pods no end, cron */15 9-17 * * mon-fri, next 14:45, checked 14:31, limit 120 s, 3 runs, 1 report, $0.03
 after-release paused until 16:30 in /Users/you/code/chief-of-pods, 3 runs, 1 report, $0.03
 after-release paused in /Users/you/code/chief-of-pods, 3 runs, 1 report, $0.03
 pods paused (budget) until 00:00 in /Users/you/code/chief-of-pods, 14 runs, 2 reports, $1.00
 after-release ended (time was up) in /Users/you/code/chief-of-pods, 12 runs, 1 report, $0.11
 reminder release-check due 15:45, reporting to chief
+reminder digest-check due 2026-11-09 08:30, cron 30 8 * * mon, reporting to chief
 spent today $1.03
 ```
+
+A running or paused cron watch shows `cron <expression>`, `next` (the next matching minute after now) and `checked` (the newest local minute that Harold checked). A time is `HH:MM` for today and `YYYY-MM-DD HH:MM` for another day. A watch with no checked minute shows no `checked`.
 
 The reason in `ended (…)` is `time was up`, `stopped`, `daily budget spent` or `3 runs in a row failed`.
 - **State is kept** in the tool's own database, so a Harold restart resumes a running or paused watch with its end unchanged. Its next run comes at its stored time, or at once if that has passed, never twice for one slot of time.
@@ -79,7 +86,7 @@ harold tool watch resume --all               # resumed 2
 ```
 
 - **`pause <name>` or `pause --all`**, with an optional `--for <time>`. Give a name or `--all`, not both. A paused watch runs nothing and spends nothing. A run in progress is stopped and its report is not typed. A waiting report is dropped.
-- **`resume <name>` or `resume --all`.** A resume, by the command or at the end of `--for`, runs the first check at once and keeps the run count. A paused watch builds up no missed runs: its resume runs once, and nothing else catches up.
+- **`resume <name>` or `resume --all`.** A resume, by the command or at the end of `--for`, runs the first check at once and keeps the run count. A paused watch builds up no missed runs: its resume runs once, and nothing else catches up. This holds for a cron watch too: while the watch is paused, its checked minute moves on, so the resume runs once, at once, with no backlog, even if the pause hid many matches.
 - **A pause does not move the end of a watch.** A watch with an end that passes while the watch is paused ends as before, with its closing line.
 - **A pause survives a Harold restart.** A `--for` pause that ended during the restart resumes at once.
 - **Pause and resume type no line**, because a person or an agent asked for it.
@@ -114,22 +121,87 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 | `<name>` | Names the reminder in `list`, the line and the log. A reminder shares the name space of the watches | The same characters as a watch name |
 | `--in` | The wait before the line is typed | A time, 1 minute to 24 hours |
 | `--at` | The next time the local clock reads this time, today or tomorrow | `HH:MM`, 24 hours |
+| `--cron` | The next local minute that a cron expression matches | A cron expression (see [Cron schedules](#cron-schedules)) |
 | `--report-to` | Who gets the line | `chief`, or `self` for the folder where the command ran. `self` when left out |
 | `"<text>"` | The text of the reminder | At least one visible character. Harold removes control characters, escape sequences and Unicode format characters (for example a right-to-left override), and cuts it to 300 characters |
 
-- **Give `--in` or `--at`, not both.** A text that starts with `-` goes after `--`.
+- **Give one of `--in`, `--at` and `--cron`.** A cron reminder is a one-time reminder: it is typed at the next matching minute, then it ends. It has no 2-minute rule. A text that starts with `-` goes after `--`.
 - **The output** is `reminder <name> at HH:MM`, the due time in local time.
 - **Harold types** `REMIND <name>: <text>` once, with the checks of the watch reports (see The lines Harold types).
-- **A missed reminder.** A reminder that is not typed within 120 minutes of its time is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
+- **A missed reminder.** A reminder (a cron reminder too) that is not typed within 120 minutes of its time is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
 - **`watch stop <name>`** cancels a waiting reminder. `list` shows each waiting reminder as `reminder <name> due HH:MM, reporting to <chief|self>`.
 - **A name in use** is refused with `name <name> is in use` (`FailedPrecondition` `name_in_use`), when a running or paused watch or a waiting reminder has the name. `start` with the name of a waiting reminder is refused the same way.
-- **A `--at` reminder keeps its local date and time.** It is due when the local clock reaches it. A change of the local offset moves it with the clock. A time in a spring-forward gap is due at the first instant after the gap. A time that occurs twice is due at its first occurrence.
+- **A `--at` reminder keeps its local date and time.** It is due when the local clock reaches it. A change of the local offset moves it with the clock. A time in a spring-forward gap is due at the first instant after the gap. A time that occurs twice is due at its first occurrence. A cron reminder follows the same two rules.
 
 ## The clock
 
 The watch tool reads the local offset from `/bin/date` (`+%Y-%m-%d %H:%M:%S %z`) at each use, as the timed prompts do. It does not read it once at the start of Harold. After a daylight-saving change, the day of the daily budget, the clock times in `list` and the due time of a `--at` reminder are right with no restart. When `/bin/date` fails, the tool uses the last offset that it read.
 
 Tokio's clock stops while the Mac sleeps, and the wall clock does not. So a waiting watch wakes at least once a minute and reads the wall clock again. After a sleep, a run time, the end of a pause, the next day of a capped watch or the end of a watch that passed during the sleep takes effect within a minute of the wake. A waiting reminder wakes the same way.
+
+## Cron schedules
+
+`watch start --cron` and `watch remind --cron` take a cron expression in place of `--every`, `--in` and `--at`. The expression names local minutes of the Mac's clock.
+
+```sh
+harold tool watch start standup --skill pod-watch --cron "*/15 9-17 * * mon-fri"
+harold tool watch remind digest-check --cron "30 8 * * mon" "check the digest"
+```
+
+A cron expression has five fields, `minute hour day month weekday`:
+
+| Field | Values | Names |
+|---|---|---|
+| minute | 0 to 59 | |
+| hour | 0 to 23 | |
+| day | 1 to 31 | |
+| month | 1 to 12 | `jan` to `dec` |
+| weekday | 0 to 7; 0 and 7 are Sunday | `sun` to `sat` |
+
+- **Each field** takes `*`, a number, a range `a-b`, a list `a,b,c`, and a step `*/n` or `a-b/n`. Names can be in any case.
+- **The day-or-weekday rule.** When the day and the weekday are both not `*`, a date matches when either one matches.
+- **Not accepted:** `@daily` forms, a seconds field and a year field.
+- **Plain errors.** The CLI prints these sentences, and the service sends them as `InvalidArgument`:
+
+```text
+a cron expression has 5 fields (minute hour day month weekday); this one has 4
+minute 75 is out of range: use 0 to 59
+weekday "mun" is not a name: use sun, mon, tue, wed, thu, fri or sat
+hour range 17-9 runs backwards: write 9-17
+minute step 0 is too small: use 1 or more
+this schedule never runs
+this schedule runs more often than every 2 minutes
+give exactly one of every_minutes and cron
+```
+
+- **`this schedule never runs`** is for an expression such as `0 0 31 2 *`. Harold looks 8 years ahead.
+- **`this schedule runs more often than every 2 minutes`** is for a watch only. Two runs must be at least 2 minutes apart, as for `--every`. A cron reminder runs once, so it has no such limit.
+- **`give exactly one of every_minutes and cron`** is for a request that carries both or neither.
+
+### When a cron watch runs
+
+- **No run at the start.** A cron watch does not run when it starts. It runs at the first matching minute after the start. A watch that replaces another of the same name starts over in the same way.
+- **Run time.** Harold wakes at each wall-clock minute, so a run starts within about a second of the matching minute.
+- **The checked minute.** Harold keeps, for each cron watch, the newest local minute it has checked. It stores that minute, so it stays across a restart. At each check Harold looks at every local minute after the checked minute, up to now. Then the checked minute moves on to now. It never moves back. Harold stores it before the run starts.
+- **A missed run.** After a sleep or a restart, the minutes since the last check can hold more than one match. Harold runs once, for the newest match, only when that match is at most 120 minutes old. Older matches are skipped and never run as a backlog. The `missed` field of `watch run finished` gives their count.
+- **A match outside the window.** When the newest match is more than 120 minutes old, nothing runs. Harold logs `watch run skipped` with `reason` = `missed` and counts the outcome `missed` in `watch.runs`.
+- **A cron reminder** types once at its match. A reminder that is more than 120 minutes late is dropped.
+- **`--for`** and the open-ended watch work as for `--every`. A cron watch with no `--for` needs `[watch] daily_budget_usd`, and the daily budget stops or caps it in the same way.
+- **Pause and resume.** While a cron watch is paused, its checked minute moves on. The resume runs once, at once, with no backlog. After a pause, the next runs are at the next matching minutes.
+
+### Daylight saving
+
+Harold reads the local date and time from `/bin/date` (see The clock). It checks local minutes, so it follows the clock without a restart.
+
+- **A skipped hour (daylight saving starts).** In Sydney on 2026-10-04 the clock goes from 01:59 to 03:00. `30 2 * * *` has no 02:30 that day, but 02:30 lies between the two checks. So Harold runs the watch once, at 03:00.
+- **A repeated hour (daylight saving ends).** On 2027-04-04 the clock goes from 02:59 back to 02:00. The checked minute stays 02:59, so Harold does not check 02:00 to 02:59 again, and `30 2 * * *` runs once.
+
+## Limits
+
+- **Matches during a long run.** When a cron match passes while a run is still in progress, the next run starts at once after it. So a watch with a dense schedule and long runs runs back to back. An `--every` watch skips such slots.
+- **The end of a daily-budget cap.** When the cap of an open-ended cron watch ends, the watch runs once at once, even with no match. This is the resume rule.
+- **The give-up window is fixed.** A watch has no `give_up_after_minutes`. The window of a cron watch and of a cron reminder is 120 minutes.
+- **The window counts local clock minutes.** Harold takes the age of a match from the difference of two local clock readings. A match from before a skipped hour is therefore due for only 60 minutes of real time after the change. The same rule makes `late_s` after a skipped hour count wall-clock minutes.
 
 ## Settings
 
