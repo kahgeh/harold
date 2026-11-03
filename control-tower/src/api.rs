@@ -30,6 +30,7 @@ use harold_api::tools::watch::v1::{
 };
 use harold_api::tools::work::v1::{
     ListRequest as WorkListRequest, ListResponse as WorkListResponse,
+    ShowRequest as WorkShowRequest, ShowResponse as WorkShowResponse,
     work_service_client::WorkServiceClient,
 };
 use tokio::sync::mpsc;
@@ -428,6 +429,37 @@ impl SourceStream {
         focus_read(answer)
     }
 
+    /// The open work records for the work view: focus, then next, and a count of the rest.
+    pub async fn list_work(&self) -> Result<WorkListing, SourceError> {
+        let Some(mut client) = self.work.clone() else {
+            return Err(SourceError::transport("work tool unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.list(WorkListRequest { all: false }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("work request timed out"))?
+        .map(|response| map_work_list(response.into_inner()))
+        .map_err(|status| SourceError::transport(status.to_string()))
+    }
+
+    /// One work record with its decisions and links.
+    pub async fn show_work(&self, name: &str) -> Result<WorkDetail, SourceError> {
+        let Some(mut client) = self.work.clone() else {
+            return Err(SourceError::transport("work tool unavailable"));
+        };
+        let request = WorkShowRequest {
+            name: name.to_owned(),
+        };
+        let response = tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.show(request))
+            .await
+            .map_err(|_| SourceError::transport("work request timed out"))?
+            .map_err(|status| SourceError::transport(status.to_string()))?;
+        map_work_show(response.into_inner())
+            .ok_or_else(|| SourceError::transport("work record unavailable"))
+    }
+
     pub async fn answer_question(&self, out: &Outgoing) -> SendResult {
         let Some(mut client) = self.questions.clone() else {
             return SendResult::Unavailable;
@@ -554,6 +586,99 @@ fn focus_read(answer: Result<WorkListResponse, tonic::Status>) -> Result<FocusRe
         Err(status) if status.code() == tonic::Code::Unimplemented => Ok(FocusRead::Unimplemented),
         Err(status) => Err(SourceError::transport(status.to_string())),
     }
+}
+
+/// One open work record in the work list, as the work view shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkRow {
+    pub name: String,
+    pub priority: String,
+    pub status: String,
+    pub next_step: String,
+}
+
+/// The work rows to show, and the count of the open work records the list hides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkListing {
+    pub rows: Vec<WorkRow>,
+    pub later_hidden: usize,
+}
+
+/// One decision of a work record. The number starts at 1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkDecision {
+    pub number: usize,
+    pub mark: String,
+    pub who: String,
+    pub at: String,
+    pub text: String,
+}
+
+/// One work record with its decisions and links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkDetail {
+    pub name: String,
+    pub title: String,
+    pub priority: String,
+    pub status: String,
+    pub waits_for: String,
+    pub next_step: String,
+    pub decisions: Vec<WorkDecision>,
+    pub links: Vec<String>,
+}
+
+/// Keeps the focus rows, then the next rows, each in the order of the tool.
+/// Counts every other open record as later.
+pub fn map_work_list(response: WorkListResponse) -> WorkListing {
+    let row = |record: &harold_api::tools::work::v1::WorkRecord| WorkRow {
+        name: sanitize_display(&record.name, PANE_FIELD_LIMIT),
+        priority: sanitize_display(&record.priority, PANE_FIELD_LIMIT),
+        status: sanitize_display(&record.status, PANE_FIELD_LIMIT),
+        next_step: sanitize_display(&record.next_step, SUMMARY_LIMIT),
+    };
+    let records = response.records;
+    let rows: Vec<WorkRow> = ["focus", "next"]
+        .iter()
+        .flat_map(|priority| {
+            records
+                .iter()
+                .filter(move |record| record.priority == *priority)
+        })
+        .map(row)
+        .collect();
+    let later_hidden = records.len() - rows.len();
+    WorkListing { rows, later_hidden }
+}
+
+/// Maps one work record and cleans each text field. `None` when the answer has no record.
+pub fn map_work_show(response: WorkShowResponse) -> Option<WorkDetail> {
+    let record = response.record?;
+    let decisions = record
+        .decisions
+        .iter()
+        .enumerate()
+        .map(|(index, decision)| WorkDecision {
+            number: index + 1,
+            mark: sanitize_display(&decision.mark, PANE_FIELD_LIMIT),
+            who: sanitize_display(&decision.who, PANE_FIELD_LIMIT),
+            at: sanitize_display(&decision.at, PANE_FIELD_LIMIT),
+            text: sanitize_display(&decision.text, SUMMARY_LIMIT),
+        })
+        .collect();
+    Some(WorkDetail {
+        name: sanitize_display(&record.name, PANE_FIELD_LIMIT),
+        title: sanitize_display(&record.title, PANE_FIELD_LIMIT),
+        priority: sanitize_display(&record.priority, PANE_FIELD_LIMIT),
+        status: sanitize_display(&record.status, PANE_FIELD_LIMIT),
+        waits_for: sanitize_display(&record.waits_for, SUMMARY_LIMIT),
+        next_step: sanitize_display(&record.next_step, SUMMARY_LIMIT),
+        decisions,
+        links: record
+            .links
+            .iter()
+            .map(|link| sanitize_display(link, PANE_FIELD_LIMIT))
+            .collect(),
+    })
 }
 
 const WATCH_CALLER: &str = "control_tower";
@@ -955,8 +1080,8 @@ mod tests {
 
     use super::{
         FocusRead, PANE_FIELD_LIMIT, ProtocolError, SUMMARY_LIMIT, SnapshotReader, SourceError,
-        call_request_timeout, focus_read, map_call, map_focus, map_now, map_snapshot, now_request,
-        spawn_reader,
+        call_request_timeout, focus_read, map_call, map_focus, map_now, map_snapshot,
+        map_work_list, map_work_show, now_request, spawn_reader,
     };
     use crate::text::sanitize_display;
 
@@ -1707,6 +1832,95 @@ mod tests {
     async fn list_focus_without_a_client_reports_unavailable() {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.list_focus().await.unwrap_err();
+        assert!(error.detail().contains("work tool unavailable"));
+    }
+
+    #[test]
+    fn map_work_list_keeps_focus_then_next_and_counts_later() {
+        let listing = map_work_list(work_list(vec![
+            work_record("n1", "next", "x"),
+            work_record("l1", "later", "x"),
+            work_record("f1", "focus", "x"),
+            work_record("n2", "next", "x"),
+            work_record("l2", "later", "x"),
+        ]));
+        let names: Vec<&str> = listing.rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["f1", "n1", "n2"]);
+        assert_eq!(listing.rows[0].priority, "focus");
+        assert_eq!(listing.rows[0].status, "building");
+        assert_eq!(listing.later_hidden, 2);
+
+        let empty = map_work_list(work_list(Vec::new()));
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.later_hidden, 0);
+    }
+
+    #[test]
+    fn map_work_list_cleans_text_fields() {
+        let listing = map_work_list(work_list(vec![work_record(
+            "a",
+            "next",
+            "go\u{1b}[0m\nnow",
+        )]));
+        assert_eq!(
+            listing.rows[0].next_step,
+            sanitize_display("go\u{1b}[0m\nnow", SUMMARY_LIMIT)
+        );
+        assert!(!listing.rows[0].next_step.contains('\x1b'));
+        assert!(!listing.rows[0].next_step.contains('\n'));
+    }
+
+    #[test]
+    fn map_work_show_numbers_decisions_from_one() {
+        let mut record = work_record("a", "focus", "step");
+        record.title = "A title".to_owned();
+        record.waits_for = "someone".to_owned();
+        record.decisions = vec![
+            harold_api::tools::work::v1::Decision {
+                at: "2026-11-01".to_owned(),
+                who: "the user".to_owned(),
+                mark: "yes".to_owned(),
+                text: "first".to_owned(),
+            },
+            harold_api::tools::work::v1::Decision {
+                at: "2026-11-02".to_owned(),
+                who: "the chief".to_owned(),
+                mark: "no".to_owned(),
+                text: "second".to_owned(),
+            },
+        ];
+        record.links = vec!["one".to_owned(), "two".to_owned()];
+        let detail = map_work_show(harold_api::tools::work::v1::ShowResponse {
+            record: Some(record),
+        })
+        .unwrap();
+        assert_eq!(detail.name, "a");
+        assert_eq!(detail.title, "A title");
+        assert_eq!(detail.waits_for, "someone");
+        assert_eq!(detail.next_step, "step");
+        assert_eq!(detail.decisions.len(), 2);
+        assert_eq!(detail.decisions[0].number, 1);
+        assert_eq!(detail.decisions[0].mark, "yes");
+        assert_eq!(detail.decisions[0].who, "the user");
+        assert_eq!(detail.decisions[0].at, "2026-11-01");
+        assert_eq!(detail.decisions[0].text, "first");
+        assert_eq!(detail.decisions[1].number, 2);
+        assert_eq!(detail.decisions[1].text, "second");
+        assert_eq!(detail.links, ["one", "two"]);
+    }
+
+    #[test]
+    fn map_work_show_without_record_is_none() {
+        let response = harold_api::tools::work::v1::ShowResponse { record: None };
+        assert_eq!(map_work_show(response), None);
+    }
+
+    #[tokio::test]
+    async fn work_reads_without_a_client_report_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.list_work().await.unwrap_err();
+        assert!(error.detail().contains("work tool unavailable"));
+        let error = stream.show_work("a").await.unwrap_err();
         assert!(error.detail().contains("work tool unavailable"));
     }
 
