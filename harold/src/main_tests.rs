@@ -2142,6 +2142,209 @@ mod one_trace_per_turn {
         task.abort();
     }
 
+    // --- tokens ---
+
+    /// Puts `pane` in the last poll's snapshot with the given identity.
+    fn set_pane_identity(
+        pane: &str,
+        role: crate::pod_stats::Role,
+        product: Option<&str>,
+        spec_id: Option<&str>,
+    ) {
+        let snapshot = crate::pod_stats::gauge_snapshot();
+        snapshot.lock().unwrap().panes.insert(
+            pane.to_string(),
+            crate::pod_stats::PaneIdentity {
+                role,
+                product: product.map(str::to_owned),
+                spec_id: spec_id.map(str::to_owned),
+            },
+        );
+    }
+
+    /// Reports a turn end with tokens from `pane`.
+    async fn complete_with_tokens(pane: &str, model: &str, tokens: [u64; 4]) {
+        test_support::install();
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane.to_string(),
+                model: model.to_string(),
+                input_tokens: tokens[0],
+                output_tokens: tokens[1],
+                cache_read_tokens: tokens[2],
+                cache_write_tokens: tokens[3],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        task.abort();
+    }
+
+    fn token_count(kind: &str, model: &str, role: &str, product: &str) -> Option<u64> {
+        test_support::exact_counter_value(
+            "harold.turn.tokens",
+            &[
+                ("kind", kind),
+                ("model", model),
+                ("role", role),
+                ("pod.product", product),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn turn_complete_with_tokens_adds_four_counts() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(&pane, crate::pod_stats::Role::Pnem, Some(&product), None);
+
+        complete_with_tokens(&pane, "claude-sonnet-5-5", [1, 2, 3, 4]).await;
+
+        for (kind, want) in [
+            ("input", 1),
+            ("output", 2),
+            ("cache_read", 3),
+            ("cache_write", 4),
+        ] {
+            assert_eq!(
+                token_count(kind, "claude-sonnet-5-5", "pnem", &product),
+                Some(want),
+                "{kind}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_complete_from_a_build_worker_adds_two_by_spec_counts() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        let spec = format!("spec-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(
+            &pane,
+            crate::pod_stats::Role::BuildWorker,
+            Some(&product),
+            Some(&spec),
+        );
+
+        complete_with_tokens(&pane, "claude-opus-4-1", [10, 7, 100, 1000]).await;
+
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.turn.tokens.by_spec",
+                &[("spec.id", &spec), ("kind", "input")]
+            ),
+            Some(1110)
+        );
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.turn.tokens.by_spec",
+                &[("spec.id", &spec), ("kind", "output")]
+            ),
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_complete_without_tokens_adds_none() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(&pane, crate::pod_stats::Role::Pnem, Some(&product), None);
+
+        complete_with_tokens(&pane, "claude-sonnet-5-5", [0, 0, 0, 0]).await;
+
+        assert_eq!(
+            test_support::counter_value("harold.turn.tokens", &[("pod.product", &product)]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_complete_with_no_model_counts_the_model_as_none() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(&pane, crate::pod_stats::Role::Pnem, Some(&product), None);
+
+        complete_with_tokens(&pane, "", [5, 0, 0, 0]).await;
+
+        assert_eq!(token_count("input", "none", "pnem", &product), Some(5));
+    }
+
+    #[tokio::test]
+    async fn turn_complete_with_a_strange_model_counts_as_other() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(&pane, crate::pod_stats::Role::Pnem, Some(&product), None);
+
+        complete_with_tokens(&pane, "Strange\nModel", [5, 0, 0, 0]).await;
+
+        assert_eq!(token_count("input", "other", "pnem", &product), Some(5));
+    }
+
+    #[tokio::test]
+    async fn turn_complete_turns_counter_has_role_and_product_and_no_model() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+        let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
+        set_pane_identity(&pane, crate::pod_stats::Role::Pnem, Some(&product), None);
+
+        complete_with_tokens(&pane, "claude-sonnet-5-5", [1, 1, 1, 1]).await;
+
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[
+                    ("pane_id", pane.as_str()),
+                    ("role", "pnem"),
+                    ("pod.product", &product)
+                ],
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[("pane_id", pane.as_str()), ("model", "claude-sonnet-5-5")]
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_complete_from_a_pane_not_in_the_last_poll_counts_as_other() {
+        let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
+        let pane = unique_pane();
+
+        complete_with_tokens(&pane, "claude-sonnet-5-5", [1, 0, 0, 0]).await;
+
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[("pane_id", pane.as_str()), ("role", "other")],
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turn.tokens",
+                &[
+                    ("role", "other"),
+                    ("model", "claude-sonnet-5-5"),
+                    ("kind", "input")
+                ],
+            )
+            .map(|n| n >= 1),
+            Some(true)
+        );
+    }
+
     #[cfg(feature = "imessage")]
     #[tokio::test]
     async fn no_text_leaves_harold() {

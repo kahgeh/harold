@@ -465,13 +465,29 @@ impl Harold for HaroldService {
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
         let hook_reached = time::OffsetDateTime::now_utc();
+        // Read before `req` moves into the stored event.
+        let identity = pod_stats::pane_identity(&req.pane_id);
+        let tokens = telemetry::TurnTokens {
+            input: req.input_tokens,
+            output: req.output_tokens,
+            cache_read: req.cache_read_tokens,
+            cache_write: req.cache_write_tokens,
+        };
+        let model = non_empty(&req.model).unwrap_or("none").to_owned();
         let trace = telemetry::begin_turn_complete(
             &req.pane_id,
             non_empty(&req.session_id),
             non_empty(&req.turn_started_at),
             hook_reached,
-            "other",
-            None,
+            identity.role.as_str(),
+            identity.product.as_deref(),
+        );
+        telemetry::record_turn_tokens(
+            &tokens,
+            &model,
+            identity.role.as_str(),
+            identity.product.as_deref(),
+            identity.spec_id.as_deref(),
         );
         let turn_cx = trace.turn_complete.context();
         // Kept by the pane before the monitor stores the turn end: the event handler may
@@ -1612,6 +1628,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     );
     if telemetry.exporting() {
         crate::telemetry::register_phone_counters();
+        crate::telemetry::register_turn_token_counters();
         crate::telemetry::register_work_counters();
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,

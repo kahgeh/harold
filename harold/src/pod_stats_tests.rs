@@ -920,10 +920,10 @@ async fn a_git_that_hangs_is_given_up_after_five_seconds() {
     assert_eq!(started.elapsed(), Duration::from_secs(5));
 }
 
-/// `start` polls into the one process-wide `gauge_snapshot()`, and each poll replaces the
-/// whole snapshot with its own registry's products. The tests that start the poller hold this
-/// from before `start` until the task has stopped, so neither clears the other's product.
-static GAUGE_SNAPSHOT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// `start` polls into the one process-wide `gauge_snapshot()`, and each poll replaces the
+// whole snapshot with its own registry's products. The tests that start the poller hold
+// `GAUGE_SNAPSHOT_TESTS` (in the parent module) from before `start` until the task has
+// stopped, so neither clears the other's product.
 
 #[tokio::test]
 async fn the_task_polls_at_start_reports_the_gauges_and_stops_at_shutdown() {

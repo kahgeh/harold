@@ -2750,6 +2750,11 @@ pub(crate) fn start(
     tokio::spawn(run(stats, shutdown))
 }
 
+/// Held by every test that writes the process-wide `gauge_snapshot()`, so one test cannot
+/// replace the products of another.
+#[cfg(test)]
+pub(crate) static GAUGE_SNAPSHOT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 #[path = "pod_stats_tests.rs"]
 mod tests;
