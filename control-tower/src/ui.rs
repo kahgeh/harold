@@ -727,7 +727,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                         "  {}",
                         fit_with_suffix(
                             &host_prefix(agent, app.host_marker, pad),
-                            (&name, suffix),
+                            (name, suffix),
                             usize::from(where_width) - 2
                         )
                     )
