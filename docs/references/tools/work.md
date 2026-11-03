@@ -146,21 +146,21 @@ Links:
 The parser is strict. It does not guess. The chief converts its own files to this form.
 
 - **Blank lines** are skipped. A leading byte-order mark and a carriage return before the line end are ignored. Each line is trimmed of spaces at both ends before it is read.
-- **The heading** is the first line that is not blank. It must be `# <name>` followed by nothing, or by a separator and the title. The separator is `:`, `-`, `–` or `—`. The name is 1 to 48 characters of `a-z`, `0-9` and `-`. The title may be empty. A second line that starts with `# ` is unplaced.
+- **The heading** is the first line that is a valid `# <name>` heading. It is `# <name>` alone, or `# <name>` with a separator and the title. The separator is `:`, `-`, `–` or `—`. The name is 1 to 48 characters of `a-z`, `0-9` and `-`. A separator `-` needs a space before it, because `# foo-title` is one name. The title may be empty. A non-blank line before the heading is unplaced. A second line that starts with `# ` is unplaced.
 - **The field lines** are `Priority:`, `Status:`, `Waits for:` and `Next step:`. The key must have exactly this spelling and capital letters. Each field may appear once. The order is free.
 - **Priority** is `focus`, `next` or `later`. The case of the value does not matter.
 - **Status** is one of `idea`, `discovery`, `spec drafted`, `architect checked`, `waiting for the user`, `approved`, `building`, `merged`, `released` or `checked by the user`. The case of the value does not matter.
 - **`Priority:` and `Status:` are required.** A file without one of them gives no work record.
 - **`Waits for:` and `Next step:`** take one line each. A missing line is an empty value.
 - **`Decisions:` and `Links:`** each stand alone on their line, may appear once, and take no value on the same line. `Links: none` is unplaced. Under them, each item is one line that starts with `- `. An item that follows a field line (not `Decisions:` or `Links:`) is unplaced.
-- **A decision item** is `- <mark>, <who>, <date>: <text>`. The mark is `agreed`, `draft`, `dropped` or `open`. The `who` is not empty and may hold spaces. The date is `YYYY-MM-DD`. The text is not empty.
-- **A link item** is `- spec:<product>/<id>`, `- question:<id>` or `- note:<text>`. A spec or question part holds no spaces.
+- **A decision item** is `- <mark>, <who>, <date>: <text>`. The mark is `agreed`, `draft`, `dropped` or `open`. The case of the mark does not matter. The `who` is not empty, may hold spaces and commas, and holds no `:`. The date has the shape `YYYY-MM-DD` with a month from 01 to 12 and a day from 01 to 31. The parser does not check that the day exists in the month. The text is not empty.
+- **A link item** is `- spec:<product>/<id>`, `- question:<id>` or `- note:<text>`. A `spec:` link has exactly one `/`, and the product and the id are not empty. The product, the id and the question id hold no white space. A `note:` text is not empty and not only spaces.
 
 An unplaced line is any non-blank line that fits none of these rules. A whole file can be unplaced too. A dry run prints each one as `unplaced <file>:<line>: <reason>: <the line>`. For line 0, which means the whole file, it prints `unplaced <file>: <reason>`. The reasons are:
 
 | Reason | Meaning |
 |---|---|
-| `no_heading` | The first line that is not blank is not a `# ` heading. A file without any heading also gives one entry at line 0 |
+| `no_heading` | A non-blank line before the heading. A file without a valid heading also gives one more entry at line 0, after the entries for its lines |
 | `bad_heading` | The line starts with `# `, but the name or the separator is not valid |
 | `second_heading` | A `# ` line after the heading |
 | `unknown_line` | The line is neither a known field nor a `- ` item |
@@ -170,13 +170,13 @@ An unplaced line is any non-blank line that fits none of these rules. A whole fi
 | `bad_link` | A link item is not one of the three link forms |
 | `item_outside_section` | A `- ` line when no `Decisions:` or `Links:` section is open |
 | `inline_value_after_section` | A value on the `Decisions:` or `Links:` line |
-| `missing_priority`, `missing_status` | The file has no `Priority:` or no `Status:` line. The entry is at the heading line |
+| `missing_priority`, `missing_status` | The file has no valid `Priority:` or `Status:` value. A bad value gives `bad_priority` or `bad_status` and also this entry. The entry is at the heading line |
 | `file_too_large` | The file is larger than 64 KB |
 | `not_utf8` | The file is not UTF-8 text |
 | `unreadable_file` | The file cannot be opened or read |
 | `not_a_file` | The entry is not a plain file, for example a folder or a link |
-| `hidden_or_upper_case_name` | The name starts with `.`, or the extension is `.MD` and not `.md`. The file is skipped and reported |
-| `name_used_by_another_file` | Two files, or a file and a queue item, give the same name |
+| `hidden_or_upper_case_name` | The name starts with `.`, or the extension is not exactly `.md` in lower case, such as `.MD`. The file is skipped and reported |
+| `name_used_by_another_file` | Two files, or a file and a queue item, give the same name. This entry is at line 0 and prints the name after the reason |
 
 - **Without `--apply`:** the command prints what it would store, and each unplaced line as shown above. It stores nothing. It exits with code 1 when any line is unplaced, and with code 0 when none is.
 - **With `--apply`:** the command stores all the work records in one transaction, or none. It refuses while any line is unplaced (`unplaced_lines <count>`). It also refuses a name that the current file holds (`name_in_use <name>`). It refuses a work record that would be a third in `focus` (`focus_full <name>`). Nothing is lost silently.

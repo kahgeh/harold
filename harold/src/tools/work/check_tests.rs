@@ -188,3 +188,31 @@ fn a_spec_that_exists_only_in_withdrawn_gives_withdrawn_open_not_missing_link() 
     assert_eq!(m.kind, "withdrawn_open");
     assert_eq!(m.line, "c is open but spec p/s1 is withdrawn.");
 }
+
+#[test]
+fn a_spec_that_exists_only_in_merged_or_approvals_counts_as_present() {
+    for set in [
+        (|s: &mut SpecFacts| {
+            s.exists = false;
+            s.merged = true;
+        }) as fn(&mut SpecFacts),
+        |s: &mut SpecFacts| {
+            s.exists = false;
+            s.approved = true;
+        },
+    ] {
+        let fake = fake_spec(spec_facts(set));
+        let records = [linked("c", Status::Idea, "spec:p/s1")];
+        let found = check(&records, &fake);
+        assert!(found.iter().all(|m| m.kind != "missing_link"), "{found:?}");
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+}
+
+#[test]
+fn a_spec_with_no_file_anywhere_still_gives_missing_link() {
+    let fake = fake_spec(spec_facts(|s| s.exists = false));
+    let records = [linked("c", Status::Idea, "spec:p/s1")];
+    let m = one(&records, &fake);
+    assert_eq!(m.kind, "missing_link");
+}
