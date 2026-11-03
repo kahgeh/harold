@@ -240,6 +240,12 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "days",
     "top_processes",
     "minutes",
+    "record",
+    "new_file",
+    "since",
+    "open_records",
+    "decisions",
+    "links",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -353,6 +359,12 @@ pub(crate) struct Instruments {
     pub agent_recap_read: Counter<u64>,
     /// `harold.agent.blocked_long`, `{event}`, by `provider_id`.
     pub agent_blocked_long: Counter<u64>,
+    /// `harold.work.status.duration`, seconds, by `status` and `priority`.
+    pub work_status_duration: Histogram<f64>,
+    /// `harold.work.check.mismatches`, `{mismatch}`, by `record` and `kind`.
+    pub work_check_mismatches: Counter<u64>,
+    /// `harold.work.rotations`, `{rotation}`, by `outcome`.
+    pub work_rotations: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -435,6 +447,14 @@ fn build_instruments(meter: &Meter) -> Instruments {
         agent_state_observed: counter("harold.agent.state_observed", "{observation}"),
         agent_recap_read: counter("harold.agent.recap_read", "{read}"),
         agent_blocked_long: counter("harold.agent.blocked_long", "{event}"),
+        work_status_duration: seconds(
+            "harold.work.status.duration",
+            &[
+                3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 345600.0, 604800.0, 1209600.0,
+            ],
+        ),
+        work_check_mismatches: counter("harold.work.check.mismatches", "{mismatch}"),
+        work_rotations: counter("harold.work.rotations", "{rotation}"),
     }
 }
 
@@ -2666,6 +2686,239 @@ impl<E: PushMetricExporter> PushMetricExporter for HealthWatch<E> {
     fn temporality(&self) -> Temporality {
         self.inner.temporality()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Work records
+// ---------------------------------------------------------------------------
+
+/// Every work record priority, as the work tool names it.
+pub(crate) const WORK_PRIORITIES: [&str; 3] = ["focus", "next", "later"];
+
+/// Every status of an open work record, in order, as the work tool names it.
+/// `checked by the user` closes a record, so the gauges leave it out.
+pub(crate) const WORK_OPEN_STATUSES: [&str; 9] = [
+    "idea",
+    "discovery",
+    "spec drafted",
+    "architect checked",
+    "waiting for the user",
+    "approved",
+    "building",
+    "merged",
+    "released",
+];
+
+/// Every `outcome` of `harold.work.rotations`.
+pub(crate) const WORK_ROTATION_OUTCOMES: [&str; 2] = ["done", "failed"];
+
+/// One row of `harold.work.records`: how many open work records are at `priority`
+/// and `status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkCount {
+    pub(crate) priority: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) count: u64,
+}
+
+/// What the two work gauges read. Each priority and open status has a value, 0
+/// when no record is there.
+#[derive(Default)]
+struct WorkGaugeState {
+    records: BTreeMap<(&'static str, &'static str), u64>,
+    waiting_long: BTreeMap<&'static str, u64>,
+}
+
+fn work_gauge_state() -> &'static Arc<Mutex<WorkGaugeState>> {
+    static STATE: OnceLock<Arc<Mutex<WorkGaugeState>>> = OnceLock::new();
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<u64>; 2]> = OnceLock::new();
+    let state = STATE.get_or_init(|| Arc::new(Mutex::new(WorkGaugeState::default())));
+    GAUGES.get_or_init(|| {
+        let meter = meter();
+        let records = Arc::clone(state);
+        let waiting = Arc::clone(state);
+        [
+            meter
+                .u64_observable_gauge("harold.work.records")
+                .with_unit("{record}")
+                .with_callback(move |observer| {
+                    let state = records.lock().unwrap_or_else(PoisonError::into_inner);
+                    for ((priority, status), count) in &state.records {
+                        observer.observe(
+                            *count,
+                            &[
+                                KeyValue::new("priority", *priority),
+                                KeyValue::new("status", *status),
+                            ],
+                        );
+                    }
+                })
+                .build(),
+            meter
+                .u64_observable_gauge("harold.work.waiting_long")
+                .with_unit("{record}")
+                .with_callback(move |observer| {
+                    let state = waiting.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (priority, count) in &state.waiting_long {
+                        observer.observe(*count, &[KeyValue::new("priority", *priority)]);
+                    }
+                })
+                .build(),
+        ]
+    });
+    state
+}
+
+/// Replaces what `harold.work.records` reads. A priority and open status that
+/// `counts` leaves out reads 0.
+fn set_work_records(counts: &[WorkCount]) {
+    let mut state = work_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    state.records.clear();
+    for priority in WORK_PRIORITIES {
+        for status in WORK_OPEN_STATUSES {
+            state.records.insert((priority, status), 0);
+        }
+    }
+    for row in counts {
+        state.records.insert((row.priority, row.status), row.count);
+    }
+}
+
+/// Replaces what `harold.work.waiting_long` reads. A priority that `counts` leaves
+/// out reads 0.
+fn set_work_waiting_long(counts: &[(&'static str, u64)]) {
+    let mut state = work_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    state.waiting_long.clear();
+    for priority in WORK_PRIORITIES {
+        state.waiting_long.insert(priority, 0);
+    }
+    for (priority, count) in counts {
+        state.waiting_long.insert(priority, *count);
+    }
+}
+
+/// Stores the open work records by priority and status, for `harold.work.records`.
+/// The work tool calls it after each write and at the daily check.
+pub(crate) fn note_work_records(counts: Vec<WorkCount>) {
+    // In tests the shared gauge is left alone, so tests that write work records
+    // at the same time do not change each other's numbers. A test reads its own
+    // notes with `take_noted_work`.
+    #[cfg(test)]
+    note_work(WorkNoted::Records(counts));
+    #[cfg(not(test))]
+    set_work_records(&counts);
+}
+
+/// Stores the open work records at `waiting for the user` for more than a day, by
+/// priority, for `harold.work.waiting_long`.
+pub(crate) fn note_work_waiting_long(counts: Vec<(&'static str, u64)>) {
+    // In tests the shared gauge is left alone, as in `note_work_records`.
+    #[cfg(test)]
+    note_work(WorkNoted::WaitingLong(counts));
+    #[cfg(not(test))]
+    set_work_waiting_long(&counts);
+}
+
+/// Records the seconds a work record spent at `status` when it left it.
+pub(crate) fn record_work_status_duration(
+    status: &'static str,
+    priority: &'static str,
+    seconds: f64,
+) {
+    #[cfg(test)]
+    note_work(WorkNoted::StatusDuration {
+        status,
+        priority,
+        seconds,
+    });
+    instruments().work_status_duration.record(
+        seconds,
+        &[
+            KeyValue::new("status", status),
+            KeyValue::new("priority", priority),
+        ],
+    );
+}
+
+/// Counts one mismatch that a work check found. `record` is the work record's name
+/// and `kind` the mismatch rule.
+pub(crate) fn count_work_mismatch(record: &str, kind: &str) {
+    #[cfg(test)]
+    note_work(WorkNoted::Mismatch {
+        record: record.to_owned(),
+        kind: kind.to_owned(),
+    });
+    instruments().work_check_mismatches.add(
+        1,
+        &[
+            KeyValue::new("record", record.to_owned()),
+            KeyValue::new("kind", kind.to_owned()),
+        ],
+    );
+}
+
+/// Counts one rotation of the work files. `outcome` is `done` or `failed`.
+pub(crate) fn count_work_rotation(outcome: &'static str) {
+    #[cfg(test)]
+    note_work(WorkNoted::Rotation(outcome));
+    instruments()
+        .work_rotations
+        .add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
+/// Records 0 once on `harold.work.rotations` for each `outcome`, and sets both work
+/// gauges to 0 for each priority and open status. HyperDX reads the first point of a
+/// running total as 0, so without this the first failed rotation after a start would
+/// be lost. `main` calls it once, after `init_telemetry`, when export is on.
+pub(crate) fn register_work_counters() {
+    for outcome in WORK_ROTATION_OUTCOMES {
+        instruments()
+            .work_rotations
+            .add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+    set_work_records(&[]);
+    set_work_waiting_long(&[]);
+}
+
+/// One work metric call, as a test sees it.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WorkNoted {
+    Records(Vec<WorkCount>),
+    WaitingLong(Vec<(&'static str, u64)>),
+    StatusDuration {
+        status: &'static str,
+        priority: &'static str,
+        seconds: f64,
+    },
+    Mismatch {
+        record: String,
+        kind: String,
+    },
+    Rotation(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The work metric calls this thread made, so a test sees its own calls beside
+    /// other tests.
+    static WORK_NOTED: std::cell::RefCell<Vec<WorkNoted>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn note_work(noted: WorkNoted) {
+    WORK_NOTED.with(|all| all.borrow_mut().push(noted));
+}
+
+/// The work metric calls the current thread made since the last call.
+#[cfg(test)]
+pub(crate) fn take_noted_work() -> Vec<WorkNoted> {
+    WORK_NOTED.with(|all| std::mem::take(&mut *all.borrow_mut()))
 }
 
 // ---------------------------------------------------------------------------

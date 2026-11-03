@@ -91,8 +91,20 @@ impl Setup {
     }
 
     fn service_with(&self, questions: impl QuestionStates + 'static) -> WorkToolService {
+        self.service_full(questions, Arc::new(FixedClock))
+    }
+
+    /// The service with this clock and no question facts.
+    fn service_at(&self, clock: Arc<dyn Clock>) -> WorkToolService {
+        self.service_full(FakeQuestions::default(), clock)
+    }
+
+    fn service_full(
+        &self,
+        questions: impl QuestionStates + 'static,
+        clock: Arc<dyn Clock>,
+    ) -> WorkToolService {
         let files = WorkFiles::new(self.tmp.0.join("work"));
-        let clock: Arc<dyn Clock> = Arc::new(FixedClock);
         let rotator = Arc::new(Rotator::new(files.clone(), Arc::clone(&clock)));
         let guard = Guard::new(
             Arc::new(NoFolders),
@@ -1024,5 +1036,177 @@ fn unsafe_path_parts_are_refused() {
     }
     for part in ["s1", "work-records", "...", "a.b"] {
         assert!(safe_part(part), "{part:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+mod metrics {
+    use crate::telemetry::{WorkCount, WorkNoted, take_noted_work};
+    use crate::tools::work::test_support::{HOUR_MS, SetClock, noon_ms};
+    use crate::tools::work::timer;
+
+    use super::*;
+
+    fn durations(noted: &[WorkNoted]) -> Vec<(&'static str, &'static str, f64)> {
+        noted
+            .iter()
+            .filter_map(|n| match n {
+                WorkNoted::StatusDuration {
+                    status,
+                    priority,
+                    seconds,
+                } => Some((*status, *priority, *seconds)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_records(noted: &[WorkNoted]) -> Option<Vec<WorkCount>> {
+        noted.iter().rev().find_map(|n| match n {
+            WorkNoted::Records(counts) => Some(counts.clone()),
+            _ => None,
+        })
+    }
+
+    fn count(priority: &'static str, status: &'static str, count: u64) -> WorkCount {
+        WorkCount {
+            priority,
+            status,
+            count,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_status_change_records_its_duration_from_status_since() {
+        let setup = Setup::new();
+        let start = noon_ms("2026-11-01");
+        let clock = SetClock::at(start);
+        let service = setup.service_at(clock.clone());
+        put(&service, CHIEF, record("a")).await.unwrap();
+        take_noted_work();
+
+        clock.set(start + 2 * HOUR_MS);
+        set_status(&service, "a", "spec drafted").await;
+        assert_eq!(durations(&take_noted_work()), [("idea", "later", 7200.0)]);
+
+        // A write that keeps the status records no duration.
+        clock.set(start + 3 * HOUR_MS);
+        set_status(&service, "a", "spec drafted").await;
+        assert!(durations(&take_noted_work()).is_empty());
+
+        // A put that replaces the record and its status records one too, with
+        // the record's priority after the write.
+        clock.set(start + 5 * HOUR_MS);
+        let mut replaced = record("a");
+        replaced.status = "building".into();
+        replaced.priority = "next".into();
+        put(&service, CHIEF, replaced).await.unwrap();
+        assert_eq!(
+            durations(&take_noted_work()),
+            [("spec drafted", "next", 3.0 * 3600.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gauges_follow_a_write_and_the_daily_check() {
+        let setup = Setup::new();
+        let start = noon_ms("2026-11-01");
+        let clock = SetClock::at(start);
+        let service = setup.service_at(clock.clone());
+        take_noted_work();
+
+        put(&service, CHIEF, record("a")).await.unwrap();
+        assert_eq!(
+            last_records(&take_noted_work()),
+            Some(vec![count("later", "idea", 1)])
+        );
+        put(&service, CHIEF, record("b")).await.unwrap();
+        set_status(&service, "b", "building").await;
+        let noted = take_noted_work();
+        let mut counts = last_records(&noted).unwrap();
+        counts.sort_by_key(|c| c.status);
+        assert_eq!(
+            counts,
+            vec![count("later", "building", 1), count("later", "idea", 1)]
+        );
+        set_status(&service, "a", "checked by the user").await;
+        assert_eq!(
+            last_records(&take_noted_work()),
+            Some(vec![count("later", "building", 1)])
+        );
+
+        clock.set(start + 30 * HOUR_MS);
+        timer::check(&service.rotator, clock.as_ref(), 14).await;
+        let noted = take_noted_work();
+        assert_eq!(
+            last_records(&noted),
+            Some(vec![count("later", "building", 1)])
+        );
+        assert!(
+            noted
+                .iter()
+                .any(|n| matches!(n, WorkNoted::WaitingLong(c) if c.is_empty())),
+            "{noted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_since_survives_a_rotation() {
+        let setup = Setup::new();
+        let start = noon_ms("2026-11-01");
+        let clock = SetClock::at(start);
+        let service = setup.service_at(clock.clone());
+        let mut waiting = record("a");
+        waiting.status = "waiting for the user".into();
+        put(&service, CHIEF, waiting).await.unwrap();
+
+        clock.set(noon_ms("2026-11-16"));
+        timer::check(&service.rotator, clock.as_ref(), 14).await;
+        let file = service.rotator.current().await.unwrap();
+        assert_eq!(file.file_name(), "work-2026-11-16.db");
+        drop(file);
+        take_noted_work();
+
+        clock.set(noon_ms("2026-11-16") + HOUR_MS);
+        set_status(&service, "a", "approved").await;
+        assert_eq!(
+            durations(&take_noted_work()),
+            [(
+                "waiting for the user",
+                "later",
+                (15.0 * 24.0 + 1.0) * 3600.0
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_counts_each_mismatch_by_record_and_kind() {
+        let setup = Setup::new();
+        let service = setup.service();
+        put(&service, CHIEF, record("gone")).await.unwrap();
+        link(&service, "gone", "spec:p/s9").await.unwrap();
+        link(&service, "gone", "question:Q9").await.unwrap();
+        take_noted_work();
+
+        let mismatches = service
+            .check(Request::new(pb::CheckRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .mismatches;
+        let noted: Vec<(String, String)> = take_noted_work()
+            .into_iter()
+            .filter_map(|n| match n {
+                WorkNoted::Mismatch { record, kind } => Some((record, kind)),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<(String, String)> =
+            mismatches.into_iter().map(|m| (m.record, m.kind)).collect();
+        assert_eq!(expected.len(), 2, "{expected:?}");
+        assert_eq!(noted, expected);
     }
 }

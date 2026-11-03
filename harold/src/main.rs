@@ -1533,6 +1533,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     );
     if telemetry.exporting() {
         crate::telemetry::register_phone_counters();
+        crate::telemetry::register_work_counters();
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,
         ));

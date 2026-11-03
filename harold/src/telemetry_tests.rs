@@ -5100,3 +5100,161 @@ fn the_multiplexer_calls_failing_alert_sums_the_bad_outcomes_over_15_minutes() {
         "{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Work records
+// ---------------------------------------------------------------------------
+
+/// Held by each test that sets the shared work gauges, so two such tests do not race.
+static WORK_GAUGES: Mutex<()> = Mutex::new(());
+
+fn hold_work_gauges() -> std::sync::MutexGuard<'static, ()> {
+    WORK_GAUGES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn new_log_fields_are_allowed() {
+    for field in [
+        "record",
+        "kind",
+        "file",
+        "new_file",
+        "since",
+        "open_records",
+        "decisions",
+        "links",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn work_counters_are_seeded_at_zero() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    register_work_counters();
+    for outcome in ["done", "failed"] {
+        let counted =
+            test_support::exact_counter_value("harold.work.rotations", &[("outcome", outcome)]);
+        assert!(counted.is_some(), "{outcome}");
+    }
+    assert_eq!(WORK_OPEN_STATUSES.len(), 9);
+    for priority in WORK_PRIORITIES {
+        for status in WORK_OPEN_STATUSES {
+            let read = test_support::gauge_value(
+                "harold.work.records",
+                &[("priority", priority), ("status", status)],
+            );
+            assert_eq!(read, Some(0), "{priority} {status}");
+        }
+        let read = test_support::gauge_value("harold.work.waiting_long", &[("priority", priority)]);
+        assert_eq!(read, Some(0), "{priority}");
+    }
+}
+
+#[test]
+fn the_work_gauges_read_the_last_counts_and_zero_for_the_rest() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    set_work_records(&[WorkCount {
+        priority: "focus",
+        status: "building",
+        count: 2,
+    }]);
+    set_work_waiting_long(&[("next", 1)]);
+    let records = |priority, status| {
+        test_support::gauge_value(
+            "harold.work.records",
+            &[("priority", priority), ("status", status)],
+        )
+    };
+    let waiting =
+        |priority| test_support::gauge_value("harold.work.waiting_long", &[("priority", priority)]);
+    assert_eq!(records("focus", "building"), Some(2));
+    assert_eq!(records("later", "idea"), Some(0));
+    assert_eq!(waiting("next"), Some(1));
+    assert_eq!(waiting("focus"), Some(0));
+    set_work_records(&[]);
+    set_work_waiting_long(&[]);
+    assert_eq!(records("focus", "building"), Some(0));
+    assert_eq!(waiting("next"), Some(0));
+}
+
+#[test]
+fn the_work_status_duration_has_the_spec_unit_and_buckets() {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    test_support::install();
+    record_work_status_duration("duration_probe", "duration_probe", 7200.0);
+    let found = test_support::metrics().iter().rev().find_map(|resource| {
+        resource
+            .scope_metrics()
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == "harold.work.status.duration")
+            .find_map(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .find(|p| {
+                        p.attributes().any(|kv| {
+                            kv.key.as_str() == "status" && kv.value.as_str() == "duration_probe"
+                        })
+                    })
+                    .map(|p| (metric.unit().to_string(), p.bounds().collect::<Vec<f64>>())),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        found,
+        Some((
+            "s".to_string(),
+            vec![
+                3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 345600.0, 604800.0, 1209600.0
+            ]
+        ))
+    );
+    assert_eq!(
+        test_support::histogram_sum(
+            "harold.work.status.duration",
+            &[("status", "duration_probe"), ("priority", "duration_probe")]
+        ),
+        Some(7200.0)
+    );
+}
+
+#[test]
+fn a_work_mismatch_counts_by_record_and_kind() {
+    test_support::install();
+    let record = format!("probe-{}", uuid::Uuid::new_v4());
+    count_work_mismatch(&record, "spec_missing");
+    count_work_mismatch(&record, "spec_missing");
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.work.check.mismatches",
+            &[("record", record.as_str()), ("kind", "spec_missing")]
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn the_work_metrics_are_noted_on_the_thread_that_made_them() {
+    take_noted_work();
+    note_work_records(vec![WorkCount {
+        priority: "next",
+        status: "idea",
+        count: 3,
+    }]);
+    note_work_waiting_long(vec![("next", 1)]);
+    count_work_rotation("done");
+    assert_eq!(
+        take_noted_work(),
+        vec![
+            WorkNoted::Records(vec![WorkCount {
+                priority: "next",
+                status: "idea",
+                count: 3,
+            }]),
+            WorkNoted::WaitingLong(vec![("next", 1)]),
+            WorkNoted::Rotation("done"),
+        ]
+    );
+}

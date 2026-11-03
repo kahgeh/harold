@@ -53,3 +53,47 @@ pub(super) fn decision(text: &str) -> Decision {
         text: text.into(),
     }
 }
+
+/// A clock that moves only when a test sets it.
+pub(super) struct SetClock(std::sync::atomic::AtomicI64);
+
+impl SetClock {
+    pub(super) fn at(ms: i64) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self(std::sync::atomic::AtomicI64::new(ms)))
+    }
+
+    pub(super) fn set(&self, ms: i64) {
+        self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl super::rotation::Clock for SetClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Noon UTC of `YYYY-MM-DD`, in milliseconds.
+pub(super) fn noon_ms(day: &str) -> i64 {
+    let mut parts = day.split('-').map(|part| part.parse::<i64>().unwrap());
+    let (year, month, date) = (
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+    );
+    let month = time::Month::try_from(u8::try_from(month).unwrap()).unwrap();
+    let date = time::Date::from_calendar_date(
+        i32::try_from(year).unwrap(),
+        month,
+        u8::try_from(date).unwrap(),
+    )
+    .unwrap();
+    date.with_hms(12, 0, 0)
+        .unwrap()
+        .assume_utc()
+        .unix_timestamp()
+        * 1000
+}
+
+/// One hour in milliseconds.
+pub(super) const HOUR_MS: i64 = 3_600_000;

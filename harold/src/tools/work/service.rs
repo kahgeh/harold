@@ -20,9 +20,10 @@ use super::NAME;
 use super::check::{self, Facts, QuestionFact, SpecFacts};
 use super::files::{WorkFiles, day_of};
 use super::import::{self, ImportDeps, ImportError, OpenQueue};
+use super::metrics;
 use super::rotation::{Clock, Rotator};
 use super::schema::{self, Decision, Mark, Priority, Record, valid_link, valid_name};
-use super::store::{Patch, PutOutcome, Refusal, StoreError};
+use super::store::{Patch, PutOutcome, Refusal, StoreError, WorkFile};
 use crate::tools::BoxFuture;
 use crate::tools::backlog::guard::{Guard, Refused};
 
@@ -238,6 +239,13 @@ impl WorkToolService {
     fn now_ms(&self) -> i64 {
         self.clock.now_ms()
     }
+}
+
+/// After a write to `file`: records the time at the old status when the status
+/// of `name` changed, then sets the gauges. Call it while the guard is held.
+async fn after_write(file: &WorkFile, name: &str, outcome: PutOutcome, now_ms: i64) {
+    metrics::status_left(file, name, outcome, now_ms).await;
+    metrics::refresh(file, now_ms).await;
 }
 
 fn invalid(field: &str) -> Status {
@@ -458,12 +466,14 @@ impl WorkService for WorkToolService {
         self.may_write(&caller_pane)?;
         let now = self.now_ms();
         let record = record_from_proto(record.ok_or_else(|| invalid("record"))?, &day_of(now))?;
+        let name = record.name.clone();
         let file = self.rotator.current().await.map_err(unavailable)?;
         let outcome = file
             .put(record, now)
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        after_write(&file, &name, outcome, now).await;
         Ok(Response::new(pb::PutResponse {
             created: outcome == PutOutcome::Created,
         }))
@@ -500,10 +510,13 @@ impl WorkService for WorkToolService {
             next_step,
         };
         let file = self.rotator.current().await.map_err(unavailable)?;
-        file.set(&name, patch, self.now_ms())
+        let now = self.now_ms();
+        let outcome = file
+            .set(&name, patch, now)
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        after_write(&file, &name, outcome, now).await;
         Ok(Response::new(pb::SetResponse {}))
     }
 
@@ -535,6 +548,7 @@ impl WorkService for WorkToolService {
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        metrics::refresh(&file, now).await;
         Ok(Response::new(pb::DecideResponse { number }))
     }
 
@@ -551,10 +565,12 @@ impl WorkService for WorkToolService {
         self.may_write(&caller_pane)?;
         let mark = mark_of(&mark)?;
         let file = self.rotator.current().await.map_err(unavailable)?;
-        file.mark(&name, number, mark, self.now_ms())
+        let now = self.now_ms();
+        file.mark(&name, number, mark, now)
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        metrics::refresh(&file, now).await;
         Ok(Response::new(pb::MarkResponse {}))
     }
 
@@ -570,10 +586,12 @@ impl WorkService for WorkToolService {
         self.may_write(&caller_pane)?;
         let link = link_of(link)?;
         let file = self.rotator.current().await.map_err(unavailable)?;
-        file.link(&name, &link, self.now_ms())
+        let now = self.now_ms();
+        file.link(&name, &link, now)
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        metrics::refresh(&file, now).await;
         Ok(Response::new(pb::LinkResponse {}))
     }
 
@@ -588,10 +606,12 @@ impl WorkService for WorkToolService {
         } = request.into_inner();
         self.may_write(&caller_pane)?;
         let file = self.rotator.current().await.map_err(unavailable)?;
-        file.unlink(&name, &link, self.now_ms())
+        let now = self.now_ms();
+        file.unlink(&name, &link, now)
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
+        metrics::refresh(&file, now).await;
         Ok(Response::new(pb::UnlinkResponse {}))
     }
 
@@ -609,7 +629,9 @@ impl WorkService for WorkToolService {
             products: self.guard.products(),
             questions: self.questions.states(&question_ids(&records)).await,
         };
-        let mismatches = check::check(&records, &facts)
+        let found = check::check(&records, &facts);
+        metrics::mismatches(&found);
+        let mismatches = found
             .into_iter()
             .map(|mismatch| pb::Mismatch {
                 record: mismatch.record,
@@ -634,10 +656,11 @@ impl WorkService for WorkToolService {
         if apply {
             self.may_write(&caller_pane)?;
         }
+        let now = self.now_ms();
         let deps = ImportDeps {
             rotator: &self.rotator,
             queue: self.queue.as_ref(),
-            now_ms: self.now_ms(),
+            now_ms: now,
         };
         let report = import::import(Path::new(&folder), &queue, apply, &deps)
             .await
@@ -645,6 +668,9 @@ impl WorkService for WorkToolService {
         if apply {
             let count = report.records.len();
             info!(tool = NAME, count, "work imported");
+            if let Ok(file) = self.rotator.current().await {
+                metrics::refresh(&file, now).await;
+            }
         }
         Ok(Response::new(pb::ImportResponse {
             records: report.records.into_iter().map(record_to_proto).collect(),

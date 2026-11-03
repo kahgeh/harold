@@ -378,6 +378,14 @@ These agent monitor lines carry the fields below:
 | `agent blocked long` | `pane_id`, `provider_id`. Logged at `warn` once for each blocked spell, 15 minutes after the first sample that showed `blocked` |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
 | `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
+
+The work tool logs its rotation. Harold logs `work rotation failed` once when a failure begins for a file. A retry that fails again logs `work rotation failed again` at `debug` only. A rotation that then works logs `work rotation done`.
+
+| Line | Fields |
+|---|---|
+| `work rotation done` (`info`) | `open_records`, `decisions`, `links` (the counts that were copied), `file` (the old current file), `new_file` |
+| `work rotation failed` (`warn`) | `file`, `reason` (`count_mismatch`, `write_failed` or `rename_failed`), `since` (the UTC date and time when the failure began) |
+| `harold.work.check.mismatches` (counter attributes) | `record` (the work record's name), `kind` (the mismatch rule) |
 | `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
 | `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
 | `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
@@ -617,6 +625,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
 - `harold.agent.blocked_long`, for each configured provider;
+- `harold.work.rotations`, for each `outcome` (`done`, `failed`). The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.

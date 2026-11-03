@@ -12,14 +12,14 @@ use crate::tools::{ToolContext, ToolError, ToolHandle};
 mod check;
 mod files;
 mod import;
-// `Rotator::tick` and its parts are used from Task 8, the daily timer.
-#[allow(dead_code)]
+mod metrics;
 mod rotation;
 mod schema;
 mod service;
 mod store;
 #[cfg(test)]
 mod test_support;
+mod timer;
 
 pub(crate) const NAME: &str = "work";
 
@@ -29,9 +29,9 @@ pub(crate) const NAME: &str = "work";
 const STORE_OPEN_FAILED: &str = "store_open_failed";
 
 /// Opens the current work file in the tool's data folder, or makes the file of
-/// today when there is none. Then it serves the work records until shutdown.
-/// The tool types nothing, so `ctx.typing` is never used. The service trusts
-/// local callers (ADR 0002). Task 8 adds the daily rotation timer.
+/// today when there is none. Then it serves the work records, and runs the
+/// daily check at start and once a day, until shutdown. The tool types nothing,
+/// so `ctx.typing` is never used. The service trusts local callers (ADR 0002).
 pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let files = files::WorkFiles::new(ctx.data_folder);
     let clock: Arc<dyn rotation::Clock> = Arc::new(rotation::SystemClock);
@@ -43,14 +43,21 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let guard = Guard::new(ctx.pane_folder, ctx.products, ctx.chief_pane);
     let questions = Arc::new(service::LoopbackQuestions::new(ctx.grpc_addr));
     let queue = Arc::new(import::LoopbackQueue::new(ctx.grpc_addr));
-    let service =
-        service::WorkToolService::new(Arc::clone(&rotator), files, guard, questions, queue, clock);
-    let mut shutdown = ctx.shutdown;
-    let task = tokio::spawn(async move {
-        // Returns on a shutdown signal and when the sender is dropped.
-        let _ = shutdown.changed().await;
-        drop(rotator);
-    });
+    let service = service::WorkToolService::new(
+        Arc::clone(&rotator),
+        files,
+        guard,
+        questions,
+        queue,
+        Arc::clone(&clock),
+    );
+    // Returns on a shutdown signal and when the sender is dropped.
+    let task = tokio::spawn(timer::run(
+        rotator,
+        clock,
+        Box::new(timer::read_rotation_days),
+        ctx.shutdown,
+    ));
     Ok(ToolHandle {
         routes: Routes::new(WorkServiceServer::new(service)),
         task,
