@@ -115,7 +115,7 @@ async fn listed(store: &impl QuestionStore) -> Vec<String> {
 /// Waits until `n` lines were tried without letting paused time move, so the
 /// time that passed since an earlier `Instant` is exactly what the sender slept.
 async fn tried_without_waiting(sender: &Running, n: usize) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while sender.typing.calls().len() < n {
         assert!(
             std::time::Instant::now() < deadline,

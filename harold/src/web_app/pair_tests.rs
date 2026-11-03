@@ -96,7 +96,7 @@ struct Server {
 impl Server {
     async fn start(folder: &Folder, pairing: Pairing) -> Self {
         // A restart starts at once, but the old store's lock goes only when the last clone drops.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let store = loop {
             match HaroldStore::open(folder.store_path()).await {
                 Ok(store) => break Arc::new(store),

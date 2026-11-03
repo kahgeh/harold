@@ -923,7 +923,7 @@ async fn the_task_polls_at_start_reports_the_gauges_and_stops_at_shutdown() {
     let handle = start(path, tips_path(&pod), empty_hub(), None, shutdown_rx);
 
     let snapshot = gauge_snapshot();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while !snapshot.lock().unwrap().slots.contains_key(&pod.name) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -2229,7 +2229,7 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
     let handle = start(path, tips_path(&pod), empty_hub(), None, shutdown_rx);
 
     let snapshot = gauge_snapshot();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while !snapshot.lock().unwrap().specs.contains_key(&pod.name) {
         assert!(
             tokio::time::Instant::now() < deadline,

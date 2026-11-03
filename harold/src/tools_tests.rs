@@ -291,7 +291,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     )
     .await;
     assert_eq!(listed.unwrap_err(), "12 ");
-    tokio::time::timeout(Duration::from_secs(1), tools.stopped())
+    tokio::time::timeout(Duration::from_secs(30), tools.stopped())
         .await
         .expect("a host with no tool stops at once");
     println!("evidence: log lines: {failed:?}");

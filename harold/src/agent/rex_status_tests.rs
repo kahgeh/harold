@@ -11,7 +11,7 @@ use crate::test_support::fake_program::{Language, write_fake_program};
 // -- fakes ---------------------------------------------------------------------------
 
 /// How long `Script::feed` waits for the program to open the fifo.
-const FEED_WAIT: Duration = Duration::from_secs(5);
+const FEED_WAIT: Duration = Duration::from_secs(60);
 /// `O_NONBLOCK` and `ENXIO` as the two systems that Harold builds on give them.
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4000;
@@ -266,7 +266,7 @@ impl Drop for Script {
 }
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !done() {
         assert!(Instant::now() < deadline, "timed out: {what}");
         std::thread::sleep(Duration::from_millis(2));

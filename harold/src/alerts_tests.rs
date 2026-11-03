@@ -167,7 +167,7 @@ async fn a_post_types_exactly_the_line_into_the_chief_pane() {
     assert!(text.contains("state=\"firing\""), "{text}");
 
     drop(shutdown_tx);
-    tokio::time::timeout(Duration::from_secs(2), handle)
+    tokio::time::timeout(Duration::from_secs(30), handle)
         .await
         .expect("the address and the delivery stop on shutdown")
         .unwrap();

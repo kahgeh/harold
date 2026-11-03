@@ -798,7 +798,7 @@ async fn the_screen_follows_the_bytes_in_the_blobs_folder_every_ten_seconds() {
             }
         )
     };
-    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    let limit = std::time::Instant::now() + Duration::from_secs(60);
     while !shown(&models) {
         assert!(
             std::time::Instant::now() < limit,

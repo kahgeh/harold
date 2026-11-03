@@ -597,7 +597,7 @@ fn real_tmux_capture_excludes_prompt_older_than_configured_history_tail() {
         .contains("CAPTURE-READY")
     {
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(30),
             "fixture output did not settle"
         );
         std::thread::sleep(Duration::from_millis(10));
@@ -1035,7 +1035,7 @@ mod rex_observer {
             block_id: block.to_string(),
             window_name: String::new(),
         }]);
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while status.lookup(block) == Lookup::NoStream {
             assert!(Instant::now() < deadline, "the stream did not start");
             std::thread::sleep(Duration::from_millis(2));

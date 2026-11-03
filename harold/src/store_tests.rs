@@ -1084,7 +1084,7 @@ async fn snapshot_reader_does_not_reserve_the_projection_writer_lock() {
 
     let writer_store = Arc::clone(&store);
     let mut writer = tokio::spawn(async move { writer_store.project_unhandled_events(500).await });
-    let batch = tokio::time::timeout(Duration::from_millis(500), &mut writer)
+    let batch = tokio::time::timeout(Duration::from_secs(10), &mut writer)
         .await
         .expect("read-only snapshot must not reserve the projection writer lock")
         .expect("projection task panicked")

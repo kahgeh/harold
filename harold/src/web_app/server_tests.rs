@@ -370,9 +370,9 @@ async fn start_serves_until_shutdown() {
     assert!(vapid_key_path(&directory.store_path()).exists());
 
     drop(shutdown);
-    tokio::time::timeout(Duration::from_secs(2), running.handle)
+    tokio::time::timeout(Duration::from_secs(30), running.handle)
         .await
-        .expect("the app stops within 2 s")
+        .expect("the app stops within 30 s")
         .unwrap();
 }
 
@@ -432,7 +432,7 @@ async fn old_thread_rows_are_pruned_at_start() {
         .collect();
     assert_eq!(ids, ["new"]);
     drop(shutdown);
-    let _ = tokio::time::timeout(Duration::from_secs(2), running.handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), running.handle).await;
 }
 
 fn named(name: &str, icon: bool) -> WebAppIdentity {

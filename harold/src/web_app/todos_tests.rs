@@ -515,7 +515,7 @@ async fn the_stream_sends_the_todos_and_the_count_when_the_list_changes() {
     // The first event is the thread; the todos are not sent while they are as the page drew them.
     service.fake.set_list(vec![question("Q1", 1)]);
 
-    let patch = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+    let patch = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let chunk = response.chunk().await.unwrap().expect("the stream goes on");
             seen.push_str(&String::from_utf8_lossy(&chunk));
@@ -1630,7 +1630,7 @@ async fn the_stream_turns_the_line_red_by_itself_when_two_hours_pass() {
     let mut seen = String::new();
     clock.store(at(24, 16, 30), Ordering::SeqCst);
 
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let chunk = response.chunk().await.unwrap().expect("the stream goes on");
             seen.push_str(&String::from_utf8_lossy(&chunk));

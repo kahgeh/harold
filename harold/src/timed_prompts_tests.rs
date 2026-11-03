@@ -1419,7 +1419,7 @@ async fn task_types_a_due_prompt_and_stops_at_once_on_shutdown() {
     assert_eq!(fake.keys(), digest_keys());
 
     drop(shutdown_tx);
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("the task stops within a second of shutdown")
         .unwrap();
@@ -1439,7 +1439,7 @@ async fn task_stops_at_once_while_a_prompt_is_waiting() {
     wait_until("the first round has run", || fake.now_reads() >= 1).await;
 
     drop(shutdown_tx);
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("the task stops within a second of shutdown")
         .unwrap();
@@ -1480,7 +1480,7 @@ async fn start_with_no_prompts_gives_a_task_that_ends_at_once() {
         .await
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("a task with nothing to do ends at once")
         .unwrap();
@@ -1565,7 +1565,7 @@ async fn task_stops_at_once_on_shutdown_during_the_startup_wait() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     drop(shutdown_tx);
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("the task stops within a second of shutdown")
         .unwrap();

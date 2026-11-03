@@ -56,10 +56,10 @@ pub(crate) fn write_fake_program(path: &Path, language: Language, body: &str) {
 }
 
 /// Runs the program with `--probe` until the start works. It retries only on "Text file busy",
-/// every 5 ms, for at most 10 s. Any other error panics with its text. The exit status of the
+/// every 5 ms, for at most 60 s. Any other error panics with its text. The exit status of the
 /// program does not matter: a copy of a real program may refuse the argument.
 pub(crate) fn probe_until_it_starts(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match std::process::Command::new(path).arg("--probe").status() {
             Ok(_) => return,

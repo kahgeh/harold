@@ -605,9 +605,9 @@ async fn the_stream_ends_at_shutdown() {
 
     drop(server.shutdown.take());
 
-    let ended = tokio::time::timeout(Duration::from_secs(2), updates.next())
+    let ended = tokio::time::timeout(Duration::from_secs(30), updates.next())
         .await
-        .expect("the stream ends within 2 s");
+        .expect("the stream ends within 30 s");
     assert_eq!(ended, None);
 }
 

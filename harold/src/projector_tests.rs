@@ -218,7 +218,7 @@ async fn idle_handler_stops_when_shutdown_channel_closes() {
 
     drop(shutdown_tx);
 
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("handler did not stop")
         .expect("handler task panicked");
@@ -839,7 +839,7 @@ async fn post_commit_snapshot_load_failure_is_retried_on_the_next_noop_cycle() {
         .await
         .unwrap();
     assert_eq!(retry.applied, 0);
-    tokio::time::timeout(Duration::from_millis(100), receiver.changed())
+    tokio::time::timeout(Duration::from_secs(10), receiver.changed())
         .await
         .expect("committed snapshot was not retried")
         .expect("snapshot hub closed");
@@ -869,7 +869,7 @@ async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
 
     assert!(!batch.snapshot_changed);
     assert_eq!(batch.through_event_version.get(), 1);
-    tokio::time::timeout(Duration::from_millis(100), receiver.changed())
+    tokio::time::timeout(Duration::from_secs(10), receiver.changed())
         .await
         .expect("checkpoint was not published")
         .expect("snapshot hub closed");

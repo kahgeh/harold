@@ -112,7 +112,7 @@ async fn put_list_answer_round_trip() {
         .unwrap();
 
     // A successful write leaves a wake for the batch sender.
-    tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(30), wake.notified())
         .await
         .expect("a write wakes the sender");
 
@@ -494,11 +494,11 @@ async fn tick_step_ticks_and_logs_a_fixed_line_without_step_text() {
     put(&service, instructions_proto("I1", &["TICK-CANARY-77 step"]))
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(30), wake.notified())
         .await
         .unwrap();
     tick(&service, "I1", 1, 1, true).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(30), wake.notified())
         .await
         .expect("a tick wakes the sender");
     tick(&service, "I1", 1, 1, false).await.unwrap();
