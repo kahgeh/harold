@@ -9,11 +9,7 @@ use crate::tools::{ToolContext, ToolError, ToolHandle};
 mod classify;
 mod gather;
 mod model;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the CLI prints with it in a later task")
-)]
-mod render;
+pub(crate) mod render;
 mod service;
 mod title;
 

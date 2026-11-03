@@ -17,6 +17,8 @@ use harold_api::tools::knowledge::v1 as knowledge_api;
 use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
 use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
+use harold_api::tools::release::v1 as release_api;
+use harold_api::tools::release::v1::release_service_client::ReleaseServiceClient;
 use harold_api::tools::watch::v1 as watch_api;
 use harold_api::tools::watch::v1::watch_service_client::WatchServiceClient;
 use harold_api::tools::work::v1 as work_api;
@@ -243,6 +245,8 @@ pub(crate) const SPEAK_COMMAND: &str = "speak";
 pub(crate) const TOOL_COMMAND: &str = "tool";
 const TOOL_USAGE_LINE: &str =
     "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
+const RELEASE_USAGE_LINE: &str =
+    "invalid argument: usage is harold tool release next [product] [--json]";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
 const SPOKEN_LOOKUP_UNAVAILABLE_LINE: &str = "the agent lookup is not available now; try again";
@@ -350,6 +354,7 @@ pub(crate) enum ToolCommand {
     QuestionsChecked,
     Backlog(BacklogCommand),
     Watch(WatchCommand),
+    Release(ReleaseCommand),
     Knowledge(KnowledgeCommand),
     Tts(TtsCommand),
     Work(WorkCommand),
@@ -1034,6 +1039,28 @@ pub(crate) enum WatchCommand {
     List,
 }
 
+/// A `harold tool release` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReleaseCommand {
+    Next { product: Option<String>, json: bool },
+}
+
+fn parse_release(args: &[&str]) -> Result<ReleaseCommand, String> {
+    let ["next", rest @ ..] = args else {
+        return Err(RELEASE_USAGE_LINE.into());
+    };
+    let mut product = None;
+    let mut json = false;
+    for arg in rest {
+        match *arg {
+            "--json" if !json => json = true,
+            name if !name.starts_with('-') && product.is_none() => product = Some(name.into()),
+            _ => return Err(RELEASE_USAGE_LINE.into()),
+        }
+    }
+    Ok(ReleaseCommand::Next { product, json })
+}
+
 fn parse_watch(args: &[&str]) -> Result<WatchCommand, String> {
     match args {
         ["list"] => Ok(WatchCommand::List),
@@ -1356,6 +1383,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
     match args {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
+        ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
         ["tts", rest @ ..] => parse_tts(rest).map(ToolCommand::Tts),
         ["work", rest @ ..] => parse_work(rest).map(ToolCommand::Work),
@@ -2002,6 +2030,9 @@ pub(crate) async fn tool(
         )
         .await;
     }
+    if let ToolCommand::Release(release) = command {
+        return release_within(address, release, CALL_DEADLINE).await;
+    }
     if let ToolCommand::Knowledge(knowledge) = command {
         return knowledge_within(address, knowledge, KNOWLEDGE_DEADLINE).await;
     }
@@ -2068,6 +2099,47 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
         other => other,
     };
     format!("{} ended ({why}) in {}, {counts}", watch.name, watch.folder)
+}
+
+/// The line printed for a refusal from the release service.
+fn release_refusal_line(status: &tonic::Status, command: &ReleaseCommand) -> String {
+    let ReleaseCommand::Next { product, .. } = command;
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve releases".into(),
+        (tonic::Code::NotFound, "unknown_product") => {
+            format!("unknown product {}", product.as_deref().unwrap_or_default())
+        }
+        (_, "registry_unreadable") => "the product registry cannot be read".into(),
+        _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
+        _ => status.message().to_string(),
+    }
+}
+
+/// Runs a `harold tool release` command. `Ok` is the text to print; `Err` the one line.
+pub(crate) async fn release_within(
+    address: &str,
+    command: &ReleaseCommand,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = ReleaseServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let ReleaseCommand::Next { product, json } = command;
+        let response = client
+            .next(release_api::NextRequest {
+                product: product.clone().unwrap_or_default(),
+            })
+            .await
+            .map_err(|status| release_refusal_line(&status, command))?
+            .into_inner();
+        Ok(if *json {
+            crate::tools::release::render::json(&response)
+        } else {
+            crate::tools::release::render::text(&response)
+        })
+    })
+    .await
 }
 
 /// Runs a `harold tool watch` command from `folder`, the caller's working directory.
@@ -2229,6 +2301,7 @@ pub(crate) async fn tool_within(
             // command through `watch_within`. `main` runs a work command through `work`.
             ToolCommand::Backlog(_)
             | ToolCommand::Watch(_)
+            | ToolCommand::Release(_)
             | ToolCommand::Knowledge(_)
             | ToolCommand::Tts(_)
             | ToolCommand::Work(_) => Err(TOOL_USAGE_LINE.into()),
@@ -6417,6 +6490,176 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
         (serve(handle.routes).await, stop)
+    }
+
+    // -- harold tool release ------------------------------------------------------
+
+    fn release_args(args: &[&str]) -> Result<Mode, String> {
+        let mut all = vec!["tool", "release"];
+        all.extend_from_slice(args);
+        parse(&all)
+    }
+
+    fn release_command(product: Option<&str>, json: bool) -> Result<Mode, String> {
+        Ok(Mode::Tool(ToolCommand::Release(ReleaseCommand::Next {
+            product: product.map(Into::into),
+            json,
+        })))
+    }
+
+    #[test]
+    fn tool_release_next_parses_its_arguments() {
+        assert_eq!(release_args(&["next"]), release_command(None, false));
+        assert_eq!(
+            release_args(&["next", "harold"]),
+            release_command(Some("harold"), false)
+        );
+        assert_eq!(
+            release_args(&["next", "--json"]),
+            release_command(None, true)
+        );
+        assert_eq!(
+            release_args(&["next", "harold", "--json"]),
+            release_command(Some("harold"), true)
+        );
+        assert_eq!(
+            release_args(&["next", "--json", "harold"]),
+            release_command(Some("harold"), true)
+        );
+    }
+
+    #[test]
+    fn tool_release_next_refuses_a_malformed_command() {
+        for args in [
+            &["next", "--bad"][..],
+            &["next", "a", "b"],
+            &["next", "--json", "--json"],
+            &["later"],
+            &[],
+        ] {
+            assert_eq!(
+                release_args(args),
+                Err(RELEASE_USAGE_LINE.into()),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// Runs a git command in `repo`, with no network and a fixed identity.
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// The release tool over a temp registry. The product `alpha` is a real tiny git repo
+    /// with the tag `v0.1.0` on `origin/main`.
+    async fn release_server(folder: &TempFolder) -> (Serving, tokio::sync::watch::Sender<()>) {
+        let repo = folder.0.join("alpha");
+        std::fs::create_dir_all(repo.join(".superpowers/pod/specs")).unwrap();
+        git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        git(
+            &repo,
+            &["commit", "--quiet", "--allow-empty", "-m", "first"],
+        );
+        git(&repo, &["tag", "v0.1.0"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let registry = folder.0.join("products.toml");
+        std::fs::write(
+            &registry,
+            format!(
+                "[products.alpha]\nrepo = \"{}\"\nbase = \"main\"\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::release::start(crate::tools::ToolContext {
+            data_folder: folder.0.join("data"),
+            typing: Some(std::sync::Arc::new(Typist)),
+            chief_pane: std::sync::Arc::new(NoChief),
+            pane_folder: std::sync::Arc::new(NoFolder),
+            products: std::sync::Arc::new(NoProducts),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "/usr/bin/true".into(),
+            pod_registry: Some(registry),
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        (serve(handle.routes).await, stop)
+    }
+
+    #[tokio::test]
+    async fn tool_release_next_runs_against_the_daemon() {
+        let folder = TempFolder::new();
+        let (serving, _stop) = release_server(&folder).await;
+        let run = |product: Option<&str>, json: bool| {
+            let address = serving.address.clone();
+            let command = ReleaseCommand::Next {
+                product: product.map(Into::into),
+                json,
+            };
+            async move { release_within(&address, &command, TEST_WAIT).await }
+        };
+
+        let text = run(None, false).await.unwrap();
+        assert!(text.starts_with("alpha\n"), "{text}");
+        assert!(text.contains("v0.1.0"), "{text}");
+
+        let json = run(Some("alpha"), true).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["products"][0]["name"], "alpha", "{json}");
+        assert_eq!(value["products"][0]["release"], "v0.1.0", "{json}");
+
+        assert_eq!(
+            run(Some("nope"), false).await,
+            Err("unknown product nope".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_release_next_says_when_the_registry_cannot_be_read() {
+        let folder = TempFolder::new();
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::release::start(crate::tools::ToolContext {
+            data_folder: folder.0.join("data"),
+            typing: Some(std::sync::Arc::new(Typist)),
+            chief_pane: std::sync::Arc::new(NoChief),
+            pane_folder: std::sync::Arc::new(NoFolder),
+            products: std::sync::Arc::new(NoProducts),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "/usr/bin/true".into(),
+            pod_registry: None,
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        let serving = serve(handle.routes).await;
+        let command = ReleaseCommand::Next {
+            product: None,
+            json: false,
+        };
+        assert_eq!(
+            release_within(&serving.address, &command, TEST_WAIT).await,
+            Err("the product registry cannot be read".into())
+        );
+        drop(stop);
     }
 
     #[tokio::test]

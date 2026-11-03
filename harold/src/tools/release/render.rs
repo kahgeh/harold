@@ -4,7 +4,7 @@ use harold_api::tools::release::v1::{Line, NextResponse, ProductNext};
 use serde_json::{Value, json};
 
 /// The text of the response: one block for each product, with a blank line between.
-pub(super) fn text(response: &NextResponse) -> String {
+pub(crate) fn text(response: &NextResponse) -> String {
     let blocks: Vec<String> = response.products.iter().map(product_text).collect();
     if blocks.is_empty() {
         return String::new();
@@ -95,7 +95,7 @@ fn section(out: &mut String, heading: &str, lines: &[Line], always: bool, counts
 }
 
 /// The JSON of the response, with the proto field names as keys.
-pub(super) fn json(response: &NextResponse) -> String {
+pub(crate) fn json(response: &NextResponse) -> String {
     let products: Vec<Value> = response.products.iter().map(product_json).collect();
     let value = json!({ "products": products });
     serde_json::to_string_pretty(&value).expect("a JSON value always prints")
