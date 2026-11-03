@@ -513,6 +513,21 @@ class AttemptTests(ReleaseTestCase):
                 self.assertEqual(code, 1 if failed_release else 0)
                 self.assertEqual(err.count('release attempt not recorded'), 1)
 
+    def test_a_call_that_outlasts_the_limit_times_out_at_5_seconds_and_is_tried_once_more(self):
+        self.harold = [(None, 0, release.CALL_LIMIT + 1)] * 2
+        timeouts = []
+        real = self.fake_harold
+        def spy(argv, timeout):
+            timeouts.append(timeout)
+            return real(argv, timeout)
+        with patch.object(self, 'fake_harold', spy):
+            code, _, err = self.release()
+        self.assertEqual(code, 0)
+        self.assertEqual(timeouts[0], release.CALL_LIMIT)
+        self.assertEqual(len(harold_calls(self)), 2)
+        self.assertGreaterEqual(self.clock.now, release.CALL_LIMIT + release.RETRY_WAIT + release.CALL_LIMIT)
+        self.assertEqual(err.count('release attempt not recorded'), 1)
+
     def test_a_second_ctrl_c_during_recording_exits_with_the_releases_code(self):
         self.harold = [(None, KeyboardInterrupt(), 0)]
         code, _, err = self.release()
