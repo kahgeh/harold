@@ -695,7 +695,7 @@ async fn the_thread_page_header_has_no_specs_link() {
         let body = get(&server, "/").await.text().await.unwrap();
 
         assert!(!body.contains("id=\"to-specs\""), "{body}");
-        assert_eq!(body.contains("id=\"to-notes\""), notes_on, "{body}");
+        assert!(body.contains("id=\"to-pages\""), "{body}");
     }
 }
 

@@ -1099,15 +1099,17 @@ mod pages {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn the_thread_header_is_unchanged() {
+    async fn the_thread_header_holds_the_pages_button() {
         let dir = Folder::new();
         let server = one(&dir).await;
         let body = get(&server, "/").await.text().await.unwrap();
         let header = &body[body.find("id=\"to-todos\"").expect("Todos button")..];
         let header = &header[..header.find("id=\"to-thread\"").expect("thread button")];
         assert!(header.contains("Todos"), "{header}");
-        assert!(!header.contains("href=\"/c\""), "{header}");
-        assert!(!header.contains("Pages"), "{header}");
+        assert!(
+            header.contains(r#"<a href="/c" id="to-pages" class="todos-button">Pages</a>"#),
+            "{header}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

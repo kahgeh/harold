@@ -362,19 +362,19 @@ async fn an_unknown_vault_note_is_not_found() {
 }
 
 #[tokio::test]
-async fn without_the_knowledge_tool_there_is_no_notes_link_and_no_notes_route() {
+async fn the_thread_header_shows_pages_and_not_notes() {
+    let pages = r#"<a href="/c" id="to-pages" class="todos-button">Pages</a>"#;
     let off = serve(false).await;
     for path in ["/notes", "/notes/search?q=abc", "/notes/anything"] {
         assert_eq!(off.get(path).await.status(), 404, "{path}");
     }
-    let thread = off.get("/").await.text().await.unwrap();
-    assert!(!thread.contains(r#"id="to-notes""#));
     let on = serve(true).await;
-    let thread = on.get("/").await.text().await.unwrap();
-    assert!(
-        thread.contains(r#"<a href="/notes" id="to-notes" class="todos-button">Notes</a>"#),
-        "{thread}"
-    );
+    for app in [off, on] {
+        let thread = app.get("/").await.text().await.unwrap();
+        assert!(thread.contains(pages), "{thread}");
+        assert!(!thread.contains(r#"id="to-notes""#), "{thread}");
+        assert!(!thread.contains(">Notes<"), "{thread}");
+    }
 }
 
 #[test]
