@@ -89,24 +89,41 @@ pub(super) fn parse_epoch(text: &str) -> Option<i64> {
     text.trim().parse().ok()
 }
 
-/// The program that prints a local midnight, and the longest it may take.
+/// The program that prints a local midnight. macOS keeps `date` in `/bin`. On Linux
+/// (Omarchy) `/usr/bin/date` is the usual path, and this path is an assumption: `/bin` is a
+/// link to `/usr/bin` there, so both paths work.
+#[cfg(target_os = "macos")]
 const DATE_PROGRAM: &str = "/bin/date";
+#[cfg(not(target_os = "macos"))]
+const DATE_PROGRAM: &str = "/usr/bin/date";
 const DATE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The arguments that make `/bin/date` print the instant of `00:00:00` on `date`.
+/// The text of `00:00:00` on `date`, as `date` reads it.
+fn midnight_text(date: Date) -> String {
+    format!(
+        "{:04}-{:02}-{:02} 00:00:00",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
+/// The arguments that make BSD `date` print the instant of `00:00:00` on `date`.
+#[cfg(target_os = "macos")]
 fn midnight_args(date: Date) -> Vec<String> {
     vec![
         "-j".into(),
         "-f".into(),
         "%Y-%m-%d %H:%M:%S".into(),
-        format!(
-            "{:04}-{:02}-{:02} 00:00:00",
-            date.year(),
-            u8::from(date.month()),
-            date.day()
-        ),
+        midnight_text(date),
         "+%s".into(),
     ]
+}
+
+/// The arguments that make GNU `date` print the instant of `00:00:00` on `date`.
+#[cfg(not(target_os = "macos"))]
+fn midnight_args(date: Date) -> Vec<String> {
+    vec!["-d".into(), midnight_text(date), "+%s".into()]
 }
 
 /// What `program` prints. A program that cannot start is `Missing`. A program that fails,
@@ -381,8 +398,9 @@ mod midnight_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn the_date_arguments_name_the_next_date_at_midnight() {
+    fn the_macos_date_arguments_name_the_next_date_at_midnight() {
         let date = Date::from_calendar_date(2026, time::Month::October, 5).unwrap();
         assert_eq!(
             midnight_args(date),
@@ -394,6 +412,13 @@ mod midnight_tests {
                 "+%s"
             ]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_date_arguments_name_the_next_date_at_midnight() {
+        let date = Date::from_calendar_date(2026, time::Month::October, 5).unwrap();
+        assert_eq!(midnight_args(date), ["-d", "2026-10-05 00:00:00", "+%s"]);
     }
 
     fn clock_with(
@@ -431,7 +456,8 @@ mod midnight_tests {
             let (clock, seen) = clock_with(Ok("1791036000"));
             let day = local_ms(local, plus_ten).unwrap();
             clock.midnight_after(day).await.unwrap();
-            assert_eq!(seen.lock().unwrap()[0][3], next, "{local}");
+            let args = seen.lock().unwrap()[0].clone();
+            assert!(args.contains(&next.to_string()), "{local}: {args:?}");
         }
     }
 
