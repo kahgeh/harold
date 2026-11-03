@@ -40,7 +40,7 @@ The installer checks for `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. `syst
 sudo pacman -S --needed python curl lsof inetutils base-devel pipewire
 ```
 
-Install `grpcurl` from the AUR package `grpcurl-bin`, with `makepkg -si`, after you approve its check. The AUR package `grpcurl` also works, but it conflicts with `grpcurl-bin`, so install only one (row 16 of the [dependency audits](references/dependency-audits.md)). The installer does not run `sudo`, `pacman` or `makepkg`. See [install on Linux](how-tos/setup.md#install-on-linux).
+Install `grpcurl` from the AUR package `grpcurl-bin`, with `makepkg -si`, after you approve its check. A machine that already has the AUR package `grpcurl` also works. That package conflicts with `grpcurl-bin`, so never install both (row 16 of the [dependency audits](references/dependency-audits.md)). The installer does not run `sudo`, `pacman` or `makepkg`. See [install on Linux](how-tos/setup.md#install-on-linux).
 
 The Linux install has no speech, no web app and no line to the phone. Later stages add them. The installer does not check for `codesign`, `launchctl` or `plutil`.
 

@@ -15,7 +15,7 @@ Do these steps as your normal user, in a login session. The steps that use `sudo
    sudo pacman -S --needed python curl lsof inetutils base-devel pipewire
    ```
    Rex and Tailscale are already on omarchy.
-2. Install `grpcurl` from the AUR package `grpcurl-bin`. First check the package and approve it (see [dependency audits](../references/dependency-audits.md)). Then run `makepkg -si` in the package folder. The AUR package `grpcurl` also works, but it conflicts with `grpcurl-bin`, so install only one. The hooks use a `grpcurl` command to report to Harold.
+2. Install `grpcurl` from the AUR package `grpcurl-bin`. First check the package and approve it (see [dependency audits](../references/dependency-audits.md)). Then run `makepkg -si` in the package folder. A machine that already has the AUR package `grpcurl` also works. That package conflicts with `grpcurl-bin`, so never install both. The hooks use a `grpcurl` command to report to Harold.
 3. Run the one-line install:
    ```sh
    curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
