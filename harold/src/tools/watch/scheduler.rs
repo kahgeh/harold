@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tracing::Instrument as _;
 
 use super::answer::{self, Answer, Cause, Failure};
-use super::clock::{clock_ms, day_bounds, local_text};
+use super::clock::{LocalOffset, clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
 use super::obs::{self, EndReason, How, RunObs, Timing};
 use super::report::{ReportSlot, Target, Typist};
@@ -58,7 +58,7 @@ pub(super) struct Deps {
     pub pods: Arc<dyn Pods>,
     pub chief_pane: Arc<dyn ChiefPane>,
     pub settings: WatchSettings,
-    pub offset: UtcOffset,
+    pub local: Arc<dyn LocalOffset>,
     pub shutdown: signal::Receiver<()>,
 }
 
@@ -156,8 +156,13 @@ impl Scheduler {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn today(&self) -> (i64, i64) {
-        day_bounds(clock_ms(), self.deps.offset)
+    /// The local zone offset now, read at each use.
+    async fn offset(&self) -> UtcOffset {
+        self.deps.local.offset().await
+    }
+
+    async fn today(&self) -> (i64, i64) {
+        day_bounds(clock_ms(), self.offset().await)
     }
 
     fn daily_budget_micros(&self) -> Option<i64> {
@@ -185,7 +190,7 @@ impl Scheduler {
             return Err(StartRefusal::TooManyWatches);
         }
         let now = clock_ms();
-        let (day_start, day_end) = day_bounds(now, self.deps.offset);
+        let (day_start, day_end) = day_bounds(now, self.offset().await);
         if let Some(daily) = self.daily_budget_micros() {
             let spent = store
                 .spent_micros(day_start, day_end)
@@ -230,7 +235,8 @@ impl Scheduler {
             } else {
                 How::Started
             },
-        );
+        )
+        .await;
         Ok(ends_at_ms)
     }
 
@@ -253,7 +259,7 @@ impl Scheduler {
 
     /// Every running watch, and every watch that ended today.
     pub(super) async fn list(&self) -> Result<Listing, StoreError> {
-        let (day_start, day_end) = self.today();
+        let (day_start, day_end) = self.today().await;
         let mut watches = self.deps.store.running().await?;
         watches.extend(self.deps.store.ended_since(day_start).await?);
         let spent_usd_micros = self.deps.store.spent_micros(day_start, day_end).await?;
@@ -273,7 +279,7 @@ impl Scheduler {
             if clock_ms() >= row.ends_at_ms {
                 self.end(&row, EndReason::Ended, None).await;
             } else {
-                self.spawn_watch(&row, How::Resumed);
+                self.spawn_watch(&row, How::Resumed).await;
             }
         }
     }
@@ -290,7 +296,8 @@ impl Scheduler {
         }
     }
 
-    fn spawn_watch(self: &Arc<Self>, row: &WatchRow, how: How) {
+    async fn spawn_watch(self: &Arc<Self>, row: &WatchRow, how: How) {
+        let ends_at = local_text(row.ends_at_ms, self.offset().await);
         let (cancel, cancelled) = signal::channel(false);
         let slot = ReportSlot::new(Arc::clone(&self.typist), Self::target(row), self.retry);
         let old = self.state().live.insert(
@@ -309,7 +316,7 @@ impl Scheduler {
             watch: &row.name,
             folder: &row.folder,
             skill: &row.skill,
-            ends_at: &local_text(row.ends_at_ms, self.deps.offset),
+            ends_at: &ends_at,
             every_minutes: row.every_minutes,
             every_run: row.every_run,
             how,
@@ -411,7 +418,7 @@ impl Scheduler {
 
         // A daily budget: every watch stops before a run that could pass it.
         if let Some(daily) = self.daily_budget_micros() {
-            let (day_start, day_end) = self.today();
+            let (day_start, day_end) = self.today().await;
             let spent = self
                 .deps
                 .store
@@ -526,7 +533,7 @@ impl Scheduler {
             agents: &self.deps.agents,
             pods: &self.deps.pods,
             chief_pane: &self.deps.chief_pane,
-            offset: self.deps.offset,
+            offset: self.offset().await,
         };
         let now = clock_ms();
         let total = total_runs(row);

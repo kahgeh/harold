@@ -3037,3 +3037,18 @@ async fn read_screen_routed_reads_nothing_for_a_host_pane_id() {
         Some("screen".to_string())
     );
 }
+
+#[test]
+fn the_local_offset_is_read_from_the_zone_part_of_the_date_text() {
+    assert_eq!(
+        parse_local_offset("2026-11-03 10:00:00 +1100"),
+        Some(time::UtcOffset::from_hms(11, 0, 0).unwrap())
+    );
+    assert_eq!(
+        parse_local_offset("2026-11-03 10:00:00 -0330\n"),
+        Some(time::UtcOffset::from_hms(-3, -30, 0).unwrap())
+    );
+    assert_eq!(parse_local_offset("garbage"), None);
+    assert_eq!(parse_local_offset("2026-11-03 10:00:00 +9900"), None);
+    assert_eq!(parse_local_offset("2026-11-03 10:00:00 +11"), None);
+}

@@ -10,6 +10,9 @@ use crate::pod_stats::PodSnapshot;
 use crate::timed_prompts::InputBox;
 use crate::tools::{AgentFact, Agents, BoxFuture, ChiefPane, PaneTyping, Pods, Typing};
 
+use time::UtcOffset;
+
+use super::clock::LocalOffset;
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 
 pub(super) struct TempFolder(pub std::path::PathBuf);
@@ -290,5 +293,25 @@ impl ModelRunner for FakeRunner {
                 Step::NoStart => ModelResult::FailedToStart,
             }
         })
+    }
+}
+
+/// An offset the test sets and changes, as daylight saving time does.
+pub(super) struct ScriptedOffset(Mutex<UtcOffset>);
+
+impl ScriptedOffset {
+    pub(super) fn at(offset: UtcOffset) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(offset)))
+    }
+
+    pub(super) fn set(&self, offset: UtcOffset) {
+        *self.0.lock().unwrap() = offset;
+    }
+}
+
+impl LocalOffset for ScriptedOffset {
+    fn offset(&self) -> BoxFuture<'_, UtcOffset> {
+        let offset = *self.0.lock().unwrap();
+        Box::pin(async move { offset })
     }
 }

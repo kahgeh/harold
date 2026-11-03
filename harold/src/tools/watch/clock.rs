@@ -1,6 +1,11 @@
 //! The watch tool's clock: wall-clock milliseconds, and the local day around them.
 
+use std::future::Future;
+use std::sync::{Mutex, PoisonError};
+
 use time::{Date, OffsetDateTime, Time, UtcOffset};
+
+use crate::tools::BoxFuture;
 
 const MS_PER_DAY: i64 = 86_400_000;
 
@@ -24,6 +29,55 @@ pub(super) fn clock_ms() -> i64 {
             .duration_since(*start)
             .as_millis() as i64
     })
+}
+
+/// The local zone offset at this moment. It is read at each use, so a change of daylight
+/// saving time takes effect without a restart.
+pub(super) trait LocalOffset: Send + Sync {
+    fn offset(&self) -> BoxFuture<'_, UtcOffset>;
+}
+
+type Reader = Box<dyn Fn() -> BoxFuture<'static, Option<UtcOffset>> + Send + Sync>;
+
+/// The production offset: it asks `/bin/date` each time. When `/bin/date` fails, it gives
+/// the last good offset.
+pub(super) struct DateClock {
+    reader: Reader,
+    last_good: Mutex<UtcOffset>,
+}
+
+impl DateClock {
+    pub(super) fn new() -> Self {
+        Self::with_reader(crate::timed_prompts::read_local_offset)
+    }
+
+    /// A clock that gets its offset from `reader`.
+    pub(super) fn with_reader<F, Fut>(reader: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<UtcOffset>> + Send + 'static,
+    {
+        Self {
+            reader: Box::new(move || Box::pin(reader())),
+            last_good: Mutex::new(crate::telemetry::local_offset()),
+        }
+    }
+}
+
+impl LocalOffset for DateClock {
+    fn offset(&self) -> BoxFuture<'_, UtcOffset> {
+        Box::pin(async move {
+            let read = (self.reader)().await;
+            let mut last = self
+                .last_good
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(offset) = read {
+                *last = offset;
+            }
+            *last
+        })
+    }
 }
 
 fn at(ms: i64, offset: UtcOffset) -> OffsetDateTime {
@@ -75,5 +129,29 @@ mod tests {
         assert!(start <= now && now < end);
         // One minute later is the next local day.
         assert_eq!(day_bounds(now + 30 * 60_000, offset).0, end);
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unreadable_date_keeps_the_last_good_offset() {
+        let plus_eleven = UtcOffset::from_hms(11, 0, 0).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let clock = DateClock::with_reader(move || {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move { first.then_some(plus_eleven) }
+        });
+
+        assert_eq!(clock.offset().await, plus_eleven);
+        assert_eq!(clock.offset().await, plus_eleven);
+        assert_eq!(clock.offset().await, plus_eleven);
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
     }
 }

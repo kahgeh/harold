@@ -53,7 +53,7 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         pods: ctx.pods,
         chief_pane: ctx.chief_pane,
         settings: ctx.watch_settings.clone(),
-        offset: crate::telemetry::local_offset(),
+        local: Arc::new(clock::DateClock::new()),
         shutdown: ctx.shutdown.clone(),
     });
     let service = service::WatchToolService::new(Arc::clone(&scheduler), ctx.watch_settings);

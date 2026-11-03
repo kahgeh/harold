@@ -104,6 +104,34 @@ pub(crate) fn parse_local_now(text: &str) -> Option<LocalNow> {
     })
 }
 
+/// The arguments that print the local date, time and zone offset.
+const OFFSET_ARGS: [&str; 1] = ["+%Y-%m-%d %H:%M:%S %z"];
+
+/// Reads the zone offset, such as `+1100`, from the last part of the output of
+/// `/bin/date "+%Y-%m-%d %H:%M:%S %z"`.
+pub(crate) fn parse_local_offset(text: &str) -> Option<time::UtcOffset> {
+    let zone = text.trim().rsplit(' ').next()?;
+    let bytes = zone.as_bytes();
+    if bytes.len() != 5 || !bytes[1..].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let hours: i8 = zone[1..3].parse().ok()?;
+    let minutes: i8 = zone[3..5].parse().ok()?;
+    time::UtcOffset::from_hms(sign * hours, sign * minutes, 0).ok()
+}
+
+/// The Mac's local zone offset now, from `/bin/date`. `None` when the command fails or
+/// prints text that is not a zone offset.
+pub(crate) async fn read_local_offset() -> Option<time::UtcOffset> {
+    let text = bounded_stdout(DATE_PROGRAM, &OFFSET_ARGS, COMMAND_TIMEOUT).await?;
+    parse_local_offset(&text)
+}
+
 // ---------------------------------------------------------------------------
 // The window
 // ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@ use super::*;
 use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::InputBox;
 use crate::tools::watch::test_support::{
-    FakeAgents, FakeChief, FakePods, FakeRunner, FakeTyping, Step, TempFolder, agent, answer,
+    FakeAgents, FakeChief, FakePods, FakeRunner, FakeTyping, ScriptedOffset, Step, TempFolder,
+    agent, answer,
 };
 use crate::tools::watch::validate::Checked;
 
@@ -31,6 +32,18 @@ pub(in crate::tools::watch) fn settings() -> WatchSettings {
 }
 
 pub(in crate::tools::watch) async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
+    harness_on(settings, steps, &ScriptedOffset::at(UtcOffset::UTC)).await
+}
+
+async fn harness_with_offset(local: &Arc<ScriptedOffset>) -> Harness {
+    harness_on(settings(), vec![answer("QUIET", 0.01)], local).await
+}
+
+async fn harness_on(
+    settings: WatchSettings,
+    steps: Vec<Step>,
+    local: &Arc<ScriptedOffset>,
+) -> Harness {
     let folder = TempFolder::with_skill(
         "pod-watch",
         "---\nname: pod-watch\nallowed-tools: Bash(bin/pod slots:*)\n---\nCheck.\n",
@@ -47,8 +60,8 @@ pub(in crate::tools::watch) async fn harness(settings: WatchSettings, steps: Vec
     let chief = FakeChief::at(Some(CHIEF_PANE));
     let pods = Arc::new(FakePods::default());
     let (stop, shutdown) = signal::channel(());
-    let scheduler = build(
-        &store, &runner, &typing, &agents, &chief, &pods, settings, shutdown,
+    let scheduler = build_on(
+        local, &store, &runner, &typing, &agents, &chief, &pods, settings, shutdown,
     );
     Harness {
         folder,
@@ -75,6 +88,24 @@ fn build(
     settings: WatchSettings,
     shutdown: signal::Receiver<()>,
 ) -> Arc<Scheduler> {
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    build_on(
+        &local, store, runner, typing, agents, chief, pods, settings, shutdown,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_on(
+    local: &Arc<ScriptedOffset>,
+    store: &Arc<WatchStore>,
+    runner: &Arc<FakeRunner>,
+    typing: &Arc<FakeTyping>,
+    agents: &Arc<FakeAgents>,
+    chief: &Arc<FakeChief>,
+    pods: &Arc<FakePods>,
+    settings: WatchSettings,
+    shutdown: signal::Receiver<()>,
+) -> Arc<Scheduler> {
     Scheduler::new(Deps {
         store: Arc::clone(store),
         runner: runner.clone(),
@@ -83,7 +114,7 @@ fn build(
         pods: pods.clone(),
         chief_pane: chief.clone(),
         settings,
-        offset: UtcOffset::UTC,
+        local: local.clone(),
         shutdown,
     })
 }
@@ -774,7 +805,7 @@ async fn stopping_a_watch_kills_the_child_its_run_started() {
         pods: Arc::new(FakePods::default()),
         chief_pane: FakeChief::at(Some(CHIEF_PANE)),
         settings: settings(),
-        offset: UtcOffset::UTC,
+        local: ScriptedOffset::at(UtcOffset::UTC),
         shutdown,
     });
     let checked = Checked {
@@ -1094,4 +1125,42 @@ async fn a_budget_stop_survives_a_restart_for_that_day_only() {
     );
     pass(Duration::from_secs(25 * 3600)).await;
     assert!(again.start(h.checked("c", 10, 120)).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn day_bounds_and_end_time_follow_a_changed_offset() {
+    let plus_eleven = UtcOffset::from_hms(11, 0, 0).unwrap();
+    let plus_ten = UtcOffset::from_hms(10, 0, 0).unwrap();
+    let local = ScriptedOffset::at(plus_eleven);
+    let h = harness_with_offset(&local).await;
+    h.start("w", 60, 120).await;
+
+    h.scheduler.list().await.unwrap();
+    let (old_start, old_end) = h.scheduler.today().await;
+    assert_eq!((old_start, old_end), day_bounds(clock_ms(), plus_eleven));
+    let ends_at = h.row("w").await.ends_at_ms;
+    let old_end_text = local_text(ends_at, plus_eleven);
+
+    // 23:30 at +10:00 on the new day is 00:30 at +11:00 on the next day.
+    local.set(plus_ten);
+    h.scheduler.list().await.unwrap();
+    let (new_start, new_end) = h.scheduler.today().await;
+    assert_eq!((new_start, new_end), day_bounds(clock_ms(), plus_ten));
+    assert_eq!(new_start - old_start, 3_600_000);
+    assert_ne!(local_text(ends_at, plus_ten), old_end_text);
+
+    let late = new_end - 30 * 60_000;
+    let record = RunRecord {
+        started_at_ms: late,
+        outcome: "quiet".into(),
+        cost_usd_micros: Some(30_000),
+        streak: Streak::Worked,
+        next_run_at_ms: late + 3_600_000,
+    };
+    let started = h.row("w").await.started_at_ms;
+    h.store.record_run("w", started, &record).await.unwrap();
+    assert_eq!(h.scheduler.list().await.unwrap().spent_usd_micros, 30_000);
+
+    local.set(plus_eleven);
+    assert_eq!(h.scheduler.list().await.unwrap().spent_usd_micros, 0);
 }
