@@ -2428,7 +2428,7 @@ fn claim_pod_panes(
 }
 
 /// The id of the spec whose `started/<id>.md` file names `worktree` in its `worktree:`
-/// pair. A worktree without such a file has no spec id.
+/// pair, which holds the folder name or the path. A worktree without such a file has no spec id.
 fn build_worker_spec(pod: &Path, worktree: &BusyWorktree) -> Option<String> {
     let wanted = worktree.path.to_string_lossy();
     let wanted_real = std::fs::canonicalize(&worktree.path).ok();
@@ -2442,7 +2442,8 @@ fn build_worker_spec(pod: &Path, worktree: &BusyWorktree) -> Option<String> {
     names.into_iter().find_map(|path| {
         let text = read_text(&path)?;
         let named = *key_values(&text).get("worktree")?;
-        let same = same_folder(&wanted, named)
+        let same = named == worktree.name
+            || same_folder(&wanted, named)
             || wanted_real.is_some() && std::fs::canonicalize(named).ok() == wanted_real;
         same.then(|| path.file_stem()?.to_str().map(str::to_owned))?
     })
@@ -2462,15 +2463,16 @@ fn claim_build_workers(
             continue;
         };
         for pane in pane_ids(&text).into_iter().take(1) {
-            if live.iter().any(|live| live.pane_id == pane) {
-                if let std::collections::hash_map::Entry::Vacant(vacant) =
-                    claimed.entry(pane.to_owned())
-                {
-                    vacant.insert((Role::BuildWorker, Some(product.name.clone())));
-                    if let Some(id) = build_worker_spec(&product.repo.join(POD_FOLDER), worktree) {
-                        specs_of_panes.insert(pane.to_owned(), id);
-                    }
-                }
+            let is_live = live.iter().any(|live| live.pane_id == pane);
+            if !is_live || claimed.contains_key(pane) {
+                continue;
+            }
+            claimed.insert(
+                pane.to_owned(),
+                (Role::BuildWorker, Some(product.name.clone())),
+            );
+            if let Some(id) = build_worker_spec(&product.repo.join(POD_FOLDER), worktree) {
+                specs_of_panes.insert(pane.to_owned(), id);
             }
         }
     }

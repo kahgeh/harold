@@ -4413,3 +4413,21 @@ async fn pane_identity_of_an_unknown_pane_is_other() {
         (Role::Other, None, None)
     );
 }
+
+#[tokio::test]
+async fn pane_identity_finds_the_spec_when_the_started_file_holds_the_folder_name() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    pod.worktree(&repo, "adr-0027-host-scan", true);
+    write(
+        &pod_files(&repo).join("started/adr-0027-host-scan.md"),
+        "# Started: adr-0027-host-scan\n\nstarted: 2026-11-02T23:02:42+11:00\nworktree: adr-0027-host-scan\n",
+    );
+
+    poll_into_gauge_snapshot(&pod, &repo, vec![live("%7", "/pods/w")], "/work/chief").await;
+
+    let worker = pane_identity("%7");
+    assert_eq!(worker.role, Role::BuildWorker);
+    assert_eq!(worker.spec_id.as_deref(), Some("adr-0027-host-scan"));
+}
