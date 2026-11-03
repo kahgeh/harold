@@ -139,7 +139,7 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 
 **Spec size** is the word count of `specs/<id>.md`, leaving out lines that start with `<`, which hold drawn charts.
 
-**Effort per spec** (`pod.spec.effort`) is a gauge for each spec, each poll. Its `measure` attribute is `revisions`, `direction_revisions`, `architect_rounds` or `build_worker_hours`. A withdrawn spec also carries `withdrawn.reason` and `withdrawn.reached` (`open`, `approved` or `in_progress`, from the files that exist). Build worker hours run from `started:` (or the agent-pane file's time) to `merged:` or `withdrawn:`, or to now. Model cost is left out, because Harold records no build worker cost. Only specs that are not `completed` or `withdrawn`, and specs that entered one of those states in the last 30 days, send a value. An older spec sends nothing.
+**Effort per spec** (`pod.spec.effort`) is a gauge for each spec, each poll. Its `measure` attribute is `revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours` or `revised_after_approval`. It also carries `spec.size`. A withdrawn spec also carries `withdrawn.reason` and `withdrawn.reached` (`open`, `approved` or `in_progress`, from the files that exist). Build worker hours run from `started:` (or the agent-pane file's time) to `merged:` or `withdrawn:`, or to now. Model cost is left out, because Harold records no build worker cost. Only specs that are not `completed` or `withdrawn`, and specs that entered one of those states in the last 30 days, send a value. An older spec sends nothing.
 
 **Steps** (`pod.spec.lead_time`) are recorded once per spec, when it first becomes `completed` from its `merged/<id>.md`. The `phase` attribute is:
 
@@ -318,7 +318,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
-| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
