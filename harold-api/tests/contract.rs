@@ -382,7 +382,7 @@ fn set_tts_muted_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
-    assert_eq!(snapshot_fields.len(), 7);
+    assert_eq!(snapshot_fields.len(), 10);
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn set_messaging_paused_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
-    assert_eq!(snapshot_fields.len(), 7);
+    assert_eq!(snapshot_fields.len(), 10);
 }
 
 #[test]
@@ -505,13 +505,45 @@ fn agent_state_snapshot_carries_harold_version_in_field_seven() {
         ("tts_muted", 5),
         ("messaging_paused", 6),
         ("harold_version", 7),
+        ("watches_running", 8),
+        ("watches_paused", 9),
+        ("watches_capped", 10),
     ] {
         assert!(
             fields.contains(&(expected.0.to_string(), expected.1)),
             "{expected:?}"
         );
     }
-    assert_eq!(fields.len(), 7);
+    assert_eq!(fields.len(), 10);
+}
+
+#[test]
+fn watch_counts_contract_is_additive() {
+    let fields = message_fields("AgentStateSnapshot");
+    for expected in [
+        ("through_event_version", 1),
+        ("server_time_ms", 2),
+        ("monitor_health", 3),
+        ("panes", 4),
+        ("tts_muted", 5),
+        ("messaging_paused", 6),
+        ("harold_version", 7),
+    ] {
+        assert!(
+            fields.contains(&(expected.0.to_string(), expected.1)),
+            "{expected:?}"
+        );
+    }
+    let snapshot = AgentStateSnapshot {
+        watches_running: 2,
+        watches_paused: 1,
+        watches_capped: 3,
+        ..Default::default()
+    };
+    let decoded = round_trip(&snapshot);
+    assert_eq!(decoded.watches_running, 2);
+    assert_eq!(decoded.watches_paused, 1);
+    assert_eq!(decoded.watches_capped, 3);
 }
 
 #[test]

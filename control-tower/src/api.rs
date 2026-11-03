@@ -792,6 +792,9 @@ mod tests {
     fn maps_the_harold_version_cleaned_and_cut_or_none_when_empty() {
         let map = |version: &str| {
             map_snapshot(AgentStateSnapshot {
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 harold_version: version.into(),
                 ..Default::default()
             })
@@ -809,6 +812,9 @@ mod tests {
     fn maps_tts_muted_from_the_snapshot() {
         for muted in [false, true] {
             let mapped = map_snapshot(AgentStateSnapshot {
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 tts_muted: muted,
                 ..Default::default()
             })
@@ -821,6 +827,9 @@ mod tests {
     fn maps_messaging_paused_from_the_snapshot() {
         for paused in [false, true] {
             let mapped = map_snapshot(AgentStateSnapshot {
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 messaging_paused: paused,
                 ..Default::default()
             })
@@ -890,6 +899,9 @@ mod tests {
         .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -939,6 +951,9 @@ mod tests {
     #[test]
     fn maps_every_monitor_health_state_and_unknown_enum_values_to_unknown() {
         let mapped = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1012,6 +1027,9 @@ mod tests {
             .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1055,6 +1073,9 @@ mod tests {
     #[test]
     fn a_recap_with_control_characters_is_shown_clean() {
         let row = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1080,6 +1101,9 @@ mod tests {
     #[test]
     fn a_long_recap_keeps_up_to_400_characters() {
         let row = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1102,6 +1126,9 @@ mod tests {
     fn api_maps_current_step() {
         let map = |step: Option<String>| {
             map_snapshot(AgentStateSnapshot {
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 harold_version: String::new(),
                 tts_muted: false,
                 messaging_paused: false,
@@ -1150,6 +1177,9 @@ mod tests {
         };
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1240,6 +1270,9 @@ mod tests {
     #[tokio::test]
     async fn reader_maps_generated_snapshot_before_delivery_then_closes_at_eof() {
         let generated = AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1266,6 +1299,9 @@ mod tests {
         let mut invalid = proto_pane("%1");
         invalid.pane_pid = 0;
         let mut stream = spawn_reader(FakeReader::new([Ok(Some(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -1641,6 +1677,9 @@ mod tests {
 
     fn mapping_error(panes: Vec<AgentPaneState>) -> ProtocolError {
         map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
@@ -2214,6 +2253,9 @@ pub(crate) mod golden {
         local_pane_id: &str,
     ) -> Result<Snapshot, ProtocolError> {
         map_snapshot(AgentStateSnapshot {
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             through_event_version: 1,
             server_time_ms: 10_000,
             panes: vec![host_pane(), local_pane(local_pane_id)],

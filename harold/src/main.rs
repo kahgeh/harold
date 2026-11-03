@@ -906,6 +906,9 @@ fn map_agent_snapshot(
     };
     let pod_roles = roles.pod_roles();
     AgentStateSnapshot {
+        watches_running: 0,
+        watches_paused: 0,
+        watches_capped: 0,
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
         harold_version: HAROLD_VERSION.to_owned(),

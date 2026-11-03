@@ -185,6 +185,13 @@ message AgentStateSnapshot {
   bool tts_muted = 5;
   bool messaging_paused = 6;
   string harold_version = 7;
+  // Watch counts. A count change does not raise `through_event_version`.
+  // Watches that run now.
+  uint32 watches_running = 8;
+  // Watches paused by a person or an agent.
+  uint32 watches_paused = 9;
+  // Watches that wait because the day budget is used up (`how` = `budget_day`).
+  uint32 watches_capped = 10;
 }
 
 message SetTtsMutedRequest {
