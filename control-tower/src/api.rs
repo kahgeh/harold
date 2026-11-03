@@ -792,9 +792,6 @@ mod tests {
     fn maps_the_harold_version_cleaned_and_cut_or_none_when_empty() {
         let map = |version: &str| {
             map_snapshot(AgentStateSnapshot {
-                watches_running: 0,
-                watches_paused: 0,
-                watches_capped: 0,
                 harold_version: version.into(),
                 ..Default::default()
             })
@@ -812,9 +809,6 @@ mod tests {
     fn maps_tts_muted_from_the_snapshot() {
         for muted in [false, true] {
             let mapped = map_snapshot(AgentStateSnapshot {
-                watches_running: 0,
-                watches_paused: 0,
-                watches_capped: 0,
                 tts_muted: muted,
                 ..Default::default()
             })
@@ -827,9 +821,6 @@ mod tests {
     fn maps_messaging_paused_from_the_snapshot() {
         for paused in [false, true] {
             let mapped = map_snapshot(AgentStateSnapshot {
-                watches_running: 0,
-                watches_paused: 0,
-                watches_capped: 0,
                 messaging_paused: paused,
                 ..Default::default()
             })
@@ -2253,9 +2244,6 @@ pub(crate) mod golden {
         local_pane_id: &str,
     ) -> Result<Snapshot, ProtocolError> {
         map_snapshot(AgentStateSnapshot {
-            watches_running: 0,
-            watches_paused: 0,
-            watches_capped: 0,
             through_event_version: 1,
             server_time_ms: 10_000,
             panes: vec![host_pane(), local_pane(local_pane_id)],
