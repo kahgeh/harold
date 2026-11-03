@@ -403,34 +403,32 @@ Rows of waiting agents are marked with `◆`. `n` and `N` move the cursor to the
 next or previous waiting agent, oldest first, and wrap around. If a search filter
 hides that agent, the filter is cleared.
 
+- Harold decides the waiting agents and serves them in each snapshot. Every control-tower
+  shows the same list.
 - An agent starts waiting when it goes from Working or Blocked to Done, Idle or Error
-  while its pane is not the pane you are looking at. A change to Unknown does not start it.
-- It stops when you visit its pane, when it goes Working or Blocked again, when it exits, or
-  when you press `Enter` on it. With focus tracking on, `Enter` does not clear
-  it directly: it stops once the jump makes its pane active, on the next poll.
-  With tracking off, `Enter` clears it.
-- Waiting state is per control-tower and kept in memory only. Agents that are already
-  Idle when the control-tower starts do not wait, and a second control-tower keeps its own list.
+  while its pane is not the focused pane. A change to Unknown does not start it.
+- It stops when you visit its pane, when it goes Working or Blocked again, or when it exits.
+  Pressing `Enter` on it jumps to its pane. The agent stops waiting once the jump makes
+  its pane the focused pane.
+- Harold keeps the waiting list in memory only. Agents that are already Idle when
+  Harold starts do not wait.
 
 ### Focus tracking
 
-For Rex agents (`block:` ids) the control-tower does not run `tmux`. Once a second it reads
-`rex client ls --json` and `session.view` and counts the focused block of the
-active window as seen. Rex does not say which session the app has in front, so
-when the app has more than one session the control-tower has no reading and shows
-`(focus tracking off)`. The control-tower finds `rex` in the running server's copy, then on
-`PATH`, then in `/Applications/Rex*.app`.
+Harold, not the control-tower, reads the focused pane once a second.
 
-For tmux agents (`%` ids):
+For Rex agents (`block:` ids) Harold reads `rex client ls --json` and `session.view`
+and counts the focused block of the active window as seen. Rex does not say which
+session the app has in front, so when the app has more than one session Harold has no reading.
 
-Once a second the control-tower runs `tmux list-clients` and decides which pane you can
-see. Suspended clients are ignored; a focused client is preferred, otherwise the
-most recently active client is used, and that client's active pane counts as
-seen. Focus is sampled once a second, so leaving a pane less than about a second
-before its agent finishes can keep that agent from waiting. The top border of the
-agent list shows `(focus tracking off)` when the query fails, when no client is
-eligible, and for the first second after start; while it is off, an agent stops
-waiting only on `Enter` or when it goes Working.
+For tmux agents (`%` ids) Harold runs `tmux list-clients`. Suspended clients are ignored;
+a focused client is preferred, otherwise the most recently active client is used, and that
+client's active pane counts as seen. Focus is sampled once a second, so leaving a pane less
+than about a second before its agent finishes can keep that agent from waiting.
+
+The top border of the agent list shows `(focus tracking off)` when Harold has no reading
+(`focus_known` is false) and before the first snapshot. While it is off, an agent stops
+waiting only when it goes Working again.
 
 The detail panel (the `AGENT DETAILS` box) shows the lines `STATE`, `TARGET`, `PANE ID`,
 `DIRECTORY` and `AGE`. Then it shows `CURRENT STEP`, only when the agent reports a step, and then

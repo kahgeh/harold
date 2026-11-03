@@ -72,7 +72,7 @@ flowchart LR
 
 | Component | Responsibility | Code |
 | --- | --- | --- |
-| agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters | `harold/src/agent/` |
+| agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters. It also reads the focused pane once a second and decides the waiting agents, which it serves in each snapshot | `harold/src/agent/` |
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
 | projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
 | delivery handler | Reads the outbox, and leaves out or sends each turn-end update. It speaks none and runs no model. The chief's update in a call comes from Haiku through the call answerer's `claude -p` path (`harold/src/voice_input/mac.rs`) | `harold/src/outbound/`, `harold/src/projector.rs` |
@@ -90,7 +90,7 @@ flowchart LR
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did. The Claude Code turn-end hook also sums the turn's input, output, cache-read and cache-write tokens from the transcript and sends them with the model. The turn starts at the last user line that is not a tool result and has no `sourceToolUseID`, so a Skill load inside a turn does not start a turn, but an injected task notification does | `hooks/` |
-| control-tower | The control-tower: agent rows, todo rows, the focus lines (it reads the work tool's list for them, and the queue's Now item from an older Harold), voice and messaging switches, and the notes search (`s`) over the knowledge tool. `harold start-control-tower` starts it. With `--remote`, it runs the remote control: a numbered list of the chief and the PnEMs in a floating Rex layer. Its rows show the roles `Chief`, `Coordinator` and `PnEM`, which Harold sends in the `role` field of each pane. The remote reads the `WatchAgentStates` stream, keeps the PnEM order through `GetRemoteOrder` and `SetRemoteOrder`, and closes its own layer with Rex's `session.close_layer` before it exits | `control-tower/` |
+| control-tower | The control-tower: agent rows (it marks the waiting agents that Harold serves), todo rows, the focus lines (it reads the work tool's list for them, and the queue's Now item from an older Harold), voice and messaging switches, and the notes search (`s`) over the knowledge tool. `harold start-control-tower` starts it. With `--remote`, it runs the remote control: a numbered list of the chief and the PnEMs in a floating Rex layer. Its rows show the roles `Chief`, `Coordinator` and `PnEM`, which Harold sends in the `role` field of each pane. The remote reads the `WatchAgentStates` stream, keeps the PnEM order through `GetRemoteOrder` and `SetRemoteOrder`, and closes its own layer with Rex's `session.close_layer` before it exits | `control-tower/` |
 | API contracts | The protobuf definitions shared by Harold, the control-tower and the tools | `harold-api/` |
 
 ## Interfaces
