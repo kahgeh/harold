@@ -9,8 +9,10 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Wrap,
 };
 
-use crate::api::{FocusRecord, HAROLD_VERSION_LIMIT};
-use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, StateCounts, VoiceState};
+use crate::api::{FocusRecord, HAROLD_VERSION_LIMIT, WorkDetail};
+use crate::app::{
+    AgentState, App, CallState, CallView, RuntimeStatus, StateCounts, ViewMode, VoiceState,
+};
 use crate::questions::{
     ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
 };
@@ -77,6 +79,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_notes(frame, workspace, app);
     if app.notes.is_some() {
         render_notes_footer(frame, footer);
+    } else if app.view_mode() == ViewMode::Work {
+        // The work view takes its keys before the question keys, so its footer comes first.
+        render_work_footer(frame, footer, compact, app.work_record().is_some());
     } else if app.swallowing_keys() {
         render_swallow_footer(frame, footer);
     } else if app.holding_block_keys() {
@@ -533,6 +538,15 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
+    // The work view keeps its last rows through a stream drop, so it draws in every
+    // connection state.
+    if app.view_mode() == ViewMode::Work {
+        match app.work_record() {
+            Some(record) => render_work_record(frame, area, record, app.work_record_scroll()),
+            None => render_work_list(frame, area, app),
+        }
+        return;
+    }
     match app.connection {
         crate::app::ConnectionState::Connecting => {
             render_state_message(
@@ -684,6 +698,221 @@ fn conservative_grapheme_line_height(line: &Line<'_>, width: usize) -> usize {
     rows
 }
 
+/// The glyph at the start of a list row: `▶ ` on the cursor's row, two spaces otherwise.
+const fn cursor_marker(on_cursor: bool) -> &'static str {
+    if on_cursor { "▶ " } else { "  " }
+}
+
+/// The style of a list row. The cursor's row has a background and bold text.
+fn row_style(on_cursor: bool) -> Style {
+    if on_cursor {
+        Style::default()
+            .fg(INK)
+            .bg(Color::Rgb(41, 40, 30))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(INK)
+    }
+}
+
+/// The work view's PRIORITY column: the cursor glyph and the word `PRIORITY`.
+const WORK_PRIORITY_WIDTH: u16 = 9;
+/// The work view's STATUS column.
+const WORK_STATUS_WIDTH: u16 = 11;
+/// The least and most the work view's WORK column takes.
+const WORK_NAME_MIN: u16 = 12;
+const WORK_NAME_MAX: u16 = 30;
+/// The least width the NEXT STEP column keeps.
+const WORK_NEXT_MIN: u16 = 8;
+/// The NEXT STEP column's place among the work view's columns.
+const WORK_NEXT_COLUMN: usize = 3;
+
+/// The WORK column: the longest name plus a 2-column gap, from 12 to 30 columns. The
+/// NEXT STEP column keeps its minimum, so the WORK column gives up what that needs.
+fn work_name_width(inner_width: u16, longest: usize) -> u16 {
+    let wanted = u16::try_from(longest.saturating_add(2)).unwrap_or(u16::MAX);
+    let others = WORK_PRIORITY_WIDTH + WORK_STATUS_WIDTH + WORK_NEXT_MIN + 3 * COLUMN_SPACING;
+    let room = inner_width.saturating_sub(others);
+    wanted
+        .clamp(WORK_NAME_MIN, WORK_NAME_MAX)
+        .min(room)
+        .max(WORK_NAME_MIN)
+}
+
+/// The work view: one row for each open work record at `focus` and `next`, with the
+/// counts in the title. The rows look as the agent rows do.
+fn render_work_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let records = app.work_rows();
+    let inner_width = area.width.saturating_sub(2);
+    let longest = records
+        .iter()
+        .map(|row| Line::raw(row.name.as_str()).width())
+        .max()
+        .unwrap_or(0);
+    let name_width = work_name_width(inner_width, longest);
+    let widths = [
+        Constraint::Length(WORK_PRIORITY_WIDTH),
+        Constraint::Length(name_width),
+        Constraint::Length(WORK_STATUS_WIDTH),
+        Constraint::Min(WORK_NEXT_MIN),
+    ];
+    let next_width = column_width(area, &widths, WORK_NEXT_COLUMN);
+    let muted = Style::default().fg(MUTED);
+    let rows = records.iter().enumerate().map(|(index, row)| {
+        let on_cursor = index == app.work_cursor();
+        let priority = format!("{}{}", cursor_marker(on_cursor), row.priority);
+        Row::new(vec![
+            Cell::from(Line::styled(
+                cut_to_width(&priority, usize::from(WORK_PRIORITY_WIDTH)).into_owned(),
+                muted,
+            )),
+            Cell::from(
+                cut_to_width(&row.name, usize::from(name_width.saturating_sub(2))).into_owned(),
+            ),
+            Cell::from(Line::styled(
+                cut_to_width(&row.status, usize::from(WORK_STATUS_WIDTH)).into_owned(),
+                muted,
+            )),
+            Cell::from(cut_to_width(&row.next_step, next_width).into_owned()),
+        ])
+        .style(row_style(on_cursor))
+    });
+    let counts = format!(
+        " {} OPEN · {} LATER HIDDEN ",
+        records.len(),
+        app.work_later_hidden()
+    );
+    let block = board_block()
+        .title(" WORK · FOCUS AND NEXT ")
+        .title_top(Line::styled(counts, muted).right_aligned())
+        .borders(Borders::ALL);
+    let header = Row::new(["PRIORITY", "WORK", "STATUS", "NEXT STEP"])
+        .style(muted.add_modifier(Modifier::BOLD));
+    let table = Table::new(rows, widths)
+        .header(header)
+        .column_spacing(COLUMN_SPACING)
+        .block(block);
+    let selected = (!records.is_empty()).then(|| app.work_cursor());
+    let mut state = TableState::default().with_selected(selected);
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// One line of the record page: a head, then its text in another style.
+struct RecordLine {
+    head: String,
+    head_style: Style,
+    text: String,
+    text_style: Style,
+}
+
+/// The lines of a work record, in order: the title, the priority and status, the waits
+/// for, the next step, the decisions head, one line for each decision, the links head and
+/// one line for each link. The drawing and the scroll limit
+/// ([`crate::app::record_line_count`]) both count these lines.
+fn record_lines(record: &WorkDetail) -> Vec<RecordLine> {
+    let ink = Style::default().fg(INK);
+    let muted = Style::default().fg(MUTED);
+    let heading = Style::default().fg(AMBER).add_modifier(Modifier::BOLD);
+    let line = |head: &str, head_style: Style, text: String| RecordLine {
+        head: head.to_owned(),
+        head_style,
+        text,
+        text_style: ink,
+    };
+    let mut lines = vec![
+        RecordLine {
+            text_style: ink.add_modifier(Modifier::BOLD),
+            ..line("", ink, record.title.clone())
+        },
+        RecordLine {
+            text_style: muted,
+            ..line(
+                "",
+                muted,
+                format!("{} · {}", record.priority, record.status),
+            )
+        },
+        line("waits for: ", muted, record.waits_for.clone()),
+        line("next: ", muted, record.next_step.clone()),
+        line("decisions", heading, String::new()),
+    ];
+    for decision in &record.decisions {
+        lines.push(line(
+            &format!("  {}. ", decision.number),
+            muted,
+            format!(
+                "{} · {} · {} · {}",
+                decision.mark, decision.who, decision.at, decision.text
+            ),
+        ));
+    }
+    lines.push(line("links", heading, String::new()));
+    for link in &record.links {
+        lines.push(line("  ", muted, link.clone()));
+    }
+    lines
+}
+
+/// The record page in the list's place: its lines from `scroll` on, each cut to the
+/// width with `…`.
+fn render_work_record(frame: &mut Frame<'_>, area: Rect, record: &WorkDetail, scroll: usize) {
+    let width = usize::from(area.width.saturating_sub(2));
+    let back = " h back ";
+    // The title row holds the corners, ` WORK · `, the name, a space, one `─` and ` h back `.
+    let name_room = usize::from(area.width).saturating_sub(2 + 8 + 1 + 1 + back.len());
+    let title = format!(" WORK · {} ", cut_to_width(&record.name, name_room));
+    let lines = record_lines(record)
+        .into_iter()
+        .skip(scroll)
+        .map(|line| {
+            let head = cut_to_width(&line.head, width).into_owned();
+            let room = width.saturating_sub(Line::raw(head.as_str()).width());
+            let text = if line.text.is_empty() || room == 0 {
+                String::new()
+            } else {
+                cut_to_width(&line.text, room).into_owned()
+            };
+            Line::from(vec![
+                Span::styled(head, line.head_style),
+                Span::styled(text, line.text_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let block = board_block()
+        .title(title)
+        .title_top(Line::styled(back, Style::default().fg(MUTED)).right_aligned())
+        .borders(Borders::ALL);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The footer in the work view: only the keys that work there.
+fn render_work_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, record_open: bool) {
+    let (label, pairs) = if record_open {
+        (" RECORD  ", [("j/k", " scroll"), ("h/Esc", " back")])
+    } else {
+        (" WORK  ", [("j/k", " move"), ("l/Enter", " open")])
+    };
+    let mut spans = vec![if compact {
+        Span::raw(" ")
+    } else {
+        Span::styled(label, Style::default().fg(MUTED))
+    }];
+    let all = pairs
+        .into_iter()
+        .chain([("/", " commands"), ("V", " view"), ("q", " quit")]);
+    for (index, (key, words)) in all.enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(key, Style::default().fg(INK)));
+        spans.push(Span::raw(words));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(board_block().borders(Borders::ALL)),
+        area,
+    );
+}
+
 fn render_state_message(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -781,15 +1010,8 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             if on_cursor {
                 selected_index = Some(rows.len());
             }
-            let marker = if on_cursor { "▶ " } else { "  " };
-            let style = if on_cursor {
-                Style::default()
-                    .fg(INK)
-                    .bg(Color::Rgb(41, 40, 30))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(INK)
-            };
+            let marker = cursor_marker(on_cursor);
+            let style = row_style(on_cursor);
             let mut cells = vec![
                 Cell::from(Line::styled(
                     format!(
@@ -1428,13 +1650,19 @@ fn inventory_widths(wide: bool, where_width: u16) -> Vec<Constraint> {
 
 /// The work column's width inside `area`, laid out as the table lays it out.
 fn work_cell_width(area: Rect, widths: &[Constraint]) -> usize {
+    column_width(area, widths, WORK_COLUMN)
+}
+
+/// The width of column `index` inside the borders of `area`, laid out as the table lays
+/// it out.
+fn column_width(area: Rect, widths: &[Constraint], index: usize) -> usize {
     let inner = Rect::new(0, 0, area.width.saturating_sub(2), 1);
     let columns = Layout::horizontal(widths.iter().copied())
         .flex(Flex::Start)
         .spacing(COLUMN_SPACING)
         .split(inner);
     columns
-        .get(WORK_COLUMN)
+        .get(index)
         .map_or(0, |column| usize::from(column.width))
 }
 
@@ -8035,5 +8263,428 @@ mod agent_view_golden {
         // view command, so it is not part of the golden.
         let text = rows[..rows.len() - 3].join("\n");
         assert_eq!(text, GOLDEN);
+    }
+}
+
+#[cfg(test)]
+mod work_view_tests {
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::render;
+    use crate::api::{WorkDecision, WorkDetail, WorkListing, WorkRow};
+    use crate::app::{
+        App, ConnectionState, MonitorHealth, MonitorHealthState, SearchState, Snapshot, ViewMode,
+        record_line_count,
+    };
+
+    const WIDTHS: [u16; 4] = [140, 118, 90, 60];
+
+    fn work_row(priority: &str, name: &str, status: &str, next_step: &str) -> WorkRow {
+        WorkRow {
+            name: name.into(),
+            priority: priority.into(),
+            status: status.into(),
+            next_step: next_step.into(),
+        }
+    }
+
+    /// The five rows of the spec picture, from the real work records.
+    fn spec_listing() -> WorkListing {
+        WorkListing {
+            rows: vec![
+                work_row(
+                    "focus",
+                    "next-harold-release",
+                    "building",
+                    "when all merged, cut v0.76.0 with clear release notes, restart the control tower, start the release watch",
+                ),
+                work_row(
+                    "focus",
+                    "watch-controls",
+                    "building",
+                    "after the install set watch daily_budget_usd to 1 and import the two cards",
+                ),
+                work_row(
+                    "next",
+                    "pnem-switcher",
+                    "released",
+                    "ask the user what they saw",
+                ),
+                work_row(
+                    "next",
+                    "records-in-harold",
+                    "released",
+                    "run work check at each digest; stage 2 (control tower work view) has no spec yet",
+                ),
+                work_row(
+                    "next",
+                    "row-names-plain",
+                    "released",
+                    "ask the user whether the rows read right",
+                ),
+            ],
+            later_hidden: 4,
+        }
+    }
+
+    fn decision(number: usize, mark: &str, who: &str, text: &str) -> WorkDecision {
+        WorkDecision {
+            number,
+            mark: mark.into(),
+            who: who.into(),
+            at: "2026-11-03".into(),
+            text: text.into(),
+        }
+    }
+
+    /// The record of the spec picture.
+    fn spec_record() -> WorkDetail {
+        WorkDetail {
+            name: "next-harold-release".into(),
+            title: "Harold release v0.76.0 and what comes after".into(),
+            priority: "focus".into(),
+            status: "building".into(),
+            waits_for: "the merges of watch-controls, cron-schedules and watch-controls-tower; linux-satellite-2b merges after v0.76.0 with its own long note".into(),
+            next_step: "when all merged, cut v0.76.0 with clear release notes, restart the control tower, start the release watch, then tell the user what the release holds".into(),
+            decisions: vec![
+                decision(1, "agreed", "the user", "cut v0.74.0 now with the timing tests and the row names fix"),
+                decision(2, "agreed", "the user", "the Enter check of host-row-jump was done; the app showed the work-records note in full and the user saw it"),
+                decision(3, "draft", "the chief", "work-records goes in v0.75.0; the real six files check and the HyperDX alert stay for the next release cut"),
+            ],
+            links: vec!["note:work-records is held by main-f4 until v0.75.0".into()],
+        }
+    }
+
+    fn live() -> App {
+        App::new(
+            ConnectionState::Live,
+            Snapshot {
+                harold_version: None,
+                tts_muted: false,
+                messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
+                through_event_version: 42,
+                server_time_ms: 0,
+                monitor_health: vec![MonitorHealth {
+                    component: "inventory".into(),
+                    state: MonitorHealthState::Healthy,
+                    reason_code: "ok".into(),
+                    observed_at_ms: 99_000,
+                }],
+                rows: Vec::new(),
+            },
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        )
+    }
+
+    /// An app in the work view with `listing` read.
+    fn work_app(listing: WorkListing) -> App {
+        let mut app = live();
+        app.handle_key(KeyCode::Char('V'));
+        assert_eq!(app.view_mode(), ViewMode::Work);
+        app.observe_work_list(listing);
+        app
+    }
+
+    /// An app with the spec record open on the first row.
+    fn record_app(record: WorkDetail) -> App {
+        let mut app = work_app(spec_listing());
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(record);
+        assert!(app.work_record().is_some());
+        app
+    }
+
+    fn screen(app: &App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app, 100_000)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn line_with<'a>(lines: &'a [String], needle: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?}:\n{}", lines.join("\n")))
+    }
+
+    /// The rows of the list's box, from its top border.
+    fn list_box(lines: &[String], title: &str) -> Vec<String> {
+        let top = lines
+            .iter()
+            .position(|line| line.contains(title))
+            .unwrap_or_else(|| panic!("missing {title:?}:\n{}", lines.join("\n")));
+        lines[top..].to_vec()
+    }
+
+    #[test]
+    fn work_view_renders_title_counts_and_columns_at_140_118_90_60() {
+        let app = work_app(spec_listing());
+        for width in WIDTHS {
+            let lines = screen(&app, width, 30);
+            let text = lines.join("\n");
+            let top = line_with(&lines, "WORK · FOCUS AND NEXT");
+            assert!(top.contains("5 OPEN · 4 LATER HIDDEN"), "{width}:\n{text}");
+            let header = line_with(&lines, "PRIORITY");
+            for word in ["WORK", "STATUS", "NEXT STEP"] {
+                assert!(header.contains(word), "{width}: {header}");
+            }
+            assert!(!header.contains("WAITS FOR"), "{width}: {header}");
+            let cursor = line_with(&lines, "▶");
+            assert!(cursor.contains("focus"), "{width}: {cursor}");
+            assert!(cursor.contains("next-harold-release"), "{width}: {cursor}");
+            assert!(!text.contains("AGENT BLOCK OCCUPANCY"), "{width}:\n{text}");
+            assert!(!text.contains("WORK SUMMARY"), "{width}:\n{text}");
+            for line in &lines {
+                assert_eq!(line.chars().count(), usize::from(width));
+            }
+        }
+    }
+
+    #[test]
+    fn work_view_matches_the_spec_picture_at_118() {
+        let lines = screen(&work_app(spec_listing()), 118, 30);
+        let list = list_box(&lines, "WORK · FOCUS AND NEXT");
+        let expected = [
+            "┌ WORK · FOCUS AND NEXT ──────────────────────────────────────────────────────────────────── 5 OPEN · 4 LATER HIDDEN ┐",
+            "│PRIORITY  WORK                  STATUS      NEXT STEP                                                               │",
+            "│▶ focus   next-harold-release   building    when all merged, cut v0.76.0 with clear release notes, restart the cont…│",
+            "│  focus   watch-controls        building    after the install set watch daily_budget_usd to 1 and import the two ca…│",
+            "│  next    pnem-switcher         released    ask the user what they saw                                              │",
+            "│  next    records-in-harold     released    run work check at each digest; stage 2 (control tower work view) has no…│",
+            "│  next    row-names-plain       released    ask the user whether the rows read right                                │",
+        ];
+        assert_eq!(
+            list[..expected.len()].to_vec(),
+            expected,
+            "\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn work_view_cuts_next_step_with_an_ellipsis_at_118() {
+        let long = "abcdefghij ".repeat(14);
+        assert_eq!(long.chars().count(), 154);
+        let mut listing = spec_listing();
+        listing.rows[0].next_step = long[..140].to_owned();
+        let lines = screen(&work_app(listing), 118, 30);
+        let cursor = line_with(&lines, "▶");
+        assert!(cursor.ends_with("…│"), "{cursor}");
+        assert_eq!(cursor.chars().count(), 118);
+    }
+
+    #[test]
+    fn work_view_cuts_a_long_name_with_an_ellipsis_at_60() {
+        let mut listing = spec_listing();
+        listing.rows[0].name = "a-very-long-work-record-name-that-never-fits-the-column".into();
+        let lines = screen(&work_app(listing), 60, 30);
+        let cursor = line_with(&lines, "▶");
+        assert!(cursor.contains("a-very-long-"), "{cursor}");
+        assert!(cursor.contains('…'), "{cursor}");
+        assert_eq!(cursor.chars().count(), 60);
+    }
+
+    #[test]
+    fn work_view_cursor_follows_j() {
+        let mut app = work_app(spec_listing());
+        app.handle_key(KeyCode::Char('j'));
+        let lines = screen(&app, 118, 30);
+        assert!(line_with(&lines, "▶").contains("watch-controls"));
+    }
+
+    #[test]
+    fn empty_work_view_renders_zero_open() {
+        let app = work_app(WorkListing {
+            rows: Vec::new(),
+            later_hidden: 0,
+        });
+        for width in WIDTHS {
+            let lines = screen(&app, width, 30);
+            let top = line_with(&lines, "WORK · FOCUS AND NEXT");
+            assert!(top.contains(" 0 OPEN"), "{width}: {top}");
+            assert!(!lines.iter().any(|line| line.contains('▶')), "{width}");
+        }
+    }
+
+    #[test]
+    fn a_failed_work_read_shows_the_status_and_keeps_the_rows() {
+        let mut app = work_app(spec_listing());
+        app.work_list_failed();
+        let text = screen(&app, 118, 30).join("\n");
+        assert!(text.contains("work list unavailable"), "{text}");
+        assert!(text.contains("row-names-plain"), "{text}");
+    }
+
+    #[test]
+    fn record_lines_agree_with_the_scroll_count() {
+        let mut record = spec_record();
+        assert_eq!(
+            super::record_lines(&record).len(),
+            record_line_count(&record)
+        );
+        record.decisions.clear();
+        record.links.clear();
+        assert_eq!(
+            super::record_lines(&record).len(),
+            record_line_count(&record)
+        );
+    }
+
+    #[test]
+    fn record_page_renders_lines_at_140_118_90_60() {
+        let app = record_app(spec_record());
+        for width in WIDTHS {
+            let lines = screen(&app, width, 30);
+            let text = lines.join("\n");
+            let page = list_box(&lines, "WORK · next-harold-release");
+            assert!(page[0].contains("h back"), "{width}: {}", page[0]);
+            assert!(
+                page[1].starts_with("│Harold release v0.7"),
+                "{width}: {}",
+                page[1]
+            );
+            assert!(
+                page[2].starts_with("│focus · building "),
+                "{width}: {}",
+                page[2]
+            );
+            assert!(
+                page[3].starts_with("│waits for: the merges"),
+                "{width}: {}",
+                page[3]
+            );
+            assert!(
+                page[4].starts_with("│next: when all merged"),
+                "{width}: {}",
+                page[4]
+            );
+            assert!(page[5].starts_with("│decisions "), "{width}: {}", page[5]);
+            assert!(
+                page[6].starts_with("│  1. agreed · the user · 2026-11-03 · cut"),
+                "{width}: {}",
+                page[6]
+            );
+            assert!(
+                page[7].starts_with("│  2. agreed · the user"),
+                "{width}: {}",
+                page[7]
+            );
+            assert!(
+                page[8].starts_with("│  3. draft · the chief"),
+                "{width}: {}",
+                page[8]
+            );
+            assert!(page[9].starts_with("│links "), "{width}: {}", page[9]);
+            assert!(
+                page[10].starts_with("│  note:work-r"),
+                "{width}: {}",
+                page[10]
+            );
+            // The long lines are cut with `…` at the right border, never wrapped.
+            for row in [3, 4, 7, 8] {
+                assert!(page[row].ends_with("…│"), "{width}: {}", page[row]);
+            }
+            assert!(!text.contains("FOCUS AND NEXT"), "{width}:\n{text}");
+            assert!(!text.contains("AGENT BLOCK OCCUPANCY"), "{width}:\n{text}");
+            for line in &lines {
+                assert_eq!(line.chars().count(), usize::from(width));
+            }
+        }
+    }
+
+    #[test]
+    fn record_page_scroll_hides_the_first_lines() {
+        let mut app = record_app(spec_record());
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.work_record_scroll(), 2);
+        for width in WIDTHS {
+            let lines = screen(&app, width, 30);
+            let page = list_box(&lines, "WORK · next-harold-release");
+            assert!(page[1].starts_with("│waits for: "), "{width}: {}", page[1]);
+            let text = lines.join("\n");
+            assert!(!text.contains("Harold release v0.7"), "{width}:\n{text}");
+            assert!(!text.contains("focus · building"), "{width}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn record_page_scrolled_to_the_end_shows_the_last_link() {
+        let mut app = record_app(spec_record());
+        for _ in 0..20 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        let lines = screen(&app, 118, 30);
+        let page = list_box(&lines, "WORK · next-harold-release");
+        assert!(page[1].starts_with("│  note:work-records"), "{}", page[1]);
+    }
+
+    #[test]
+    fn record_title_cuts_a_long_name_and_keeps_h_back_at_60() {
+        let mut record = spec_record();
+        record.name = "a-very-long-work-record-name-that-never-fits-the-title-row".into();
+        let mut listing = spec_listing();
+        listing.rows[0].name = record.name.clone();
+        let mut app = work_app(listing);
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(record);
+        let lines = screen(&app, 60, 30);
+        let top = line_with(&lines, "WORK · a-very-long");
+        assert!(top.contains('…'), "{top}");
+        assert!(top.contains("h back"), "{top}");
+    }
+
+    #[test]
+    fn work_footer_names_only_the_keys_that_work_there() {
+        for width in WIDTHS {
+            let list = screen(&work_app(spec_listing()), width, 30);
+            let record = screen(&record_app(spec_record()), width, 30);
+            for (lines, words) in [
+                (&list, ["j/k", "move", "l/Enter", "open"]),
+                (&record, ["j/k", "scroll", "h/Esc", "back"]),
+            ] {
+                let footer = lines[lines.len() - 3..].join("\n");
+                for word in words
+                    .iter()
+                    .chain(&["/", "commands", "V", "view", "q", "quit"])
+                {
+                    assert!(footer.contains(word), "{width}: {word:?}\n{footer}");
+                }
+                for word in [
+                    "talk now",
+                    "call",
+                    "search",
+                    "waiting",
+                    "switch pane",
+                    "retry",
+                ] {
+                    assert!(!footer.contains(word), "{width}: {word:?}\n{footer}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switching_back_draws_the_agent_view() {
+        let mut app = work_app(spec_listing());
+        app.handle_key(KeyCode::Char('V'));
+        let text = screen(&app, 118, 30).join("\n");
+        assert!(text.contains("AGENT BLOCK OCCUPANCY"), "{text}");
+        assert!(!text.contains("FOCUS AND NEXT"), "{text}");
     }
 }
