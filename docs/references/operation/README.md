@@ -57,6 +57,39 @@ Run these from the repository:
 
 Reinstall operates only on the managed bundle. It does not convert database schemas or remove an external store mentioned in a copied configuration. Backups are named uniquely and their locations are printed. A normal install moves retained managed data into the new bundle; its archived previous bundle is not a second copy of that data.
 
+## Release attempts
+
+A **release attempt** is one run of `make release`. At its end, `make release` records the attempt with the [telemetry tool](../tools/telemetry.md). Use it to see how long a release takes and how often it fails.
+
+An attempt has five steps. Each step has a time.
+
+| Step | What it holds |
+| --- | --- |
+| `checks` | The checks before the tests, with the wait for the Linux check of the commit |
+| `local_tests` | The local test suites |
+| `publish` | The release notes and the pre-release on GitHub |
+| `github_build` | The wait for the GitHub build |
+| `install` | The mark as latest, and the install on this Mac |
+
+The result of an attempt is `ok`, `failed` or `stopped`. A step that raises an error gives `failed`. An interrupt gives `stopped`. The step is the one that raised the error or ran when the interrupt came. An `ok` attempt has the step `none`. Every exit path of `make release` records.
+
+| Signal | Type | Attributes | Series |
+| --- | --- | --- | --- |
+| `harold.release.attempts` | counter | `result` and `step` (the five steps and `none`) | 18 |
+| `harold.release.seconds` | counter | `result` and `step` (the five steps) | 15 |
+
+Each attempt sends both declarations. The tool accepts the same declaration again with no change. Then it counts one attempt. Then it counts the seconds of each step that ran. A step that takes less than half a second records 1 second.
+
+A failure to record never changes the result or the exit code of `make release`. All the calls share a budget of 20 seconds. Each call has a limit of 5 seconds. A call that fails runs once more after 5 seconds, if the budget allows. After a second failure, or when the budget is spent, the other calls do not run. Then `make release` prints one line to stderr:
+
+```
+release attempt not recorded: <reason>
+```
+
+A missing `harold` command (exit code 127) is not tried again. A second Ctrl-C or a signal during the recording stops the recording. The exit code stays the code of the release.
+
+`make release` runs in Harold's folder or in the chief's pane. Both may write the `harold.` prefix. `make install-release` records nothing.
+
 ## Configuration and environment
 
 The daemon loads configuration in this order:

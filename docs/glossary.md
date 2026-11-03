@@ -322,6 +322,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
 | signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
+| release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
 
 ## Storing and delivering
 
