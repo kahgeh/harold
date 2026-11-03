@@ -1287,6 +1287,25 @@ fn print_help() {
     println!("  harold tool backlog export PRODUCT");
     println!("                          Print a product's backlog as markdown; 30s timeout");
     println!("  harold tool backlog queue export    Print the queue as markdown; 30s timeout");
+    println!("  harold tool work list [--all]       List the open work records, focus first");
+    println!("                          --all adds the closed ones; names long waits for the user");
+    println!("  harold tool work show NAME          Print a work record, its decisions and links");
+    println!(
+        "  harold tool work put NAME           Add or replace a work record from JSON on stdin"
+    );
+    println!("  harold tool work set NAME [--priority P] [--status S] [--waits-for T] [--next T]");
+    println!("                          Change some fields of a work record; give at least one");
+    println!("  harold tool work decide NAME --mark M --who W TEXT   Add a decision, dated today");
+    println!("  harold tool work mark NAME N MARK   Change the mark of decision N");
+    println!("  harold tool work link|unlink NAME LINK   Add or remove a link");
+    println!(
+        "  harold tool work check              Print each mismatch and exit 1; silent when clean"
+    );
+    println!("  harold tool work import FOLDER [--queue ID,ID] [--apply]");
+    println!("                          Load the chief's *.md files, dry run unless --apply");
+    println!("  harold tool work rotate --dry-run   Show what a rotation would copy now");
+    println!("  harold tool work history NAME       Print a work record from the newest file");
+    println!("  harold tool work search WORD        List the work records that hold WORD");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --build-features Print the Cargo features of this build, one per line");
@@ -1511,6 +1530,17 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             }
             match cli::app(&address, command, telemetry::local_offset()).await {
                 Ok(text) => println!("{text}"),
+                Err(line) => exit_with_line(&line),
+            }
+            return Ok(());
+        }
+        cli::Mode::Tool(cli::ToolCommand::Work(ref command)) => {
+            let address = settings.grpc.addr()?.to_string();
+            match cli::work(&address, command, std::io::stdin()).await {
+                Ok(output) => match cli::write_work_output(&output, &mut std::io::stdout()) {
+                    0 => {}
+                    code => std::process::exit(code),
+                },
                 Err(line) => exit_with_line(&line),
             }
             return Ok(());

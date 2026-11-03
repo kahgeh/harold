@@ -19,6 +19,8 @@ use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::watch::v1 as watch_api;
 use harold_api::tools::watch::v1::watch_service_client::WatchServiceClient;
+use harold_api::tools::work::v1 as work_api;
+use harold_api::tools::work::v1::work_service_client::WorkServiceClient;
 use harold_api::tts::v1 as tts_api;
 use harold_api::tts::v1::tts_service_client::TtsServiceClient;
 
@@ -350,6 +352,7 @@ pub(crate) enum ToolCommand {
     Watch(WatchCommand),
     Knowledge(KnowledgeCommand),
     Tts(TtsCommand),
+    Work(WorkCommand),
 }
 
 const TTS_USAGE_LINE: &str = "invalid argument: usage is harold tool tts models | add REPO@REVISION | remove ID | default MODEL VOICE | speak TEXT";
@@ -1355,6 +1358,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
         ["tts", rest @ ..] => parse_tts(rest).map(ToolCommand::Tts),
+        ["work", rest @ ..] => parse_work(rest).map(ToolCommand::Work),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
         ["questions", "checked"] => Ok(ToolCommand::QuestionsChecked),
@@ -2222,11 +2226,12 @@ pub(crate) async fn tool_within(
                 ))
             }
             // `tool` runs a backlog command through `backlog_within`, and a watch
-            // command through `watch_within`.
+            // command through `watch_within`. `main` runs a work command through `work`.
             ToolCommand::Backlog(_)
             | ToolCommand::Watch(_)
             | ToolCommand::Knowledge(_)
-            | ToolCommand::Tts(_) => Err(TOOL_USAGE_LINE.into()),
+            | ToolCommand::Tts(_)
+            | ToolCommand::Work(_) => Err(TOOL_USAGE_LINE.into()),
         }
     })
     .await
@@ -2734,6 +2739,630 @@ async fn backlog_call(
         }
     }
 }
+
+// ---- The work tool: `harold tool work` ----
+
+const WORK_USAGE_LINE: &str = "invalid argument: usage is harold tool work list|show|put|set|decide|mark|link|unlink|check|import|rotate|history|search";
+
+/// A day in milliseconds: `list` names the work records that wait for the user longer.
+const WAITING_LONG_MS: i64 = 86_400_000;
+
+/// A `harold tool work` command. `put` reads the work record as JSON from stdin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkCommand {
+    List {
+        all: bool,
+    },
+    Show {
+        name: String,
+    },
+    Put {
+        name: String,
+    },
+    Set {
+        name: String,
+        priority: Option<String>,
+        status: Option<String>,
+        waits_for: Option<String>,
+        next: Option<String>,
+    },
+    Decide {
+        name: String,
+        mark: String,
+        who: String,
+        text: String,
+    },
+    Mark {
+        name: String,
+        number: u32,
+        mark: String,
+    },
+    Link {
+        name: String,
+        link: String,
+    },
+    Unlink {
+        name: String,
+        link: String,
+    },
+    Check,
+    Import {
+        folder: std::path::PathBuf,
+        queue: Vec<String>,
+        apply: bool,
+    },
+    RotateDryRun,
+    History {
+        name: String,
+    },
+    Search {
+        word: String,
+    },
+}
+
+impl WorkCommand {
+    /// How long the command waits for the daemon: import, history and search read
+    /// many files.
+    pub(crate) fn deadline(&self) -> Duration {
+        match self {
+            Self::Import { .. } | Self::History { .. } | Self::Search { .. } => BULK_DEADLINE,
+            _ => CALL_DEADLINE,
+        }
+    }
+}
+
+/// What a work command prints on stdout, and the code Harold exits with.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct WorkOutput {
+    pub(crate) text: String,
+    pub(crate) exit_code: i32,
+}
+
+impl WorkOutput {
+    fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            exit_code: 0,
+        }
+    }
+}
+
+/// Writes `output` to `out` and returns the exit code. An empty text writes
+/// nothing, not even a line break: a clean `check` is silent.
+pub(crate) fn write_work_output(output: &WorkOutput, out: &mut impl std::io::Write) -> i32 {
+    if !output.text.is_empty() {
+        // A closed stdout cannot show the text; the exit code still tells.
+        let _ = writeln!(out, "{}", output.text);
+    }
+    output.exit_code
+}
+
+fn parse_work(args: &[&str]) -> Result<WorkCommand, String> {
+    parse_work_words(args).map_err(|_| WORK_USAGE_LINE.to_string())
+}
+
+/// The shared helpers (`word`, `flags`, `number`) give the backlog's usage line;
+/// `parse_work` puts the work tool's line in its place.
+fn parse_work_words(args: &[&str]) -> Result<WorkCommand, String> {
+    use WorkCommand as C;
+    let usage = || Err(WORK_USAGE_LINE.to_string());
+    match args {
+        ["list", rest @ ..] => Ok(C::List {
+            all: flags(rest, &["--all"], &[])?.contains_key("--all"),
+        }),
+        ["show", name] => Ok(C::Show { name: word(name)? }),
+        ["put", name] => Ok(C::Put { name: word(name)? }),
+        ["set", name, rest @ ..] => {
+            let found = flags(
+                rest,
+                &[],
+                &["--priority", "--status", "--waits-for", "--next"],
+            )?;
+            if found.is_empty() {
+                return usage();
+            }
+            let value = |flag: &str| found.get(flag).copied().flatten().map(String::from);
+            Ok(C::Set {
+                name: word(name)?,
+                priority: value("--priority"),
+                status: value("--status"),
+                waits_for: value("--waits-for"),
+                next: value("--next"),
+            })
+        }
+        ["decide", name, rest @ ..] => {
+            let (mut mark, mut who, mut rest) = (None, None, rest);
+            while let [flag @ ("--mark" | "--who"), value, more @ ..] = rest {
+                let slot = match *flag {
+                    "--mark" => &mut mark,
+                    _ => &mut who,
+                };
+                if slot.is_some() || value.starts_with("--") {
+                    return usage();
+                }
+                *slot = Some(value.to_string());
+                rest = more;
+            }
+            let (Some(mark), Some(who)) = (mark, who) else {
+                return usage();
+            };
+            Ok(C::Decide {
+                name: word(name)?,
+                mark,
+                who,
+                text: words(rest)?.join(" "),
+            })
+        }
+        ["mark", name, number_arg, mark] => Ok(C::Mark {
+            name: word(name)?,
+            number: number(number_arg)?,
+            mark: word(mark)?,
+        }),
+        ["link", name, link] => Ok(C::Link {
+            name: word(name)?,
+            link: word(link)?,
+        }),
+        ["unlink", name, link] => Ok(C::Unlink {
+            name: word(name)?,
+            link: word(link)?,
+        }),
+        ["check"] => Ok(C::Check),
+        ["import", folder, rest @ ..] => {
+            let found = flags(rest, &["--apply"], &["--queue"])?;
+            let queue = found
+                .get("--queue")
+                .copied()
+                .flatten()
+                .map(|ids| ids.split(',').map(|id| id.trim().to_string()).collect())
+                .unwrap_or_default();
+            Ok(C::Import {
+                folder: word(folder)?.into(),
+                queue,
+                apply: found.contains_key("--apply"),
+            })
+        }
+        ["rotate", "--dry-run"] => Ok(C::RotateDryRun),
+        ["history", name] => Ok(C::History { name: word(name)? }),
+        ["search", search] if !search.trim().is_empty() => Ok(C::Search {
+            word: word(search)?,
+        }),
+        _ => usage(),
+    }
+}
+
+/// The line printed for a refusal from the work service. It names the reason word.
+/// `pane` is the caller's, as the command sent it.
+fn work_refusal_line(status: &tonic::Status, pane: &str) -> String {
+    use tonic::Code;
+    match (status.code(), status.message()) {
+        (Code::PermissionDenied, "not_chief") => {
+            format!("refused: not_chief: pane {pane} is not the chief's pane")
+        }
+        (Code::PermissionDenied, "no_pane") => "refused: no_pane: not run in a pane".into(),
+        (_, "focus_full") => {
+            "refused: focus_full: two open work records are in focus already".into()
+        }
+        (_, "name_in_use") => {
+            "refused: name_in_use: a closed work record of the current file has the name".into()
+        }
+        (_, "not_found") => {
+            "refused: not_found: the work record, decision or link is not there".into()
+        }
+        (_, "read_only") => "refused: read_only: the work file is read-only".into(),
+        (_, "rotation_is_harolds") => {
+            "refused: rotation_is_harolds: only Harold rotates the work files".into()
+        }
+        (Code::InvalidArgument, "invalid name") => {
+            "refused: bad_name: a name is 1 to 48 characters of a-z, 0-9 and -".into()
+        }
+        (Code::Unimplemented, _) => "the Harold daemon does not serve the work records".into(),
+        (_, "") => "the Harold daemon refused the call".into(),
+        (Code::Unavailable, message) => message.to_string(),
+        (_, message) => format!("refused: {message}"),
+    }
+}
+
+fn decision_from_work_json(value: &serde_json::Value) -> Result<work_api::Decision, String> {
+    if !value.is_object() {
+        return Err(json_error("decisions must be a list of objects"));
+    }
+    Ok(work_api::Decision {
+        at: json_optional_text(value, "at")?,
+        who: json_text(value, "who")?,
+        mark: json_text(value, "mark")?,
+        text: json_text(value, "text")?,
+    })
+}
+
+/// Turns `put`'s JSON into a work record named `name`. It only translates; the
+/// daemon checks the rules.
+fn work_record_from_json(name: &str, text: &str) -> Result<work_api::WorkRecord, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(json_error)?;
+    if !value.is_object() {
+        return Err(json_error("work record must be an object"));
+    }
+    if value.get("name").is_some() && json_text(&value, "name")? != name {
+        return Err(json_error(format!("name must be {name} or left out")));
+    }
+    let decisions = match value.get("decisions") {
+        None => Vec::new(),
+        Some(_) => json_list(&value, "decisions")?
+            .iter()
+            .map(decision_from_work_json)
+            .collect::<Result<_, _>>()?,
+    };
+    let links = match value.get("links") {
+        None => Vec::new(),
+        Some(_) => json_list(&value, "links")?
+            .iter()
+            .map(|link| match link {
+                serde_json::Value::String(link) => Ok(link.clone()),
+                _ => Err(json_error("links must be a list of strings")),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    Ok(work_api::WorkRecord {
+        name: name.into(),
+        title: json_optional_text(&value, "title")?,
+        priority: json_optional_text(&value, "priority")?,
+        status: json_optional_text(&value, "status")?,
+        waits_for: json_optional_text(&value, "waits_for")?,
+        next_step: json_optional_text(&value, "next_step")?,
+        decisions,
+        links,
+        ..Default::default()
+    })
+}
+
+fn work_line(record: &work_api::WorkRecord) -> String {
+    format!(
+        "{:<5}  {}  [{}]  next: {}",
+        record.priority, record.name, record.status, record.next_step
+    )
+}
+
+/// The `list` text: one line for each work record in the service's order (focus,
+/// then next, then later), then the names of the work records at `waiting for the
+/// user` for more than a day at `now_ms`. The CLI works these out from
+/// `status_since_ms`: the list response has no field for them.
+fn work_list_text(listed: &work_api::ListResponse, now_ms: i64) -> String {
+    if listed.records.is_empty() {
+        return "no open work records".into();
+    }
+    let mut lines: Vec<String> = listed.records.iter().map(work_line).collect();
+    let waiting: Vec<&str> = listed
+        .records
+        .iter()
+        .filter(|record| record.status == "waiting for the user")
+        .filter(|record| now_ms - record.status_since_ms > WAITING_LONG_MS)
+        .map(|record| record.name.as_str())
+        .collect();
+    if !waiting.is_empty() {
+        lines.push(format!(
+            "waiting for the user for more than a day: {}",
+            waiting.join(", ")
+        ));
+    }
+    lines.join("\n")
+}
+
+/// One work record with its decisions and links, for `show` and `history`.
+fn work_record_text(record: &work_api::WorkRecord) -> String {
+    let or_none = |text: &str| match text.is_empty() {
+        true => "-".to_string(),
+        false => text.to_string(),
+    };
+    let mut lines = vec![
+        format!("{}: {}", record.name, record.title),
+        format!("priority: {}", record.priority),
+        format!("status: {}", record.status),
+        format!("waits for: {}", or_none(&record.waits_for)),
+        format!("next step: {}", or_none(&record.next_step)),
+    ];
+    match record.decisions.is_empty() {
+        true => lines.push("decisions: none".into()),
+        false => lines.push("decisions:".into()),
+    }
+    for (index, decision) in record.decisions.iter().enumerate() {
+        lines.push(format!(
+            "  {}. {}, {}, {}: {}",
+            index + 1,
+            decision.mark,
+            decision.who,
+            decision.at,
+            decision.text
+        ));
+    }
+    match record.links.is_empty() {
+        true => lines.push("links: none".into()),
+        false => lines.push("links:".into()),
+    }
+    lines.extend(record.links.iter().map(|link| format!("  {link}")));
+    lines.join("\n")
+}
+
+fn work_import_text(imported: &work_api::ImportResponse, apply: bool) -> String {
+    let verb = match apply {
+        true => "stored",
+        false => "would store",
+    };
+    let mut lines: Vec<String> = imported
+        .records
+        .iter()
+        .map(|record| format!("{verb} {}", work_line(record)))
+        .collect();
+    lines.extend(
+        imported
+            .unplaced
+            .iter()
+            .map(|unplaced| match unplaced.line {
+                0 => format!("unplaced {}: {}", unplaced.file, unplaced.text),
+                line => format!("unplaced {}:{line}: {}", unplaced.file, unplaced.text),
+            }),
+    );
+    if !imported.in_use.is_empty() {
+        lines.push(format!("in use: {}", imported.in_use.join(", ")));
+    }
+    lines.push(format!(
+        "{} work records, {} unplaced lines, {} names in use",
+        imported.records.len(),
+        imported.unplaced.len(),
+        imported.in_use.len()
+    ));
+    if !apply {
+        lines.push("dry run: nothing is stored; run again with --apply to store".into());
+    }
+    lines.join("\n")
+}
+
+/// Run a `harold tool work` command as the caller's pane, now, with its own deadline.
+pub(crate) async fn work(
+    address: &str,
+    command: &WorkCommand,
+    stdin: impl std::io::Read,
+) -> Result<WorkOutput, String> {
+    work_within(
+        address,
+        command,
+        stdin,
+        &caller_pane(),
+        time::OffsetDateTime::now_utc(),
+        command.deadline(),
+    )
+    .await
+}
+
+/// Run a `harold tool work` command against the daemon at `address`, as `pane`, at
+/// `now`. `Ok` is what to print and the exit code; `Err` is the one refusal line.
+pub(crate) async fn work_within(
+    address: &str,
+    command: &WorkCommand,
+    mut stdin: impl std::io::Read,
+    pane: &str,
+    now: time::OffsetDateTime,
+    wait: Duration,
+) -> Result<WorkOutput, String> {
+    let record = match command {
+        WorkCommand::Put { name } => {
+            let mut text = String::new();
+            stdin.read_to_string(&mut text).map_err(json_error)?;
+            Some(work_record_from_json(name, &text)?)
+        }
+        _ => None,
+    };
+    call_within(command.deadline(), wait, async {
+        let client = WorkServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        work_call(client, command, record, pane, ms(now)).await
+    })
+    .await
+}
+
+async fn work_call(
+    mut client: WorkServiceClient<tonic::transport::Channel>,
+    command: &WorkCommand,
+    record: Option<work_api::WorkRecord>,
+    pane: &str,
+    now_ms: i64,
+) -> Result<WorkOutput, String> {
+    use WorkCommand as C;
+    let caller_pane = pane.to_string();
+    let refused = |status: tonic::Status| work_refusal_line(&status, pane);
+    let text = match command {
+        C::List { all } => {
+            let listed = client
+                .list(work_api::ListRequest { all: *all })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            work_list_text(&listed, now_ms)
+        }
+        C::Show { name } => {
+            let shown = client
+                .show(work_api::ShowRequest { name: name.clone() })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            work_record_text(&shown.record.unwrap_or_default())
+        }
+        C::Put { name } => {
+            let put = client
+                .put(work_api::PutRequest {
+                    record,
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            match put.created {
+                true => format!("created {name}"),
+                false => format!("replaced {name}"),
+            }
+        }
+        C::Set {
+            name,
+            priority,
+            status,
+            waits_for,
+            next,
+        } => {
+            client
+                .set(work_api::SetRequest {
+                    name: name.clone(),
+                    title: None,
+                    priority: priority.clone(),
+                    status: status.clone(),
+                    waits_for: waits_for.clone(),
+                    next_step: next.clone(),
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?;
+            format!("set {name}")
+        }
+        C::Decide {
+            name,
+            mark,
+            who,
+            text,
+        } => {
+            let decided = client
+                .decide(work_api::DecideRequest {
+                    name: name.clone(),
+                    mark: mark.clone(),
+                    who: who.clone(),
+                    text: text.clone(),
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            format!("added decision {} to {name}", decided.number)
+        }
+        C::Mark { name, number, mark } => {
+            client
+                .mark(work_api::MarkRequest {
+                    name: name.clone(),
+                    number: *number,
+                    mark: mark.clone(),
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?;
+            format!("marked decision {number} of {name} {mark}")
+        }
+        C::Link { name, link } => {
+            client
+                .link(work_api::LinkRequest {
+                    name: name.clone(),
+                    link: link.clone(),
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?;
+            format!("linked {name} to {link}")
+        }
+        C::Unlink { name, link } => {
+            client
+                .unlink(work_api::UnlinkRequest {
+                    name: name.clone(),
+                    link: link.clone(),
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?;
+            format!("unlinked {link} from {name}")
+        }
+        C::Check => {
+            let checked = client
+                .check(work_api::CheckRequest {})
+                .await
+                .map_err(refused)?
+                .into_inner();
+            let lines: Vec<&str> = checked
+                .mismatches
+                .iter()
+                .map(|mismatch| mismatch.line.as_str())
+                .collect();
+            return Ok(WorkOutput {
+                text: lines.join("\n"),
+                exit_code: i32::from(!lines.is_empty()),
+            });
+        }
+        C::Import {
+            folder,
+            queue,
+            apply,
+        } => {
+            // The service needs an absolute path; a relative one is from the caller's folder.
+            let folder = std::path::absolute(folder).map_err(|_| "invalid folder".to_string())?;
+            let imported = client
+                .import(work_api::ImportRequest {
+                    folder: folder.to_string_lossy().into_owned(),
+                    queue: queue.clone(),
+                    apply: *apply,
+                    caller_pane,
+                })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            work_import_text(&imported, *apply)
+        }
+        C::RotateDryRun => {
+            let rotation = client
+                .rotate(work_api::RotateRequest { dry_run: true })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            let mut text = format!(
+                "a rotation would copy {} open work records, {} decisions and {} links to {}",
+                rotation.open_records, rotation.decisions, rotation.links, rotation.target
+            );
+            if !rotation.records.is_empty() {
+                text.push_str(&format!("\nrecords: {}", rotation.records.join(", ")));
+            }
+            text
+        }
+        C::History { name } => {
+            let history = client
+                .history(work_api::HistoryRequest { name: name.clone() })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            format!(
+                "in {}\n{}",
+                history.file,
+                work_record_text(&history.record.unwrap_or_default())
+            )
+        }
+        C::Search { word } => {
+            let searched = client
+                .search(work_api::SearchRequest { word: word.clone() })
+                .await
+                .map_err(refused)?
+                .into_inner();
+            match searched.found.is_empty() {
+                true => format!("no work record holds {word}"),
+                false => searched
+                    .found
+                    .iter()
+                    .map(|found| {
+                        let record = found.record.clone().unwrap_or_default();
+                        format!(
+                            "{}  {}  [{}]  {}",
+                            found.file, record.name, record.status, record.title
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }
+        }
+    };
+    Ok(WorkOutput::text(text))
+}
+
+// ---- End of the work tool ----
 
 /// `ms` since the Unix epoch as `2026-10-23 14:05` at `offset`.
 fn minute_text(ms: i64, offset: time::UtcOffset) -> String {
@@ -6509,6 +7138,488 @@ mod tests {
                 result,
                 Err(failure("this Harold is too old for harold get"))
             );
+        }
+    }
+
+    // ---- The work tool: `harold tool work` ----
+    mod work_cli {
+        use super::*;
+        use harold_api::tools::work::v1 as work_api;
+
+        const USAGE: &str = "invalid argument: usage is harold tool work list|show|put|set|decide|mark|link|unlink|check|import|rotate|history|search";
+
+        fn work_parse(words: &[&str]) -> Result<Mode, String> {
+            let mut args = vec!["tool", "work"];
+            args.extend_from_slice(words);
+            parse(&args)
+        }
+
+        fn work_mode(command: WorkCommand) -> Result<Mode, String> {
+            Ok(Mode::Tool(ToolCommand::Work(command)))
+        }
+
+        #[test]
+        fn tool_work_commands_parse() {
+            use WorkCommand as C;
+            let n = || "feature-a".to_string();
+            let set = |priority: Option<&str>,
+                       status: Option<&str>,
+                       waits_for: Option<&str>,
+                       next: Option<&str>| C::Set {
+                name: n(),
+                priority: priority.map(String::from),
+                status: status.map(String::from),
+                waits_for: waits_for.map(String::from),
+                next: next.map(String::from),
+            };
+            for (words, command) in [
+                (vec!["list"], C::List { all: false }),
+                (vec!["list", "--all"], C::List { all: true }),
+                (vec!["show", "feature-a"], C::Show { name: n() }),
+                (vec!["put", "feature-a"], C::Put { name: n() }),
+                (
+                    vec!["set", "feature-a", "--priority", "focus"],
+                    set(Some("focus"), None, None, None),
+                ),
+                (
+                    vec![
+                        "set",
+                        "feature-a",
+                        "--next",
+                        "write the plan",
+                        "--status",
+                        "waiting for the user",
+                        "--waits-for",
+                        "the user",
+                        "--priority",
+                        "next",
+                    ],
+                    set(
+                        Some("next"),
+                        Some("waiting for the user"),
+                        Some("the user"),
+                        Some("write the plan"),
+                    ),
+                ),
+                (
+                    vec!["set", "feature-a", "--waits-for", ""],
+                    set(None, None, Some(""), None),
+                ),
+                (
+                    vec![
+                        "decide",
+                        "feature-a",
+                        "--mark",
+                        "agreed",
+                        "--who",
+                        "the user",
+                        "keep the queue",
+                    ],
+                    C::Decide {
+                        name: n(),
+                        mark: "agreed".into(),
+                        who: "the user".into(),
+                        text: "keep the queue".into(),
+                    },
+                ),
+                (
+                    vec![
+                        "decide",
+                        "feature-a",
+                        "--who",
+                        "the chief",
+                        "--mark",
+                        "open",
+                        "keep",
+                        "the",
+                        "queue",
+                    ],
+                    C::Decide {
+                        name: n(),
+                        mark: "open".into(),
+                        who: "the chief".into(),
+                        text: "keep the queue".into(),
+                    },
+                ),
+                (
+                    vec!["mark", "feature-a", "2", "dropped"],
+                    C::Mark {
+                        name: n(),
+                        number: 2,
+                        mark: "dropped".into(),
+                    },
+                ),
+                (
+                    vec!["link", "feature-a", "spec:harold/work"],
+                    C::Link {
+                        name: n(),
+                        link: "spec:harold/work".into(),
+                    },
+                ),
+                (
+                    vec!["unlink", "feature-a", "question:Q4"],
+                    C::Unlink {
+                        name: n(),
+                        link: "question:Q4".into(),
+                    },
+                ),
+                (vec!["check"], C::Check),
+                (
+                    vec!["import", "/tmp/chief"],
+                    C::Import {
+                        folder: "/tmp/chief".into(),
+                        queue: Vec::new(),
+                        apply: false,
+                    },
+                ),
+                (
+                    vec!["import", "/tmp/chief", "--apply", "--queue", "N12,N34"],
+                    C::Import {
+                        folder: "/tmp/chief".into(),
+                        queue: vec!["N12".into(), "N34".into()],
+                        apply: true,
+                    },
+                ),
+                (vec!["rotate", "--dry-run"], C::RotateDryRun),
+                (vec!["history", "feature-a"], C::History { name: n() }),
+                (
+                    vec!["search", "queue"],
+                    C::Search {
+                        word: "queue".into(),
+                    },
+                ),
+            ] {
+                assert_eq!(work_parse(&words), work_mode(command), "{words:?}");
+            }
+        }
+
+        #[test]
+        fn a_malformed_work_command_is_refused_with_usage() {
+            for words in [
+                vec![],
+                vec!["lists"],
+                vec!["list", "--al"],
+                vec!["list", "--all", "--all"],
+                vec!["show"],
+                vec!["show", "a", "b"],
+                vec!["put"],
+                vec!["set", "feature-a"],
+                vec!["set", "feature-a", "--priority"],
+                vec!["set", "feature-a", "--colour", "red"],
+                vec!["decide", "feature-a", "--mark", "agreed", "text"],
+                vec![
+                    "decide",
+                    "feature-a",
+                    "--mark",
+                    "agreed",
+                    "--who",
+                    "the user",
+                ],
+                vec!["mark", "feature-a", "two", "agreed"],
+                vec!["mark", "feature-a", "2"],
+                vec!["link", "feature-a"],
+                vec!["unlink", "feature-a", "a", "b"],
+                vec!["check", "--now"],
+                vec!["import"],
+                vec!["import", "/tmp/chief", "--queue"],
+                vec!["import", "/tmp/chief", "--force"],
+                vec!["rotate"],
+                vec!["rotate", "--apply"],
+                vec!["history"],
+                vec!["search"],
+                vec!["search", ""],
+                vec!["search", "  "],
+            ] {
+                assert_eq!(work_parse(&words), Err(USAGE.to_string()), "{words:?}");
+            }
+        }
+
+        #[test]
+        fn refusal_lines_name_focus_full_and_not_chief() {
+            use tonic::Status;
+            for (status, words) in [
+                (
+                    Status::failed_precondition("focus_full"),
+                    vec!["focus_full"],
+                ),
+                (
+                    Status::permission_denied("not_chief"),
+                    vec!["not_chief", "%9"],
+                ),
+                (Status::permission_denied("no_pane"), vec!["no_pane"]),
+                (
+                    Status::failed_precondition("name_in_use"),
+                    vec!["name_in_use"],
+                ),
+                (Status::not_found("not_found"), vec!["not_found"]),
+                (Status::invalid_argument("invalid name"), vec!["bad_name"]),
+                (Status::failed_precondition("read_only"), vec!["read_only"]),
+                (
+                    Status::failed_precondition("rotation_is_harolds"),
+                    vec!["rotation_is_harolds"],
+                ),
+                (
+                    Status::invalid_argument("invalid priority"),
+                    vec!["invalid priority"],
+                ),
+                (
+                    Status::failed_precondition("focus_full plan-b"),
+                    vec!["focus_full plan-b"],
+                ),
+                (
+                    Status::failed_precondition("unplaced_lines 3"),
+                    vec!["unplaced_lines 3"],
+                ),
+                (
+                    Status::unimplemented(""),
+                    vec!["does not serve the work records"],
+                ),
+            ] {
+                let line = work_refusal_line(&status, "%9");
+                for word in words {
+                    assert!(line.contains(word), "{line:?} lacks {word:?}");
+                }
+                assert!(!line.contains('\n'), "{line:?}");
+            }
+        }
+
+        fn record(name: &str, priority: &str, status: &str, since_ms: i64) -> work_api::WorkRecord {
+            work_api::WorkRecord {
+                name: name.into(),
+                title: format!("Title {name}"),
+                priority: priority.into(),
+                status: status.into(),
+                next_step: format!("next for {name}"),
+                status_since_ms: since_ms,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn list_names_the_records_waiting_for_the_user_over_a_day() {
+            let now_ms = 10 * 86_400_000;
+            let listed = work_api::ListResponse {
+                records: vec![
+                    record("a", "focus", "building", 0),
+                    record("b", "next", "waiting for the user", now_ms - 25 * 3_600_000),
+                    record("c", "later", "waiting for the user", now_ms - 3_600_000),
+                    record("d", "later", "checked by the user", 0),
+                ],
+                file: "work-2026-11-03.db".into(),
+            };
+            let text = work_list_text(&listed, now_ms);
+            let lines: Vec<&str> = text.lines().collect();
+            assert!(
+                lines[0].contains("focus") && lines[0].contains('a'),
+                "{text}"
+            );
+            assert!(lines[0].contains("building") && lines[0].contains("next for a"));
+            assert!(lines[1].contains("next") && lines[1].contains("waiting for the user"));
+            assert_eq!(
+                lines.last().copied(),
+                Some("waiting for the user for more than a day: b"),
+                "{text}"
+            );
+            let calm = work_api::ListResponse {
+                records: vec![record(
+                    "c",
+                    "later",
+                    "waiting for the user",
+                    now_ms - 3_600_000,
+                )],
+                file: String::new(),
+            };
+            assert!(!work_list_text(&calm, now_ms).contains("more than a day"));
+            let empty = work_api::ListResponse::default();
+            assert_eq!(work_list_text(&empty, now_ms), "no open work records");
+        }
+
+        /// The work tool over a temp folder; `%2` is the chief.
+        struct WorkServer {
+            serving: Serving,
+            _folder: TempFolder,
+            _stop: tokio::sync::watch::Sender<()>,
+        }
+
+        async fn work_server() -> WorkServer {
+            let folder = TempFolder::new();
+            let (stop, shutdown) = tokio::sync::watch::channel(());
+            let handle = crate::tools::work::start(crate::tools::ToolContext {
+                data_folder: folder.0.join("data"),
+                typing: None,
+                chief_pane: std::sync::Arc::new(ChiefAt("%2")),
+                pane_folder: std::sync::Arc::new(Folders(Vec::new())),
+                products: std::sync::Arc::new(Registry(Vec::new())),
+                agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+                pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+                watch_settings: Default::default(),
+                model_environment: Vec::new(),
+                cli_path: "agent".into(),
+                grpc_addr: None,
+                shutdown,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+            WorkServer {
+                serving: serve(handle.routes).await,
+                _folder: folder,
+                _stop: stop,
+            }
+        }
+
+        impl WorkServer {
+            async fn run(
+                &self,
+                pane: &str,
+                words: &[&str],
+                input: &str,
+            ) -> Result<WorkOutput, String> {
+                let Ok(Mode::Tool(ToolCommand::Work(command))) = work_parse(words) else {
+                    panic!("not a work command: {words:?}");
+                };
+                work_within(
+                    &self.serving.address,
+                    &command,
+                    input.as_bytes(),
+                    pane,
+                    time::OffsetDateTime::now_utc(),
+                    TEST_WAIT,
+                )
+                .await
+            }
+        }
+
+        /// What Harold prints on stdout for `output`, and its exit code.
+        fn printed(output: &WorkOutput) -> (String, i32) {
+            let mut out = Vec::new();
+            let code = write_work_output(output, &mut out);
+            (String::from_utf8(out).unwrap(), code)
+        }
+
+        #[tokio::test]
+        async fn check_prints_nothing_and_exits_0_when_clean() {
+            let server = work_server().await;
+            let json =
+                r#"{"title":"Work A","priority":"focus","status":"building","next_step":"build"}"#;
+            server.run("%2", &["put", "work-a"], json).await.unwrap();
+            let output = server.run("%40", &["check"], "").await.unwrap();
+            assert_eq!(printed(&output), (String::new(), 0));
+        }
+
+        #[tokio::test]
+        async fn check_prints_lines_and_exits_1() {
+            let server = work_server().await;
+            let json = r#"{"title":"Work A","priority":"focus","status":"building","next_step":"build","links":["spec:nowhere/a"]}"#;
+            server.run("%2", &["put", "work-a"], json).await.unwrap();
+            let json = r#"{"title":"Work B","priority":"next","status":"idea","next_step":"think","links":["spec:nowhere/b"]}"#;
+            server.run("%2", &["put", "work-b"], json).await.unwrap();
+            let output = server.run("%40", &["check"], "").await.unwrap();
+            let (text, code) = printed(&output);
+            assert_eq!(code, 1);
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 2, "{text}");
+            assert!(lines[0].starts_with("work-a ") && lines[0].contains("nowhere/a"));
+            assert!(lines[1].starts_with("work-b ") && lines[1].contains("nowhere/b"));
+        }
+
+        #[tokio::test]
+        async fn the_chief_keeps_work_records_through_the_cli() {
+            let server = work_server().await;
+            let focus = |name: &str| {
+                format!(
+                    r#"{{"title":"Title {name}","priority":"focus","status":"idea","next_step":"start {name}"}}"#
+                )
+            };
+            let text = |result: Result<WorkOutput, String>| result.map(|output| output.text);
+            assert_eq!(
+                text(server.run("%2", &["put", "a"], &focus("a")).await),
+                Ok("created a".into())
+            );
+            server.run("%2", &["put", "b"], &focus("b")).await.unwrap();
+            let third = server.run("%2", &["put", "c"], &focus("c")).await;
+            assert!(
+                matches!(&third, Err(line) if line.contains("focus_full")),
+                "{third:?}"
+            );
+            let other = server.run("%40", &["put", "d"], &focus("d")).await;
+            assert!(
+                matches!(&other, Err(line) if line.contains("not_chief") && line.contains("%40")),
+                "{other:?}"
+            );
+            let set = server
+                .run(
+                    "%2",
+                    &["set", "b", "--priority", "next", "--status", "approved"],
+                    "",
+                )
+                .await;
+            assert_eq!(text(set), Ok("set b".into()));
+            let decided = server
+                .run(
+                    "%2",
+                    &[
+                        "decide", "a", "--mark", "open", "--who", "the user", "ship it",
+                    ],
+                    "",
+                )
+                .await;
+            assert_eq!(text(decided), Ok("added decision 1 to a".into()));
+            server
+                .run("%2", &["mark", "a", "1", "agreed"], "")
+                .await
+                .unwrap();
+            server
+                .run("%2", &["link", "a", "note:keep it small"], "")
+                .await
+                .unwrap();
+            let shown = server.run("%40", &["show", "a"], "").await.unwrap().text;
+            assert!(shown.contains("1. agreed, the user"), "{shown}");
+            assert!(shown.contains("note:keep it small"), "{shown}");
+            let listed = server.run("%40", &["list"], "").await.unwrap().text;
+            let first: Vec<&str> = listed
+                .lines()
+                .map(|line| line.split_whitespace().nth(1).unwrap_or(""))
+                .collect();
+            assert_eq!(first, vec!["a", "b"], "{listed}");
+            let missing = server.run("%40", &["show", "zz"], "").await;
+            assert!(
+                matches!(&missing, Err(line) if line.contains("not_found")),
+                "{missing:?}"
+            );
+            let rotate = server
+                .run("%40", &["rotate", "--dry-run"], "")
+                .await
+                .unwrap()
+                .text;
+            assert!(rotate.contains("2 open work records"), "{rotate}");
+            let found = server
+                .run("%40", &["search", "Title"], "")
+                .await
+                .unwrap()
+                .text;
+            assert!(
+                found.contains(" a ") || found.contains(" a\t") || found.contains("  a"),
+                "{found}"
+            );
+        }
+
+        #[tokio::test]
+        async fn import_says_plainly_that_a_dry_run_stores_nothing() {
+            let server = work_server().await;
+            let folder = TempFolder::new();
+            std::fs::write(
+                folder.0.join("plan-a.md"),
+                "# plan-a: Plan A\n\nPriority: next\nStatus: idea\nNext step: write it\nA stray line\n",
+            )
+            .unwrap();
+            let path = folder.0.to_string_lossy().to_string();
+            let output = server.run("%2", &["import", &path], "").await.unwrap();
+            let text = output.text;
+            assert!(text.contains("plan-a"), "{text}");
+            assert!(text.contains("plan-a.md:6"), "{text}");
+            assert!(text.contains("dry run"), "{text}");
+            let listed = server.run("%40", &["list"], "").await.unwrap().text;
+            assert_eq!(listed, "no open work records");
         }
     }
 }
