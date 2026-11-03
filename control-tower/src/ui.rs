@@ -723,7 +723,7 @@ const WORK_STATUS_WIDTH: u16 = 11;
 const WORK_NAME_MIN: u16 = 12;
 const WORK_NAME_MAX: u16 = 30;
 /// The least width the NEXT STEP column keeps.
-const WORK_NEXT_MIN: u16 = 8;
+const WORK_NEXT_MIN: u16 = 9;
 /// The NEXT STEP column's place among the work view's columns.
 const WORK_NEXT_COLUMN: usize = 3;
 
@@ -8486,6 +8486,15 @@ mod work_view_tests {
         let cursor = line_with(&lines, "▶");
         assert!(cursor.ends_with("…│"), "{cursor}");
         assert_eq!(cursor.chars().count(), 118);
+    }
+
+    #[test]
+    fn work_view_keeps_the_next_step_header_at_60_with_a_long_name() {
+        let mut listing = spec_listing();
+        listing.rows[0].name = "a-very-long-work-record-name-that-never-fits-the-column".into();
+        let lines = screen(&work_app(listing), 60, 30);
+        let header = line_with(&lines, "PRIORITY");
+        assert!(header.contains("NEXT STEP"), "{header}");
     }
 
     #[test]

@@ -209,7 +209,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   reads. It never writes a record.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). After
-  them it adds `m voice  p pause  C call  W watches` for the commands that show now, where they fit;
+  them it adds `V view  m voice  p pause  C call  W watches` for the commands that show now, where they fit;
   they drop first on a narrow screen. On a
   todo row, under a `TODO` label, it lists the row's own keys first, then `j/k` move,
   `n/N` todo, `o` link (only when the todo has a web link), `Esc` close, `^L` retry and

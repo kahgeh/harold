@@ -333,7 +333,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | checkpoint | The projector's saved position in the event stream | "cursor" for the saved position |
 | agent view | The control-tower's list of agents, the view it opens with | "dashboard", "main view" |
 | work view | The control-tower's list of open work records at `focus` and `next`, switched with `view` | "board", "queue view" (the queue is another thing) |
-| state database | The Turso database `harold-state.db` that holds the current agent view, the outbox and the checkpoint | "SQLite" for it |
+| state database | The Turso database `harold-state.db` that holds the current agent states, the outbox and the checkpoint | "SQLite" for it |
 | outbox | The stored list of delivery work, such as a turn-end update to send or a phone reply to route | "queue" for it |
 | try | One time the delivery handler works on an outbox row. The code keeps `attempt_count` | "attempt" in text, "retry" for a single try |
 | give up | The delivery handler marks an outbox row as failed for good, after its 10th failed try, or after `LONGEST_INVENTORY_WAIT` while the inventory fails | "drop", "abandon" |
