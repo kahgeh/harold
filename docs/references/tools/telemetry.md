@@ -2,7 +2,7 @@
 
 The **telemetry tool** lets a pane record a counter, a gauge or an event with one command. The chief, a PnEM or a script in a product's folder uses it. A new signal needs no change in Harold's code.
 
-The tool keeps its names in its own Turso file, `<store folder>/tools/telemetry/telemetry.db`. The service is `harold.tools.telemetry.v1.TelemetryService`, with the calls `Declare`, `Count`, `Gauge`, `Event`, `List` and `Remove`. The proto is `harold-api/proto/tools/telemetry.proto`. The service trusts local callers, as the [ADR](../../adr/0002-tool-services-trust-local-callers.md) says. The tool types into no pane.
+The tool keeps its names in its own Turso file, `<store folder>/tools/telemetry/telemetry.db`. The service is `harold.tools.telemetry.v1.TelemetryService`, with the calls `Declare`, `Count`, `Gauge`, `Event`, `List` and `Remove`. The proto is `harold-api/proto/tools/telemetry.proto`. The service trusts local callers, as the [ADR](../../adr/0002-tool-services-trust-local-callers.md) states. The tool types into no pane.
 
 Harold exports each signal as `agent.<name>`, so an agent's signal never mixes with Harold's own `harold.*` and `pod.*` signals. See the [telemetry reference](../telemetry/README.md#what-leaves-harold) for the exported fields.
 
