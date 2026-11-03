@@ -157,12 +157,22 @@ fn open_without_blocking(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-/// One file of the folder that the list shows.
+/// One file of the folder that the list shows. No handle is kept: a folder of thousands of
+/// files must not run out of file descriptors.
 struct Found {
     name: String,
     ext: Ext,
     modified: SystemTime,
-    file: File,
+    resolved: PathBuf,
+}
+
+/// Whether the resolved file's own name passes the collection's rules: the served name counts,
+/// so a symlink to a hidden file or to another extension is refused.
+fn target_allowed(c: &Collection, resolved: &Path) -> bool {
+    resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| c.ext_of(n).is_some())
 }
 
 /// Every allowed, visible, plain file of at most 2 MiB that lies inside the folder, newest first.
@@ -181,13 +191,10 @@ fn scan(c: &Collection) -> Result<Vec<Found>, Outcome> {
         let Ok(resolved) = std::fs::canonicalize(entry.path()) else {
             continue;
         };
-        if !resolved.starts_with(&folder) {
+        if !resolved.starts_with(&folder) || !target_allowed(c, &resolved) {
             continue;
         }
-        let Ok(file) = open_without_blocking(&resolved) else {
-            continue;
-        };
-        let Ok(metadata) = file.metadata() else {
+        let Ok(metadata) = std::fs::metadata(&resolved) else {
             continue;
         };
         if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
@@ -197,7 +204,7 @@ fn scan(c: &Collection) -> Result<Vec<Found>, Outcome> {
             name,
             ext,
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            file,
+            resolved,
         });
     }
     // Newest first; the name breaks a tie so the order is stable.
@@ -209,13 +216,16 @@ fn scan(c: &Collection) -> Result<Vec<Found>, Outcome> {
 pub(crate) fn list_blocking(c: &Collection) -> Result<Listing, Outcome> {
     let found = scan(c)?;
     let total = found.len();
-    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let offset = crate::telemetry::local_offset();
     let rows = found
         .into_iter()
         .take(MAX_ROWS)
         .map(|f| {
+            // One handle at a time, and only for the rows shown.
             let mut head = Vec::new();
-            let _ = f.file.take(TITLE_BYTES).read_to_end(&mut head);
+            if let Ok(file) = open_without_blocking(&f.resolved) {
+                let _ = file.take(TITLE_BYTES).read_to_end(&mut head);
+            }
             let head = String::from_utf8_lossy(&head);
             let title = match f.ext {
                 Ext::Html => title_of_html(&head),
@@ -251,7 +261,7 @@ pub(crate) fn load_blocking(c: &Collection, file: &str) -> Result<LoadedFile, Ou
             Outcome::Unreadable
         }
     })?;
-    if !resolved.starts_with(&folder) {
+    if !resolved.starts_with(&folder) || !target_allowed(c, &resolved) {
         return Err(Outcome::Refused);
     }
     // Opened before it is judged, and judged by the open handle, so what is read is what was
@@ -310,7 +320,18 @@ fn format_when(at: SystemTime, offset: UtcOffset) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let local = OffsetDateTime::from(at).to_offset(offset);
+    let secs = match at.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_secs()).ok(),
+        Err(before) => i64::try_from(before.duration().as_secs())
+            .ok()
+            .map(|secs| -secs),
+    };
+    let local = secs
+        .and_then(|secs| OffsetDateTime::from_unix_timestamp(secs).ok())
+        .and_then(|utc| utc.checked_to_offset(offset));
+    let Some(local) = local else {
+        return "-".to_owned();
+    };
     format!(
         "{} {} {:02}:{:02}",
         local.day(),

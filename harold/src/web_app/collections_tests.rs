@@ -420,3 +420,64 @@ fn the_time_reads_as_day_month_and_clock() {
     let plus11 = time::UtcOffset::from_hms(11, 0, 0).unwrap();
     assert_eq!(format_when(at, plus11), "4 Nov 07:40");
 }
+
+#[test]
+fn a_folder_with_more_files_than_the_descriptor_limit_is_counted_whole() {
+    let dir = Folder::new();
+    for i in 0..600 {
+        dir.write(&format!("p{i:03}.md"), b"# t");
+    }
+    let c = dir.collection();
+    assert_eq!(count_files(&c), Ok(600));
+    let listing = list_blocking(&c).unwrap();
+    assert_eq!(listing.total, 600);
+    assert_eq!(listing.rows.len(), 200);
+    assert!(listing.rows.iter().all(|r| r.title == "t"));
+}
+
+#[test]
+fn a_far_future_or_far_past_time_lists_without_a_panic() {
+    let dir = Folder::new();
+    dir.write("future.html", b"x");
+    // About the year 300000.
+    dir.touch("future.html", 9_000_000_000_000);
+    let listing = list_blocking(&dir.collection()).unwrap();
+    // The file system may clamp the time, so only the lack of a panic is certain here.
+    assert!(!listing.rows[0].when.is_empty());
+    let year_300000 = SystemTime::UNIX_EPOCH + Duration::from_secs(9_000_000_000_000);
+    assert_eq!(format_when(year_300000, time::UtcOffset::UTC), "-");
+    let far = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 2);
+    assert_eq!(format_when(far, time::UtcOffset::UTC), "-");
+    let past = SystemTime::UNIX_EPOCH - Duration::from_secs(u64::MAX / 2);
+    assert_eq!(format_when(past, time::UtcOffset::UTC), "-");
+}
+
+#[test]
+fn a_symlink_to_a_hidden_file_or_another_extension_is_refused_and_not_listed() {
+    let dir = Folder::new();
+    dir.write(".hidden.html", b"secret");
+    dir.write("data.txt", b"secret");
+    dir.write("real.md", b"ok");
+    for (link, target) in [
+        ("to-hidden.html", ".hidden.html"),
+        ("to-txt.html", "data.txt"),
+        ("to-md.html", "real.md"),
+    ] {
+        std::os::unix::fs::symlink(dir.pages().join(target), dir.pages().join(link)).unwrap();
+    }
+    let mut c = dir.collection();
+    c.extensions = vec![Ext::Html, Ext::Md];
+    for link in ["to-hidden.html", "to-txt.html"] {
+        assert_eq!(load_blocking(&c, link).unwrap_err(), Outcome::Refused);
+    }
+    // A target with an allowed extension is served.
+    assert!(load_blocking(&c, "to-md.html").is_ok());
+    let mut files: Vec<_> = list_blocking(&c)
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.file)
+        .collect();
+    files.sort();
+    assert_eq!(files, vec!["real.md", "to-md.html"]);
+}
