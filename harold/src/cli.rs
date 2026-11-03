@@ -1017,7 +1017,7 @@ fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
     lines.join("\n")
 }
 
-const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list";
+const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES [--for TIME] [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list | pause (NAME | --all) [--for TIME] | resume (NAME | --all) | remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] \"TEXT\"";
 
 /// A `harold tool watch` command. The numbers stay text here: the daemon checks the
 /// ranges, and the CLI only needs them to be numbers.
@@ -1027,7 +1027,7 @@ pub(crate) enum WatchCommand {
         name: String,
         skill: String,
         every_minutes: u32,
-        for_minutes: u32,
+        for_minutes: Option<u32>,
         report_to: Option<String>,
         run_budget_usd: Option<String>,
         run_limit_secs: Option<u32>,
@@ -1037,6 +1037,47 @@ pub(crate) enum WatchCommand {
         name: String,
     },
     List,
+    Pause {
+        name: Option<String>,
+        all: bool,
+        for_minutes: Option<u32>,
+    },
+    Resume {
+        name: Option<String>,
+        all: bool,
+    },
+    Remind {
+        name: String,
+        when: RemindWhen,
+        report_to: Option<String>,
+        text: String,
+    },
+}
+
+/// When a reminder is due: in some minutes, or at a local time of day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemindWhen {
+    In(u32),
+    At(String),
+}
+
+/// Reads a time span: `90` and `90m` are minutes, `2h` is hours. The daemon checks the
+/// range. `field` names the flag in the error line.
+pub(crate) fn parse_minutes(text: &str, field: &str) -> Result<u32, String> {
+    let invalid = || format!("invalid {field}");
+    let (digits, hours) = match text.strip_suffix('h') {
+        Some(digits) => (digits, true),
+        None => (text.strip_suffix('m').unwrap_or(text), false),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let number = digits.parse::<u32>().map_err(|_| invalid())?;
+    if hours {
+        number.checked_mul(60).ok_or_else(invalid)
+    } else {
+        Ok(number)
+    }
 }
 
 /// A `harold tool release` command.
@@ -1068,8 +1109,76 @@ fn parse_watch(args: &[&str]) -> Result<WatchCommand, String> {
             name: (*name).into(),
         }),
         ["start", name, flags @ ..] => parse_watch_start(name, flags),
+        ["pause", rest @ ..] => parse_watch_hold(rest, true),
+        ["resume", rest @ ..] => parse_watch_hold(rest, false),
+        ["remind", name, rest @ ..] if !name.starts_with('-') => parse_watch_remind(name, rest),
         _ => Err(WATCH_USAGE_LINE.into()),
     }
+}
+
+/// Reads `pause` or `resume`: one name or `--all`, and for `pause` an optional `--for`.
+fn parse_watch_hold(args: &[&str], pausing: bool) -> Result<WatchCommand, String> {
+    let (mut name, mut all, mut minutes) = (None::<String>, false, None::<String>);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match *arg {
+            "--all" if !all => all = true,
+            "--for" if pausing && minutes.is_none() => {
+                let value = rest.next().ok_or_else(|| WATCH_USAGE_LINE.to_string())?;
+                minutes = Some((*value).to_string());
+            }
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.into()),
+            _ => return Err(WATCH_USAGE_LINE.into()),
+        }
+    }
+    if all == name.is_some() {
+        return Err(WATCH_USAGE_LINE.into());
+    }
+    if !pausing {
+        return Ok(WatchCommand::Resume { name, all });
+    }
+    let for_minutes = minutes
+        .map(|text| parse_minutes(&text, "for_minutes"))
+        .transpose()?;
+    Ok(WatchCommand::Pause {
+        name,
+        all,
+        for_minutes,
+    })
+}
+
+/// Reads `remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] TEXT`.
+fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String> {
+    let (mut within, mut at, mut report_to) = (None::<String>, None::<String>, None);
+    let mut text = None::<String>;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let slot = match *arg {
+            "--in" => &mut within,
+            "--at" => &mut at,
+            "--report-to" => &mut report_to,
+            other if !other.starts_with('-') && text.is_none() => {
+                text = Some(other.into());
+                continue;
+            }
+            _ => return Err(WATCH_USAGE_LINE.into()),
+        };
+        let value = rest.next().ok_or_else(|| WATCH_USAGE_LINE.to_string())?;
+        if slot.replace((*value).to_string()).is_some() {
+            return Err(WATCH_USAGE_LINE.into());
+        }
+    }
+    let when = match (within, at) {
+        (Some(minutes), None) => RemindWhen::In(parse_minutes(&minutes, "in_minutes")?),
+        (None, Some(time)) => RemindWhen::At(time),
+        _ => return Err(WATCH_USAGE_LINE.into()),
+    };
+    Ok(WatchCommand::Remind {
+        name: name.into(),
+        when,
+        report_to,
+        text: text.ok_or_else(|| WATCH_USAGE_LINE.to_string())?,
+    })
 }
 
 fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String> {
@@ -1120,7 +1229,9 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
         name: name.into(),
         skill: skill.ok_or_else(|| WATCH_USAGE_LINE.to_string())?,
         every_minutes: number(every, "every_minutes")?,
-        for_minutes: number(minutes, "for_minutes")?,
+        for_minutes: minutes
+            .map(|text| parse_minutes(&text, "for_minutes"))
+            .transpose()?,
         report_to,
         run_budget_usd: budget,
         run_limit_secs,
@@ -2046,8 +2157,19 @@ pub(crate) async fn tool(
 /// caller's.
 fn watch_refusal_line(status: &tonic::Status, command: &WatchCommand) -> String {
     let subject = match command {
-        WatchCommand::Start { name, .. } | WatchCommand::Stop { name } => name.as_str(),
+        WatchCommand::Start { name, .. }
+        | WatchCommand::Stop { name }
+        | WatchCommand::Remind { name, .. } => name.as_str(),
+        WatchCommand::Pause { name, .. } | WatchCommand::Resume { name, .. } => {
+            name.as_deref().unwrap_or_default()
+        }
         WatchCommand::List => "",
+    };
+    // `--all` has no name, so these lines then name no watch.
+    let which = if subject.is_empty() {
+        "the watch"
+    } else {
+        subject
     };
     match (status.code(), status.message()) {
         (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve watches".into(),
@@ -2055,8 +2177,16 @@ fn watch_refusal_line(status: &tonic::Status, command: &WatchCommand) -> String 
             WatchCommand::Start { skill, .. } => format!("unknown skill {skill}"),
             _ => "unknown skill".into(),
         },
-        (tonic::Code::NotFound, "unknown_watch") => format!("unknown watch {subject}"),
-        (tonic::Code::FailedPrecondition, "not_running") => format!("{subject} is not running"),
+        (tonic::Code::NotFound, "unknown_watch") => {
+            format!("unknown watch {subject}").trim_end().to_string()
+        }
+        (tonic::Code::FailedPrecondition, "not_running") => format!("{which} is not running"),
+        (tonic::Code::FailedPrecondition, "not_paused") => format!("{which} is not paused"),
+        (tonic::Code::FailedPrecondition, "budget_day") => {
+            format!("{which} is capped by the daily budget")
+        }
+        (tonic::Code::FailedPrecondition, "name_in_use") => format!("name {subject} is in use"),
+        (tonic::Code::FailedPrecondition, "daily_budget_unset") => "daily budget not set".into(),
         (tonic::Code::FailedPrecondition, "too_many_watches") => "too many watches".into(),
         (tonic::Code::FailedPrecondition, "daily_budget_spent") => "daily budget spent".into(),
         _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
@@ -2082,13 +2212,29 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
         plural(watch.reports, "report", "reports"),
         watch.cost_usd
     );
-    if watch.running {
+    if watch.paused {
+        let capped = if watch.pause_how == "budget_day" {
+            " (budget)"
+        } else {
+            ""
+        };
+        let until = watch
+            .paused_until_ms
+            .map(|ms| format!(" until {}", watch_time(ms, offset)))
+            .unwrap_or_default();
         return format!(
-            "{} running in {} until {}, limit {} s, {counts}",
-            watch.name,
-            watch.folder,
-            watch_time(watch.ends_at_ms.unwrap_or(0), offset),
-            watch.run_limit_secs
+            "{} paused{capped}{until} in {}, {counts}",
+            watch.name, watch.folder
+        );
+    }
+    if watch.running {
+        let until = match watch.ends_at_ms {
+            Some(ms) => format!("until {}", watch_time(ms, offset)),
+            None => "no end".to_string(),
+        };
+        return format!(
+            "{} running in {} {until}, limit {} s, {counts}",
+            watch.name, watch.folder, watch.run_limit_secs
         );
     }
     let why = match watch.stop_reason.as_str() {
@@ -2099,6 +2245,29 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
         other => other,
     };
     format!("{} ended ({why}) in {}, {counts}", watch.name, watch.folder)
+}
+
+fn watch_reminder_line(reminder: &watch_api::Reminder, offset: time::UtcOffset) -> String {
+    format!(
+        "reminder {} due {}, reporting to {}",
+        reminder.name,
+        watch_time(reminder.due_at_ms, offset),
+        if reminder.report_to.is_empty() {
+            "self"
+        } else {
+            &reminder.report_to
+        }
+    )
+}
+
+/// The count line for `pause --all` and `resume --all`. `why` tells why a watch was
+/// skipped.
+fn watch_count_line(verb: &str, done: &[String], skipped: &[String], why: &str) -> String {
+    let mut line = format!("{verb} {}", done.len());
+    if !skipped.is_empty() {
+        line.push_str(&format!(", skipped {} ({why})", skipped.join(", ")));
+    }
+    line
 }
 
 /// The line printed for a refusal from the release service.
@@ -2173,7 +2342,7 @@ pub(crate) async fn watch_within(
                         folder: folder.to_string_lossy().into_owned(),
                         skill: skill.clone(),
                         every_minutes: *every_minutes,
-                        for_minutes: Some(*for_minutes),
+                        for_minutes: *for_minutes,
                         report_to: report_to.clone().unwrap_or_default(),
                         run_budget_usd: run_budget_usd
                             .as_deref()
@@ -2185,11 +2354,14 @@ pub(crate) async fn watch_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
+                let until = match started.ends_at_ms {
+                    Some(ms) => format!("until {}", watch_time(ms, offset)),
+                    None => "with no end".to_string(),
+                };
                 Ok(format!(
-                    "started {} in {} until {}, every {every_minutes} minutes, reporting to {}",
+                    "started {} in {} {until}, every {every_minutes} minutes, reporting to {}",
                     started.name,
                     folder.display(),
-                    watch_time(started.ends_at_ms.unwrap_or(0), offset),
                     report_to
                         .as_deref()
                         .filter(|to| !to.is_empty())
@@ -2214,8 +2386,86 @@ pub(crate) async fn watch_within(
                     .iter()
                     .map(|watch| watch_list_line(watch, offset))
                     .collect();
+                lines.extend(
+                    listed
+                        .reminders
+                        .iter()
+                        .map(|reminder| watch_reminder_line(reminder, offset)),
+                );
                 lines.push(format!("spent today ${:.2}", listed.spent_usd));
                 Ok(lines.join("\n"))
+            }
+            WatchCommand::Pause {
+                name,
+                all,
+                for_minutes,
+            } => {
+                let paused = client
+                    .pause(watch_api::PauseRequest {
+                        name: name.clone().unwrap_or_default(),
+                        all: *all,
+                        for_minutes: *for_minutes,
+                        caller: "cli".into(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                let mut line = match name {
+                    Some(name) => format!("paused {name}"),
+                    None => {
+                        watch_count_line("paused", &paused.paused, &paused.skipped, "not running")
+                    }
+                };
+                if let Some(minutes) = for_minutes {
+                    line.push_str(&format!(" for {minutes} minutes"));
+                }
+                Ok(line)
+            }
+            WatchCommand::Resume { name, all } => {
+                let resumed = client
+                    .resume(watch_api::ResumeRequest {
+                        name: name.clone().unwrap_or_default(),
+                        all: *all,
+                        caller: "cli".into(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(match name {
+                    Some(name) => format!("resumed {name}"),
+                    None => {
+                        watch_count_line("resumed", &resumed.resumed, &resumed.skipped, "budget")
+                    }
+                })
+            }
+            WatchCommand::Remind {
+                name,
+                when,
+                report_to,
+                text,
+            } => {
+                let reminded = client
+                    .remind(watch_api::RemindRequest {
+                        name: name.clone(),
+                        folder: folder.to_string_lossy().into_owned(),
+                        when: Some(match when {
+                            RemindWhen::In(minutes) => {
+                                watch_api::remind_request::When::InMinutes(*minutes)
+                            }
+                            RemindWhen::At(time) => {
+                                watch_api::remind_request::When::AtLocal(time.clone())
+                            }
+                        }),
+                        report_to: report_to.clone().unwrap_or_default(),
+                        text: text.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "reminder {name} at {}",
+                    watch_time(reminded.due_at_ms, offset)
+                ))
             }
         }
     })
@@ -6190,7 +6440,7 @@ mod tests {
             name: "after-release".into(),
             skill: "pod-watch".into(),
             every_minutes: 10,
-            for_minutes: 120,
+            for_minutes: Some(120),
             report_to: None,
             run_budget_usd: None,
             run_limit_secs: None,
@@ -6242,7 +6492,7 @@ mod tests {
                 name: "w".into(),
                 skill: "s".into(),
                 every_minutes: 5,
-                for_minutes: 60,
+                for_minutes: Some(60),
                 report_to: Some("chief".into()),
                 run_budget_usd: Some("0.03".into()),
                 run_limit_secs: None,
@@ -6266,7 +6516,7 @@ mod tests {
                 name: "w".into(),
                 skill: "s".into(),
                 every_minutes: 5,
-                for_minutes: 60,
+                for_minutes: Some(60),
                 report_to: None,
                 run_budget_usd: None,
                 run_limit_secs: Some(300),
@@ -6292,7 +6542,6 @@ mod tests {
             vec![],
             vec!["start"],
             vec!["start", "w"],
-            vec!["start", "w", "--skill", "s", "--every", "10"],
             vec![
                 "start", "w", "--skill", "s", "--every", "10", "--for", "5", "--bogus",
             ],
@@ -6389,7 +6638,7 @@ mod tests {
             name: "w".into(),
             skill: "nope".into(),
             every_minutes: 10,
-            for_minutes: 5,
+            for_minutes: Some(5),
             report_to: None,
             run_budget_usd: None,
             run_limit_secs: None,
@@ -6466,6 +6715,423 @@ mod tests {
             watch_list_line(&ended, utc),
             "after-release ended (daily budget spent) in /work/chief-of-pods, 1 run, 2 reports, $0.03"
         );
+    }
+
+    fn watch_command(args: &[&str]) -> Result<WatchCommand, String> {
+        match watch(args) {
+            Ok(Mode::Tool(ToolCommand::Watch(command))) => Ok(command),
+            Ok(other) => panic!("not a watch command: {other:?}"),
+            Err(line) => Err(line),
+        }
+    }
+
+    #[test]
+    fn parse_minutes_takes_minutes_or_hours() {
+        assert_eq!(parse_minutes("90", "for_minutes"), Ok(90));
+        assert_eq!(parse_minutes("90m", "for_minutes"), Ok(90));
+        assert_eq!(parse_minutes("2h", "for_minutes"), Ok(120));
+        assert_eq!(parse_minutes("0", "for_minutes"), Ok(0));
+        for bad in ["h", "2x", "", "-5", "1.5h", "m"] {
+            assert_eq!(
+                parse_minutes(bad, "for_minutes"),
+                Err("invalid for_minutes".into()),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            parse_minutes("x", "in_minutes"),
+            Err("invalid in_minutes".into())
+        );
+    }
+
+    #[test]
+    fn tool_watch_start_may_leave_out_the_end_or_take_hours() {
+        let start = |end: &[&str]| {
+            let mut args = vec!["start", "w", "--skill", "s", "--every", "5"];
+            args.extend(end);
+            watch_command(&args)
+        };
+        let Ok(WatchCommand::Start { for_minutes, .. }) = start(&[]) else {
+            panic!("start without --for must parse");
+        };
+        assert_eq!(for_minutes, None);
+        let Ok(WatchCommand::Start { for_minutes, .. }) = start(&["--for", "2h"]) else {
+            panic!("start --for 2h must parse");
+        };
+        assert_eq!(for_minutes, Some(120));
+        let Ok(WatchCommand::Start { for_minutes, .. }) = start(&["--for", "90"]) else {
+            panic!("start --for 90 must parse");
+        };
+        assert_eq!(for_minutes, Some(90));
+        assert_eq!(start(&["--for", "soon"]), Err("invalid for_minutes".into()));
+        assert!(WATCH_USAGE_LINE.contains("[--for TIME]"));
+        assert!(WATCH_USAGE_LINE.contains("pause (NAME | --all) [--for TIME]"));
+        assert!(WATCH_USAGE_LINE.contains("resume (NAME | --all)"));
+        assert!(WATCH_USAGE_LINE.contains("remind NAME (--in TIME | --at HH:MM)"));
+    }
+
+    #[test]
+    fn tool_watch_pause_and_resume_parse() {
+        assert_eq!(
+            watch_command(&["pause", "pods", "--for", "2h"]),
+            Ok(WatchCommand::Pause {
+                name: Some("pods".into()),
+                all: false,
+                for_minutes: Some(120)
+            })
+        );
+        assert_eq!(
+            watch_command(&["pause", "pods"]),
+            Ok(WatchCommand::Pause {
+                name: Some("pods".into()),
+                all: false,
+                for_minutes: None
+            })
+        );
+        assert_eq!(
+            watch_command(&["pause", "--all"]),
+            Ok(WatchCommand::Pause {
+                name: None,
+                all: true,
+                for_minutes: None
+            })
+        );
+        assert_eq!(
+            watch_command(&["pause", "--for", "30m", "--all"]),
+            Ok(WatchCommand::Pause {
+                name: None,
+                all: true,
+                for_minutes: Some(30)
+            })
+        );
+        assert_eq!(
+            watch_command(&["resume", "pods"]),
+            Ok(WatchCommand::Resume {
+                name: Some("pods".into()),
+                all: false
+            })
+        );
+        assert_eq!(
+            watch_command(&["resume", "--all"]),
+            Ok(WatchCommand::Resume {
+                name: None,
+                all: true
+            })
+        );
+        assert_eq!(
+            watch_command(&["pause", "pods", "--for", "x"]),
+            Err("invalid for_minutes".into())
+        );
+        for args in [
+            vec!["pause"],
+            vec!["pause", "pods", "--all"],
+            vec!["pause", "--all", "pods"],
+            vec!["pause", "pods", "--for"],
+            vec!["pause", "pods", "--for", "1h", "--for", "2h"],
+            vec!["pause", "--all", "--all"],
+            vec!["pause", "pods", "--bogus"],
+            vec!["pause", "a", "b"],
+            vec!["resume"],
+            vec!["resume", "pods", "--all"],
+            vec!["resume", "pods", "--for", "1h"],
+            vec!["resume", "--all", "--all"],
+            vec!["resume", "a", "b"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn tool_watch_remind_parses() {
+        assert_eq!(
+            watch_command(&[
+                "remind",
+                "release-check",
+                "--in",
+                "45m",
+                "--report-to",
+                "chief",
+                "check the v0.75.0 release"
+            ]),
+            Ok(WatchCommand::Remind {
+                name: "release-check".into(),
+                when: RemindWhen::In(45),
+                report_to: Some("chief".into()),
+                text: "check the v0.75.0 release".into()
+            })
+        );
+        assert_eq!(
+            watch_command(&["remind", "x", "--at", "16:30", "t"]),
+            Ok(WatchCommand::Remind {
+                name: "x".into(),
+                when: RemindWhen::At("16:30".into()),
+                report_to: None,
+                text: "t".into()
+            })
+        );
+        assert_eq!(
+            watch_command(&["remind", "x", "t", "--in", "2h"]),
+            Ok(WatchCommand::Remind {
+                name: "x".into(),
+                when: RemindWhen::In(120),
+                report_to: None,
+                text: "t".into()
+            })
+        );
+        assert_eq!(
+            watch_command(&["remind", "x", "--in", "soon", "t"]),
+            Err("invalid in_minutes".into())
+        );
+        for args in [
+            vec!["remind"],
+            vec!["remind", "x"],
+            vec!["remind", "x", "t"],
+            vec!["remind", "x", "--in", "5m"],
+            vec!["remind", "x", "--in", "5m", "--at", "16:30", "t"],
+            vec!["remind", "x", "--in", "5m", "a", "b"],
+            vec!["remind", "x", "--in", "5m", "--in", "6m", "t"],
+            vec!["remind", "x", "--at", "16:30", "--at", "17:30", "t"],
+            vec![
+                "remind",
+                "x",
+                "--in",
+                "5m",
+                "--report-to",
+                "chief",
+                "--report-to",
+                "self",
+                "t",
+            ],
+            vec!["remind", "x", "--in", "5m", "--bogus", "t"],
+            vec!["remind", "x", "--in"],
+            vec!["remind", "x", "--in", "5m", "--report-to"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_watch_refusal_names_the_new_refusals() {
+        let pause_one = WatchCommand::Pause {
+            name: Some("pods".into()),
+            all: false,
+            for_minutes: None,
+        };
+        let resume_one = WatchCommand::Resume {
+            name: Some("pods".into()),
+            all: false,
+        };
+        let resume_all = WatchCommand::Resume {
+            name: None,
+            all: true,
+        };
+        let remind = WatchCommand::Remind {
+            name: "release-check".into(),
+            when: RemindWhen::In(5),
+            report_to: None,
+            text: "t".into(),
+        };
+        let start = WatchCommand::Start {
+            name: "w".into(),
+            skill: "s".into(),
+            every_minutes: 10,
+            for_minutes: None,
+            report_to: None,
+            run_budget_usd: None,
+            run_limit_secs: None,
+            every_run: false,
+        };
+        for (status, command, line) in [
+            (
+                tonic::Status::failed_precondition("daily_budget_unset"),
+                &start,
+                "daily budget not set",
+            ),
+            (
+                tonic::Status::failed_precondition("not_paused"),
+                &resume_one,
+                "pods is not paused",
+            ),
+            (
+                tonic::Status::failed_precondition("budget_day"),
+                &resume_one,
+                "pods is capped by the daily budget",
+            ),
+            (
+                tonic::Status::failed_precondition("budget_day"),
+                &pause_one,
+                "pods is capped by the daily budget",
+            ),
+            (
+                tonic::Status::failed_precondition("name_in_use"),
+                &remind,
+                "name release-check is in use",
+            ),
+            (
+                tonic::Status::not_found("unknown_watch"),
+                &pause_one,
+                "unknown watch pods",
+            ),
+            (
+                tonic::Status::failed_precondition("not_running"),
+                &pause_one,
+                "pods is not running",
+            ),
+            (
+                tonic::Status::not_found("unknown_watch"),
+                &resume_all,
+                "unknown watch",
+            ),
+            (
+                tonic::Status::invalid_argument("invalid at_local"),
+                &remind,
+                "invalid at_local",
+            ),
+        ] {
+            assert_eq!(watch_refusal_line(&status, command), line);
+        }
+    }
+
+    #[test]
+    fn a_watch_list_line_covers_no_end_paused_and_capped() {
+        let utc = time::UtcOffset::UTC;
+        let at_1630 = 16 * 3_600_000 + 30 * 60_000;
+        let open = watch_api::Watch {
+            name: "pods".into(),
+            folder: "/work/x".into(),
+            running: true,
+            ends_at_ms: None,
+            runs: 3,
+            reports: 1,
+            cost_usd: 0.03,
+            run_limit_secs: 300,
+            ..Default::default()
+        };
+        assert_eq!(
+            watch_list_line(&open, utc),
+            "pods running in /work/x no end, limit 300 s, 3 runs, 1 report, $0.03"
+        );
+        let paused = watch_api::Watch {
+            running: false,
+            paused: true,
+            paused_until_ms: Some(at_1630),
+            pause_how: "cli".into(),
+            ..open.clone()
+        };
+        assert_eq!(
+            watch_list_line(&paused, utc),
+            "pods paused until 16:30 in /work/x, 3 runs, 1 report, $0.03"
+        );
+        let held = watch_api::Watch {
+            paused_until_ms: None,
+            ..paused.clone()
+        };
+        assert_eq!(
+            watch_list_line(&held, utc),
+            "pods paused in /work/x, 3 runs, 1 report, $0.03"
+        );
+        let capped = watch_api::Watch {
+            paused_until_ms: Some(0),
+            pause_how: "budget_day".into(),
+            ..paused
+        };
+        assert_eq!(
+            watch_list_line(&capped, utc),
+            "pods paused (budget) until 00:00 in /work/x, 3 runs, 1 report, $0.03"
+        );
+        let waiting = watch_api::Reminder {
+            name: "release-check".into(),
+            report_to: "chief".into(),
+            due_at_ms: at_1630,
+        };
+        assert_eq!(
+            watch_reminder_line(&waiting, utc),
+            "reminder release-check due 16:30, reporting to chief"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_watch_pause_resume_and_remind_run_against_the_daemon() {
+        let folder = TempFolder::new();
+        let work = std::fs::canonicalize(&folder.0).unwrap();
+        let skill = work.join(".claude/skills/pod-watch");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Check.\n").unwrap();
+        let (serving, _stop) = watch_server(&folder).await;
+        let utc = time::UtcOffset::UTC;
+        let run = |command: WatchCommand| {
+            let (address, work) = (serving.address.clone(), work.clone());
+            async move { watch_within(&address, &command, &work, utc, TEST_WAIT).await }
+        };
+        run(WatchCommand::Start {
+            name: "pods".into(),
+            skill: "pod-watch".into(),
+            every_minutes: 10,
+            for_minutes: Some(120),
+            report_to: Some("chief".into()),
+            run_budget_usd: None,
+            run_limit_secs: None,
+            every_run: false,
+        })
+        .await
+        .unwrap();
+        let pause = |name: Option<&str>, all, for_minutes| WatchCommand::Pause {
+            name: name.map(Into::into),
+            all,
+            for_minutes,
+        };
+        let resume = |name: Option<&str>, all| WatchCommand::Resume {
+            name: name.map(Into::into),
+            all,
+        };
+        assert_eq!(
+            run(pause(Some("pods"), false, None)).await,
+            Ok("paused pods".into())
+        );
+        let listed = run(WatchCommand::List).await.unwrap();
+        assert!(
+            listed.starts_with(&format!("pods paused in {}, ", work.display())),
+            "{listed}"
+        );
+        assert_eq!(
+            run(resume(Some("pods"), false)).await,
+            Ok("resumed pods".into())
+        );
+        assert_eq!(
+            run(resume(Some("pods"), false)).await,
+            Err("pods is not paused".into())
+        );
+        assert_eq!(
+            run(pause(Some("pods"), false, Some(30))).await,
+            Ok("paused pods for 30 minutes".into())
+        );
+        assert_eq!(run(resume(None, true)).await, Ok("resumed 1".into()));
+        assert_eq!(run(resume(None, true)).await, Ok("resumed 0".into()));
+        assert_eq!(run(pause(None, true, None)).await, Ok("paused 1".into()));
+
+        let reminder = run(WatchCommand::Remind {
+            name: "release-check".into(),
+            when: RemindWhen::In(45),
+            report_to: Some("chief".into()),
+            text: "check".into(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            reminder.starts_with("reminder release-check at "),
+            "{reminder}"
+        );
+        let listed = run(WatchCommand::List).await.unwrap();
+        let lines: Vec<&str> = listed.lines().collect();
+        assert!(
+            lines[lines.len() - 2].starts_with("reminder release-check due "),
+            "{listed}"
+        );
+        assert!(
+            lines[lines.len() - 2].ends_with(", reporting to chief"),
+            "{listed}"
+        );
+        assert!(lines[lines.len() - 1].starts_with("spent today $"));
     }
 
     /// The watch tool over a temp folder. Claude Code is `/usr/bin/true`, so a run that
@@ -6681,7 +7347,7 @@ mod tests {
             name: "after-release".into(),
             skill: skill.into(),
             every_minutes: 10,
-            for_minutes: 120,
+            for_minutes: Some(120),
             report_to: Some("chief".into()),
             run_budget_usd: None,
             run_limit_secs: None,
