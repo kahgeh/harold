@@ -6593,6 +6593,7 @@ mod tests {
             pods: std::sync::Arc::new(crate::tools::tests::NoPods),
             watch_settings: Default::default(),
             model_environment: Vec::new(),
+            grpc_addr: None,
             cli_path: "/usr/bin/true".into(),
             pod_registry: Some(registry),
             shutdown,
@@ -6646,6 +6647,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "/usr/bin/true".into(),
             pod_registry: None,
+            grpc_addr: None,
             shutdown,
         })
         .await
@@ -7749,6 +7751,7 @@ mod tests {
                 watch_settings: Default::default(),
                 model_environment: Vec::new(),
                 cli_path: "agent".into(),
+                pod_registry: None,
                 grpc_addr: None,
                 shutdown,
             })

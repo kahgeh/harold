@@ -479,7 +479,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 4);
+    assert_eq!(tools.tasks.len(), 5);
     assert!(folder.0.join("tools/backlog/backlog.db").is_file());
     let listing: bp::ListQueueResponse = call(
         &tools.routes,
@@ -523,7 +523,7 @@ async fn the_work_tool_starts_and_makes_the_current_work_file() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 4);
+    assert_eq!(tools.tasks.len(), 5);
     let made: Vec<String> = std::fs::read_dir(folder.0.join("tools/work"))
         .unwrap()
         .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
@@ -606,7 +606,7 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 4);
+    assert_eq!(tools.tasks.len(), 5);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
@@ -721,7 +721,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 4);
+    assert_eq!(tools.tasks.len(), 5);
     // An item id no other test uses, so this test's lines can be told apart.
     let id = unique_id();
 

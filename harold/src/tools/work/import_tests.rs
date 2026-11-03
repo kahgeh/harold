@@ -701,6 +701,7 @@ async fn serve_backlog(
         watch_settings: Default::default(),
         model_environment: Vec::new(),
         cli_path: String::new(),
+        pod_registry: None,
         grpc_addr: None,
         shutdown,
     })

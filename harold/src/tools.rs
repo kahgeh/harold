@@ -329,7 +329,7 @@ fn contexts(
     products: Arc<dyn Products>,
     extras: Extras,
     shutdown: tokio::sync::watch::Receiver<()>,
-) -> [(&'static str, ToolContext); 4] {
+) -> [(&'static str, ToolContext); 5] {
     let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
         data_folder: data_folder(store_path, name),
         typing,
