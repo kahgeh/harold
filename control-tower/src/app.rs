@@ -312,6 +312,8 @@ pub(crate) enum RuntimeStatus {
     WatchesFailed(String),
     CallFailed(String),
     SourceError(String),
+    /// A read of the work tool failed. It shows as WORK_LIST_UNAVAILABLE.
+    WorkUnavailable,
 }
 
 /// A row the cursor can stop on: an agent row, or a row of the chief's questions.
@@ -1006,6 +1008,7 @@ impl App {
             && !self.swallowing_keys
             && !self.search.editing
             && self.palette.is_none()
+            && self.view_mode == ViewMode::Agents
             && self.cursor_on_question()
     }
 
@@ -1233,7 +1236,8 @@ impl App {
             .filter(|health| health.state == MonitorHealthState::Degraded)
     }
 
-    /// The commands that show now, in table order. Empty when the connection is not live.
+    /// The commands that show now, in table order. When the connection is not live, the
+    /// agent view shows none and the work view shows only the view command, the way back.
     /// It ignores the palette and its query.
     pub fn commands(&self) -> Vec<PaletteEntry> {
         let live = self.connection == ConnectionState::Live;
@@ -1567,15 +1571,20 @@ impl App {
             }
             ViewMode::Work => {
                 self.view_mode = ViewMode::Agents;
+                // The agent view reads no work, so a failed work read is old news there.
+                if self.work_status_shows() {
+                    self.runtime_status = None;
+                }
                 Effect::None
             }
         }
     }
 
-    /// Handles a key in the work view: `j`, `k`, `l`, Enter, `h`, Esc, `/` and the
+    /// Handles a key in the work view: `j`, `k`, `l`, Enter, `h`, Esc, `/`, `q` and the
     /// command keys. Every other key does nothing.
     fn handle_work_key(&mut self, code: KeyCode) -> Effect {
         match code {
+            KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Char('/') => {
                 self.palette = Some(PaletteState {
                     query: String::new(),
@@ -1632,11 +1641,8 @@ impl App {
     }
 
     /// Whether the status line shows the failed work read.
-    fn work_status_shows(&self) -> bool {
-        matches!(
-            &self.runtime_status,
-            Some(RuntimeStatus::SourceError(detail)) if detail == WORK_LIST_UNAVAILABLE
-        )
+    pub(crate) const fn work_status_shows(&self) -> bool {
+        matches!(&self.runtime_status, Some(RuntimeStatus::WorkUnavailable))
     }
 
     /// The list that shows now.
@@ -1666,7 +1672,7 @@ impl App {
         if self.runtime_status.is_some() && !self.work_status_shows() {
             return;
         }
-        self.runtime_status = Some(RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.to_owned()));
+        self.runtime_status = Some(RuntimeStatus::WorkUnavailable);
     }
 
     /// Opens the record that `l` or Enter asked for. A record that comes after the user
@@ -3507,7 +3513,7 @@ mod tests {
         let mut app = work_app();
         app.handle_key(KeyCode::Char('j'));
         let before = app.clone();
-        for key in "ctnNfqsgGoxrabzyduKJvw ".chars() {
+        for key in "ctnNfsgGoxrabzyduKJvw ".chars() {
             assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None, "{key:?}");
             assert_eq!(app, before, "key {key:?} changed the state");
         }
@@ -3515,6 +3521,48 @@ mod tests {
             assert_eq!(app.handle_key(code), Effect::None);
             assert_eq!(app, before);
         }
+    }
+
+    #[test]
+    fn q_quits_in_the_work_view_and_in_a_record() {
+        let mut app = work_app();
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(work_detail("a", 1, 1));
+        assert!(app.work_record().is_some());
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+    }
+
+    #[test]
+    fn work_keys_never_read_the_questions() {
+        let mut app = live_voice_app(false);
+        app.observe_questions(question_queue(&["Q1"]));
+        while !app.cursor_on_question() {
+            app.handle_key(KeyCode::Char('k'));
+        }
+        let l = KeyEvent::from(KeyCode::Char('l'));
+        assert!(app.wants_fresh_questions(&l));
+        // The question rows keep `V`, so the test opens the work view directly.
+        app.view_mode = ViewMode::Work;
+        assert!(!app.wants_fresh_questions(&l));
+    }
+
+    #[test]
+    fn leaving_the_work_view_clears_only_the_work_status() {
+        let mut app = work_app();
+        app.work_list_failed();
+        app.handle_key(KeyCode::Char('V'));
+        assert_eq!(app.runtime_status(), None);
+
+        let mut app = work_app();
+        app.set_runtime_status(RuntimeStatus::CallFailed("x".into()));
+        app.handle_key(KeyCode::Char('V'));
+        assert_eq!(
+            app.runtime_status(),
+            Some(&RuntimeStatus::CallFailed("x".into()))
+        );
     }
 
     #[test]
@@ -3583,10 +3631,7 @@ mod tests {
     fn work_list_failed_sets_status_and_keeps_rows() {
         let mut app = work_app();
         app.work_list_failed();
-        assert_eq!(
-            app.runtime_status(),
-            Some(&RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.into()))
-        );
+        assert_eq!(app.runtime_status(), Some(&RuntimeStatus::WorkUnavailable));
         assert_eq!(WORK_LIST_UNAVAILABLE, "work list unavailable");
         let names: Vec<_> = app
             .work_rows()
@@ -3660,10 +3705,7 @@ mod tests {
         let mut app = work_app();
         app.work_list_failed();
         app.work_list_failed();
-        assert_eq!(
-            app.runtime_status(),
-            Some(&RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.into()))
-        );
+        assert_eq!(app.runtime_status(), Some(&RuntimeStatus::WorkUnavailable));
     }
 
     fn live_watches_app(running: u32, paused: u32, capped: u32) -> App {

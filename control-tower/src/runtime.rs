@@ -12,10 +12,13 @@ use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
-use crate::api::{AgentStateSource, FocusRead, FocusRecord, SharedSeen, SourceError, SourceStream};
+use crate::api::{
+    AgentStateSource, FocusRead, FocusRecord, SharedSeen, SourceError, SourceStream, WorkDetail,
+    WorkListing,
+};
 use crate::app::{
     App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
-    Snapshot, SnapshotError,
+    Snapshot, SnapshotError, ViewMode, WORK_LIST_UNAVAILABLE,
 };
 use crate::cli::Options;
 use crate::navigation::{
@@ -35,6 +38,8 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const CALL_POLL_DURING_CALL: Duration = Duration::from_millis(500);
 const CALL_POLL_OTHERWISE: Duration = Duration::from_secs(5);
 const QUESTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the work list is read while the work view is open.
+const WORK_POLL_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
@@ -184,7 +189,9 @@ where
                 | Control::Answer(_)
                 | Control::Tick { .. }
                 | Control::SavePicks { .. }
-                | Control::OpenLink(_) => {}
+                | Control::OpenLink(_)
+                | Control::WorkRefresh
+                | Control::WorkShow(_) => {}
             }
         }
         retry_immediately = false;
@@ -225,7 +232,9 @@ where
                 | Control::Answer(_)
                 | Control::Tick { .. }
                 | Control::SavePicks { .. }
-                | Control::OpenLink(_),
+                | Control::OpenLink(_)
+                | Control::WorkRefresh
+                | Control::WorkShow(_),
             ) => {
                 let detail = core
                     .app
@@ -275,6 +284,12 @@ trait StreamPort: Sized {
         Box::pin(async { Err(SourceError::Transport("backlog tool unavailable".into())) })
     }
     fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
+    }
+    fn list_work(&mut self) -> BoxFuture<'_, Result<WorkListing, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
+    }
+    fn show_work(&mut self, _name: String) -> BoxFuture<'_, Result<WorkDetail, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
     }
     fn answer_question<'a>(&'a mut self, _out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
@@ -351,6 +366,14 @@ impl StreamPort for SourceStream {
     }
     fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
         Box::pin(SourceStream::list_focus(self))
+    }
+
+    fn list_work(&mut self) -> BoxFuture<'_, Result<WorkListing, SourceError>> {
+        Box::pin(SourceStream::list_work(self))
+    }
+
+    fn show_work(&mut self, name: String) -> BoxFuture<'_, Result<WorkDetail, SourceError>> {
+        Box::pin(async move { SourceStream::show_work(self, &name).await })
     }
 
     fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
@@ -431,7 +454,9 @@ where
                 };
             }
             item = input.recv() => {
-                match handle_input(item, core, navigator)? {
+                let control = handle_input(item, core, navigator)?;
+                skip_work_read(core, &control);
+                match control {
                     Control::Quit => return Ok(OpenOutcome::Quit),
                     Control::Retry => return Ok(OpenOutcome::RetryNow),
                     Control::Continue
@@ -442,7 +467,9 @@ where
                     | Control::Answer(_)
                     | Control::Tick { .. }
                     | Control::SavePicks { .. }
-                    | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
+                    | Control::OpenLink(_)
+                    | Control::WorkRefresh
+                    | Control::WorkShow(_) => draw(terminal, &core.app, clock)?,
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(OpenOutcome::Quit),
@@ -492,13 +519,17 @@ where
         let changed = core.questions_listed(listed).changed;
         let now = read_now(&mut stream, questions_timed_out).await;
         let now_changed = core.now_listed(now);
-        if changed || now_changed {
+        // The work view can be open as the stream opens: read its list once now.
+        let work_changed = poll_work(&mut stream, &mut core.app).await;
+        if changed || now_changed || work_changed {
             draw(terminal, &core.app, clock)?;
         }
         let poll = sleep(call_poll_interval(core.app.call.as_ref()));
         tokio::pin!(poll);
         let question_poll = sleep(core.question_poll_interval);
         tokio::pin!(question_poll);
+        let work_poll = sleep(WORK_POLL_INTERVAL);
+        tokio::pin!(work_poll);
         loop {
             tokio::select! {
             () = &mut poll => {
@@ -520,6 +551,14 @@ where
                 question_poll
                     .as_mut()
                     .reset(tokio::time::Instant::now() + core.question_poll_interval);
+            }
+            () = &mut work_poll => {
+                if poll_work(&mut stream, &mut core.app).await {
+                    draw(terminal, &core.app, clock)?;
+                }
+                work_poll
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + WORK_POLL_INTERVAL);
             }
             item = stream.receive() => {
                 match item {
@@ -613,6 +652,20 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if control == Control::WorkRefresh {
+                    read_work_list(&mut stream, &mut core.app).await;
+                    // A full interval before the next poll.
+                    work_poll
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + WORK_POLL_INTERVAL);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
+                if let Control::WorkShow(name) = control {
+                    read_work_record(&mut stream, &mut core.app, name).await;
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 if let Control::OpenLink(link) = &control {
                     core.open_link(link, navigator);
                     draw(terminal, &core.app, clock)?;
@@ -689,6 +742,46 @@ async fn read_now<S: StreamPort>(
     }
 }
 
+/// Reads the work list and applies it: a good read shows the rows, a failed read keeps
+/// them and sets the status line. Returns whether the screen changed.
+async fn read_work_list<S: StreamPort>(stream: &mut S, app: &mut App) -> bool {
+    let status = app.runtime_status().cloned();
+    let rows_changed = match stream.list_work().await {
+        Ok(listing) => app.observe_work_list(listing),
+        Err(_) => {
+            app.work_list_failed();
+            false
+        }
+    };
+    rows_changed || app.runtime_status() != status.as_ref()
+}
+
+/// The work poll: reads the work list only while the work view is open. Returns whether
+/// the screen changed.
+async fn poll_work<S: StreamPort>(stream: &mut S, app: &mut App) -> bool {
+    if app.view_mode() != ViewMode::Work {
+        return false;
+    }
+    read_work_list(stream, app).await
+}
+
+/// Reads the record that `l` or Enter asked for. A failed read keeps the list, sets the
+/// status line and forgets the request, so a late record does not open.
+async fn read_work_record<S: StreamPort>(stream: &mut S, app: &mut App, name: String) {
+    match stream.show_work(name).await {
+        Ok(detail) => app.observe_work_record(detail),
+        Err(_) => app.work_list_failed(),
+    }
+}
+
+/// A key asked for a work record while no stream is open: nothing can read it, so it
+/// counts as a failed read. The list is read again when the next stream opens.
+fn skip_work_read(core: &mut RuntimeCore, control: &Control) {
+    if matches!(control, Control::WorkShow(_)) {
+        core.app.work_list_failed();
+    }
+}
+
 async fn wait_for_retry(
     core: &mut RuntimeCore,
     input: &mut InputPump,
@@ -708,6 +801,7 @@ async fn wait_for_retry(
             () = &mut timer => return Ok(Control::Continue),
             item = input.recv() => {
                 let control = handle_input(item, core, navigator)?;
+                skip_work_read(core, &control);
                 draw(terminal, &core.app, clock)?;
                 if !matches!(
                     control,
@@ -720,6 +814,8 @@ async fn wait_for_retry(
                         | Control::Tick { .. }
                         | Control::SavePicks { .. }
                         | Control::OpenLink(_)
+                        | Control::WorkRefresh
+                        | Control::WorkShow(_)
                 ) {
                     return Ok(control);
                 }
@@ -827,6 +923,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
         | RuntimeStatus::CallFailed(detail)
         | RuntimeStatus::SourceError(detail) => detail.clone(),
         RuntimeStatus::NavigationUnavailable => "navigation unavailable".into(),
+        RuntimeStatus::WorkUnavailable => WORK_LIST_UNAVAILABLE.into(),
     }
 }
 
@@ -1196,6 +1293,10 @@ enum Control {
         ticked: bool,
     },
     OpenLink(String),
+    /// Read the work list now.
+    WorkRefresh,
+    /// Read one work record, by name.
+    WorkShow(String),
 }
 
 /// What a read of the question queue did to the block.
@@ -1518,9 +1619,15 @@ impl RuntimeCore {
                 }
                 if accepted {
                     self.app.record_snapshot_received_at(received_at_ms);
+                    // A snapshot says nothing about the work tool: a failed work read
+                    // stays on the status line while the work view is open.
+                    let keep_work_status =
+                        self.app.work_status_shows() && self.app.view_mode() == ViewMode::Work;
                     self.app.clear_runtime_status();
                     if let Some(status) = self.visible_navigation_issue() {
                         self.app.set_runtime_status(status);
+                    } else if keep_work_status {
+                        self.app.set_runtime_status(RuntimeStatus::WorkUnavailable);
                     }
                     if self.app.selected.is_none() {
                         self.app.select_first_row();
@@ -1591,8 +1698,8 @@ impl RuntimeCore {
                 self.start_notes(action);
                 Control::Continue
             }
-            // The work reads come in the next change; until then these keys read nothing.
-            Effect::WorkRefresh | Effect::WorkShow { .. } => Control::Continue,
+            Effect::WorkRefresh => Control::WorkRefresh,
+            Effect::WorkShow { name } => Control::WorkShow(name),
             Effect::Navigate { pane_id } if pane_id.starts_with(REX_HOST_PREFIX) => {
                 // An agent on another Rex host: the host and the block come from the pane id
                 // (`rex:<label>/block:<id>`), the session name from the row.
@@ -1694,11 +1801,14 @@ mod tests {
     use super::{
         Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, NowRead,
         OpenOutcome, QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort,
-        ShutdownPort, SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval,
-        consume_stream, handle_input, merge_exit, open_stream, resolve_client, run_loop,
-        spawn_focus_worker, wait_for_retry,
+        ShutdownPort, SourcePort, StreamControl, StreamPort, TerminalInput, WORK_POLL_INTERVAL,
+        call_poll_interval, consume_stream, handle_input, merge_exit, open_stream, poll_work,
+        resolve_client, run_loop, runtime_status_detail, spawn_focus_worker, wait_for_retry,
     };
-    use crate::api::{FocusRead, FocusRecord, SeenReporter, SharedSeen, SourceError};
+    use crate::api::{
+        FocusRead, FocusRecord, SeenReporter, SharedSeen, SourceError, WorkDetail, WorkListing,
+        WorkRow,
+    };
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
@@ -4735,6 +4845,219 @@ mod tests {
         }
     }
 
+    fn work_row(name: &str) -> WorkRow {
+        WorkRow {
+            name: name.into(),
+            priority: "focus".into(),
+            status: "building".into(),
+            next_step: "next".into(),
+        }
+    }
+
+    fn work_listing(names: &[&str]) -> WorkListing {
+        WorkListing {
+            rows: names.iter().map(|name| work_row(name)).collect(),
+            later_hidden: 1,
+        }
+    }
+
+    fn work_detail(name: &str) -> WorkDetail {
+        WorkDetail {
+            name: name.into(),
+            title: format!("title of {name}"),
+            priority: "focus".into(),
+            status: "building".into(),
+            waits_for: String::new(),
+            next_step: "next".into(),
+            decisions: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    fn work_probe(
+        lists: Vec<Result<WorkListing, SourceError>>,
+        show: Result<WorkDetail, SourceError>,
+    ) -> WorkProbe {
+        Arc::new(std::sync::Mutex::new(WorkState {
+            lists: lists.into(),
+            show: Some(show),
+            ..WorkState::default()
+        }))
+    }
+
+    fn work_failure() -> SourceError {
+        SourceError::Transport("work tool unavailable".into())
+    }
+
+    fn work_names(core: &RuntimeCore) -> Vec<String> {
+        core.app
+            .work_rows()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    /// Runs `consume_stream` over `keys` then Ctrl+Q, with `probe` as the work tool.
+    async fn run_work_stream(core: &mut RuntimeCore, probe: &WorkProbe, keys: &[KeyCode]) {
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.work = Some(Arc::clone(probe));
+        let (input_sender, mut input) = InputPump::channel();
+        for key in keys
+            .iter()
+            .map(|code| KeyEvent::from(*code))
+            .chain([ctrl_q()])
+        {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let outcome = consume_stream(
+            stream,
+            core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+    }
+
+    #[tokio::test]
+    async fn work_effects_read_once_and_apply() {
+        let mut core = connected_core();
+        let probe = work_probe(vec![Ok(work_listing(&["a", "b"]))], Ok(work_detail("a")));
+        run_work_stream(&mut core, &probe, &[KeyCode::Char('V'), KeyCode::Char('l')]).await;
+        let state = probe.lock().unwrap();
+        assert_eq!(state.list_reads, 1);
+        assert_eq!(state.shows, ["a"]);
+        assert_eq!(work_names(&core), ["a", "b"]);
+        assert_eq!(core.app.work_later_hidden(), 1);
+        assert_eq!(
+            core.app.work_record().map(|record| record.name.as_str()),
+            Some("a")
+        );
+    }
+
+    #[tokio::test]
+    async fn work_poll_reads_only_while_the_work_view_is_open() {
+        assert_eq!(WORK_POLL_INTERVAL, Duration::from_secs(2));
+        let mut core = connected_core();
+        let probe = work_probe(vec![Ok(work_listing(&["a"]))], Ok(work_detail("a")));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.work = Some(Arc::clone(&probe));
+
+        assert!(!poll_work(&mut stream, &mut core.app).await);
+        assert_eq!(probe.lock().unwrap().list_reads, 0);
+
+        core.app.handle_key(KeyCode::Char('V'));
+        assert!(poll_work(&mut stream, &mut core.app).await);
+        assert_eq!(probe.lock().unwrap().list_reads, 1);
+        assert_eq!(work_names(&core), ["a"]);
+
+        // The same rows again change nothing.
+        assert!(!poll_work(&mut stream, &mut core.app).await);
+        assert_eq!(probe.lock().unwrap().list_reads, 2);
+
+        core.app.handle_key(KeyCode::Char('V'));
+        assert!(!poll_work(&mut stream, &mut core.app).await);
+        assert_eq!(probe.lock().unwrap().list_reads, 2);
+    }
+
+    #[tokio::test]
+    async fn the_stream_open_reads_the_work_list_only_in_the_work_view() {
+        let mut core = connected_core();
+        let probe = work_probe(vec![Ok(work_listing(&["a"]))], Ok(work_detail("a")));
+        run_work_stream(&mut core, &probe, &[]).await;
+        assert_eq!(probe.lock().unwrap().list_reads, 0);
+
+        core.app.handle_key(KeyCode::Char('V'));
+        run_work_stream(&mut core, &probe, &[]).await;
+        assert_eq!(probe.lock().unwrap().list_reads, 1);
+        assert_eq!(work_names(&core), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn failed_work_read_keeps_rows_and_sets_status() {
+        let mut core = connected_core();
+        let probe = work_probe(
+            vec![Ok(work_listing(&["a", "b"])), Err(work_failure())],
+            Ok(work_detail("a")),
+        );
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.work = Some(Arc::clone(&probe));
+        core.app.handle_key(KeyCode::Char('V'));
+        assert!(poll_work(&mut stream, &mut core.app).await);
+        assert!(poll_work(&mut stream, &mut core.app).await);
+        assert_eq!(work_names(&core), ["a", "b"]);
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::WorkUnavailable)
+        );
+        assert_eq!(
+            runtime_status_detail(&RuntimeStatus::WorkUnavailable),
+            "work list unavailable"
+        );
+
+        // A snapshot keeps the status while the work view is open.
+        core.accept_snapshot(snapshot(2, MonitorHealthState::Healthy), 2_000);
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::WorkUnavailable)
+        );
+        // A second failed read changes nothing on the screen.
+        assert!(!poll_work(&mut stream, &mut core.app).await);
+    }
+
+    #[tokio::test]
+    async fn failed_show_keeps_the_list_and_sets_status() {
+        let mut core = connected_core();
+        let probe = work_probe(vec![Ok(work_listing(&["a", "b"]))], Err(work_failure()));
+        run_work_stream(&mut core, &probe, &[KeyCode::Char('V'), KeyCode::Char('l')]).await;
+        assert_eq!(probe.lock().unwrap().shows, ["a"]);
+        assert_eq!(core.app.work_record(), None);
+        assert_eq!(work_names(&core), ["a", "b"]);
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::WorkUnavailable)
+        );
+        // A late record for the failed read does not open.
+        core.app.observe_work_record(work_detail("a"));
+        assert_eq!(core.app.work_record(), None);
+    }
+
+    #[tokio::test]
+    async fn a_show_without_a_stream_reads_nothing_and_drops_its_record() {
+        let mut core = connected_core();
+        core.app.handle_key(KeyCode::Char('V'));
+        core.app.observe_work_list(work_listing(&["a"]));
+        core.source_failed(work_failure());
+        core.retry_after("stream closed");
+        let (input_sender, mut input) = InputPump::channel();
+        for key in [KeyEvent::from(KeyCode::Char('l')), ctrl_q()] {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let control = wait_for_retry(
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(control, Control::Quit);
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::Retrying { .. })
+        ));
+        core.app.observe_work_record(work_detail("a"));
+        assert_eq!(core.app.work_record(), None);
+    }
+
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
             focus_known: None,
@@ -5024,7 +5347,22 @@ mod tests {
         questions: Option<QuestionProbe>,
         now: Option<NowProbe>,
         seen: Option<SharedSeen>,
+        work: Option<WorkProbe>,
     }
+
+    /// The work tool's List and Show reads as a test sees them.
+    #[derive(Default)]
+    struct WorkState {
+        /// The List answers, in order; the last answer repeats.
+        lists: VecDeque<Result<WorkListing, SourceError>>,
+        list_reads: usize,
+        /// The Show answer.
+        show: Option<Result<WorkDetail, SourceError>>,
+        /// The name of each Show read.
+        shows: Vec<String>,
+    }
+
+    type WorkProbe = Arc<std::sync::Mutex<WorkState>>;
 
     /// The backlog tool's Now reads, answered in order; the last answer repeats.
     struct NowState {
@@ -5089,6 +5427,7 @@ mod tests {
                 questions: None,
                 now: None,
                 seen: None,
+                work: None,
             }
         }
 
@@ -5103,6 +5442,7 @@ mod tests {
                 questions: None,
                 now: None,
                 seen: None,
+                work: None,
             }
         }
     }
@@ -5231,6 +5571,30 @@ mod tests {
             } else {
                 state.focus.front().cloned().unwrap()
             };
+            Box::pin(async move { answer })
+        }
+
+        fn list_work(&mut self) -> BoxFuture<'_, Result<WorkListing, SourceError>> {
+            let Some(probe) = &self.work else {
+                return Box::pin(async { Err(SourceError::Transport("no work tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.list_reads += 1;
+            let answer = if state.lists.len() > 1 {
+                state.lists.pop_front().unwrap()
+            } else {
+                state.lists.front().cloned().unwrap()
+            };
+            Box::pin(async move { answer })
+        }
+
+        fn show_work(&mut self, name: String) -> BoxFuture<'_, Result<WorkDetail, SourceError>> {
+            let Some(probe) = &self.work else {
+                return Box::pin(async { Err(SourceError::Transport("no work tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.shows.push(name);
+            let answer = state.show.clone().unwrap();
             Box::pin(async move { answer })
         }
 

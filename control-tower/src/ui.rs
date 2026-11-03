@@ -362,6 +362,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             RuntimeStatus::WatchesFailed(detail) => format!("watches: {detail}"),
             RuntimeStatus::CallFailed(detail) => format!("CALL ERROR: {detail}"),
             RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
+            RuntimeStatus::WorkUnavailable => crate::app::WORK_LIST_UNAVAILABLE.to_owned(),
         };
         text.push_span(Span::styled(
             format!("  ·  {label}"),
@@ -3478,6 +3479,15 @@ mod tests {
             "pause refused".into(),
         ));
         assert!(rendered(&app, 140, 38, 100_000).contains("MESSAGING ERROR: pause refused"));
+    }
+
+    #[test]
+    fn work_failure_shows_a_plain_label_in_the_monitor_line() {
+        let mut app = live_app(Vec::new(), None);
+        app.set_runtime_status(crate::app::RuntimeStatus::WorkUnavailable);
+        let text = rendered(&app, 140, 38, 100_000);
+        assert!(text.contains("work list unavailable"));
+        assert!(!text.contains("SOURCE ERROR"));
     }
 
     #[test]
