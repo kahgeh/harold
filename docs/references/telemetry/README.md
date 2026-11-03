@@ -292,6 +292,15 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery` | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
 
+**Turn tokens.** The hook sums the tokens of one turn from the agent's transcript and sends them with `turn_complete`. Only Claude Code sends them. A Codex turn counts as a turn with no tokens. The hook reads no message text for this. A subagent's tokens are in its own transcript file, so they are not counted.
+
+| Fields | Meaning |
+|---|---|
+| `input_tokens` | the input tokens of one turn |
+| `output_tokens` | the output tokens of one turn |
+| `cache_read_tokens` | the cache-read tokens of one turn. `harold.turn.tokens` counts them as `kind = cache_read` |
+| `cache_write_tokens` | the cache-write tokens of one turn. `harold.turn.tokens` counts them as `kind = cache_write` |
+
 **A turn you start by speaking in a call** is one trace, with these spans in order:
 
 | Span | From – to | Attributes |
@@ -375,7 +384,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.web_app.collection_pages` | counter, `{page}` | `collection` (a name from `[[web_app.collections]]`, or `unknown`; never a path), `result` (`ok`, `not_found`, `refused`, `too_big`, `unreadable`) |
 | `harold.app_spans.not_forwarded` | counter, `{span}` | `reason` (`collector_unreachable`, `collector_refused`, `timed_out`, `queue_full`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
-| `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
+| `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by`, `role`, `pod.product` when the pane is in a pod |
+| `harold.turn.tokens` | counter, `{token}` | `kind` (`input`, `output`, `cache_read`, `cache_write`), `model`, `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` when the pane is in a pod |
+| `harold.turn.tokens.by_spec` | counter, `{token}` | `spec.id`, `kind` (`input`: the input, cache-read and cache-write tokens together; `output`). Only for a `build_worker` turn that has a spec id |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
@@ -420,6 +431,12 @@ A `screen_read` call also has the attribute `purpose`, which tells why Harold re
 
 `harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
 
+**Where a turn gets its role, product and spec id.** Harold looks up the turn's pane in the last pod poll, which runs every 60 s. The first turn of a new build worker, and a turn after its worktree stops being busy, count as `other` with no product and no spec id. A spec with no `started/<id>.md` file (the ADR 0021 fallback) has no spec id. Its tokens count in `harold.turn.tokens` but not in `harold.turn.tokens.by_spec`. The `worktree:` line of the started file holds the name of the worktree folder, and Harold matches it to the busy worktree that claimed the pane. No log line carries the folder.
+
+**Turn tokens.** `harold.turn.tokens` adds a count for each of the four kinds on each turn that has tokens. A kind with the value 0 adds 0, so every kind has a series for a real model. A turn with no token fields adds nothing. `model` is the turn's last model if it is `claude-` followed by 1 to 40 of `a-z`, `0-9` and `-`. Any other string counts as `other`, so a caller cannot add series. A turn that sends no model uses `none`. The counter has about 150 series: 4 kinds, a few models, 5 roles and the products.
+
+`harold.turn.tokens.by_spec` has 2 series for each build-worker spec (`input` and `output`). The 2000-series limit of an instrument then holds about 1,000 specs. Past the limit, new series fall into the overflow series, and the counts stay in the total. The card "Tokens and turns" shows a note when the overflow series appears.
+
 ## What leaves Harold
 
 No exported item carries what the user or an agent wrote, a voice line, the AI model's output, an error message, the recipient or a token.
@@ -441,8 +458,6 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 | Span | Fields |
 |---|---|
 | `event` | `event_type`, `event_version`: the projector's run for one stored event |
-| turn tokens | `cache_read_tokens`: the turn's cache-read tokens |
-| turn tokens | `cache_write_tokens`: the turn's cache-write tokens |
 
 These agent monitor lines carry the fields below:
 
@@ -779,6 +794,23 @@ Four cards read the pod signals. Each card is a query on ClickHouse. Their defin
 | Now | Which agents work now? | `pod.agents` with `state` = `working`, over all pods and by pod | The share of working build workers while approved work waits | None needed: `pod.slots.idle_with_work` catches the waste | The control-tower |
 | Work waiting | How much work waits, and for how long? | `pod.inventory.items`, `pod.inventory.oldest_hours` and `pod.inventory.item_days`, by `pod.product` and `list` | The week's item-days against last week | The oldest `awaiting_approval` spec is over 72 hours old. This is the time the user takes to approve. The reading is `max(pod.inventory.oldest_hours) WHERE list = 'awaiting_approval'` over the last hour | `harold tool release next <product>` |
 
+### Tokens and turns card
+
+The card "Tokens and turns" reads the turn token counters. Its definition file is not yet in [`hyperdx/`](hyperdx/), so the card is described here only, as with the pod signals cards. No test reads it. Use the counter rule for every reading.
+
+| Card | The question | Reads | Weekly comparison | Note (info only, no alert) | Diagnosis |
+|---|---|---|---|---|---|
+| Tokens and turns | Where do the tokens go, and is the model mix right? | `harold.turn.tokens` by `model` and `role`; `harold.turn.tokens.by_spec` with `pod.merges` for tokens per merged spec; `harold.turns` by `role` and `pod.product`, with the turns per merged spec | The week's tokens against last week, and the share of each model | See the list below | The counter by `role` and `model`, then the pod's agent-pane files |
+
+The notes of the card:
+
+- The Opus share of the tokens for each `role`. This is the model-mix reading: build workers belong on Sonnet.
+- A `build_worker` turn on an Opus model.
+- The share of tokens with `role = other` above a fifth of a day: turns do not reach their pod. The first turn of a worker is one known cause.
+- The overflow series (`otel.metric.overflow`) on `harold.turn.tokens.by_spec`. Check the series limit and the attribute.
+- Tokens per merged spec up by over a half against last week, when both weeks have at least 3 merged specs.
+- Subagent tokens are not counted.
+
 ### Counters in HyperDX
 
 Harold sends counters and histograms as running totals, the OpenTelemetry default. HyperDX turns a running total into increases by taking each point's difference from the series' previous point. It counts a series' first point as 0, because there is no previous one. The local stack's own provisioning notes the same undercount. Two things work around it.
@@ -794,13 +826,14 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.work.checked`, for each `priority`;
+- `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
 
 This cannot cover every series:
 
-- A counter keyed by `session.id` (`harold.turns`) or by `spec.id` (a merge naming a spec) gets a new series for each new value, which cannot be known at start.
+- A counter keyed by `session.id` (`harold.turns`) or by `spec.id` (a merge naming a spec, or `harold.turn.tokens.by_spec`) gets a new series for each new value, which cannot be known at start.
 - A histogram cannot be given a 0 point, because recording a value adds an observation. So nothing reads latency from the `harold.phone_request.latency` histogram: the latency card, panel and the `phone-request-slow` alert read the typed `harold.phone_request` spans.
 
 **The counter rule.** So every card and panel that counts a running total uses raw SQL with its own rule instead of HyperDX's. Each series is one metric with one set of resource attributes and attributes. Its points are read in time order, from one window length before the window (a day before for the trends panels). Each point rises by:

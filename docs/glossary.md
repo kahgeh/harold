@@ -139,6 +139,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | error | The agent stopped with a failure | "failed", "crashed" |
 | unknown | An agent runs in the pane, and no evidence gives its state yet | "Unknown" with a capital, "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
+| turn tokens | The input, output, cache-read and cache-write tokens of one Claude Code turn, from its transcript | "cost" (tokens are not dollars), "usage" alone |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
 | work summary | Short text that names what an agent is working on. A recap and a current step are not work summaries | "task description", "current work", "dashboard description", "summary" alone |
 | activity summary | A work summary that Claude Code writes from the agent's evidence, when `[activity_summary]` is on | "generated description" |
