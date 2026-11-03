@@ -2972,6 +2972,9 @@ fn the_spec_pod_and_agent_panels_read_the_new_gauges_and_steps() {
         "'build_worker'",
         "'chief'",
         "'other'",
+        "argMax(Value, TimeUnix) AS v",
+        "GROUP BY ts, machine, product, MetricName, role, state",
+        "sumIf(v, MetricName = 'pod.agents' AND role = 'chief')",
     ] {
         assert!(pods.contains(phrase), "{phrase}: {pods}");
     }
