@@ -322,8 +322,6 @@ impl Cron {
         Ok(cron)
     }
 
-    // The watch tool uses this in a later task.
-    #[allow(dead_code)]
     pub(crate) fn source(&self) -> &str {
         &self.source
     }
@@ -396,8 +394,6 @@ impl Cron {
 
     /// The smallest gap in minutes between two runs, or `None` if the schedule
     /// has fewer than two runs in 8 years.
-    // The watch tool uses this in a later task.
-    #[allow(dead_code)]
     pub(crate) fn min_gap_minutes(&self) -> Option<u32> {
         let times: Vec<u64> = (0..1440u64)
             .filter(|time| self.time_matches((*time / 60) as u32, (*time % 60) as u32))

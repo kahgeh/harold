@@ -2,6 +2,9 @@
 //! `REMIND <name>: <text>` once, with the same checks as a watch report (one agent in the
 //! folder, idle, an empty input box, tried again every 5 seconds).
 //!
+//! A `--cron` reminder is one shot too: its time is the next matching minute after it was
+//! set, kept as a local time like `--at`.
+//!
 //! Each waiting reminder has a task. The store holds the truth, so a restart gives each
 //! waiting reminder a new task. A reminder not typed within 120 minutes of its time is
 //! dropped. The task stores `typed` as soon as it sees the line typed, and a restart reads
@@ -122,11 +125,11 @@ impl Reminders {
             folder: req.folder.to_string_lossy().into_owned(),
             report_to: req.report_to.as_str().to_owned(),
             text: req.text,
-            // `--in` is a fixed instant; `--at` keeps its local time and is read again
-            // with the offset in force at each wake-up.
+            // `--in` is a fixed instant; `--at` and `--cron` keep their local time and are
+            // read again with the offset in force at each wake-up.
             due_at_ms: req.in_minutes.map(|_| due_at_ms),
             due_local: req.in_minutes.is_none().then_some(req.due_local).flatten(),
-            cron: None,
+            cron: req.cron.map(|cron| cron.source().to_owned()),
         };
         self.store
             .put_reminder(&reminder, now_ms)

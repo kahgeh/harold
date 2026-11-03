@@ -46,6 +46,7 @@ fn remind_in(h: &Harness, name: &str, minutes: u32, text: &str) -> CheckedRemind
         report_to: ReportTo::Chief,
         in_minutes: Some(minutes),
         due_local: None,
+        cron: None,
         text: text.into(),
     }
 }
@@ -604,4 +605,91 @@ async fn the_reminders_counter_is_registered_for_each_outcome_and_goes_up_with_e
     for (outcome, before) in ["typed", "dropped", "cancelled"].into_iter().zip(before) {
         assert!(count(outcome).unwrap() > before, "{outcome}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cron reminders
+// ---------------------------------------------------------------------------
+
+/// A `--cron` reminder, checked as the service checks it, against the harness's clock.
+async fn remind_cron(h: &Harness, name: &str, cron: &str) -> CheckedRemind {
+    let now = h.scheduler.local_now().await;
+    check_remind(
+        &RemindRequest {
+            name: name.into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: Some(When::Cron(cron.into())),
+            report_to: "chief".into(),
+            text: "x".into(),
+        },
+        &now,
+    )
+    .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_reminder_types_once_at_the_next_match_then_ends() {
+    let logs = CapturedLogs::start();
+    let (h, _local) = harness_utc().await;
+    let day_start = to_one_past_midnight(UtcOffset::UTC).await;
+    let name = format!("digest-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+
+    let due = h
+        .scheduler
+        .remind(remind_cron(&h, &name, "30 0 * * *").await)
+        .await
+        .unwrap();
+    assert_eq!(due, day_start + 30 * MINUTE_MS, "00:30 today");
+    let stored = h.store.reminder(&name).await.unwrap().unwrap();
+    assert_eq!(stored.cron.as_deref(), Some("30 0 * * *"));
+    assert_eq!(
+        stored.due_local,
+        Some(clock::local_text(due, UtcOffset::UTC)[..16].to_owned())
+    );
+
+    pass(28 * MINUTE).await;
+    assert!(h.typing.typed().is_empty());
+    pass(2 * MINUTE).await;
+    assert_eq!(h.typing.typed(), [format!("REMIND {name}: x")]);
+    assert_eq!(state_of(&h, &name).await, ReminderState::Typed);
+
+    // One shot: the next day's 00:30 types nothing.
+    pass(25 * 60 * MINUTE).await;
+    assert_eq!(h.typing.typed().len(), 1);
+    assert!(h.scheduler.list().await.unwrap().reminders.is_empty());
+    let text = logs.text();
+    let typed = text
+        .lines()
+        .find(|line| line.contains("reminder typed") && line.contains(&name))
+        .unwrap_or_else(|| panic!("no reminder typed:\n{text}"));
+    assert!(
+        typed.contains("late_s=0"),
+        "late_s from the matched minute: {typed}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_reminder_past_120_minutes_is_dropped() {
+    let logs = CapturedLogs::start();
+    let (h, local) = harness_utc().await;
+    let day_start = to_one_past_midnight(UtcOffset::UTC).await;
+    let name = format!("late-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    h.scheduler
+        .remind(remind_cron(&h, &name, "30 0 * * *").await)
+        .await
+        .unwrap();
+
+    // Harold is down from 00:01 to 02:31: 121 minutes after the match.
+    let _stop = restart_at(&h, &local, day_start + 151 * MINUTE_MS).await;
+    pass(Duration::from_secs(10)).await;
+
+    assert_eq!(state_of(&h, &name).await, ReminderState::Dropped);
+    assert!(h.typing.typed().is_empty());
+    let text = logs.text();
+    assert!(
+        text.lines().any(|line| line.contains("reminder ended")
+            && line.contains(&name)
+            && line.contains("reason=\"dropped\"")),
+        "{text}"
+    );
 }

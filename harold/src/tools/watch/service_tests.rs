@@ -114,6 +114,33 @@ async fn start_refuses_with_the_codes_and_messages_the_proto_names() {
         (invalid, "invalid every_minutes".into())
     );
     let mut asked = request(&h, "w");
+    asked.cron = Some("*/15 * * * *".into());
+    assert_eq!(
+        refusal(&service, asked).await,
+        (invalid, "give exactly one of every_minutes and cron".into())
+    );
+    let mut asked = request(&h, "w");
+    asked.every_minutes = None;
+    assert_eq!(
+        refusal(&service, asked).await,
+        (invalid, "give exactly one of every_minutes and cron".into())
+    );
+    let mut asked = request(&h, "w");
+    (asked.every_minutes, asked.cron) = (None, Some("* * * * *".into()));
+    assert_eq!(
+        refusal(&service, asked).await,
+        (
+            invalid,
+            "this schedule runs more often than every 2 minutes".into()
+        )
+    );
+    let mut asked = request(&h, "w");
+    (asked.every_minutes, asked.cron) = (None, Some("75 9 * * *".into()));
+    assert_eq!(
+        refusal(&service, asked).await,
+        (invalid, "minute 75 is out of range: use 0 to 59".into())
+    );
+    let mut asked = request(&h, "w");
     asked.for_minutes = Some(1441);
     assert_eq!(
         refusal(&service, asked).await,
@@ -483,4 +510,59 @@ async fn remind_answers_its_time_list_shows_it_and_a_name_in_use_is_refused() {
     assert!(listed.reminders.is_empty());
     pass(Duration::from_secs(60 * 60)).await;
     assert!(h.typing.typed().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_watch_starts_and_a_cron_reminder_answers_its_next_match() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let service = service(&h);
+    let mut asked = request(&h, "standup");
+    (asked.every_minutes, asked.cron) = (None, Some("*/15 9-17 * * mon-fri".into()));
+    service.start_watch(Request::new(asked)).await.unwrap();
+    let row = h.store.get("standup").await.unwrap().unwrap();
+    assert_eq!(
+        (row.every_minutes, row.cron.as_deref()),
+        (0, Some("*/15 9-17 * * mon-fri"))
+    );
+
+    let answered = service
+        .remind(Request::new(pb::RemindRequest {
+            name: "digest-check".into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: Some(pb::remind_request::When::Cron("30 8 * * mon".into())),
+            report_to: "chief".into(),
+            text: "read the weekly digest".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let now = crate::tools::watch::clock::clock_ms();
+    assert!(answered.due_at_ms > now);
+    assert!(answered.due_at_ms <= now + 7 * 24 * 3_600_000);
+    // The harness's offset is UTC: the due time is a Monday at 08:30 UTC.
+    let due = time::OffsetDateTime::from_unix_timestamp(answered.due_at_ms / 1000).unwrap();
+    assert_eq!(
+        (due.weekday(), due.hour(), due.minute()),
+        (time::Weekday::Monday, 8, 30)
+    );
+    let stored = h.store.reminder("digest-check").await.unwrap().unwrap();
+    assert_eq!(stored.cron.as_deref(), Some("30 8 * * mon"));
+
+    let status = service
+        .remind(Request::new(pb::RemindRequest {
+            name: "bad".into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: Some(pb::remind_request::When::Cron("0 9 * * mun".into())),
+            report_to: "chief".into(),
+            text: "x".into(),
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        (status.code(), status.message()),
+        (
+            tonic::Code::InvalidArgument,
+            "weekday \"mun\" is not a name: use sun, mon, tue, wed, thu, fri or sat"
+        )
+    );
 }

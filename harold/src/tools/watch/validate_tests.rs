@@ -759,3 +759,117 @@ fn clean_text_drops_escape_sequences_and_unicode_format_characters() {
     // Ordinary letters of any script stay.
     assert_eq!(clean_text("café שלום 日本"), "café שלום 日本");
 }
+
+// ---------------------------------------------------------------------------
+// Cron schedules
+// ---------------------------------------------------------------------------
+
+fn cron_request(folder: &Path, cron: &str) -> StartWatchRequest {
+    StartWatchRequest {
+        every_minutes: None,
+        cron: Some(cron.into()),
+        ..request(folder)
+    }
+}
+
+#[test]
+fn a_cron_watch_is_checked_and_has_every_minutes_0() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let checked = check(&cron_request(&temp.0, "*/15  9-17 * * MON-FRI")).unwrap();
+    assert_eq!(checked.every_minutes, 0);
+    assert_eq!(
+        checked.cron.as_ref().map(Cron::source),
+        Some("*/15 9-17 * * MON-FRI")
+    );
+    assert_eq!(check(&request(&temp.0)).unwrap().cron, None);
+}
+
+#[test]
+fn cron_and_every_together_refused() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let mut asked = cron_request(&temp.0, "*/15 * * * *");
+    asked.every_minutes = Some(10);
+    assert_eq!(check(&asked), Err(Refusal::EveryOrCron));
+}
+
+#[test]
+fn neither_refused() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let mut asked = request(&temp.0);
+    asked.every_minutes = None;
+    assert_eq!(check(&asked), Err(Refusal::EveryOrCron));
+}
+
+#[test]
+fn schedule_under_two_minutes_refused() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    // Every minute, and two runs one minute apart once a day.
+    for cron in ["* * * * *", "0,1 9 * * *"] {
+        assert_eq!(
+            check(&cron_request(&temp.0, cron)),
+            Err(Refusal::TooOften),
+            "{cron}"
+        );
+    }
+    // Two minutes apart is the `--every` lower limit: it passes.
+    assert!(check(&cron_request(&temp.0, "*/2 * * * *")).is_ok());
+    // A schedule that runs once a year passes.
+    assert!(check(&cron_request(&temp.0, "0 9 1 1 *")).is_ok());
+}
+
+#[test]
+fn a_bad_cron_expression_is_refused_with_its_sentence() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    for cron in ["0 9 * *", "75 9 * * *", "0 9 * * mun", "0 0 31 2 *"] {
+        let error = Cron::parse(cron).unwrap_err();
+        assert_eq!(
+            check(&cron_request(&temp.0, cron)),
+            Err(Refusal::Cron(error)),
+            "{cron}"
+        );
+    }
+}
+
+#[test]
+fn a_cron_reminder_is_due_at_the_next_matching_minute() {
+    let temp = Temp::new();
+    // 2026-11-03 is a Tuesday; at_ten is 10:00 that day.
+    let checked = remind_check(&temp.0, Some(When::Cron("30 8 * * mon".into()))).unwrap();
+    assert_eq!(checked.in_minutes, None);
+    assert_eq!(checked.due_local.as_deref(), Some("2026-11-09 08:30"));
+    assert_eq!(
+        checked.cron.as_ref().map(Cron::source),
+        Some("30 8 * * mon")
+    );
+    // The minute now does not count: the next match is the next day.
+    let checked = remind_check(&temp.0, Some(When::Cron("0 10 * * *".into()))).unwrap();
+    assert_eq!(checked.due_local.as_deref(), Some("2026-11-04 10:00"));
+    // A reminder is one shot, so a schedule more often than 2 minutes is not refused.
+    let checked = remind_check(&temp.0, Some(When::Cron("* * * * *".into()))).unwrap();
+    assert_eq!(checked.due_local.as_deref(), Some("2026-11-03 10:01"));
+    // The other forms have no cron.
+    let soon = remind_check(&temp.0, Some(When::InMinutes(45))).unwrap();
+    assert_eq!(soon.cron, None);
+}
+
+#[test]
+fn a_bad_cron_reminder_is_refused_with_its_sentence() {
+    let temp = Temp::new();
+    let error = Cron::parse("0 9 * * mun").unwrap_err();
+    assert_eq!(
+        remind_check(&temp.0, Some(When::Cron("0 9 * * mun".into()))),
+        Err(Refusal::Cron(error))
+    );
+}
+
+/// The proto's `oneof` holds one form, so a request cannot give `cron` with `in_minutes`
+/// or `at_local`: setting one form replaces the other.
+#[test]
+fn reminder_cron_with_in_or_at_cannot_be_asked() {
+    let temp = Temp::new();
+    let mut asked = remind(&temp.0, Some(When::InMinutes(5)));
+    asked.when = Some(When::Cron("30 8 * * mon".into()));
+    let checked = check_remind(&asked, &at_ten()).unwrap();
+    assert_eq!(checked.in_minutes, None);
+    assert!(checked.cron.is_some());
+}

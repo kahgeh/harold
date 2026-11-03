@@ -9,11 +9,14 @@ use harold_api::tools::watch::v1::{PauseRequest, RemindRequest, ResumeRequest, S
 
 use super::runner::RUN_LIMIT;
 use crate::agent::summary::sanitize_bounded_metadata;
+use crate::cron::{Cron, CronError};
 use crate::settings::WatchSettings;
 use crate::timed_prompts::LocalNow;
 
 const MAX_NAME_LEN: usize = 64;
 const EVERY_MINUTES: std::ops::RangeInclusive<u32> = 2..=240;
+/// The smallest gap between two runs of a cron watch: the `--every` lower limit.
+const MIN_CRON_GAP_MINUTES: u32 = 2;
 const FOR_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
 /// The most characters of a reminder's text.
 const MAX_TEXT_CHARS: usize = 300;
@@ -46,7 +49,10 @@ pub(super) struct Checked {
     pub folder: PathBuf,
     pub skill: String,
     pub report_to: ReportTo,
+    /// 0 for a cron watch.
     pub every_minutes: u32,
+    /// The cron expression, or `None` for a watch at an interval.
+    pub cron: Option<Cron>,
     /// `None` when `start` gave none: the watch has no end.
     pub for_minutes: Option<u32>,
     pub every_run: bool,
@@ -63,6 +69,12 @@ pub(super) enum Refusal {
     /// `run_limit_secs` is above `[watch] max_run_limit_secs`, which is the value.
     RunLimitAboveMax(u32),
     UnknownSkill,
+    /// `start` gave both `every_minutes` and `cron`, or neither.
+    EveryOrCron,
+    /// A cron expression that does not parse, or that never runs.
+    Cron(CronError),
+    /// A cron watch with two runs less than 2 minutes apart.
+    TooOften,
 }
 
 /// A skill read from `SKILL.md`.
@@ -103,11 +115,12 @@ pub(super) fn check_start(
     if !is_token(&request.skill) {
         return Err(Refusal::Invalid("skill"));
     }
-    // `cron` is not used yet: an absent `every_minutes` stays invalid.
-    let every_minutes = request.every_minutes.unwrap_or(0);
-    if !EVERY_MINUTES.contains(&every_minutes) {
-        return Err(Refusal::Invalid("every_minutes"));
-    }
+    let (every_minutes, cron) = match (request.every_minutes, request.cron.as_deref()) {
+        (Some(minutes), None) if EVERY_MINUTES.contains(&minutes) => (minutes, None),
+        (Some(_), None) => return Err(Refusal::Invalid("every_minutes")),
+        (None, Some(text)) => (0, Some(watch_cron(text)?)),
+        _ => return Err(Refusal::EveryOrCron),
+    };
     if request
         .for_minutes
         .is_some_and(|minutes| !FOR_MINUTES.contains(&minutes))
@@ -124,11 +137,24 @@ pub(super) fn check_start(
         skill: request.skill.clone(),
         report_to,
         every_minutes,
+        cron,
         for_minutes: request.for_minutes,
         every_run: request.every_run,
         run_budget_usd_micros,
         run_limit_secs,
     })
+}
+
+/// A watch's cron expression: it parses, and no two runs are less than 2 minutes apart.
+fn watch_cron(text: &str) -> Result<Cron, Refusal> {
+    let cron = Cron::parse(text).map_err(Refusal::Cron)?;
+    if cron
+        .min_gap_minutes()
+        .is_some_and(|gap| gap < MIN_CRON_GAP_MINUTES)
+    {
+        return Err(Refusal::TooOften);
+    }
+    Ok(cron)
 }
 
 /// What a pause or a resume acts on.
@@ -160,7 +186,7 @@ pub(super) struct CheckedResume {
 }
 
 /// A reminder request that passed every check. Exactly one of `in_minutes` and
-/// `due_local` is set.
+/// `due_local` is set. A cron reminder has `due_local`, its next matching minute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckedRemind {
     pub name: String,
@@ -169,6 +195,8 @@ pub(super) struct CheckedRemind {
     pub in_minutes: Option<u32>,
     /// The next time the local clock reads the asked time: `YYYY-MM-DD HH:MM`.
     pub due_local: Option<String>,
+    /// The cron expression of a cron reminder, else `None`.
+    pub cron: Option<Cron>,
     pub text: String,
 }
 
@@ -220,12 +248,21 @@ pub(super) fn check_remind(
         return Err(Refusal::Invalid("name"));
     }
     let folder = canonical_folder(&request.folder).ok_or(Refusal::Invalid("folder"))?;
-    let (in_minutes, due_local) = match &request.when {
-        Some(When::InMinutes(minutes)) if IN_MINUTES.contains(minutes) => (Some(*minutes), None),
+    let (in_minutes, due_local, cron) = match &request.when {
+        Some(When::InMinutes(minutes)) if IN_MINUTES.contains(minutes) => {
+            (Some(*minutes), None, None)
+        }
         Some(When::InMinutes(_)) => return Err(Refusal::Invalid("in_minutes")),
-        Some(When::AtLocal(text)) => (None, Some(next_local(text, now)?)),
-        // A cron reminder is not handled yet: refuse it, do not crash.
-        Some(When::Cron(_)) => return Err(Refusal::Invalid("cron")),
+        Some(When::AtLocal(text)) => (None, Some(next_local(text, now)?), None),
+        Some(When::Cron(text)) => {
+            // One shot: the next matching minute after now. A schedule that parses has a
+            // match within 8 years, so `None` cannot come; it is refused as never running.
+            let cron = Cron::parse(text).map_err(Refusal::Cron)?;
+            let due = cron
+                .next_after(now.local_minute)
+                .ok_or(Refusal::Cron(CronError::NeverRuns))?;
+            (None, Some(due.to_string()), Some(cron))
+        }
         None => return Err(Refusal::Invalid("when")),
     };
     let report_to = report_to(&request.report_to)?;
@@ -239,6 +276,7 @@ pub(super) fn check_remind(
         report_to,
         in_minutes,
         due_local,
+        cron,
         text,
     })
 }

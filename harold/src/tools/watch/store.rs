@@ -105,11 +105,12 @@ impl WatchRow {
 }
 
 /// Which table `set_checked_local` writes.
-// The cron scheduler (Task 6) is the first caller; only tests call it now.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CheckedKind {
     Watch,
+    /// A cron reminder is one shot and keeps its next match in `due_local`, so only the
+    /// tests write a reminder's checked minute.
+    #[allow(dead_code)]
     Reminder,
 }
 
@@ -370,8 +371,6 @@ impl WatchStore {
         finish(&conn, work).await
     }
 
-    // The cron scheduler (Task 6) is the first caller; only tests call it now.
-    #[allow(dead_code)]
     /// Records the newest local minute ("YYYY-MM-DD HH:MM") a cron schedule checked.
     /// The value moves forward only: an older or equal minute changes nothing. A name
     /// with no row changes nothing.

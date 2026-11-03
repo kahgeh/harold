@@ -16,17 +16,19 @@ use tracing::Instrument as _;
 use super::answer::{self, Answer, Cause, Failure};
 use super::clock::{LocalOffset, WAKE_EVERY, clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
-use super::obs::{self, EndReason, How, RunObs, Timing};
+use super::obs::{self, EndReason, How, RunDue, RunObs, Timing};
 use super::reminders::{ReminderInfo, Reminders};
 use super::report::{ReportSlot, Target, Typist};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 use super::store::{
-    NewWatch, ReminderState, RunRecord, StoreError, Streak, WatchRow, WatchState, WatchStore,
+    CheckedKind, NewWatch, ReminderState, RunRecord, StoreError, Streak, WatchRow, WatchState,
+    WatchStore,
 };
 use super::validate::{
     Caller, Checked, CheckedPause, CheckedRemind, CheckedResume, ReportTo, Target as Aim,
     read_skill, to_micros,
 };
+use crate::cron::{Cron, LocalMinute, due_run};
 use crate::settings::WatchSettings;
 use crate::timed_prompts::{LocalNow, parse_local_now};
 use crate::tools::{Agents, ChiefPane, PaneTyping, Pods, WatchCounts};
@@ -55,6 +57,13 @@ pub(super) const MODEL_WAIT: Duration = Duration::from_secs(60);
 pub(super) const RETRY: Duration = Duration::from_secs(5);
 
 const MINUTE_MS: i64 = 60_000;
+
+/// `next_run_at_ms` of a watch with no run due by time: a cron watch. A resume sets the
+/// time to now, so the run at once after a resume still comes.
+pub(super) const NO_RUN_DUE: i64 = i64::MAX;
+
+/// A cron match older than this is not run: the timed prompts' give-up time.
+const GIVE_UP_MINUTES: u32 = 120;
 
 /// Everything the scheduler reads or does outside this module.
 pub(super) struct Deps {
@@ -159,18 +168,81 @@ enum Flow {
     Over,
 }
 
-/// The first time on the watch's grid (`started + k * every`) after `now`.
+/// The first time on the watch's grid (`started + k * every`) after `now`. A cron watch
+/// (`every_minutes` 0) has no grid: `NO_RUN_DUE`.
 pub(super) fn next_on_grid(started_ms: i64, every_minutes: u32, now_ms: i64) -> i64 {
+    if every_minutes == 0 {
+        return NO_RUN_DUE;
+    }
     let every = i64::from(every_minutes) * MINUTE_MS;
     started_ms + ((now_ms - started_ms).max(0) / every + 1) * every
 }
 
 /// How many runs the watch's time holds: `--for` over `--every`, rounded up. `None` for
-/// a watch with no end.
+/// a watch with no end, and for a cron watch.
 pub(super) fn total_runs(row: &WatchRow) -> Option<u32> {
+    if row.every_minutes == 0 {
+        return None;
+    }
     let every = i64::from(row.every_minutes) * MINUTE_MS;
     let span = row.ends_at_ms? - row.started_at_ms;
     Some(((span + every - 1) / every).max(1) as u32)
+}
+
+/// What one check of a cron watch found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CronCheck {
+    /// The newest minute checked after this check. It never moves back.
+    pub checked: LocalMinute,
+    /// The run to start now, or `None`.
+    pub run: Option<RunDue>,
+    /// The matches that gave no run, because the newest one is older than 120 minutes.
+    /// 0 when none. The log does not show it yet.
+    #[allow(dead_code)]
+    pub missed_all: u32,
+}
+
+/// One check of a cron watch at `now`. It looks at the minutes after `checked` up to now
+/// and runs once, for the newest match, when that match is at most 120 minutes old.
+/// `forced` is a resume: it runs at once, match or not. With no checked minute, the check
+/// starts from now, so a new watch has no backlog.
+pub(super) fn cron_check(
+    cron: &Cron,
+    checked: Option<LocalMinute>,
+    now: &LocalNow,
+    forced: bool,
+) -> CronCheck {
+    let checked = checked.unwrap_or(now.local_minute);
+    let due = due_run(cron, Some(checked), now.local_minute, GIVE_UP_MINUTES);
+    let run = match due.run {
+        Some(matched) => {
+            let minutes = now.local_minute.total_minutes() - matched.total_minutes();
+            Some(RunDue {
+                matched: Some(matched),
+                missed: due.missed,
+                late_s: (minutes * 60 + i64::from(now.seconds_of_day % 60)).max(0),
+            })
+        }
+        None if forced => Some(RunDue {
+            matched: None,
+            missed: due.missed,
+            late_s: 0,
+        }),
+        None => None,
+    };
+    CronCheck {
+        checked: checked.max(now.local_minute),
+        run,
+        missed_all: if run.is_none() { due.missed } else { 0 },
+    }
+}
+
+/// The milliseconds to wait from `now_ms`: up to the next wall-clock minute, up to `end`,
+/// and at most `WAKE_EVERY`.
+fn to_next_minute(now_ms: i64, end: Option<i64>) -> Duration {
+    let next_minute = now_ms + MINUTE_MS - now_ms.rem_euclid(MINUTE_MS);
+    let until = end.map_or(next_minute, |end| next_minute.min(end));
+    Duration::from_millis((until - now_ms).max(0) as u64).min(WAKE_EVERY)
 }
 
 /// The `how` of a pause or a resume that a person or an agent asked for.
@@ -315,6 +387,8 @@ impl Scheduler {
         let ends_at_ms = checked
             .for_minutes
             .map(|minutes| now + i64::from(minutes) * MINUTE_MS);
+        // A cron watch does not run at start: its first run is its first match.
+        let cron = checked.cron.as_ref().map(|cron| cron.source().to_owned());
         let watch = NewWatch {
             name: checked.name.clone(),
             folder: checked.folder.to_string_lossy().into_owned(),
@@ -326,13 +400,21 @@ impl Scheduler {
             run_limit_secs: checked.run_limit_secs,
             started_at_ms: now,
             ends_at_ms,
-            next_run_at_ms: now,
-            cron: None,
+            next_run_at_ms: if cron.is_some() { NO_RUN_DUE } else { now },
+            cron,
         };
         store
             .put_watch(&watch)
             .await
             .map_err(|_| StartRefusal::Unavailable)?;
+        if watch.cron.is_some() {
+            // The minutes up to the start are checked. When this write fails, the task's
+            // first check starts from its own minute, so no backlog runs either way.
+            let minute = self.local_now().await.local_minute;
+            let _ = store
+                .set_checked_local(CheckedKind::Watch, &checked.name, &minute.to_string())
+                .await;
+        }
         let row = store
             .get(&checked.name)
             .await
@@ -684,6 +766,8 @@ impl Scheduler {
         slot: Arc<ReportSlot>,
     ) {
         let mut shutdown = self.deps.shutdown.clone();
+        // The newest minute this task checked, in case the store did not keep it.
+        let mut checked: Option<LocalMinute> = None;
         loop {
             if *cancelled.borrow() {
                 return;
@@ -726,23 +810,87 @@ impl Scheduler {
                     Flow::Over => return,
                 }
             }
-            if now < row.next_run_at_ms {
-                let until = row
-                    .ends_at_ms
-                    .map_or(row.next_run_at_ms, |end| row.next_run_at_ms.min(end));
-                // Tokio's clock stops while the computer sleeps: wake often and read the
-                // wall clock again.
-                let wait = Duration::from_millis((until - now) as u64).min(WAKE_EVERY);
-                tokio::select! {
-                    () = tokio::time::sleep(wait) => {}
-                    () = interrupted(&mut cancelled, &mut shutdown) => return,
+            let due = match row.cron.as_deref() {
+                Some(text) => match self.check_cron(&row, text, now, &mut checked).await {
+                    Some(due) => due,
+                    None => {
+                        // Check again at the next minute.
+                        let wait = to_next_minute(now, row.ends_at_ms);
+                        tokio::select! {
+                            () = tokio::time::sleep(wait) => {}
+                            () = interrupted(&mut cancelled, &mut shutdown) => return,
+                        }
+                        continue;
+                    }
+                },
+                None if now < row.next_run_at_ms => {
+                    let until = row
+                        .ends_at_ms
+                        .map_or(row.next_run_at_ms, |end| row.next_run_at_ms.min(end));
+                    // Tokio's clock stops while the computer sleeps: wake often and read
+                    // the wall clock again.
+                    let wait = Duration::from_millis((until - now) as u64).min(WAKE_EVERY);
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {}
+                        () = interrupted(&mut cancelled, &mut shutdown) => return,
+                    }
+                    continue;
                 }
-                continue;
-            }
-            match self.run(&row, &mut cancelled, &mut shutdown, &slot).await {
+                None => RunDue::every(row.next_run_at_ms, now),
+            };
+            match self
+                .run(&row, due, &mut cancelled, &mut shutdown, &slot)
+                .await
+            {
                 Flow::Continue => {}
                 Flow::Over => return,
             }
+        }
+    }
+
+    /// One check of a cron watch at `now_ms`. It stores the new checked minute before it
+    /// gives a run, as the timed prompts do, so a restart never runs one match twice.
+    /// `memory` is the newest minute this task checked. Returns the run to start now.
+    async fn check_cron(
+        &self,
+        row: &WatchRow,
+        text: &str,
+        now_ms: i64,
+        memory: &mut Option<LocalMinute>,
+    ) -> Option<RunDue> {
+        // `start` checked the expression, so a stored one always parses.
+        let cron = Cron::parse(text).ok()?;
+        let now = self.local_now().await;
+        let stored = row.checked_local.as_deref().and_then(LocalMinute::parse);
+        let checked = stored.max(*memory);
+        // A resume stores `next_run_at_ms` as now: one run at once.
+        let step = cron_check(&cron, checked, &now, now_ms >= row.next_run_at_ms);
+        self.store_checked(row, stored, step.checked).await;
+        *memory = Some(step.checked);
+        step.run
+    }
+
+    /// Stores `minute` as the watch's newest checked minute when it is newer than `stored`.
+    async fn store_checked(
+        &self,
+        row: &WatchRow,
+        stored: Option<LocalMinute>,
+        minute: LocalMinute,
+    ) {
+        if stored.is_some_and(|stored| stored >= minute) {
+            return;
+        }
+        let written = self
+            .deps
+            .store
+            .set_checked_local(CheckedKind::Watch, &row.name, &minute.to_string())
+            .await;
+        if written.is_err() {
+            tracing::warn!(
+                watch = row.name.as_str(),
+                reason = "store_failed",
+                "watch checked minute not stored"
+            );
         }
     }
 
@@ -750,20 +898,33 @@ impl Scheduler {
     /// cancelled. A pause that ends resumes the watch, and its first check runs at once.
     /// One wait is at most `WAKE_EVERY`, because tokio's clock stops while the computer
     /// sleeps. The caller then reads the row again and checks the wall clock.
+    ///
+    /// A paused cron watch moves its checked minute to now at each wake, so a resume runs
+    /// only once and adds no match from the pause.
     async fn wait_while_paused(
         &self,
         row: &WatchRow,
         cancelled: &mut signal::Receiver<bool>,
         shutdown: &mut signal::Receiver<()>,
     ) -> Flow {
+        if row.cron.is_some() {
+            let stored = row.checked_local.as_deref().and_then(LocalMinute::parse);
+            let now = self.local_now().await.local_minute;
+            self.store_checked(row, stored, now).await;
+        }
         let wake = [row.paused_until_ms, row.ends_at_ms]
             .into_iter()
             .flatten()
             .min();
-        let Some(wake) = wake else {
-            // No end and no pause end: only a resume (a new task) or a stop goes on.
-            interrupted(cancelled, shutdown).await;
-            return Flow::Over;
+        let wake = match wake {
+            Some(wake) => wake,
+            // A paused cron watch wakes each minute to move its checked minute on.
+            None if row.cron.is_some() => clock_ms() + MINUTE_MS,
+            None => {
+                // No end and no pause end: only a resume (a new task) or a stop goes on.
+                interrupted(cancelled, shutdown).await;
+                return Flow::Over;
+            }
         };
         let wait = Duration::from_millis((wake - clock_ms()).max(0) as u64).min(WAKE_EVERY);
         tokio::select! {
@@ -794,12 +955,13 @@ impl Scheduler {
     async fn run(
         self: &Arc<Self>,
         row: &WatchRow,
+        due: RunDue,
         cancelled: &mut signal::Receiver<bool>,
         shutdown: &mut signal::Receiver<()>,
         slot: &Arc<ReportSlot>,
     ) -> Flow {
         let run_no = row.runs + 1;
-        let obs = RunObs::start(&row.name, &row.folder, run_no);
+        let obs = RunObs::start(&row.name, &row.folder, run_no, due);
         let span = obs.span().clone();
         self.run_in_span(row, run_no, &obs, cancelled, shutdown, slot)
             .instrument(span)

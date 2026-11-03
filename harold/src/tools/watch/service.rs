@@ -40,6 +40,13 @@ fn invalid_status(refusal: Refusal) -> Status {
             "run_limit_secs is above [watch] max_run_limit_secs ({max})"
         )),
         Refusal::UnknownSkill => Status::not_found("unknown_skill"),
+        Refusal::EveryOrCron => {
+            Status::invalid_argument("give exactly one of every_minutes and cron")
+        }
+        Refusal::Cron(error) => Status::invalid_argument(error.to_string()),
+        Refusal::TooOften => {
+            Status::invalid_argument("this schedule runs more often than every 2 minutes")
+        }
     }
 }
 

@@ -1017,7 +1017,7 @@ fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
     lines.join("\n")
 }
 
-const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES [--for TIME] [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list | pause (NAME | --all) [--for TIME] | resume (NAME | --all) | remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] [--] \"TEXT\"";
+const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL (--every MINUTES | --cron \"EXPR\") [--for TIME] [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list | pause (NAME | --all) [--for TIME] | resume (NAME | --all) | remind NAME (--in TIME | --at HH:MM | --cron \"EXPR\") [--report-to chief|self] [--] \"TEXT\"";
 
 /// A `harold tool watch` command. The numbers stay text here: the daemon checks the
 /// ranges, and the CLI only needs them to be numbers.
@@ -1026,7 +1026,7 @@ pub(crate) enum WatchCommand {
     Start {
         name: String,
         skill: String,
-        every_minutes: u32,
+        schedule: WatchSchedule,
         for_minutes: Option<u32>,
         report_to: Option<String>,
         run_budget_usd: Option<String>,
@@ -1054,11 +1054,21 @@ pub(crate) enum WatchCommand {
     },
 }
 
-/// When a reminder is due: in some minutes, or at a local time of day.
+/// When a watch runs: every some minutes, or at the minutes of a cron expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchSchedule {
+    Every(u32),
+    /// The daemon checks the expression.
+    Cron(String),
+}
+
+/// When a reminder is due: in some minutes, at a local time of day, or at the next
+/// minute that a cron expression matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemindWhen {
     In(u32),
     At(String),
+    Cron(String),
 }
 
 /// Reads a time span: `90` and `90m` are minutes, `2h` is hours. The daemon checks the
@@ -1147,9 +1157,10 @@ fn parse_watch_hold(args: &[&str], pausing: bool) -> Result<WatchCommand, String
     })
 }
 
-/// Reads `remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] TEXT`.
+/// Reads `remind NAME (--in TIME | --at HH:MM | --cron EXPR) [--report-to chief|self] TEXT`.
 fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String> {
     let (mut within, mut at, mut report_to) = (None::<String>, None::<String>, None);
+    let mut cron = None::<String>;
     let mut text = None::<String>;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -1161,6 +1172,7 @@ fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String>
             }
             "--in" => &mut within,
             "--at" => &mut at,
+            "--cron" => &mut cron,
             "--report-to" => &mut report_to,
             other if !other.starts_with('-') && text.is_none() => {
                 text = Some(other.into());
@@ -1173,9 +1185,10 @@ fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String>
             return Err(WATCH_USAGE_LINE.into());
         }
     }
-    let when = match (within, at) {
-        (Some(minutes), None) => RemindWhen::In(parse_minutes(&minutes, "in_minutes")?),
-        (None, Some(time)) => RemindWhen::At(time),
+    let when = match (within, at, cron) {
+        (Some(minutes), None, None) => RemindWhen::In(parse_minutes(&minutes, "in_minutes")?),
+        (None, Some(time), None) => RemindWhen::At(time),
+        (None, None, Some(cron)) => RemindWhen::Cron(cron),
         _ => return Err(WATCH_USAGE_LINE.into()),
     };
     Ok(WatchCommand::Remind {
@@ -1189,6 +1202,7 @@ fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String>
 fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String> {
     let (mut skill, mut every, mut minutes) = (None, None, None);
     let (mut report_to, mut budget, mut limit) = (None, None, None);
+    let mut cron = None;
     let mut every_run = false;
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
@@ -1199,6 +1213,7 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
             }
             "--skill" => &mut skill,
             "--every" => &mut every,
+            "--cron" => &mut cron,
             "--for" => &mut minutes,
             "--report-to" => &mut report_to,
             "--run-budget" => &mut budget,
@@ -1210,12 +1225,6 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
             return Err(WATCH_USAGE_LINE.into());
         }
     }
-    let number = |value: Option<String>, field: &str| -> Result<u32, String> {
-        value
-            .ok_or_else(|| WATCH_USAGE_LINE.to_string())?
-            .parse::<u32>()
-            .map_err(|_| format!("invalid {field}"))
-    };
     if let Some(text) = &budget
         && !text
             .parse::<f64>()
@@ -1230,10 +1239,21 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
         },
         None => None,
     };
+    let skill = skill.ok_or_else(|| WATCH_USAGE_LINE.to_string())?;
+    // Exactly one of `--every` and `--cron`.
+    let schedule = match (every, cron) {
+        (Some(every), None) => WatchSchedule::Every(
+            every
+                .parse::<u32>()
+                .map_err(|_| "invalid every_minutes".to_string())?,
+        ),
+        (None, Some(cron)) => WatchSchedule::Cron(cron),
+        _ => return Err(WATCH_USAGE_LINE.into()),
+    };
     Ok(WatchCommand::Start {
         name: name.into(),
-        skill: skill.ok_or_else(|| WATCH_USAGE_LINE.to_string())?,
-        every_minutes: number(every, "every_minutes")?,
+        skill,
+        schedule,
         for_minutes: minutes
             .map(|text| parse_minutes(&text, "for_minutes"))
             .transpose()?,
@@ -2362,20 +2382,28 @@ pub(crate) async fn watch_within(
             WatchCommand::Start {
                 name,
                 skill,
-                every_minutes,
+                schedule,
                 for_minutes,
                 report_to,
                 run_budget_usd,
                 run_limit_secs,
                 every_run,
             } => {
+                let (every_minutes, cron, how_often) = match schedule {
+                    WatchSchedule::Every(minutes) => {
+                        (Some(*minutes), None, format!("every {minutes} minutes"))
+                    }
+                    WatchSchedule::Cron(cron) => {
+                        (None, Some(cron.clone()), format!("on cron {cron}"))
+                    }
+                };
                 let started = client
                     .start_watch(watch_api::StartWatchRequest {
                         name: name.clone(),
                         folder: folder.to_string_lossy().into_owned(),
                         skill: skill.clone(),
-                        every_minutes: Some(*every_minutes),
-                        cron: None,
+                        every_minutes,
+                        cron,
                         for_minutes: *for_minutes,
                         report_to: report_to.clone().unwrap_or_default(),
                         run_budget_usd: run_budget_usd
@@ -2393,7 +2421,7 @@ pub(crate) async fn watch_within(
                     None => "with no end".to_string(),
                 };
                 Ok(format!(
-                    "started {} in {} {until}, every {every_minutes} minutes, reporting to {}",
+                    "started {} in {} {until}, {how_often}, reporting to {}",
                     started.name,
                     folder.display(),
                     report_to
@@ -2474,6 +2502,9 @@ pub(crate) async fn watch_within(
                             }
                             RemindWhen::At(time) => {
                                 watch_api::remind_request::When::AtLocal(time.clone())
+                            }
+                            RemindWhen::Cron(cron) => {
+                                watch_api::remind_request::When::Cron(cron.clone())
                             }
                         }),
                         report_to: report_to.clone().unwrap_or_default(),
@@ -6497,7 +6528,7 @@ mod tests {
         let expected = WatchCommand::Start {
             name: "after-release".into(),
             skill: "pod-watch".into(),
-            every_minutes: 10,
+            schedule: WatchSchedule::Every(10),
             for_minutes: Some(120),
             report_to: None,
             run_budget_usd: None,
@@ -6549,7 +6580,7 @@ mod tests {
             Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::Start {
                 name: "w".into(),
                 skill: "s".into(),
-                every_minutes: 5,
+                schedule: WatchSchedule::Every(5),
                 for_minutes: Some(60),
                 report_to: Some("chief".into()),
                 run_budget_usd: Some("0.03".into()),
@@ -6573,7 +6604,7 @@ mod tests {
             Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::Start {
                 name: "w".into(),
                 skill: "s".into(),
-                every_minutes: 5,
+                schedule: WatchSchedule::Every(5),
                 for_minutes: Some(60),
                 report_to: None,
                 run_budget_usd: None,
@@ -6695,7 +6726,7 @@ mod tests {
         let start = WatchCommand::Start {
             name: "w".into(),
             skill: "nope".into(),
-            every_minutes: 10,
+            schedule: WatchSchedule::Every(10),
             for_minutes: Some(5),
             report_to: None,
             run_budget_usd: None,
@@ -6825,7 +6856,9 @@ mod tests {
         assert!(WATCH_USAGE_LINE.contains("[--for TIME]"));
         assert!(WATCH_USAGE_LINE.contains("pause (NAME | --all) [--for TIME]"));
         assert!(WATCH_USAGE_LINE.contains("resume (NAME | --all)"));
-        assert!(WATCH_USAGE_LINE.contains("remind NAME (--in TIME | --at HH:MM)"));
+        assert!(
+            WATCH_USAGE_LINE.contains("remind NAME (--in TIME | --at HH:MM | --cron \"EXPR\")")
+        );
         assert!(WATCH_USAGE_LINE.ends_with("[--report-to chief|self] [--] \"TEXT\""));
     }
 
@@ -7012,6 +7045,121 @@ mod tests {
     }
 
     #[test]
+    fn tool_watch_start_takes_cron_in_place_of_every() {
+        assert_eq!(
+            watch_command(&[
+                "start",
+                "standup",
+                "--skill",
+                "pod-watch",
+                "--cron",
+                "*/15 9-17 * * mon-fri",
+                "--report-to",
+                "chief",
+            ]),
+            Ok(WatchCommand::Start {
+                name: "standup".into(),
+                skill: "pod-watch".into(),
+                schedule: WatchSchedule::Cron("*/15 9-17 * * mon-fri".into()),
+                for_minutes: None,
+                report_to: Some("chief".into()),
+                run_budget_usd: None,
+                run_limit_secs: None,
+                every_run: false,
+            })
+        );
+        assert!(WATCH_USAGE_LINE.contains("(--every MINUTES | --cron \"EXPR\")"));
+        for args in [
+            // Both, neither, and a second --cron.
+            vec![
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--every",
+                "10",
+                "--cron",
+                "0 9 * * *",
+            ],
+            vec!["start", "w", "--skill", "s", "--for", "5"],
+            vec![
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--cron",
+                "0 9 * * *",
+                "--cron",
+                "0 10 * * *",
+            ],
+            vec!["start", "w", "--skill", "s", "--cron"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn tool_watch_remind_takes_cron_in_place_of_in_or_at() {
+        assert_eq!(
+            watch_command(&[
+                "remind",
+                "digest-check",
+                "--cron",
+                "30 8 * * mon",
+                "read the weekly digest"
+            ]),
+            Ok(WatchCommand::Remind {
+                name: "digest-check".into(),
+                when: RemindWhen::Cron("30 8 * * mon".into()),
+                report_to: None,
+                text: "read the weekly digest".into()
+            })
+        );
+        assert!(
+            WATCH_USAGE_LINE.contains("remind NAME (--in TIME | --at HH:MM | --cron \"EXPR\")")
+        );
+        for args in [
+            vec!["remind", "x", "--cron", "30 8 * * mon", "--in", "5m", "t"],
+            vec![
+                "remind",
+                "x",
+                "--at",
+                "16:30",
+                "--cron",
+                "30 8 * * mon",
+                "t",
+            ],
+            vec!["remind", "x", "--cron", "30 8 * * mon"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_cron_refusal_prints_the_daemon_sentence() {
+        let start = WatchCommand::Start {
+            name: "w".into(),
+            skill: "s".into(),
+            schedule: WatchSchedule::Cron("* * * * *".into()),
+            for_minutes: Some(5),
+            report_to: None,
+            run_budget_usd: None,
+            run_limit_secs: None,
+            every_run: false,
+        };
+        for line in [
+            "this schedule runs more often than every 2 minutes",
+            "minute 75 is out of range: use 0 to 59",
+            "give exactly one of every_minutes and cron",
+        ] {
+            assert_eq!(
+                watch_refusal_line(&tonic::Status::invalid_argument(line), &start),
+                line
+            );
+        }
+    }
+
+    #[test]
     fn a_watch_refusal_names_the_new_refusals() {
         let pause_one = WatchCommand::Pause {
             name: Some("pods".into()),
@@ -7035,7 +7183,7 @@ mod tests {
         let start = WatchCommand::Start {
             name: "w".into(),
             skill: "s".into(),
-            every_minutes: 10,
+            schedule: WatchSchedule::Every(10),
             for_minutes: None,
             report_to: None,
             run_budget_usd: None,
@@ -7206,7 +7354,7 @@ mod tests {
         run(WatchCommand::Start {
             name: "pods".into(),
             skill: "pod-watch".into(),
-            every_minutes: 10,
+            schedule: WatchSchedule::Every(10),
             for_minutes: Some(120),
             report_to: Some("chief".into()),
             run_budget_usd: None,
@@ -7495,7 +7643,7 @@ mod tests {
         let start = |skill: &str| WatchCommand::Start {
             name: "after-release".into(),
             skill: skill.into(),
-            every_minutes: 10,
+            schedule: WatchSchedule::Every(10),
             for_minutes: Some(120),
             report_to: Some("chief".into()),
             run_budget_usd: None,
@@ -7536,6 +7684,33 @@ mod tests {
             })
             .await,
             Err("unknown watch nope".into())
+        );
+
+        let cron = |expr: &str| WatchCommand::Start {
+            name: "standup".into(),
+            skill: "pod-watch".into(),
+            schedule: WatchSchedule::Cron(expr.into()),
+            for_minutes: Some(120),
+            report_to: Some("chief".into()),
+            run_budget_usd: None,
+            run_limit_secs: None,
+            every_run: false,
+        };
+        let started = run(cron("*/15 9-17 * * mon-fri")).await.unwrap();
+        assert!(
+            started.ends_with(", on cron */15 9-17 * * mon-fri, reporting to chief"),
+            "{started}"
+        );
+        assert_eq!(
+            run(cron("* * * * *")).await,
+            Err("this schedule runs more often than every 2 minutes".into())
+        );
+        assert_eq!(
+            run(cron("0 9 * *")).await,
+            Err(
+                "a cron expression has 5 fields (minute hour day month weekday); this one has 4"
+                    .into()
+            )
         );
     }
 

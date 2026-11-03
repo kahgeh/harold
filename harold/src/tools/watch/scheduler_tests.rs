@@ -130,6 +130,7 @@ impl Harness {
             skill: "pod-watch".into(),
             report_to: ReportTo::Chief,
             every_minutes: every,
+            cron: None,
             for_minutes: Some(minutes),
             every_run: false,
             run_budget_usd_micros: None,
@@ -818,6 +819,7 @@ async fn stopping_a_watch_kills_the_child_its_run_started() {
         skill: "pod-watch".into(),
         report_to: ReportTo::Chief,
         every_minutes: 10,
+        cron: None,
         for_minutes: Some(120),
         every_run: false,
         run_budget_usd_micros: None,
@@ -2145,4 +2147,361 @@ async fn each_changed_count_is_logged_once_and_an_equal_count_is_not() {
             assert!(!line.contains(word), "{word} in {line}");
         }
     }
+// ---------------------------------------------------------------------------
+// Cron watches
+// ---------------------------------------------------------------------------
+
+use crate::cron::{Cron, LocalMinute};
+use crate::tools::watch::obs::RunDue;
+
+fn hours(count: i8) -> UtcOffset {
+    UtcOffset::from_hms(count, 0, 0).unwrap()
+}
+
+/// The instant the local clock at `offset` reads `text` (`YYYY-MM-DD HH:MM`).
+fn instant(text: &str, offset: UtcOffset) -> i64 {
+    clock::local_ms(text, offset).unwrap()
+}
+
+/// Moves the test wall clock to `at_ms`, forward or back.
+fn set_wall_clock(at_ms: i64) {
+    clock::jump_wall_clock(at_ms - clock_ms());
+}
+
+fn minute(text: &str) -> LocalMinute {
+    LocalMinute::parse(text).unwrap()
+}
+
+fn now_at(text: &str) -> LocalNow {
+    parse_local_now(text).unwrap()
+}
+
+impl Harness {
+    fn cron_checked(&self, name: &str, cron: &str, minutes: u32) -> Checked {
+        Checked {
+            every_minutes: 0,
+            cron: Some(Cron::parse(cron).unwrap()),
+            ..self.checked(name, 10, minutes)
+        }
+    }
+
+    async fn start_cron(&self, name: &str, cron: &str, minutes: u32) {
+        self.scheduler
+            .start(self.cron_checked(name, cron, minutes))
+            .await
+            .unwrap();
+    }
+
+    async fn checked_local(&self, name: &str) -> Option<String> {
+        self.row(name).await.checked_local
+    }
+}
+
+#[test]
+fn a_cron_watch_has_no_grid_and_no_total() {
+    assert_eq!(next_on_grid(1_000, 0, 5_000), NO_RUN_DUE);
+    let mut row = WatchRow {
+        name: "w".into(),
+        folder: "/x".into(),
+        skill: "s".into(),
+        report_to: "chief".into(),
+        every_minutes: 0,
+        every_run: false,
+        run_budget_usd_micros: None,
+        run_limit_secs: 120,
+        running: true,
+        state: WatchState::Running,
+        started_at_ms: 0,
+        ends_at_ms: Some(60 * MINUTE_MS),
+        next_run_at_ms: NO_RUN_DUE,
+        runs: 0,
+        reports: 0,
+        failed_in_a_row: 0,
+        cost_usd_micros: 0,
+        last_outcome: None,
+        stop_reason: None,
+        ended_at_ms: None,
+        paused_until_ms: None,
+        pause_how: None,
+        cron: Some("*/15 * * * *".into()),
+        checked_local: None,
+    };
+    assert_eq!(total_runs(&row), None);
+    assert_eq!(
+        report_line("w", 3, total_runs(&row), "quiet"),
+        "WATCH w 3: quiet"
+    );
+    (row.every_minutes, row.cron) = (10, None);
+    assert_eq!(total_runs(&row), Some(6));
+}
+
+#[test]
+fn cron_check_runs_the_newest_match_with_missed_and_late_s() {
+    let cron = Cron::parse("*/10 * * * *").unwrap();
+    let step = cron_check(
+        &cron,
+        Some(minute("2026-11-03 12:00")),
+        &now_at("2026-11-03 12:36:20"),
+        false,
+    );
+    assert_eq!(step.checked, minute("2026-11-03 12:36"));
+    assert_eq!(
+        step.run,
+        Some(RunDue {
+            matched: Some(minute("2026-11-03 12:30")),
+            missed: 2,
+            late_s: 6 * 60 + 20,
+        })
+    );
+    assert_eq!(step.missed_all, 0);
+}
+
+#[test]
+fn cron_check_past_the_window_runs_nothing_and_counts_the_missed_matches() {
+    let cron = Cron::parse("5 12 * * *").unwrap();
+    let step = cron_check(
+        &cron,
+        Some(minute("2026-11-03 12:00")),
+        &now_at("2026-11-03 15:01:00"),
+        false,
+    );
+    assert_eq!(step.checked, minute("2026-11-03 15:01"));
+    assert_eq!(step.run, None);
+    assert_eq!(step.missed_all, 1);
+}
+
+#[test]
+fn cron_check_with_no_checked_minute_starts_from_now_and_runs_nothing() {
+    let cron = Cron::parse("*/10 * * * *").unwrap();
+    let step = cron_check(&cron, None, &now_at("2026-11-03 12:30:05"), false);
+    assert_eq!(step.checked, minute("2026-11-03 12:30"));
+    assert_eq!((step.run, step.missed_all), (None, 0));
+}
+
+#[test]
+fn cron_check_runs_a_resume_at_once_and_never_moves_the_checked_minute_back() {
+    let cron = Cron::parse("*/10 * * * *").unwrap();
+    let step = cron_check(
+        &cron,
+        Some(minute("2026-11-03 12:34")),
+        &now_at("2026-11-03 12:35:10"),
+        true,
+    );
+    assert_eq!(step.checked, minute("2026-11-03 12:35"));
+    assert_eq!(
+        step.run,
+        Some(RunDue {
+            matched: None,
+            missed: 0,
+            late_s: 0,
+        })
+    );
+
+    // Daylight saving ends: the clock reads 02:30 again after 02:59 was checked.
+    let daily = Cron::parse("30 2 * * *").unwrap();
+    let step = cron_check(
+        &daily,
+        Some(minute("2027-04-04 02:59")),
+        &now_at("2027-04-04 02:30:00"),
+        false,
+    );
+    assert_eq!(step.checked, minute("2027-04-04 02:59"));
+    assert_eq!((step.run, step.missed_all), (None, 0));
+
+    // Daylight saving starts: 01:59 then 03:00 holds 02:30, so it runs, 1800 s late.
+    let step = cron_check(
+        &daily,
+        Some(minute("2026-10-04 01:59")),
+        &now_at("2026-10-04 03:00:04"),
+        false,
+    );
+    assert_eq!(
+        step.run,
+        Some(RunDue {
+            matched: Some(minute("2026-10-04 02:30")),
+            missed: 0,
+            late_s: 1804,
+        })
+    );
+}
+
+#[test]
+fn an_every_run_is_late_from_its_slot() {
+    assert_eq!(
+        RunDue::every(10 * MINUTE_MS, 10 * MINUTE_MS + 7_500),
+        RunDue {
+            matched: None,
+            missed: 0,
+            late_s: 7,
+        }
+    );
+    assert_eq!(RunDue::every(10 * MINUTE_MS, 0).late_s, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_watch_does_not_run_at_start_and_runs_at_each_match() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    let row = h.row("w").await;
+    assert_eq!(
+        (
+            row.every_minutes,
+            row.cron.as_deref(),
+            row.checked_local.as_deref()
+        ),
+        (0, Some("*/10 * * * *"), Some("2026-11-03 12:00"))
+    );
+    pass(9 * MINUTE + Duration::from_secs(55)).await;
+    assert_eq!(h.runner.calls(), 0, "no run at start");
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(h.runner.calls(), 1, "the 12:10 match");
+    pass(10 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 2, "the 12:20 match");
+    assert_eq!(h.row("w").await.runs, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cron_sydney_skip_runs_once() {
+    let local = ScriptedOffset::at(hours(10));
+    let h = harness_on(settings(), vec![answer("QUIET", 0.01)], &local).await;
+    set_wall_clock(instant("2026-10-04 01:50", hours(10)));
+    h.start_cron("digest", "30 2 * * *", 1440).await;
+
+    pass(9 * MINUTE + Duration::from_millis(59_500)).await;
+    assert_eq!(h.runner.calls(), 0);
+    // 01:59:59.5, then the clock goes from 02:00 to 03:00.
+    local.set(hours(11));
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1, "02:30 runs at 03:00");
+    pass(120 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1, "and only once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn cron_sydney_repeat_runs_once() {
+    let local = ScriptedOffset::at(hours(11));
+    let h = harness_on(settings(), vec![answer("QUIET", 0.01)], &local).await;
+    set_wall_clock(instant("2027-04-04 02:20", hours(11)));
+    h.start_cron("digest", "30 2 * * *", 1440).await;
+
+    pass(10 * MINUTE + Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1, "02:30");
+    pass(29 * MINUTE + Duration::from_millis(54_500)).await;
+    // 02:59:59.5, then the clock goes back from 03:00 to 02:00.
+    local.set(hours(10));
+    pass(61 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1, "the second 02:30 does not run");
+    assert_eq!(
+        h.checked_local("digest").await.as_deref(),
+        Some("2027-04-04 03:00")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sleep_over_three_matches_runs_once_for_the_newest() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    pass(Duration::from_secs(5)).await;
+
+    clock::jump_wall_clock(35 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+    assert_eq!(h.runner.calls(), 1, "12:10, 12:20 and 12:30 give one run");
+    pass(3 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1);
+    pass(2 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 2, "12:40");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sleep_past_120_minutes_runs_nothing() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "5 12 * * *", 600).await;
+    pass(Duration::from_secs(5)).await;
+
+    clock::jump_wall_clock(180 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+    assert_eq!(h.runner.calls(), 0, "12:05 is 3 hours old");
+    assert_eq!(
+        h.checked_local("w").await.as_deref(),
+        Some("2026-11-03 15:01")
+    );
+    pass(60 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_keeps_the_checked_minute_of_a_cron_watch() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    pass(5 * MINUTE + Duration::from_secs(5)).await;
+    assert_eq!(
+        h.checked_local("w").await.as_deref(),
+        Some("2026-11-03 12:05")
+    );
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+    // Down from 12:05 to 12:15: the 12:10 match is missed.
+    pass(10 * MINUTE).await;
+    assert_eq!(
+        h.checked_local("w").await.as_deref(),
+        Some("2026-11-03 12:05")
+    );
+
+    let (scheduler, runner, _stop) = restarted(&h);
+    scheduler.resume().await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(runner.calls(), 1, "the 12:10 match runs once, late");
+    pass(4 * MINUTE).await;
+    assert_eq!(runner.calls(), 1);
+    pass(MINUTE).await;
+    assert_eq!(runner.calls(), 2, "12:20");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_watch_paused_over_three_matches_then_resumed_runs_once() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 600).await;
+    pass(5 * MINUTE).await;
+    h.pause("w", None).await;
+    // From 12:05 to 12:35: 12:10, 12:20 and 12:30 pass while paused.
+    pass(30 * MINUTE + Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 0);
+    assert_eq!(
+        h.checked_local("w").await.as_deref(),
+        Some("2026-11-03 12:35"),
+        "the checked minute moves on while paused"
+    );
+
+    h.resume("w").await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1, "the resume runs once");
+    pass(4 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1, "no older match is added");
+    pass(MINUTE).await;
+    assert_eq!(h.runner.calls(), 2, "12:40");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_watch_with_an_end_ends_and_a_replacement_resets_the_checked_minute() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    set_wall_clock(instant("2026-11-03 12:00", UtcOffset::UTC));
+    h.start_cron("w", "*/10 * * * *", 25).await;
+    pass(26 * MINUTE).await;
+    let row = h.row("w").await;
+    assert_eq!((row.runs, row.stop_reason.as_deref()), (2, Some("ended")));
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w ended: 2 runs, 0 reports, $0.02"]
+    );
+
+    h.start_cron("w", "*/10 * * * *", 25).await;
+    assert_eq!(
+        h.checked_local("w").await.as_deref(),
+        Some("2026-11-03 12:26")
+    );
 }

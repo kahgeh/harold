@@ -11,6 +11,7 @@ use tracing::{Span, debug, info, info_span, warn};
 
 use super::answer::{Cause, Failure};
 use super::runner::Exit;
+use crate::cron::LocalMinute;
 use crate::telemetry::{self, TRACE_TARGET};
 
 /// How a watch started (the `how` of `watch started`), or who paused or resumed it (the
@@ -190,6 +191,29 @@ pub(super) struct Timing {
     pub run_ms: u64,
 }
 
+/// Why a run starts now, and how late it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RunDue {
+    /// The cron minute the run is for. `None` for a watch at an interval, and for the run
+    /// at once after a resume.
+    pub matched: Option<LocalMinute>,
+    /// The older cron matches skipped before this run. 0 when none.
+    pub missed: u32,
+    /// The seconds from the matched minute, or from the slot's time, to the run's start.
+    pub late_s: i64,
+}
+
+impl RunDue {
+    /// A run of a watch at an interval: late from its slot, `next_run_at_ms`.
+    pub(super) fn every(slot_ms: i64, now_ms: i64) -> Self {
+        Self {
+            matched: None,
+            missed: 0,
+            late_s: ((now_ms - slot_ms) / 1000).max(0),
+        }
+    }
+}
+
 /// One run: its `harold.watch.run` span and the lines written inside it.
 pub(super) struct RunObs {
     span: Span,
@@ -198,10 +222,13 @@ pub(super) struct RunObs {
     run: u32,
     /// How many folders the skill's `add-dirs` gave the run; never the paths.
     add_dirs: AtomicU32,
+    /// Why the run starts now. The run's log lines do not show it yet.
+    #[allow(dead_code)]
+    due: RunDue,
 }
 
 impl RunObs {
-    pub(super) fn start(watch: &str, folder: &str, run: u32) -> Self {
+    pub(super) fn start(watch: &str, folder: &str, run: u32, due: RunDue) -> Self {
         let span = info_span!(
             target: TRACE_TARGET,
             "harold.watch.run",
@@ -217,6 +244,7 @@ impl RunObs {
             folder: folder.to_owned(),
             run,
             add_dirs: AtomicU32::new(0),
+            due,
         }
     }
 
