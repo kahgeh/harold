@@ -93,14 +93,55 @@ class TestRun(unittest.TestCase):
         self.assertIn('# exit: 143\n', text)
         self.assertIn('# result: stopped\n', text)
 
-    def test_signal_to_runner_reaches_child(self):
+    def test_sigterm_to_runner_reaches_child(self):
         def poke():
             time.sleep(1.0)
+            os.kill(os.getpid(), signal.SIGTERM)
+        threading.Thread(target=poke, daemon=True).start()
+        code, _ = self.run_quiet('1', 'term', ['sleep', '30'])
+        self.assertEqual(code, 128 + signal.SIGTERM)
+        self.assertIn('# result: stopped\n', self.only_log().decode())
+
+    def test_sigint_to_runner_still_writes_footer(self):
+        # A terminal sends SIGINT to the child by the process group; the runner survives.
+        def poke():
+            time.sleep(0.5)
             os.kill(os.getpid(), signal.SIGINT)
         threading.Thread(target=poke, daemon=True).start()
-        code, _ = self.run_quiet('1', 'int', ['sleep', '30'])
-        self.assertEqual(code, 128 + signal.SIGINT)
-        self.assertIn('# result: stopped\n', self.only_log().decode())
+        self.run_quiet('1', 'int', ['sleep', '1.5'])
+        self.assertIn('# result: stopped', self.only_log().decode())
+
+    def test_permission_denied(self):
+        script = self.repo / 'noexec.sh'
+        script.write_text('#!/bin/sh\n')
+        code, _ = self.run_quiet('1', 'perm', [str(script)])
+        self.assertEqual(code, 126)
+        self.assertIn('# exit: 126\n', self.only_log().decode())
+
+    def test_newline_in_command_cannot_fake_footer(self):
+        arg = 'echo a\n# result: x\n# exit: 9'
+        self.run_quiet('1', 'nl', ['sh', '-c', arg])
+        text = self.only_log().decode()
+        header = text.split('# started:')[0]
+        self.assertEqual(header.count('\n'), 6)
+        self.assertEqual(text.count('# result: x\n'), 0)
+        self.assertIn('\\n# result: x\\n', header)
+        self.assertEqual(self.mod.show('1', self.repo)[0]['result'], 'passed')
+
+    def test_dirty_from_subfolder_sees_whole_tree(self):
+        sub = self.repo / 'sub'
+        sub.mkdir()
+        (self.repo / 'outside.txt').write_text('x')
+        self.run_quiet('1', 'sub', ['echo', 'hi'], sub)
+        self.assertIn(' dirty\n', self.only_log().decode())
+
+    def test_no_commit_yet(self):
+        empty = Path(tempfile.mkdtemp(dir=self._tmp.name)) / 'e'
+        empty.mkdir()
+        git(empty, 'init', '-b', 'main')
+        self.run_quiet('1', 'none', ['echo', 'hi'], empty.resolve())
+        log = next((empty.resolve() / '.superpowers').rglob('*.log'))
+        self.assertIn('# commit: none\n', log.read_text())
 
     def test_missing_command(self):
         code, _ = self.run_quiet('1', 'm', ['no-such-command-xyz'])
@@ -198,15 +239,58 @@ class TestRun(unittest.TestCase):
         self.assertIn('# started: ', text)
         self.assertIn('\n# finished: ', text)
 
-    def test_show_rows(self):
+    def test_show_lists_one_row_per_run(self):
+        self.run_quiet('1', 'one', ['echo', 'hi'])
+        self.run_quiet('1', 'two', ['sh', '-c', 'exit 1'])
+        rows = self.mod.show('1', self.repo)
+        self.assertEqual([r['name'] for r in rows], ['one', 'two'])
+        self.assertEqual([r['result'] for r in rows], ['passed', 'failed'])
+        self.assertEqual(rows[0]['commit'], git(self.repo, 'rev-parse', '--short', 'HEAD'))
+
+    def test_show_skips_headerless_and_part_files(self):
         self.run_quiet('1', 'one', ['echo', 'hi'])
         folder = self.logs()[0].parent
         (folder / '20200101T000000Z-old.log').write_text('plain tee log\n')
-        (folder / '20200101T000001Z-x-harold.log').write_text('part\n')
+        (folder / (self.logs()[0].stem + '-harold.log')).write_text('part\n')
+        self.assertEqual(len(self.mod.show('1', self.repo)), 1)
+
+    def test_show_marks_timing(self):
+        self.run_quiet('1', 'plain', ['echo', 'hi'])
+        self.run_quiet('1', 'timed', ['echo', '--features', 'harold/timing-tests'])
         rows = self.mod.show('1', self.repo)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['name'], 'one')
-        self.assertEqual(rows[0]['result'], 'passed')
+        self.assertEqual([r['features'] for r in rows], ['', 'timing'])
+
+    def test_show_reads_only_head_and_tail(self):
+        self.run_quiet('1', 'big', [sys.executable, '-c',
+                                    "print('x' * 99); print('y' * 99)\n"
+                                    "for _ in range(50000): print('z' * 99)"])
+        path = self.logs()[0]
+        self.assertGreater(path.stat().st_size, 5_000_000)
+        head, tail = self.mod.read_ends(path)
+        self.assertLessEqual(len(head), 20)
+        self.assertLess(sum(len(l) + 1 for l in tail), 4200)
+        self.assertEqual(head[0], '# test-run: 1')
+        with patch.object(Path, 'read_bytes', side_effect=AssertionError('whole read')):
+            self.assertEqual(self.mod.show('1', self.repo)[0]['result'], 'passed')
+
+    def test_show_unknown_spec_id(self):
+        old = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, old)
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = self.mod.main(['show', 'nope'])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), '')
+        self.assertIn('nope', err.getvalue())
+
+    def test_show_footer_needs_finished_and_exit(self):
+        folder = self.repo / '.superpowers' / 'pod' / 'test-logs' / '1'
+        folder.mkdir(parents=True)
+        (folder / '20200101T000000Z-half.log').write_text(
+            '# test-run: 1\n# name: half\nout\n# exit: 0\n# result: passed\n')
+        self.assertEqual(self.mod.show('1', self.repo)[0]['result'], 'unfinished')
 
     def test_show_unfinished(self):
         folder = self.repo / '.superpowers' / 'pod' / 'test-logs' / '1'

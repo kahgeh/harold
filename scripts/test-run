@@ -73,11 +73,15 @@ def sum_results(text):
 
 
 def commit_of(cwd):
-    def git(*args):
-        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True).stdout
-    commit = git('rev-parse', '--short', 'HEAD').strip()
+    def git(where, *args):
+        return subprocess.run(['git', *args], cwd=where, capture_output=True, text=True).stdout
+    commit = git(cwd, 'rev-parse', '--short', 'HEAD').strip()
+    if not commit:
+        return 'none'
+    # Check the whole tree, also when the cwd is a subfolder.
+    top = git(cwd, 'rev-parse', '--show-toplevel').strip() or cwd
     # The kept logs are not a change of the tree.
-    if git('status', '--porcelain', '--', '.', ':(top,exclude).superpowers').strip():
+    if git(top, 'status', '--porcelain', '--', '.', ':(top,exclude).superpowers').strip():
         commit += ' dirty'
     return commit
 
@@ -116,7 +120,7 @@ def run(spec_id, name, command, cwd=None):
     path, log = open_log(base, spec_id, name, started)
     env = dict(os.environ, TEST_RUN_DIR=str(path.parent), TEST_RUN_STEM=path.stem)
     header = [('test-run', '1'), ('id', spec_id), ('name', name),
-              ('command', shlex.join(command)), ('cwd', str(cwd)),
+              ('command', shlex.join(command).replace('\r', '\\r').replace('\n', '\\n')), ('cwd', str(cwd)),
               ('commit', commit), ('started', rfc3339(started))]
     with log:
         log.write(''.join(f'# {k}: {v}\n' for k, v in header).encode())
@@ -146,11 +150,15 @@ def execute(command, cwd, env, log):
         log.write(msg)
         sys.stdout.buffer.write(msg)
         sys.stdout.buffer.flush()
-        return 127, False, b'\n', []
+        return (127 if isinstance(err, FileNotFoundError) else 126), False, b'\n', []
     forwarded = []
 
     def forward(signum, _frame):
+        # On a terminal, Ctrl-C reaches the child by the process group already.
+        # So SIGINT is only noted here. SIGTERM is sent on.
         forwarded.append(signum)
+        if signum == signal.SIGINT:
+            return
         try:
             proc.send_signal(signum)
         except ProcessLookupError:
@@ -190,26 +198,41 @@ def execute(command, cwd, env, log):
     return proc.returncode, bool(forwarded), last, matched
 
 
-def read_log(path):
-    """Return (header, footer) dicts from a log, or None when it is not a test-run log."""
-    header = {}
-    footer = {}
+def read_ends(path):
+    """Return (first 20 lines, lines of the last 4 KB) without a read of the whole file."""
+    size = os.path.getsize(path)
     with open(path, 'rb') as handle:
-        first = handle.readline().decode('utf-8', 'replace').rstrip('\n')
-        if first != '# test-run: 1':
-            return None
-        for raw in handle:
-            line = raw.decode('utf-8', 'replace').rstrip('\n')
-            match = re.match(r'# (\w+): (.*)$', line)
-            if not match:
-                break
-            header[match.group(1)] = match.group(2)
-        size = path.stat().st_size
-        handle.seek(max(0, size - 4096))
-        for raw in handle.read().splitlines():
-            match = re.match(rb'# (finished|duration_s|exit|result): (.*)$', raw)
-            if match:
-                footer[match.group(1).decode()] = match.group(2).decode('utf-8', 'replace')
+        head = [handle.readline().decode('utf-8', 'replace').rstrip('\n') for _ in range(20)]
+        head = [line for line in head]
+        start = max(0, size - 4096)
+        handle.seek(start)
+        data = handle.read()
+    lines = data.decode('utf-8', 'replace').split('\n')
+    if start > 0:
+        lines = lines[1:]  # the first line may be cut
+    return head, [line for line in lines if line]
+
+
+def read_log(path):
+    """Return (header, footer) dicts, or None when it is not a test-run log.
+
+    A part file (-harold.log and so on) has no `# test-run: 1` first line,
+    so this check skips it, as it skips a headerless tee log.
+    """
+    head, tail = read_ends(path)
+    if not head or head[0] != '# test-run: 1':
+        return None
+    header = {}
+    for line in head[1:]:
+        match = re.match(r'# (\w+): (.*)$', line)
+        if not match:
+            break
+        header[match.group(1)] = match.group(2)
+    footer = {}
+    for line in tail:
+        match = re.match(r'# (finished|duration_s|exit|result): (.*)$', line)
+        if match:
+            footer[match.group(1)] = match.group(2)
     return header, footer
 
 
@@ -223,12 +246,13 @@ def show(spec_id, base):
         if parsed is None:
             continue
         header, footer = parsed
+        done = 'finished' in footer and 'exit' in footer
         rows.append({
             'time': path.name.split('-', 1)[0],
             'name': header.get('name', ''),
             'commit': header.get('commit', ''),
-            'seconds': footer.get('duration_s', ''),
-            'result': footer.get('result', 'unfinished') if 'exit' in footer else 'unfinished',
+            'seconds': footer.get('duration_s', '') if done else '',
+            'result': footer.get('result', 'unfinished') if done else 'unfinished',
             'features': 'timing' if 'timing-tests' in header.get('command', '') else '',
         })
     return rows
@@ -240,7 +264,10 @@ def main(argv):
         if base is None:
             print('test-run: no worktree of main found', file=sys.stderr)
             return 2
-        for row in show(argv[1], base):
+        rows = show(argv[1], base)
+        if not rows:
+            print(f'test-run: no kept runs for spec id {argv[1]!r}', file=sys.stderr)
+        for row in rows:
             print('  '.join(str(row[k]) for k in
                             ('time', 'name', 'commit', 'seconds', 'result', 'features')).rstrip())
         return 0
