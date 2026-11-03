@@ -240,9 +240,13 @@ for what the switch does.
 
 ## Focus lines
 
-The control-tower shows the chief's focus work records on dim lines under the masthead. It shows one line for each work record at priority `focus`, and at most two. A line reads `FOCUS  <name>  [<status>]  next: <next step>`, cut to the terminal's width with `…`. A record with an empty next step ends after its status. The control-tower reads the lines from Harold's work tool (`List`, open records only) with the question tool, every 2 seconds. When that poll's question read timed out, the read is skipped and the lines hide until the next poll. The lines take rows only when rows are spare beside the agent list's six rows. With one spare row, the first record shows. The lines hide while no work record is at `focus`, when the read fails, when the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on them and they take no keys. See the [work reference](../docs/references/tools/work.md) for how the records are kept.
+The control-tower shows the chief's focus work records on dim lines under the masthead. It shows one line for each work record at priority `focus`, and at most two. A line reads `FOCUS  <name>  [<status>]  next: <next step>`, cut to the terminal's width with `…`. A record with an empty next step ends after its status.
 
-When Harold is older and does not serve the work tool, the control-tower shows the old `NOW  ` line instead. That line shows the first line of the queue's Now item, under the same rules. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
+The control-tower reads the records from Harold's work tool (`List`, open records only). It reads them every 2 seconds, after the question read. When that question read times out, the control-tower skips the work read and hides the lines until the next poll.
+
+The lines take rows only when rows are spare beside the agent list's six rows. With one spare row, the first record shows. The lines hide while no work record is at `focus`, or when the read fails. They also hide when the control-tower loses the stream to Harold. At the smallest height (18 rows), the agent list keeps its six rows and the lines hide. The cursor never lands on the lines and they take no keys. See the [work reference](../docs/references/tools/work.md) for how the records are kept.
+
+An older Harold does not serve the work tool. Then the control-tower shows the old `NOW  ` line instead. That line shows the first line of the queue's Now item. It takes rows and hides under the same rules, and it also hides while the queue has no Now item. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
 ## Todos
 
