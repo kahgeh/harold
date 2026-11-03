@@ -24,6 +24,19 @@ use crate::pod_stats::{
 thread_local! {
     /// How many times this thread published, so a test counts its own task.
     pub(super) static PUBLISHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// How many publishes this thread finished, on every way out of `publish`.
+    pub(super) static PUBLISHES_DONE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Raises `PUBLISHES_DONE` when a publish ends, early return included.
+#[cfg(test)]
+struct PublishDone;
+
+#[cfg(test)]
+impl Drop for PublishDone {
+    fn drop(&mut self) {
+        PUBLISHES_DONE.with(|count| count.set(count.get() + 1));
+    }
 }
 
 pub(super) const PERIOD: Duration = Duration::from_secs(600);
@@ -99,6 +112,8 @@ pub(super) async fn publish<G: Git>(
 ) {
     #[cfg(test)]
     PUBLISHES.with(|count| count.set(count.get() + 1));
+    #[cfg(test)]
+    let _done = PublishDone;
     // A failed read keeps the last numbers: it is not a statement that the list is empty.
     let Ok(products) = service.products("", now, offset).await else {
         return;

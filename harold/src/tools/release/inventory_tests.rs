@@ -32,6 +32,23 @@ async fn let_task_run() {
     }
 }
 
+/// Waits, in real time, until `expected` publishes have finished. Paused time does not move.
+async fn wait_for_done(expected: u32) {
+    let started = std::time::Instant::now();
+    loop {
+        let done = super::PUBLISHES_DONE.with(|count| count.get());
+        if done >= expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "publishes done {done}, expected {expected}, started {}",
+            super::PUBLISHES.with(|count| count.get())
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 /// A fresh product name, so a test reads only its own series from the shared store.
 fn unique_name() -> String {
     format!("release-test-{}", uuid::Uuid::new_v4())
@@ -184,14 +201,18 @@ async fn the_task_publishes_every_ten_minutes() {
     let (service, _fixture) = two_merged(&folder, &unique_name());
     let (shutdown, receiver) = watch::channel(());
     super::PUBLISHES.with(|count| count.set(0));
+    super::PUBLISHES_DONE.with(|count| count.set(0));
 
     let task = tokio::spawn(run(service, PERIOD, receiver));
+    wait_for_done(1).await;
     let_task_run().await;
     let at_start = super::PUBLISHES.with(|count| count.get());
     tokio::time::advance(PERIOD).await;
+    wait_for_done(2).await;
     let_task_run().await;
     let after_one_period = super::PUBLISHES.with(|count| count.get());
     tokio::time::advance(PERIOD).await;
+    wait_for_done(3).await;
     let_task_run().await;
     let after_two_periods = super::PUBLISHES.with(|count| count.get());
 
