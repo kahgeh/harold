@@ -2095,6 +2095,20 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_still_matches_the_folder_of_a_row_with_a_window_name() {
+        let mut worker = row(
+            incarnation("%1", 1, 2, 0, "claude"),
+            AgentState::Working,
+            "one",
+            0,
+            0,
+        );
+        worker.working_directory = "/w/harold".into();
+        worker.window_name = "work-records".into();
+        assert!(SearchableRow::from(&worker).matches("harold"));
+    }
+
+    #[test]
     fn the_filter_matches_the_recap() {
         let mut recapped = row(
             incarnation("%1", 1, 2, 0, "claude"),

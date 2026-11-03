@@ -706,7 +706,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                         "  {}",
                         fit_with_suffix(
                             &host_prefix(agent, app.host_marker, pad),
-                            (&where_name(name, &agent.window_name), suffix),
+                            (&where_text(agent, name), suffix),
                             usize::from(where_width) - 2
                         )
                     )
@@ -1471,12 +1471,15 @@ fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker, pad: bool) -> S
     String::new()
 }
 
-/// The session name, then ` · ` and the window name when the window has one.
-fn where_name(name: &str, window_name: &str) -> String {
-    if window_name.is_empty() {
+/// What a row shows as its name: the role when it has one, else the window name,
+/// else `name` (the folder or the pane label).
+fn where_text(agent: &crate::app::AgentRow, name: &str) -> String {
+    if matches!(agent.role.as_str(), "chief" | "coordinator" | "pnem")
+        || agent.window_name.is_empty()
+    {
         return name.to_owned();
     }
-    format!("{name} · {window_name}")
+    agent.window_name.clone()
 }
 
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
@@ -3334,7 +3337,8 @@ mod tests {
         agent.working_directory = "/w/harold".into();
         agent.window_name = "linux-sat-2b".into();
         let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
-        assert!(content.contains("harold · linux-sat-2b"), "{content}");
+        assert!(content.contains("linux-sat-2b"), "{content}");
+        assert!(!content.contains("harold · linux-sat-2b"), "{content}");
     }
 
     #[test]
@@ -3352,17 +3356,74 @@ mod tests {
         let app = live_app(vec![agent], None);
         for width in [60, 80, 120] {
             let content = rendered_lines(&app, width, 29, 100_000);
-            assert!(content.contains("harold · "), "{width}: {content}");
+            assert!(content.contains("a-very-long-"), "{width}: {content}");
+            assert!(content.contains("…"), "{width}: {content}");
             assert!(!content.contains("never-fits-in-the-column"), "{width}");
         }
     }
 
+    fn plain_row(window: &str, dir: &str, role: &str, target: &str, n: u32) -> AgentRow {
+        let mut agent = row(
+            incarnation(&format!("%{n}"), n, n + 100, "claude"),
+            AgentState::Working,
+            "Claude",
+            target,
+            "SUMMARYX",
+            0,
+        );
+        agent.working_directory = dir.into();
+        agent.window_name = window.into();
+        agent.role = role.into();
+        agent
+    }
+
+    #[test]
+    fn where_text_picks_role_then_window_then_folder() {
+        let coordinator = plain_row("pod", "/w/harold", "coordinator", "harold:0.1", 1);
+        assert_eq!(
+            super::where_text(&coordinator, "Coordinator"),
+            "Coordinator"
+        );
+        let worker = plain_row("work-records", "/w/harold", "", "harold:0.2", 2);
+        assert_eq!(super::where_text(&worker, "harold"), "work-records");
+        let bare = plain_row("", "/w/harold", "", "harold:0.3", 3);
+        assert_eq!(super::where_text(&bare, "harold"), "harold");
+    }
+
+    #[test]
+    fn a_coordinator_row_shows_the_role_without_the_window() {
+        let coordinator = plain_row("pod", "/w/harold", "coordinator", "harold:0.1", 1);
+        let content = rendered_lines(&live_app(vec![coordinator], None), 140, 29, 100_000);
+        assert!(content.contains("Coordinator"), "{content}");
+        assert!(!content.contains("· pod"), "{content}");
+    }
+
+    #[test]
+    fn two_rows_with_one_window_name_keep_the_pane_suffix() {
+        let mut first = plain_row("work", "/w/harold", "", "harold:0.1", 1);
+        first.pane_index = 1;
+        let mut second = plain_row("work", "/w/harold", "", "harold:0.2", 2);
+        second.pane_index = 2;
+        let content = rendered_lines(&live_app(vec![first, second], None), 140, 29, 100_000);
+        assert!(content.contains(" :0.1"), "{content}");
+        assert!(content.contains(" :0.2"), "{content}");
+    }
+
     #[test]
     fn where_keeps_the_pane_suffix_with_a_window_name() {
-        let text = super::where_name("sre", "a-very-long-window-name");
+        let mut agent = row(
+            incarnation("%1", 10, 20, "claude"),
+            AgentState::Working,
+            "Claude",
+            "sre:0.3",
+            "S",
+            0,
+        );
+        agent.window_name = "a-very-long-window-name".into();
+        let text = super::where_text(&agent, "sre");
         assert_eq!(
             super::fit_with_suffix("", (&text, " :0.3"), 16),
-            "sre · a-ve… :0.3"
+            "a-very-lon… :0.3"
         );
     }
 
@@ -3458,7 +3519,7 @@ mod tests {
         );
         let lines = super::detail_lines(&agent, 100_000, 60, super::StepMode::Full);
         assert!(lines.iter().all(|l| !l.to_string().starts_with("WINDOW")));
-        assert_eq!(super::where_name("harold", ""), "harold");
+        assert_eq!(super::where_text(&agent, "harold"), "harold");
         let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
         let row_line = content
             .lines()
