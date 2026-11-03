@@ -154,6 +154,93 @@ class ProviderHooksTest(unittest.TestCase):
                 turn = notify.call_args.args[0]
                 self.assertEqual((turn.last_user_prompt, turn.session_id, turn.turn_started_at), ("p", "", ""))
 
+    def asst(self, mid, model="m", **usage):
+        return {"type": "assistant", "message": {"id": mid, "model": model, "usage": usage, "content": []}}
+
+    def usage_of(self, records):
+        self.write_records(records)
+        return claude_turn_complete.extract_turn_usage(str(self.transcript))
+
+    def test_usage_sums_each_message_id_once(self):
+        line = dict(input_tokens=10, output_tokens=5, cache_read_input_tokens=3, cache_creation_input_tokens=2)
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("m1", **line), self.asst("m1", **line), self.asst("m1", **line),
+            self.asst("m2", **line),
+        ])
+        self.assertEqual(usage, {
+            "input_tokens": 20, "output_tokens": 10, "cache_read_tokens": 6,
+            "cache_write_tokens": 4, "model": "m",
+        })
+
+    def test_usage_same_id_takes_largest_of_each_field(self):
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("m1", input_tokens=7, output_tokens=4),
+            self.asst("m1", input_tokens=7, output_tokens=90),
+        ])
+        self.assertEqual((usage["input_tokens"], usage["output_tokens"]), (7, 90))
+
+    def test_usage_boundary_is_last_non_tool_result_user_line(self):
+        tool_result = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}}
+        usage = self.usage_of([
+            self.asst("old", output_tokens=1000),
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", output_tokens=1),
+            tool_result,
+            self.asst("b", output_tokens=2),
+        ])
+        self.assertEqual(usage["output_tokens"], 3)
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", output_tokens=100),
+            {"type": "user", "message": {"content": "<system-reminder>x"}},
+            self.asst("b", output_tokens=2),
+        ])
+        self.assertEqual(usage["output_tokens"], 2)
+
+    def test_usage_model_is_the_last_assistant_message_model(self):
+        usage = self.usage_of([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", model="first", output_tokens=1),
+            self.asst("b", model="last", output_tokens=1),
+        ])
+        self.assertEqual(usage["model"], "last")
+
+    def test_usage_empty_when_no_usage_and_reads_no_text(self):
+        self.write_records([
+            {"type": "user", "message": {"content": "go"}},
+            {"type": "assistant", "message": {"id": "a", "content": [{"type": "text", "text": "hi"}]}},
+        ])
+        self.assertEqual(claude_turn_complete.extract_turn_usage(str(self.transcript)), {})
+        self.assertEqual(claude_turn_complete.extract_turn_usage(None), {})
+        notify = self.invoke(claude_turn_complete, {"cwd": "/p", "transcript_path": str(self.transcript)})
+        turn = notify.call_args.args[0]
+        self.assertEqual(
+            (turn.input_tokens, turn.output_tokens, turn.cache_read_tokens, turn.cache_write_tokens, turn.model),
+            (0, 0, 0, 0, ""),
+        )
+
+    def test_usage_skips_malformed_lines_and_non_integer_values(self):
+        usage = self.usage_of([
+            None, [], 7,
+            {"type": "user", "message": {"content": "go"}},
+            {"type": "assistant", "message": {"id": "a", "usage": "bad"}},
+            {"type": "assistant", "message": {"usage": {"output_tokens": 50}}},
+            self.asst("b", input_tokens="7", output_tokens=True, cache_read_input_tokens=1.5, cache_creation_input_tokens=4),
+        ])
+        self.assertEqual(usage["cache_write_tokens"], 4)
+        self.assertEqual((usage["input_tokens"], usage["output_tokens"], usage["cache_read_tokens"]), (0, 0, 0))
+
+    def test_main_passes_usage_into_the_turn(self):
+        self.write_records([
+            {"type": "user", "message": {"content": "go"}},
+            self.asst("a", model="mm", input_tokens=3, output_tokens=4),
+        ])
+        notify = self.invoke(claude_turn_complete, {"cwd": "/p", "transcript_path": str(self.transcript)})
+        turn = notify.call_args.args[0]
+        self.assertEqual((turn.input_tokens, turn.output_tokens, turn.model), (3, 4, "mm"))
+
     def test_installed_scripts_find_shared_notifier_in_custom_prefix(self):
         hooks = Path(self.temporary.name) / "custom prefix" / "harold" / "hooks"
         hooks.mkdir(parents=True)

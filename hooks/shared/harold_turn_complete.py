@@ -38,6 +38,11 @@ class TurnComplete:
     session_id: str = ""
     turn_started_at: str = ""
     transcript_path: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    model: str = ""
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -137,6 +142,11 @@ def call_harold(
     session_id: str = "",
     turn_started_at: str = "",
     transcript_path: str = "",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    model: str = "",
 ) -> None:
     fields = {
         "pane_id": pane_id,
@@ -152,6 +162,15 @@ def call_harold(
         fields["turn_started_at"] = turn_started_at
     if transcript_path:
         fields["transcript_path"] = transcript_path
+    for name, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("cache_read_tokens", cache_read_tokens),
+        ("cache_write_tokens", cache_write_tokens),
+        ("model", model),
+    ):
+        if value:
+            fields[name] = value
     payload = json.dumps(fields)
     subprocess.run(
         [
@@ -184,4 +203,9 @@ def notify_harold(turn: TurnComplete) -> None:
         session_id=turn.session_id,
         turn_started_at=turn.turn_started_at,
         transcript_path=turn.transcript_path,
+        input_tokens=turn.input_tokens,
+        output_tokens=turn.output_tokens,
+        cache_read_tokens=turn.cache_read_tokens,
+        cache_write_tokens=turn.cache_write_tokens,
+        model=turn.model,
     )

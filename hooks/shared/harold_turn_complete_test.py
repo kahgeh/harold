@@ -135,6 +135,35 @@ class HaroldTurnCompleteTest(unittest.TestCase):
         self.assertEqual(payload["turn_started_at"], "2026-10-15T08:05:00.000Z")
 
 
+    @patch.object(harold_turn_complete.subprocess, "run")
+    def test_call_harold_sends_token_fields_when_set(self, run) -> None:
+        harold_turn_complete.call_harold(
+            pane_id="%8", pane_label="harold:2.3", last_user_prompt="p",
+            assistant_message="a", main_context="harold", grpc_addr="127.0.0.1:55060",
+            input_tokens=1, output_tokens=2, cache_read_tokens=3, cache_write_tokens=4, model="m",
+        )
+
+        command = run.call_args.args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        self.assertEqual(
+            (payload["input_tokens"], payload["output_tokens"], payload["cache_read_tokens"],
+             payload["cache_write_tokens"], payload["model"]),
+            (1, 2, 3, 4, "m"),
+        )
+
+    @patch.object(harold_turn_complete.subprocess, "run")
+    def test_call_harold_leaves_out_zero_tokens_and_empty_model(self, run) -> None:
+        harold_turn_complete.call_harold(
+            pane_id="%8", pane_label="harold:2.3", last_user_prompt="p",
+            assistant_message="a", main_context="harold", grpc_addr="127.0.0.1:55060",
+        )
+
+        command = run.call_args.args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "model"):
+            self.assertNotIn(key, payload)
+
+
 class ManagedHookTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="Harold's test ")
