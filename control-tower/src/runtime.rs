@@ -1591,6 +1591,8 @@ impl RuntimeCore {
                 self.start_notes(action);
                 Control::Continue
             }
+            // The work reads come in the next change; until then these keys read nothing.
+            Effect::WorkRefresh | Effect::WorkShow { .. } => Control::Continue,
             Effect::Navigate { pane_id } if pane_id.starts_with(REX_HOST_PREFIX) => {
                 // An agent on another Rex host: the host and the block come from the pane id
                 // (`rex:<label>/block:<id>`), the session name from the row.

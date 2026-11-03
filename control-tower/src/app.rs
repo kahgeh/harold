@@ -1,4 +1,4 @@
-use crate::api::FocusRecord;
+use crate::api::{FocusRecord, WorkDetail, WorkListing, WorkRow};
 use crate::notes::{NotesAction, NotesEvent, NotesKey, NotesView};
 use crate::questions::{
     BlockEffect, Mode, Outgoing, PickView, QStop, QuestionBlock, Queue, SendResult,
@@ -378,6 +378,37 @@ pub struct App {
     holding_block_keys: bool,
     /// How the WHERE column marks an agent on another Rex host.
     pub host_marker: HostMarker,
+    /// The list that shows: the agents or the work records.
+    view_mode: ViewMode,
+    /// The work view: its rows, cursor and open record.
+    work: WorkState,
+}
+
+/// Which list the control-tower shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// The agent view: the list of agents. The control-tower opens with it.
+    Agents,
+    /// The work view: the open work records at `focus` and `next`.
+    Work,
+}
+
+/// The status line text when the work tool cannot be read.
+pub const WORK_LIST_UNAVAILABLE: &str = "work list unavailable";
+
+/// The state of the work view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkState {
+    rows: Vec<WorkRow>,
+    later_hidden: usize,
+    /// The index of the row under the cursor.
+    cursor: usize,
+    /// The name of the record that `l` or Enter asked for, until it comes.
+    pending: Option<String>,
+    /// The open record. It shows in the place of the list.
+    record: Option<WorkDetail>,
+    /// The first line of the open record that shows.
+    record_scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +444,12 @@ pub enum Effect {
     OpenLink(String),
     /// The notes search asks the runtime to read a list or open a vault note.
     Notes(NotesAction),
+    /// The runtime reads the work list now.
+    WorkRefresh,
+    /// The runtime reads one work record with its decisions and links.
+    WorkShow {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,8 +474,14 @@ struct CommandRow {
     on: &'static str,
 }
 
-/// The commands in palette order: voice, messaging, call, watches.
-const COMMAND_TABLE: [CommandRow; 4] = [
+/// The commands in palette order: view, voice, messaging, call, watches.
+const COMMAND_TABLE: [CommandRow; 5] = [
+    CommandRow {
+        key: 'V',
+        hint: "view",
+        off: "View: work",
+        on: "View: agents",
+    },
     CommandRow {
         key: 'm',
         hint: "voice",
@@ -466,12 +509,16 @@ const COMMAND_TABLE: [CommandRow; 4] = [
 ];
 
 /// The keys that run a command from the list. They come from `COMMAND_TABLE`.
-pub const COMMAND_KEYS: [char; 4] = [
+pub const COMMAND_KEYS: [char; 5] = [
     COMMAND_TABLE[0].key,
     COMMAND_TABLE[1].key,
     COMMAND_TABLE[2].key,
     COMMAND_TABLE[3].key,
+    COMMAND_TABLE[4].key,
 ];
+
+/// The key of the view command, which switches between the agent view and the work view.
+const VIEW_KEY: char = COMMAND_TABLE[0].key;
 
 /// Keys kept for later work (`v` for a select mode, `w` for a view). Nothing uses them now, and no command may take them.
 pub const KEPT_KEYS: [char; 2] = ['v', 'w'];
@@ -537,6 +584,8 @@ impl App {
             swallowing_keys: false,
             holding_block_keys: false,
             host_marker: HostMarker::default(),
+            view_mode: ViewMode::Agents,
+            work: WorkState::default(),
         }
     }
 
@@ -1105,6 +1154,11 @@ impl App {
         self.now_line = None;
         self.focus.clear();
         self.snapshot.harold_version = None;
+        // The view command shows only while live, so a lost connection goes back to the
+        // agent view: the user is never held in the work view.
+        if self.view_mode == ViewMode::Work {
+            self.toggle_view();
+        }
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
         } else {
@@ -1190,22 +1244,34 @@ impl App {
         if self.connection != ConnectionState::Live {
             return Vec::new();
         }
-        let [voice, messaging, call, watches] = &COMMAND_TABLE;
-        let mut all = match self.voice() {
-            VoiceState::On => vec![PaletteEntry {
+        let [view, voice, messaging, call, watches] = &COMMAND_TABLE;
+        let in_work = self.view_mode == ViewMode::Work;
+        // The App runs this entry itself: see `run_entry`.
+        let mut all = vec![PaletteEntry {
+            label: if in_work { view.on } else { view.off },
+            key: view.key,
+            hint: view.hint,
+            effect: if in_work {
+                Effect::None
+            } else {
+                Effect::WorkRefresh
+            },
+        }];
+        match self.voice() {
+            VoiceState::On => all.push(PaletteEntry {
                 label: voice.off,
                 key: voice.key,
                 hint: voice.hint,
                 effect: Effect::SetTtsMuted(true),
-            }],
-            VoiceState::Muted => vec![PaletteEntry {
+            }),
+            VoiceState::Muted => all.push(PaletteEntry {
                 label: voice.on,
                 key: voice.key,
                 hint: voice.hint,
                 effect: Effect::SetTtsMuted(false),
-            }],
-            VoiceState::Unknown => Vec::new(),
-        };
+            }),
+            VoiceState::Unknown => {}
+        }
         if self.has_snapshot {
             let paused = self.snapshot.messaging_paused;
             all.push(PaletteEntry {
@@ -1265,9 +1331,9 @@ impl App {
             KeyCode::Esc => self.palette = None,
             KeyCode::Enter => {
                 if let Some(entry) = entries.get(palette.selected) {
-                    let effect = entry.effect.clone();
+                    let entry = entry.clone();
                     self.palette = None;
-                    return effect;
+                    return self.run_entry(entry);
                 }
             }
             KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
@@ -1355,6 +1421,13 @@ impl App {
         if self.notes.is_some() {
             return self.handle_notes_key(key.code);
         }
+        if self.view_mode == ViewMode::Work {
+            // The work view takes its own keys. The question block is not in it.
+            if self.palette.is_some() {
+                return self.handle_palette_key(key.code);
+            }
+            return self.handle_work_key(key.code);
+        }
         if self.swallowing_keys {
             // Esc returns the keys to the list, which already has the cursor.
             if key.code == KeyCode::Esc {
@@ -1439,9 +1512,7 @@ impl App {
                 return Effect::Call(CallAction::TalkNow);
             }
             KeyCode::Char(character) if COMMAND_KEYS.contains(&character) => {
-                if let Some(entry) = self.commands().into_iter().find(|e| e.key == character) {
-                    return entry.effect;
-                }
+                return self.run_command_key(character);
             }
             KeyCode::Char('n') => self.select_waiting(true),
             KeyCode::Char('N') => self.select_waiting(false),
@@ -1463,6 +1534,170 @@ impl App {
             _ => {}
         }
         Effect::None
+    }
+
+    /// Runs the command of `character` when it shows now. A hidden command does nothing.
+    fn run_command_key(&mut self, character: char) -> Effect {
+        match self.commands().into_iter().find(|e| e.key == character) {
+            Some(entry) => self.run_entry(entry),
+            None => Effect::None,
+        }
+    }
+
+    /// Runs a command entry. The view command changes the App, so the App runs it here;
+    /// every other command goes to the runtime as its effect.
+    fn run_entry(&mut self, entry: PaletteEntry) -> Effect {
+        if entry.key == VIEW_KEY {
+            return self.toggle_view();
+        }
+        entry.effect
+    }
+
+    /// Switches between the agent view and the work view. Opening the work view puts the
+    /// cursor on the first row, closes any record and asks for the list now.
+    fn toggle_view(&mut self) -> Effect {
+        self.work.pending = None;
+        self.work.record = None;
+        self.work.record_scroll = 0;
+        match self.view_mode {
+            ViewMode::Agents => {
+                self.view_mode = ViewMode::Work;
+                self.work.cursor = 0;
+                Effect::WorkRefresh
+            }
+            ViewMode::Work => {
+                self.view_mode = ViewMode::Agents;
+                Effect::None
+            }
+        }
+    }
+
+    /// Handles a key in the work view: `j`, `k`, `l`, Enter, `h`, Esc, `/` and the
+    /// command keys. Every other key does nothing.
+    fn handle_work_key(&mut self, code: KeyCode) -> Effect {
+        match code {
+            KeyCode::Char('/') => {
+                self.palette = Some(PaletteState {
+                    query: String::new(),
+                    selected: 0,
+                });
+            }
+            KeyCode::Char(character) if COMMAND_KEYS.contains(&character) => {
+                return self.run_command_key(character);
+            }
+            _ if self.work.record.is_some() => self.handle_record_key(code),
+            KeyCode::Char('j') => {
+                self.work.cursor =
+                    (self.work.cursor + 1).min(self.work.rows.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') => self.work.cursor = self.work.cursor.saturating_sub(1),
+            KeyCode::Char('l') | KeyCode::Enter => {
+                if let Some(row) = self.work.rows.get(self.work.cursor) {
+                    self.work.pending = Some(row.name.clone());
+                    return Effect::WorkShow {
+                        name: row.name.clone(),
+                    };
+                }
+            }
+            _ => {}
+        }
+        Effect::None
+    }
+
+    /// Handles a key while a record is open: `j` and `k` scroll it, `h` and Esc go back
+    /// to the row it came from.
+    fn handle_record_key(&mut self, code: KeyCode) {
+        let Some(record) = &self.work.record else {
+            return;
+        };
+        match code {
+            KeyCode::Char('j') => {
+                let last = record_line_count(record).saturating_sub(1);
+                self.work.record_scroll = (self.work.record_scroll + 1).min(last);
+            }
+            KeyCode::Char('k') => {
+                self.work.record_scroll = self.work.record_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('h') | KeyCode::Esc => {
+                let name = record.name.clone();
+                self.work.record = None;
+                self.work.record_scroll = 0;
+                // A poll can move the row while the record is open: find it by name.
+                if let Some(index) = self.work.rows.iter().position(|row| row.name == name) {
+                    self.work.cursor = index;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The list that shows now.
+    pub const fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// Takes a read of the work list, and reports whether it changed. The cursor clamps
+    /// to the last row, and an open record stays open. A good read clears the status
+    /// that a failed read set.
+    pub fn observe_work_list(&mut self, listing: WorkListing) -> bool {
+        if self.runtime_status == Some(RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.to_owned()))
+        {
+            self.runtime_status = None;
+        }
+        let changed =
+            self.work.rows != listing.rows || self.work.later_hidden != listing.later_hidden;
+        self.work.rows = listing.rows;
+        self.work.later_hidden = listing.later_hidden;
+        self.work.cursor = self.work.cursor.min(self.work.rows.len().saturating_sub(1));
+        changed
+    }
+
+    /// Sets the status line after a failed read of the work tool. The last rows stay.
+    /// A retry status stays, because the runtime reads its delay.
+    pub fn work_list_failed(&mut self) {
+        self.work.pending = None;
+        if matches!(self.runtime_status, Some(RuntimeStatus::Retrying { .. })) {
+            return;
+        }
+        self.runtime_status = Some(RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.to_owned()));
+    }
+
+    /// Opens the record that `l` or Enter asked for. A record that comes after the user
+    /// left the work view, or that nobody asked for, is dropped.
+    pub fn observe_work_record(&mut self, detail: WorkDetail) {
+        if self.view_mode != ViewMode::Work
+            || self.work.pending.as_deref() != Some(detail.name.as_str())
+        {
+            return;
+        }
+        self.work.pending = None;
+        self.work.record = Some(detail);
+        self.work.record_scroll = 0;
+    }
+
+    /// The rows of the work view, at `focus` then `next`.
+    pub fn work_rows(&self) -> &[WorkRow] {
+        &self.work.rows
+    }
+
+    /// How many open work records the work view hides.
+    pub const fn work_later_hidden(&self) -> usize {
+        self.work.later_hidden
+    }
+
+    /// The index of the work row under the cursor.
+    pub const fn work_cursor(&self) -> usize {
+        self.work.cursor
+    }
+
+    /// The open work record, if any.
+    pub const fn work_record(&self) -> Option<&WorkDetail> {
+        self.work.record.as_ref()
+    }
+
+    /// The first line of the open record that shows.
+    pub const fn work_record_scroll(&self) -> usize {
+        self.work.record_scroll
     }
 
     fn replace_snapshot(
@@ -1651,6 +1886,13 @@ struct RowLabel {
 /// ` :window.pane` when they share a session, otherwise the session's second
 /// word (or, lacking one, the whole tmux target) is added so same-address panes
 /// of different sessions in one group still differ.
+/// The number of lines a work record shows: its title, the priority and status, the
+/// waits for, the next step, the decisions head, one line for each decision, the links
+/// head and one line for each link. The scroll stops at the last line.
+pub fn record_line_count(record: &WorkDetail) -> usize {
+    6 + record.decisions.len() + record.links.len()
+}
+
 fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
     rows.iter()
         .map(|row| {
@@ -1680,6 +1922,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+    use crate::api::WorkDecision;
     use crate::questions::{AnswerKind, Mode};
     use AgentState::{Blocked, Done, Error, Idle, Unknown, Working};
 
@@ -2996,7 +3239,7 @@ mod tests {
             app.questions.view().unwrap().mode,
             Mode::Note {
                 kind: crate::questions::NoteKind::Revise,
-                text: "mpCW".into()
+                text: "VmpCW".into()
             }
         );
     }
@@ -3014,7 +3257,372 @@ mod tests {
         for key in table_keys {
             assert!(!KEPT_KEYS.contains(&key), "key {key:?} is kept");
         }
-        assert_eq!(COMMAND_KEYS.to_vec(), keys[..4]);
+        assert_eq!(COMMAND_KEYS.to_vec(), keys[..5]);
+    }
+
+    fn work_row(name: &str, priority: &str) -> WorkRow {
+        WorkRow {
+            name: name.into(),
+            priority: priority.into(),
+            status: "building".into(),
+            next_step: format!("next step of {name}"),
+        }
+    }
+
+    fn work_listing(names: &[&str], later_hidden: usize) -> WorkListing {
+        WorkListing {
+            rows: names.iter().map(|name| work_row(name, "focus")).collect(),
+            later_hidden,
+        }
+    }
+
+    fn work_detail(name: &str, decisions: usize, links: usize) -> WorkDetail {
+        WorkDetail {
+            name: name.into(),
+            title: format!("title of {name}"),
+            priority: "focus".into(),
+            status: "building".into(),
+            waits_for: String::new(),
+            next_step: "next".into(),
+            decisions: (1..=decisions)
+                .map(|number| WorkDecision {
+                    number,
+                    mark: "agreed".into(),
+                    who: "the user".into(),
+                    at: "2026-11-03".into(),
+                    text: format!("decision {number}"),
+                })
+                .collect(),
+            links: (1..=links).map(|link| format!("note:{link}")).collect(),
+        }
+    }
+
+    /// A live app in the work view with the rows `a`, `b` and `c`.
+    fn work_app() -> App {
+        let mut app = live_voice_app(false);
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::WorkRefresh);
+        app.observe_work_list(work_listing(&["a", "b", "c"], 2));
+        app
+    }
+
+    fn view_label(app: &App) -> Option<&'static str> {
+        app.commands()
+            .into_iter()
+            .find(|entry| entry.key == 'V')
+            .map(|entry| entry.label)
+    }
+
+    #[test]
+    fn view_is_first_row_and_v_selects_it_before_voice() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('v'));
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["View: work", "Voice: mute"]);
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::WorkRefresh);
+        assert!(app.palette.is_none());
+        assert_eq!(app.view_mode(), ViewMode::Work);
+
+        // In the work view the palette offers the way back, and it runs no effect.
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('v'));
+        assert_eq!(app.palette_entries()[0].label, "View: agents");
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+    }
+
+    #[test]
+    fn view_row_shows_while_live_even_with_no_snapshot() {
+        let mut app = App::new(
+            ConnectionState::Live,
+            snapshot(0, 0, Vec::new()),
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        );
+        app.has_snapshot = false;
+        assert_eq!(view_label(&app), Some("View: work"));
+        let mut stale = live_voice_app(false);
+        stale.mark_disconnected();
+        assert_eq!(view_label(&stale), None);
+        assert_eq!(stale.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(stale.view_mode(), ViewMode::Agents);
+    }
+
+    #[test]
+    fn capital_v_switches_both_ways() {
+        let mut app = live_voice_app(false);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+        assert_eq!(view_label(&app), Some("View: work"));
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::WorkRefresh);
+        assert_eq!(app.view_mode(), ViewMode::Work);
+        assert_eq!(view_label(&app), Some("View: agents"));
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+        assert_eq!(view_label(&app), Some("View: work"));
+    }
+
+    #[test]
+    fn command_table_keys_have_no_clash_with_v() {
+        assert!(COMMAND_KEYS.contains(&'V'));
+        assert_eq!(COMMAND_TABLE[0].key, 'V');
+        assert_eq!(COMMAND_TABLE[0].hint, "view");
+        assert_eq!(COMMAND_TABLE[0].off, "View: work");
+        assert_eq!(COMMAND_TABLE[0].on, "View: agents");
+        assert_eq!(KEPT_KEYS, ['v', 'w']);
+        let table: Vec<char> = COMMAND_TABLE.iter().map(|row| row.key).collect();
+        assert_eq!(COMMAND_KEYS.to_vec(), table);
+        for key in "jklhgG/cnNqfostxrabzyduKJ".chars() {
+            assert!(!COMMAND_KEYS.contains(&key), "key {key:?} is a command key");
+        }
+    }
+
+    #[test]
+    fn opening_the_work_view_resets_the_cursor_and_closes_the_record() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::WorkRefresh);
+        assert_eq!(app.work_cursor(), 0);
+        assert_eq!(app.work_record(), None);
+    }
+
+    #[test]
+    fn work_view_j_k_move_and_clamp() {
+        let mut app = work_app();
+        assert_eq!(app.work_cursor(), 0);
+        assert_eq!(app.handle_key(KeyCode::Char('k')), Effect::None);
+        assert_eq!(app.work_cursor(), 0);
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.work_cursor(), 1);
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.work_cursor(), 2);
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.work_cursor(), 1);
+    }
+
+    #[test]
+    fn empty_work_list_keys_do_nothing() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('V'));
+        app.observe_work_list(work_listing(&[], 0));
+        for key in ['j', 'k', 'l', 'h'] {
+            assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None);
+        }
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert_eq!(app.work_cursor(), 0);
+        assert!(app.work_rows().is_empty());
+    }
+
+    #[test]
+    fn work_view_l_and_enter_open_the_record_with_show_effect() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(
+            app.handle_key(KeyCode::Char('l')),
+            Effect::WorkShow { name: "b".into() }
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::WorkShow { name: "b".into() }
+        );
+        assert_eq!(app.work_record(), None);
+        app.observe_work_record(work_detail("b", 2, 1));
+        assert_eq!(
+            app.work_record().map(|detail| detail.name.as_str()),
+            Some("b")
+        );
+        assert_eq!(app.work_record_scroll(), 0);
+
+        let mut empty = live_voice_app(false);
+        empty.handle_key(KeyCode::Char('V'));
+        assert_eq!(empty.handle_key(KeyCode::Char('l')), Effect::None);
+        assert_eq!(empty.handle_key(KeyCode::Enter), Effect::None);
+    }
+
+    #[test]
+    fn a_record_nobody_asked_for_is_dropped() {
+        let mut app = work_app();
+        app.observe_work_record(work_detail("a", 0, 0));
+        assert_eq!(app.work_record(), None);
+
+        // A record that comes after the switch to the agents does not open.
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('V'));
+        app.observe_work_record(work_detail("a", 0, 0));
+        assert_eq!(app.work_record(), None);
+    }
+
+    #[test]
+    fn record_scrolls_with_j_k_and_h_or_esc_returns_to_the_same_row() {
+        for back in [KeyCode::Char('h'), KeyCode::Esc] {
+            let mut app = work_app();
+            app.handle_key(KeyCode::Char('j'));
+            app.handle_key(KeyCode::Char('l'));
+            app.observe_work_record(work_detail("b", 2, 1));
+            assert_eq!(app.handle_key(KeyCode::Char('k')), Effect::None);
+            assert_eq!(app.work_record_scroll(), 0);
+            app.handle_key(KeyCode::Char('j'));
+            app.handle_key(KeyCode::Char('j'));
+            assert_eq!(app.work_record_scroll(), 2);
+            for _ in 0..20 {
+                app.handle_key(KeyCode::Char('j'));
+            }
+            // Title, priority, waits for, next, the decisions head, 2 decisions,
+            // the links head and 1 link: 9 lines, so the last scroll is 8.
+            assert_eq!(app.work_record_scroll(), 8);
+            assert_eq!(app.work_cursor(), 1);
+            assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+            assert_eq!(app.handle_key(back), Effect::None);
+            assert_eq!(app.work_record(), None);
+            assert_eq!(app.work_cursor(), 1);
+            assert_eq!(app.view_mode(), ViewMode::Work);
+        }
+    }
+
+    #[test]
+    fn back_from_a_record_finds_its_row_after_a_poll_moved_it() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(work_detail("b", 0, 0));
+        app.observe_work_list(work_listing(&["x", "y", "b"], 0));
+        assert!(app.work_record().is_some());
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.work_cursor(), 2);
+    }
+
+    #[test]
+    fn agent_keys_do_nothing_in_the_work_view() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        let before = app.clone();
+        for key in "ctnNfqsgGoxrabzyduKJvw ".chars() {
+            assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None, "{key:?}");
+            assert_eq!(app, before, "key {key:?} changed the state");
+        }
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Backspace] {
+            assert_eq!(app.handle_key(code), Effect::None);
+            assert_eq!(app, before);
+        }
+    }
+
+    #[test]
+    fn command_keys_still_run_in_the_work_view() {
+        let mut app = work_app();
+        assert_eq!(
+            app.handle_key(KeyCode::Char('m')),
+            Effect::SetTtsMuted(true)
+        );
+        assert_eq!(app.view_mode(), ViewMode::Work);
+    }
+
+    #[test]
+    fn slash_opens_the_palette_in_the_work_view() {
+        let mut app = work_app();
+        assert_eq!(app.handle_key(KeyCode::Char('/')), Effect::None);
+        assert!(app.palette.is_some());
+        type_text(&mut app, "jk");
+        assert_eq!(app.palette.as_ref().unwrap().query, "jk");
+        assert_eq!(app.work_cursor(), 0);
+        app.handle_key(KeyCode::Esc);
+        assert!(app.palette.is_none());
+        assert_eq!(app.view_mode(), ViewMode::Work);
+    }
+
+    #[test]
+    fn rows_shrinking_clamps_the_cursor() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert!(app.observe_work_list(work_listing(&["a"], 0)));
+        assert_eq!(app.work_cursor(), 0);
+        assert!(!app.observe_work_list(work_listing(&["a"], 0)));
+        assert!(app.observe_work_list(work_listing(&[], 0)));
+        assert_eq!(app.work_cursor(), 0);
+        assert_eq!(app.work_later_hidden(), 0);
+    }
+
+    #[test]
+    fn rows_shrinking_keeps_an_open_record_open() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(work_detail("c", 0, 0));
+        app.observe_work_list(work_listing(&["a"], 0));
+        assert_eq!(app.work_cursor(), 0);
+        assert!(app.work_record().is_some());
+    }
+
+    #[test]
+    fn switching_to_agents_closes_an_open_record() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(work_detail("a", 1, 0));
+        assert!(app.work_record().is_some());
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::None);
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+        assert_eq!(app.work_record(), None);
+        assert_eq!(app.handle_key(KeyCode::Char('V')), Effect::WorkRefresh);
+        assert_eq!(app.work_record(), None);
+        assert_eq!(app.work_record_scroll(), 0);
+    }
+
+    #[test]
+    fn work_list_failed_sets_status_and_keeps_rows() {
+        let mut app = work_app();
+        app.work_list_failed();
+        assert_eq!(
+            app.runtime_status(),
+            Some(&RuntimeStatus::SourceError(WORK_LIST_UNAVAILABLE.into()))
+        );
+        assert_eq!(WORK_LIST_UNAVAILABLE, "work list unavailable");
+        let names: Vec<_> = app
+            .work_rows()
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(app.work_later_hidden(), 2);
+
+        // The next good read clears the status.
+        app.observe_work_list(work_listing(&["a"], 0));
+        assert_eq!(app.runtime_status(), None);
+    }
+
+    #[test]
+    fn a_lost_connection_returns_to_the_agent_view() {
+        let mut app = work_app();
+        app.handle_key(KeyCode::Char('l'));
+        app.observe_work_record(work_detail("a", 0, 0));
+        app.mark_disconnected();
+        assert_eq!(app.view_mode(), ViewMode::Agents);
+        assert_eq!(app.work_record(), None);
+    }
+
+    #[test]
+    fn work_list_failed_keeps_another_status() {
+        let mut app = work_app();
+        app.set_runtime_status(RuntimeStatus::CallFailed("x".into()));
+        app.observe_work_list(work_listing(&["a"], 0));
+        assert_eq!(
+            app.runtime_status(),
+            Some(&RuntimeStatus::CallFailed("x".into()))
+        );
+        app.set_runtime_status(RuntimeStatus::Retrying {
+            endpoint: "e".into(),
+            detail: "d".into(),
+            delay_ms: 5,
+        });
+        app.work_list_failed();
+        assert!(matches!(
+            app.runtime_status(),
+            Some(RuntimeStatus::Retrying { .. })
+        ));
     }
 
     fn live_watches_app(running: u32, paused: u32, capped: u32) -> App {
@@ -3086,7 +3694,7 @@ mod tests {
         let mut app = call_app(CallState::Off);
         app.handle_key(KeyCode::Char('/'));
         assert_eq!(app.palette_entries(), app.commands());
-        assert_eq!(app.commands().len(), 3);
+        assert_eq!(app.commands().len(), 4);
     }
 
     #[test]
@@ -3120,7 +3728,7 @@ mod tests {
         let mut app = live_messaging_app(false);
         app.handle_key(KeyCode::Char('/'));
         let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
-        assert_eq!(labels, ["Voice: mute", "Messaging: pause"]);
+        assert_eq!(labels, ["View: work", "Voice: mute", "Messaging: pause"]);
     }
 
     #[test]

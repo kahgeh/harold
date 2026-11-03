@@ -5251,7 +5251,7 @@ mod tests {
             last_transcript: String::new(),
             last_result: None,
         }));
-        assert_eq!(app.commands().len(), 3);
+        assert_eq!(app.commands().len(), 4);
         app.handle_key(crossterm::event::KeyCode::Char('/'));
         for width in [40, 60, 80] {
             let backend = TestBackend::new(width, 12);
@@ -5267,6 +5267,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             for (label, key) in [
+                ("View: work", 'V'),
                 ("Voice: mute", 'm'),
                 ("Messaging: pause", 'p'),
                 ("Call: start", 'C'),
