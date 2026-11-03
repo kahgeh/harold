@@ -147,14 +147,11 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-26: ADR 0021, the pod's shared tools write `withdrawn/`, `started/` and `merged/` files once, and Harold reads them first, with the older git and worktree sources as a fallback. `pod_stats` also reads the agent snapshot, pane ids and folders only, to count pods and agents by role. [ADR 0021](../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)
 - 2026-11-03: ADR 0028, work records live in their own Turso files, and Harold itself moves the open ones to a new file every `rotation_days` days after a count check. [ADR 0028](../adr/0028-work-records-live-in-rotating-turso-files-of-their-own.md)
 - 2026-11-03: The release tool only reads: it takes each spec's state from `read_specs` in `pod_stats.rs`, so the pod metrics and the next release use one rule. They differ only where the poller's record of worktrees seen to go is the only source of a merge. [Release reference](../references/tools/release.md)
-<<<<<<< HEAD
 - 2026-11-03: Pod signals. Pod stats records free slots with work waiting, redo, spec size, agents by state, and work waiting in three lists. The release tool publishes the fourth list, `merged_not_released`, itself, with the names that pod stats exports, so pod stats never calls the release tool. No ADR. [Telemetry reference](../references/telemetry/README.md)
 - 2026-11-03: ADR 0030, Harold serves page collections: folders of pages named in `[[web_app.collections]]`, behind the web app's checks and on the specs listener, and an HTML page is sandboxed with no script and nothing from outside. [ADR 0030](../adr/0030-harold-serves-page-collections-sandboxed.md)
 - 2026-11-04: Turn tokens. Harold counts each Claude Code turn's tokens by kind, model, role and pod, and a build worker's tokens by spec. The role, product and spec id come from the last pod poll. No ADR. [Telemetry reference](../references/telemetry/README.md)
 - 2026-11-04: ADR 0031, a tool takes declared counters, gauges and events from local panes under a prefix that the caller's pane allows, and exports them as `agent.*`. An event carries declared values only, never free text. The prefix check is a mix-up check, not security. [ADR 0031](../adr/0031-agents-record-signals-through-harold-under-a-prefix.md)
-=======
 - 2026-11-02: Harold runs on Linux as a systemd user service, as a stand-alone Harold. It has no speech, no web app and no line to the phone yet. [Operation reference](../references/operation/README.md#linux-and-the-systemd-user-service)
->>>>>>> 546f109 (fix: harden the Linux service control and correct the Linux docs)
 
 ## Departures from the standards
 
