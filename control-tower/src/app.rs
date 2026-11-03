@@ -122,11 +122,8 @@ impl AgentRow {
     /// What the user calls this agent: its role name, or else the last component of its
     /// working directory.
     pub fn name(&self) -> &str {
-        match self.role.as_str() {
-            "chief" => return "Chief",
-            "coordinator" => return "Coordinator",
-            "pnem" => return "PnEM",
-            _ => {}
+        if let Some(role) = self.role_name() {
+            return role;
         }
         if self.working_directory.is_empty() {
             return &self.tmux_target;
@@ -139,6 +136,26 @@ impl AgentRow {
         {
             Some(last) if !last.is_empty() => last,
             _ => "/",
+        }
+    }
+
+    /// The display name of the row's role, when it has one.
+    fn role_name(&self) -> Option<&str> {
+        match self.role.as_str() {
+            "chief" => Some("Chief"),
+            "coordinator" => Some("Coordinator"),
+            "pnem" => Some("PnEM"),
+            _ => None,
+        }
+    }
+
+    /// The text a row shows in the list: its role, else its window name, else its
+    /// folder, else its pane label.
+    pub fn shown_name(&self) -> &str {
+        match self.role_name() {
+            Some(role) => role,
+            None if self.window_name.is_empty() => self.name(),
+            None => &self.window_name,
         }
     }
 
@@ -495,7 +512,7 @@ impl App {
     /// unless the name collides). Renderers truncate the name, never the suffix.
     pub fn label_parts<'a>(&'a self, row: &'a AgentRow) -> (&'a str, &'a str) {
         self.row_label(row).map_or_else(
-            || (row.name(), ""),
+            || (row.shown_name(), ""),
             |label| label.full.split_at(label.full.len() - label.suffix_len),
         )
     }
@@ -1504,9 +1521,9 @@ struct RowLabel {
 fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
     rows.iter()
         .map(|row| {
-            let mut colliders = rows
-                .iter()
-                .filter(|other| other.group() == row.group() && other.name() == row.name());
+            let mut colliders = rows.iter().filter(|other| {
+                other.group() == row.group() && other.shown_name() == row.shown_name()
+            });
             let suffix = if colliders.clone().count() < 2 {
                 String::new()
             } else if colliders.any(|other| other.session_name != row.session_name) {
@@ -1518,7 +1535,7 @@ fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
                 format!(" :{}.{}", row.window_index, row.pane_index)
             };
             RowLabel {
-                full: format!("{}{suffix}", row.name()),
+                full: format!("{}{suffix}", row.shown_name()),
                 suffix_len: suffix.len(),
             }
         })

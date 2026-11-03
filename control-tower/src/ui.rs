@@ -666,12 +666,19 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             Line::raw(format!(
                 "{}{}{suffix}",
                 host_prefix(agent, app.host_marker, pad),
-                where_text(agent, name)
+                name
             ))
             .width()
         })
         .max()
         .unwrap_or(0);
+    // A group header has no indent and shows in full where a row's text would.
+    let header_longest = groups
+        .iter()
+        .map(|(group, _)| Line::raw(*group).width().saturating_sub(2))
+        .max()
+        .unwrap_or(0);
+    let longest = longest.max(header_longest);
     let where_width = where_column_width(wide, area.width.saturating_sub(2), longest);
     let widths = inventory_widths(wide, where_width);
     let work_width = work_cell_width(area, &widths);
@@ -720,7 +727,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                         "  {}",
                         fit_with_suffix(
                             &host_prefix(agent, app.host_marker, pad),
-                            (&where_text(agent, name), suffix),
+                            (&name, suffix),
                             usize::from(where_width) - 2
                         )
                     )
@@ -1503,17 +1510,6 @@ fn host_prefix(agent: &crate::app::AgentRow, marker: HostMarker, pad: bool) -> S
         return "   ".to_owned();
     }
     String::new()
-}
-
-/// What a row shows as its name: the role when it has one, else the window name,
-/// else `name` (the folder or the pane label).
-fn where_text(agent: &crate::app::AgentRow, name: &str) -> String {
-    if matches!(agent.role.as_str(), "chief" | "coordinator" | "pnem")
-        || agent.window_name.is_empty()
-    {
-        return name.to_owned();
-    }
-    agent.window_name.clone()
 }
 
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
@@ -3441,7 +3437,7 @@ mod tests {
     }
 
     #[test]
-    fn timing_tests_local_shows_in_full_after_a_host_icon_with_the_detail_panel() {
+    fn timing_tests_local_shows_in_full_after_a_host_icon_on_the_row_line() {
         let mut remote = located(
             "rex:omarchy/block:abc",
             AgentState::Working,
@@ -3453,11 +3449,11 @@ mod tests {
         remote.host = "omarchy".into();
         remote.host_icon = "arch".into();
         remote.window_name = "timing-tests-local".into();
-        let selected = remote.incarnation.clone();
-        let mut app = live_app(vec![remote], Some(selected));
+        let mut app = live_app(vec![remote], None);
         app.host_marker = HostMarker::Glyph;
         let content = rendered_lines(&app, 120, 29, 100_000);
-        assert!(content.contains("timing-tests-local"), "{content}");
+        let line = content.lines().find(|l| l.contains("● WORKING")).unwrap();
+        assert!(line.contains("\u{f303}  timing-tests-local"), "{line}");
     }
 
     #[test]
@@ -3490,14 +3486,11 @@ mod tests {
     #[test]
     fn where_text_picks_role_then_window_then_folder() {
         let coordinator = plain_row("pod", "/w/harold", "coordinator", "harold:0.1", 1);
-        assert_eq!(
-            super::where_text(&coordinator, "Coordinator"),
-            "Coordinator"
-        );
+        assert_eq!(coordinator.shown_name(), "Coordinator");
         let worker = plain_row("work-records", "/w/harold", "", "harold:0.2", 2);
-        assert_eq!(super::where_text(&worker, "harold"), "work-records");
+        assert_eq!(worker.shown_name(), "work-records");
         let bare = plain_row("", "/w/harold", "", "harold:0.3", 3);
-        assert_eq!(super::where_text(&bare, "harold"), "harold");
+        assert_eq!(bare.shown_name(), "harold");
     }
 
     #[test]
@@ -3512,11 +3505,51 @@ mod tests {
     fn two_rows_with_one_window_name_keep_the_pane_suffix() {
         let mut first = plain_row("work", "/w/harold", "", "harold:0.1", 1);
         first.pane_index = 1;
-        let mut second = plain_row("work", "/w/harold", "", "harold:0.2", 2);
+        let mut second = plain_row("work", "/w/other", "", "harold:0.2", 2);
         second.pane_index = 2;
         let content = rendered_lines(&live_app(vec![first, second], None), 140, 29, 100_000);
         assert!(content.contains(" :0.1"), "{content}");
         assert!(content.contains(" :0.2"), "{content}");
+    }
+
+    #[test]
+    fn two_rows_with_one_folder_and_two_window_names_get_no_suffix() {
+        let first = plain_row("work-one", "/w/harold", "", "harold:0.1", 1);
+        let second = plain_row("work-two", "/w/harold", "", "harold:0.2", 2);
+        let content = rendered_lines(&live_app(vec![first, second], None), 140, 29, 100_000);
+        assert!(content.contains("work-one"), "{content}");
+        assert!(content.contains("work-two"), "{content}");
+        assert!(!content.contains(" :0."), "{content}");
+    }
+
+    #[test]
+    fn a_host_row_shows_the_marker_then_the_window_name_and_not_the_folder() {
+        let mut remote = plain_row("work-records", "/w/harold", "", "harold:0.1", 1);
+        remote.host = "omarchy".into();
+        remote.host_icon = "arch".into();
+        let mut app = live_app(vec![remote], None);
+        app.host_marker = HostMarker::Glyph;
+        let content = rendered_lines(&app, 140, 29, 100_000);
+        let line = content.lines().find(|l| l.contains("● WORKING")).unwrap();
+        assert!(line.contains("\u{f303}  work-records"), "{line}");
+        assert!(!line.contains("harold"), "{line}");
+    }
+
+    #[test]
+    fn a_24_character_group_name_shows_in_full_in_the_wide_layout() {
+        let group = "a-group-name-of-24-chars";
+        assert_eq!(group.chars().count(), 24);
+        let mut agent = plain_row("w", "/w/x", "", &format!("{group}:0.1"), 1);
+        agent.session_name = group.into();
+        let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
+        let header = content
+            .lines()
+            .find(|l| l.contains("a-group-name"))
+            .unwrap();
+        let text: String = header.chars().skip(1).collect();
+        let text = text.trim_start();
+        assert!(text.starts_with(group), "{header}");
+        assert!(!header.contains('…'), "{header}");
     }
 
     #[test]
@@ -3530,7 +3563,7 @@ mod tests {
             0,
         );
         agent.window_name = "a-very-long-window-name".into();
-        let text = super::where_text(&agent, "sre");
+        let text = agent.shown_name().to_owned();
         assert_eq!(
             super::fit_with_suffix("", (&text, " :0.3"), 16),
             "a-very-lon… :0.3"
@@ -3629,7 +3662,7 @@ mod tests {
         );
         let lines = super::detail_lines(&agent, 100_000, 60, super::StepMode::Full);
         assert!(lines.iter().all(|l| !l.to_string().starts_with("WINDOW")));
-        assert_eq!(super::where_text(&agent, "harold"), "harold");
+        assert_eq!(agent.shown_name(), agent.name());
         let content = rendered_lines(&live_app(vec![agent], None), 140, 29, 100_000);
         let row_line = content
             .lines()
