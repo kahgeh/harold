@@ -384,12 +384,14 @@ pub struct PaletteState {
 pub struct PaletteEntry {
     pub label: &'static str,
     pub key: char,
+    pub hint: &'static str,
     pub effect: Effect,
 }
 
 /// One command of the palette: its key, and its label before and after it acts.
 struct CommandRow {
     key: char,
+    hint: &'static str,
     off: &'static str,
     on: &'static str,
 }
@@ -398,16 +400,19 @@ struct CommandRow {
 const COMMAND_TABLE: [CommandRow; 3] = [
     CommandRow {
         key: 'm',
+        hint: "voice",
         off: "Voice: mute",
         on: "Voice: unmute",
     },
     CommandRow {
         key: 'p',
+        hint: "pause",
         off: "Messaging: pause",
         on: "Messaging: resume",
     },
     CommandRow {
         key: 'C',
+        hint: "call",
         off: "Call: start",
         on: "Call: end",
     },
@@ -1062,11 +1067,13 @@ impl App {
             VoiceState::On => vec![PaletteEntry {
                 label: voice.off,
                 key: voice.key,
+                hint: voice.hint,
                 effect: Effect::SetTtsMuted(true),
             }],
             VoiceState::Muted => vec![PaletteEntry {
                 label: voice.on,
                 key: voice.key,
+                hint: voice.hint,
                 effect: Effect::SetTtsMuted(false),
             }],
             VoiceState::Unknown => Vec::new(),
@@ -1076,6 +1083,7 @@ impl App {
             all.push(PaletteEntry {
                 label: if paused { messaging.on } else { messaging.off },
                 key: messaging.key,
+                hint: messaging.hint,
                 effect: Effect::SetMessagingPaused(!paused),
             });
         }
@@ -1083,11 +1091,13 @@ impl App {
             Some(CallAction::Start) => all.push(PaletteEntry {
                 label: call.off,
                 key: call.key,
+                hint: call.hint,
                 effect: Effect::Call(CallAction::Start),
             }),
             Some(CallAction::Stop) => all.push(PaletteEntry {
                 label: call.on,
                 key: call.key,
+                hint: call.hint,
                 effect: Effect::Call(CallAction::Stop),
             }),
             Some(CallAction::TalkNow | CallAction::Status) | None => {}

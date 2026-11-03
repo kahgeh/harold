@@ -93,6 +93,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
                 link: app.questions.has_web_link(),
                 instructions: app.questions.on_instructions(),
             },
+            command_hints(&app.commands()),
         );
     }
     render_palette(frame, area, app);
@@ -1903,9 +1904,27 @@ fn render_hold_footer(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// The command keys for the footer: `m voice  p pause  C call` for the commands that show now.
+fn command_hints(commands: &[crate::app::PaletteEntry]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for command in commands {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            command.key.to_string(),
+            Style::default().fg(INK),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", command.hint),
+            Style::default().fg(MUTED),
+        ));
+    }
+    spans
+}
+
 /// The footer for the row under the cursor, on one line when it fits. Otherwise it goes
 /// on to a second line at its break key, or at the last key before that when the first
 /// line still would not fit.
+#[allow(clippy::too_many_arguments)]
 fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1914,9 +1933,18 @@ fn render_footer(
     open: bool,
     note: Option<NoteKind>,
     todo: TodoFacts,
+    commands: Vec<Span<'static>>,
 ) {
     let mut hints = footer_hints(compact, stop, open, note, todo.link, todo.instructions);
     let room = usize::from(area.width).saturating_sub(2);
+    // The command keys show only in the agent-row form, and only when the whole line fits.
+    if stop.is_none() && note.is_none() && !commands.is_empty() {
+        let mut with_commands = hints.clone();
+        with_commands.extend(commands);
+        if Line::from(with_commands.clone()).width() <= room {
+            hints = with_commands;
+        }
+    }
     if Line::from(hints.clone()).width() <= room {
         frame.render_widget(
             Paragraph::new(Line::from(hints)).block(board_block().borders(Borders::ALL)),
@@ -1987,14 +2015,23 @@ fn render_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         for (index, entry) in entries.iter().enumerate() {
             let selected = index == palette.selected;
-            lines.push(Line::from(Span::styled(
-                format!("{} {}", if selected { "▸" } else { " " }, entry.label),
-                if selected {
-                    Style::default().fg(INK).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(MUTED)
-                },
-            )));
+            let style = if selected {
+                Style::default().fg(INK).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            let text = format!("{} {}", if selected { "▸" } else { " " }, entry.label);
+            // The key sits at the right edge of the inner width. A label is never cut:
+            // when the room is short, one space is all the padding.
+            let inner = usize::from(width.saturating_sub(2));
+            let padding = inner
+                .saturating_sub(Line::raw(text.as_str()).width() + 1)
+                .max(1);
+            lines.push(Line::from(vec![
+                Span::styled(text, style),
+                Span::styled(" ".repeat(padding), style),
+                Span::styled(entry.key.to_string(), Style::default().fg(INK)),
+            ]));
         }
     }
     frame.render_widget(Clear, popup);
@@ -4709,6 +4746,105 @@ mod tests {
     }
 
     #[test]
+    fn palette_shows_each_key_at_the_right_of_its_row() {
+        let mut app = live_app(Vec::new(), None);
+        app.observe_call(Some(CallView {
+            state: CallState::Off,
+            chief_pane_id: "%3".into(),
+            last_transcript: String::new(),
+            last_result: None,
+        }));
+        assert_eq!(app.commands().len(), 3);
+        app.handle_key(crossterm::event::KeyCode::Char('/'));
+        for width in [40, 60, 80] {
+            let backend = TestBackend::new(width, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| super::render_palette(frame, frame.area(), &app))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let lines = buffer
+                .content()
+                .chunks(usize::from(width))
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for (label, key) in [
+                ("Voice: mute", 'm'),
+                ("Messaging: pause", 'p'),
+                ("Call: start", 'C'),
+            ] {
+                let row = lines
+                    .lines()
+                    .find(|line| line.contains(label))
+                    .unwrap_or_else(|| panic!("{label} missing at {width}\n{lines}"));
+                let inner = row.trim_end().trim_end_matches('│').trim_end();
+                assert!(inner.ends_with(key), "{label} at {width}: {row}");
+            }
+        }
+    }
+
+    fn call_off() -> CallView {
+        CallView {
+            state: CallState::Off,
+            chief_pane_id: "%3".into(),
+            last_transcript: String::new(),
+            last_result: None,
+        }
+    }
+
+    #[test]
+    fn footer_shows_the_command_keys_when_they_fit() {
+        let mut app = live_app(Vec::new(), None);
+        app.observe_call(Some(call_off()));
+        let content = rendered(&app, 200, 38, 100_000);
+        for hint in ["m voice", "p pause", "C call"] {
+            assert!(content.contains(hint), "{hint} missing");
+        }
+    }
+
+    #[test]
+    fn footer_drops_a_hidden_command() {
+        let mut app = live_app(Vec::new(), None);
+        app.observe_call(Some(call_off()));
+        let commands: Vec<_> = app
+            .commands()
+            .into_iter()
+            .filter(|command| command.key != 'm')
+            .collect();
+        let text: String = super::command_hints(&commands)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!text.contains("m voice"), "{text}");
+        assert!(
+            text.contains("p pause") && text.contains("C call"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn footer_drops_the_command_keys_first_on_a_narrow_screen() {
+        let mut app = live_app(Vec::new(), None);
+        app.observe_call(Some(call_off()));
+        for (width, height) in [(70, 30), (60, 18)] {
+            let content = rendered(&app, width, height, 100_000);
+            assert!(!content.contains("m voice"), "{width}");
+            for hint in ["j/k", "n/N", "f search", "/ commands", "Enter", "q quit"] {
+                assert!(content.contains(hint), "{hint} missing at {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn question_footer_has_no_command_keys() {
+        let app = question_app(true);
+        assert!(app.cursor_on_question());
+        let lines = footer_rows(&rendered_lines(&app, 200, 38, 100_000));
+        assert!(!lines.contains("m voice"), "{lines}");
+    }
+
+    #[test]
     fn palette_fits_the_minimum_terminal_size() {
         let mut app = live_app(Vec::new(), None);
         app.handle_key(crossterm::event::KeyCode::Char('/'));
@@ -5166,7 +5302,10 @@ mod tests {
                     .zip(during.content().chunks(row_width))
                     .enumerate()
                 {
-                    if index != chief_index {
+                    // The footer rows differ on purpose: the `C call` key shows only
+                    // while a call can start or end.
+                    let footer = index >= before.area.height as usize - 3;
+                    if index != chief_index && !footer {
                         assert_eq!(old, new, "{state:?} at {width}, row {index}");
                     }
                 }
@@ -5683,6 +5822,7 @@ mod tests {
                         false,
                         None,
                         super::TodoFacts::default(),
+                        Vec::new(),
                     )
                 })
                 .unwrap();
