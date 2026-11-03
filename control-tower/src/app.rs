@@ -210,8 +210,9 @@ pub struct Snapshot {
     pub watches_paused: u32,
     /// Watches that stopped because they reached the day budget.
     pub watches_capped: u32,
-    /// Whether Harold knows which pane has focus. False when Harold sends nothing.
-    pub focus_known: bool,
+    /// Whether Harold knows which pane has focus. `None` when Harold sends nothing: an
+    /// older Harold, so the control-tower keeps its own waiting rule.
+    pub focus_known: Option<bool>,
     /// The release Harold reports, `None` while disconnected or when it sent none.
     pub harold_version: Option<String>,
 }
@@ -320,6 +321,13 @@ pub enum Stop {
     Question(QStop),
 }
 
+/// What the tmux focus probe saw: the user's active pane, or nothing usable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusReading {
+    Active(String),
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub connection: ConnectionState,
@@ -354,6 +362,13 @@ pub struct App {
     normalized_query: String,
     searchable_rows: Vec<SearchableRow>,
     row_labels: Vec<RowLabel>,
+    /// The local waiting rule for an older Harold (`focus_known` is `None`): the agents
+    /// that finished while the user was elsewhere, oldest first. Empty for a newer Harold.
+    waiting: Vec<AgentIncarnation>,
+    /// The pane the local focus probe saw. Used only for an older Harold.
+    active_pane: Option<String>,
+    /// Whether the local focus probe sees a usable pane. Used only for an older Harold.
+    focus_tracking: bool,
     /// The questions hid while the cursor was on them: keys are swallowed until Esc, so
     /// a note being typed never turns into list commands.
     swallowing_keys: bool,
@@ -516,6 +531,9 @@ impl App {
             normalized_query,
             searchable_rows,
             row_labels,
+            waiting: Vec::new(),
+            active_pane: None,
+            focus_tracking: false,
             swallowing_keys: false,
             holding_block_keys: false,
             host_marker: HostMarker::default(),
@@ -550,21 +568,62 @@ impl App {
         groups
     }
 
-    /// Whether Harold knows the focused pane. Without it, `(focus tracking off)` shows.
-    pub const fn focus_tracking(&self) -> bool {
-        self.snapshot.focus_known
+    /// A reading of the local focus probe. Only an older Harold (`focus_known` is
+    /// `None`) uses it; a newer Harold reads the focus itself, so the reading is ignored.
+    pub fn observe_focus(&mut self, reading: FocusReading) {
+        if self.snapshot.focus_known.is_some() {
+            return;
+        }
+        match reading {
+            FocusReading::Active(pane_id) => {
+                self.waiting.retain(|waiting| waiting.pane_id != pane_id);
+                self.active_pane = Some(pane_id);
+                self.focus_tracking = true;
+            }
+            FocusReading::Unavailable => {
+                self.active_pane = None;
+                self.focus_tracking = false;
+            }
+        }
     }
 
-    /// Whether Harold serves this agent as waiting for you.
+    /// Whether the focused pane is known. Without it, `(focus tracking off)` shows. A
+    /// newer Harold says it in `focus_known`; for an older Harold the local probe decides.
+    pub const fn focus_tracking(&self) -> bool {
+        match self.snapshot.focus_known {
+            Some(known) => known,
+            None => self.focus_tracking,
+        }
+    }
+
+    /// Whether this agent waits for you: as Harold serves it, or by the local rule
+    /// for an older Harold.
     pub fn is_waiting(&self, incarnation: &AgentIncarnation) -> bool {
+        if self.snapshot.focus_known.is_none() {
+            return self.waiting.contains(incarnation);
+        }
         self.snapshot
             .rows
             .iter()
             .any(|row| &row.incarnation == incarnation && row.waiting)
     }
 
-    /// The agents Harold serves as waiting, the longest waiting first; the pane id breaks a tie.
+    /// The agents that wait for you. A newer Harold serves them: the longest waiting
+    /// first, and the pane id breaks a tie. For an older Harold the local rule keeps
+    /// them, oldest first.
     pub fn waiting_rows(&self) -> Vec<&AgentRow> {
+        if self.snapshot.focus_known.is_none() {
+            return self
+                .waiting
+                .iter()
+                .filter_map(|waiting| {
+                    self.snapshot
+                        .rows
+                        .iter()
+                        .find(|row| &row.incarnation == waiting)
+                })
+                .collect();
+        }
         let mut rows: Vec<&AgentRow> = self
             .snapshot
             .rows
@@ -576,6 +635,35 @@ impl App {
                 .cmp(&(right.waiting_since_ms, &right.incarnation.pane_id))
         });
         rows
+    }
+
+    /// The local waiting rule of an older Harold: an agent waits when it goes from work
+    /// to rest off the active pane, and stops when it works again or goes away.
+    fn next_waiting(&self, rows: &[AgentRow]) -> Vec<AgentIncarnation> {
+        let mut waiting: Vec<AgentIncarnation> = self
+            .waiting
+            .iter()
+            .filter(|waiting| {
+                rows.iter()
+                    .any(|row| &row.incarnation == *waiting && !row.state.is_working())
+            })
+            .cloned()
+            .collect();
+        for row in rows {
+            if !row.state.is_at_rest() || waiting.contains(&row.incarnation) {
+                continue;
+            }
+            let was_working = self
+                .snapshot
+                .rows
+                .iter()
+                .any(|prior| prior.incarnation == row.incarnation && prior.state.is_working());
+            let in_view = self.active_pane.as_deref() == Some(row.incarnation.pane_id.as_str());
+            if was_working && !in_view {
+                waiting.push(row.incarnation.clone());
+            }
+        }
+        waiting
     }
 
     fn select_waiting(&mut self, forward: bool) {
@@ -990,8 +1078,15 @@ impl App {
     /// A change of the waiting agents or of `focus_known` does not raise the event
     /// version, so a snapshot at the same version still counts when the waiting rows
     /// differ: a pane waits or stops waiting, waits since another time, or a waiting
-    /// row appears or goes.
+    /// row appears or goes. An older Harold serves no waiting rows, so only a change
+    /// of `focus_known` counts for it.
     pub fn waiting_changed_in(&self, snapshot: &Snapshot) -> bool {
+        if snapshot.focus_known != self.snapshot.focus_known {
+            return true;
+        }
+        if snapshot.focus_known.is_none() {
+            return false;
+        }
         let waiting_set = |snapshot: &Snapshot| -> Vec<(String, i64)> {
             let mut set: Vec<(String, i64)> = snapshot
                 .rows
@@ -1002,8 +1097,7 @@ impl App {
             set.sort();
             set
         };
-        snapshot.focus_known != self.snapshot.focus_known
-            || waiting_set(snapshot) != waiting_set(&self.snapshot)
+        waiting_set(snapshot) != waiting_set(&self.snapshot)
     }
 
     pub fn mark_disconnected(&mut self) {
@@ -1352,14 +1446,19 @@ impl App {
             KeyCode::Char('n') => self.select_waiting(true),
             KeyCode::Char('N') => self.select_waiting(false),
             KeyCode::Enter => {
-                // Harold clears the agent's mark when the focus moves to its pane.
-                let Some(pane_id) = self
-                    .selected_row()
-                    .map(|row| row.incarnation.pane_id.clone())
+                let Some(incarnation) = self.selected_row().map(|row| row.incarnation.clone())
                 else {
                     return Effect::None;
                 };
-                return Effect::Navigate { pane_id };
+                // A newer Harold clears the agent's mark when the focus moves to its pane.
+                // An older Harold does not: without a focus probe, jumping from the
+                // control-tower is the only visit the local rule can see.
+                if self.snapshot.focus_known.is_none() && !self.focus_tracking {
+                    self.waiting.retain(|waiting| *waiting != incarnation);
+                }
+                return Effect::Navigate {
+                    pane_id: incarnation.pane_id,
+                };
             }
             _ => {}
         }
@@ -1373,6 +1472,15 @@ impl App {
     ) -> Result<(), SnapshotError> {
         validate_rows(&snapshot.rows)?;
         sort_rows(&mut snapshot.rows);
+        // The local rule runs only for an older Harold. A newer Harold serves the marks,
+        // so the local list and the probe's reading are dropped.
+        let waiting = if snapshot.focus_known.is_none() {
+            self.next_waiting(&snapshot.rows)
+        } else {
+            self.active_pane = None;
+            self.focus_tracking = false;
+            Vec::new()
+        };
 
         let prior_selection = self.selected.clone();
         let prior_index = prior_selection.as_ref().and_then(|selected| {
@@ -1408,6 +1516,7 @@ impl App {
             })
         };
         self.snapshot = snapshot;
+        self.waiting = waiting;
         self.searchable_rows = self.snapshot.rows.iter().map(SearchableRow::from).collect();
         self.row_labels = build_labels(&self.snapshot.rows);
         if !self.normalized_query.is_empty()
@@ -1577,7 +1686,7 @@ mod tests {
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
         let empty = Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             through_event_version: 0,
             server_time_ms: 0,
@@ -1634,7 +1743,7 @@ mod tests {
         app.begin_connection();
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -1795,7 +1904,7 @@ mod tests {
         let pane = incarnation("%1", 1, 2, 3, "codex");
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -1820,7 +1929,7 @@ mod tests {
 
         assert!(
             !app.apply_later_snapshot(Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -1838,7 +1947,7 @@ mod tests {
 
         assert!(
             app.apply_later_snapshot(Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2513,7 +2622,7 @@ mod tests {
 
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2634,7 +2743,7 @@ mod tests {
 
     fn live_voice_app(muted: bool) -> App {
         let snapshot = Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             through_event_version: 1,
             server_time_ms: 0,
@@ -2737,7 +2846,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -2827,7 +2936,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -3019,7 +3128,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -3316,7 +3425,7 @@ mod tests {
     /// The snapshot with each named pane served as waiting since its time, and the
     /// focus known or not, as Harold serves them.
     fn served(mut snapshot: Snapshot, waiting: &[(&str, i64)], focus_known: bool) -> Snapshot {
-        snapshot.focus_known = focus_known;
+        snapshot.focus_known = Some(focus_known);
         for row in &mut snapshot.rows {
             if let Some((_, since)) = waiting
                 .iter()
@@ -3501,33 +3610,321 @@ mod tests {
         app.apply_first_snapshot(served(fleet([Idle, Idle, Idle], 1), &[], false))
             .unwrap();
         assert!(!app.focus_tracking());
+        // A newer Harold decides: a local reading changes nothing.
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert!(!app.focus_tracking());
         app.apply_later_snapshot(served(fleet([Idle, Idle, Idle], 1), &[], true))
             .unwrap();
+        assert!(app.focus_tracking());
+        app.observe_focus(FocusReading::Unavailable);
         assert!(app.focus_tracking());
         app.apply_later_snapshot(served(fleet([Idle, Idle, Idle], 2), &[], false))
             .unwrap();
         assert!(!app.focus_tracking());
+
+        // An older Harold sends no `focus_known`: the local probe decides.
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Idle, Idle, Idle], 1))
+            .unwrap();
+        assert_eq!(app.snapshot.focus_known, None);
+        assert!(!app.focus_tracking());
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert!(app.focus_tracking());
+        app.observe_focus(FocusReading::Unavailable);
+        assert!(!app.focus_tracking());
     }
 
     #[test]
-    fn absent_served_fields_show_no_diamond() {
-        // An older Harold sends no waiting fields: they read as false and 0.
+    fn absent_served_fields_show_the_marks_of_today() {
+        // An older Harold sends no waiting fields and no `focus_known`: the local rule
+        // marks the agents that went from work to rest, as the control-tower did before.
         let mut app = empty_app();
         app.apply_first_snapshot(fleet([Working, Working, Working], 1))
             .unwrap();
         app.apply_later_snapshot(fleet([Idle, Done, Working], 2))
             .unwrap();
-        assert!(waiting_panes(&app).is_empty());
-        assert!(
-            app.snapshot
-                .rows
-                .iter()
-                .all(|row| !app.is_waiting(&row.incarnation))
-        );
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        assert!(app.is_waiting(&app.snapshot.rows[0].incarnation));
+        assert!(app.is_waiting(&app.snapshot.rows[1].incarnation));
+        assert!(!app.is_waiting(&app.snapshot.rows[2].incarnation));
         assert!(!app.focus_tracking());
-        select_pane(&mut app, "%2");
+        select_pane(&mut app, "%3");
         app.handle_key(KeyCode::Char('n'));
-        assert_eq!(selected_pane(&app).as_deref(), Some("%2"));
+        assert_eq!(selected_pane(&app).as_deref(), Some("%1"));
+    }
+
+    #[test]
+    fn an_older_harold_snapshot_runs_the_local_rule() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        // Working to idle off the active pane marks the agent.
+        app.observe_focus(FocusReading::Active("%3".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        assert!(app.focus_tracking());
+
+        // The focus on the pane clears its mark.
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert_eq!(waiting_panes(&app), ["%2"]);
+
+        // An agent that comes to rest in the active pane does not wait.
+        app.observe_focus(FocusReading::Active("%3".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2"]);
+
+        // With the focus tracked, Enter does not clear the mark.
+        select_pane(&mut app, "%2");
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Navigate {
+                pane_id: "%2".into()
+            }
+        );
+        assert_eq!(waiting_panes(&app), ["%2"]);
+
+        // With the focus tracking off, Enter clears the mark.
+        app.observe_focus(FocusReading::Unavailable);
+        assert!(!app.focus_tracking());
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Navigate {
+                pane_id: "%2".into()
+            }
+        );
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn a_newer_harold_snapshot_never_uses_the_local_rule() {
+        for focus_known in [false, true] {
+            let mut app = empty_app();
+            app.apply_first_snapshot(served(
+                fleet([Working, Working, Working], 1),
+                &[],
+                focus_known,
+            ))
+            .unwrap();
+            // Working to idle marks nothing that Harold does not serve.
+            app.apply_later_snapshot(served(
+                fleet([Idle, Idle, Working], 2),
+                &[("%2", 100)],
+                focus_known,
+            ))
+            .unwrap();
+            assert_eq!(waiting_panes(&app), ["%2"], "{focus_known}");
+            assert!(!app.is_waiting(&app.snapshot.rows[0].incarnation));
+
+            // The local readings change no mark and not the focus tracking.
+            app.observe_focus(FocusReading::Active("%2".into()));
+            assert_eq!(waiting_panes(&app), ["%2"], "{focus_known}");
+            assert_eq!(app.focus_tracking(), focus_known);
+            app.observe_focus(FocusReading::Unavailable);
+            assert_eq!(app.focus_tracking(), focus_known);
+
+            // Enter leaves the mark to Harold.
+            select_pane(&mut app, "%2");
+            assert_eq!(
+                app.handle_key(KeyCode::Enter),
+                Effect::Navigate {
+                    pane_id: "%2".into()
+                }
+            );
+            assert_eq!(waiting_panes(&app), ["%2"], "{focus_known}");
+        }
+    }
+
+    #[test]
+    fn switching_from_older_to_newer_harold_uses_served_marks() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        app.observe_focus(FocusReading::Active("%9".into()));
+        assert!(app.focus_tracking());
+
+        // A newer Harold serves only %3: the local list is dropped.
+        let newer = served(fleet([Idle, Idle, Idle], 3), &[("%3", 100)], false);
+        app.apply_later_snapshot(newer).unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+        assert!(!app.is_waiting(&app.snapshot.rows[0].incarnation));
+        assert!(!app.focus_tracking());
+
+        // A same-version switch counts too.
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Idle, Idle], 4))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 5))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1"]);
+        let newer = served(fleet([Idle, Idle, Idle], 5), &[], true);
+        assert!(app.waiting_changed_in(&newer));
+        assert!(app.apply_later_snapshot(newer).unwrap());
+        assert!(waiting_panes(&app).is_empty());
+        assert!(app.focus_tracking());
+    }
+
+    #[test]
+    fn waiting_changed_in_ignores_the_served_fields_of_an_older_harold() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Idle, Idle, Idle], 5))
+            .unwrap();
+        let mut same_version = fleet([Idle, Idle, Idle], 5);
+        same_version.rows[0].waiting = true;
+        same_version.rows[0].waiting_since_ms = 100;
+        assert!(!app.waiting_changed_in(&same_version));
+        assert!(!app.apply_later_snapshot(same_version).unwrap());
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn working_to_idle_joins_in_order_and_first_seen_idle_does_not() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Idle], 1))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+
+        app.apply_later_snapshot(fleet([Working, Idle, Idle], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2"]);
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2", "%1"]);
+        assert!(app.is_waiting(&app.snapshot.rows[0].incarnation));
+    }
+
+    #[test]
+    fn working_or_blocked_to_done_idle_or_error_joins_and_unknown_does_not() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Blocked, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Done, Error, Unknown], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+        app.apply_later_snapshot(fleet([Done, Error, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2"]);
+    }
+
+    #[test]
+    fn a_blocked_or_unseen_row_that_comes_at_rest_without_prior_work_does_not_join() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Done, Idle, Error], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Blocked, Idle, Error], 2))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+        app.apply_later_snapshot(fleet([Blocked, Working, Blocked], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_row_that_goes_blocked_leaves() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Done, Working, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1"]);
+        app.apply_later_snapshot(fleet([Blocked, Working, Working], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn going_working_or_disappearing_leaves_and_unknown_stays() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2", "%3"]);
+
+        app.apply_later_snapshot(fleet([Working, Unknown, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2", "%3"]);
+
+        app.apply_later_snapshot(snapshot(
+            4,
+            0,
+            vec![placed("%3", Idle, "home", "/Users/k/code/sre", 1)],
+        ))
+        .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+    }
+
+    #[test]
+    fn a_new_incarnation_in_the_same_pane_does_not_inherit_waiting() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
+            .unwrap();
+        let mut replacement = placed("%1", Idle, "harold  main", "/p/harold/main", 3);
+        replacement.incarnation.agent_pid = 999;
+        app.apply_later_snapshot(snapshot(3, 0, vec![replacement]))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn focus_clears_waiting_and_suppresses_joining_for_the_pane_in_view() {
+        let mut app = empty_app();
+        assert!(!app.focus_tracking());
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1"]);
+
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert!(app.focus_tracking());
+        assert!(waiting_panes(&app).is_empty());
+
+        // The user is now looking at %2 when it finishes: it never joins.
+        app.observe_focus(FocusReading::Active("%2".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+
+        app.observe_focus(FocusReading::Unavailable);
+        assert!(!app.focus_tracking());
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 4))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+    }
+
+    #[test]
+    fn enter_clears_waiting_only_when_focus_tracking_is_off() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Working, Working, Working], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Working, Working], 2))
+            .unwrap();
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Navigate {
+                pane_id: "%1".into()
+            }
+        );
+        assert!(waiting_panes(&app).is_empty());
+
+        app.observe_focus(FocusReading::Active("%9".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Working], 3))
+            .unwrap();
+        app.handle_key(KeyCode::Char('n'));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(
+            waiting_panes(&app),
+            ["%2"],
+            "tracking on: only a real visit clears it"
+        );
     }
 
     #[test]

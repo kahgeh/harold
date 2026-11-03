@@ -602,7 +602,7 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         watches_running: snapshot.watches_running,
         watches_paused: snapshot.watches_paused,
         watches_capped: snapshot.watches_capped,
-        focus_known: snapshot.focus_known.unwrap_or(false),
+        focus_known: snapshot.focus_known,
         harold_version: Some(sanitize_display(
             &snapshot.harold_version,
             HAROLD_VERSION_LIMIT,
@@ -1027,19 +1027,26 @@ mod tests {
     }
 
     #[test]
-    fn focus_known_absent_maps_to_false() {
+    fn focus_known_absent_maps_to_none() {
+        // An older Harold sends no `focus_known`: the control-tower keeps its own rule.
         let mapped = map_snapshot(AgentStateSnapshot::default()).unwrap();
-        assert!(!mapped.focus_known);
+        assert_eq!(mapped.focus_known, None);
     }
 
     #[test]
-    fn focus_known_true_maps_to_true() {
+    fn focus_known_sent_maps_to_some() {
         let mapped = map_snapshot(AgentStateSnapshot {
             focus_known: Some(true),
             ..Default::default()
         })
         .unwrap();
-        assert!(mapped.focus_known);
+        assert_eq!(mapped.focus_known, Some(true));
+        let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(mapped.focus_known, Some(false));
     }
 
     fn local_pane_for_waiting() -> AgentPaneState {

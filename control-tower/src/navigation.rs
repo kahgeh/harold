@@ -214,6 +214,32 @@ impl TmuxNavigator {
         Ok(Some(client))
     }
 
+    /// The pane the user is looking at: the active pane of the best attached client.
+    /// Suspended clients are ignored; a focused client wins; otherwise the most recently active.
+    pub fn focused_pane(&self) -> Result<Option<String>, NavigationError> {
+        let output = self.run_tmux(
+            "read tmux clients",
+            &[
+                "list-clients",
+                "-F",
+                "#{client_activity}\t#{client_flags}\t#{pane_id}",
+            ],
+        )?;
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let best = listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let activity = fields.next()?.trim().parse::<u64>().ok()?;
+                let flags = fields.next()?;
+                let pane = sanitize_display(fields.next()?.trim(), ERROR_DETAIL_MAX_SCALARS);
+                let has = |flag: &str| flags.split(',').any(|candidate| candidate == flag);
+                (!pane.is_empty() && !has("suspended")).then(|| (has("focused"), activity, pane))
+            })
+            .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+        Ok(best.map(|(_, _, pane)| pane))
+    }
+
     /// Finds `rex`: the server's own copy, then `PATH`, then an app bundle.
     fn find_rex(&self) -> Option<PathBuf> {
         let from_home = self
@@ -287,6 +313,29 @@ impl TmuxNavigator {
             });
         }
         Ok(apps.pop().map(|(id, _)| id).ok_or(HostJump::NoApp))
+    }
+
+    /// The Rex block the user sees: the focused block of the active window of the one session
+    /// the Rex app shows. Rex does not say which session the app has in front, so with
+    /// more than one session this is `None` and the control-tower does not guess.
+    pub fn rex_focused_block(&self) -> Result<Option<String>, NavigationError> {
+        if self.find_rex().is_none() {
+            return Ok(None);
+        }
+        let clients = self.run_rex("read Rex clients", &["client", "ls", "--json"])?;
+        let clients = String::from_utf8_lossy(&clients.stdout);
+        let sessions = rex_app_session_ids(&clients);
+        let [session] = sessions.as_slice() else {
+            return Ok(None);
+        };
+        let request = session_view_request(session);
+        let view = self.run_rex(
+            "read Rex session",
+            &["api", "call", "session.view", &request],
+        )?;
+        let view = String::from_utf8_lossy(&view.stdout);
+        Ok(rex_focused_block_of(&view)
+            .map(|block| sanitize_display(&block, ERROR_DETAIL_MAX_SCALARS)))
     }
 
     /// The block of this program in Rex: `REX_BLOCK`, read from the same context as
@@ -637,6 +686,22 @@ fn rex_session_id(listing: &str, name: &str) -> Option<String> {
     None
 }
 
+/// The sessions that the Rex app shows: `session_ids` of the `app` client in `rex client ls --json`.
+fn rex_app_session_ids(clients: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for client in clients.split("\"client_id\"").skip(1) {
+        let is_app = json_string(client, "kind", 0).is_some_and(|(kind, _)| kind == "app");
+        let Some(list) = client.find("\"session_ids\"").filter(|_| is_app) else {
+            continue;
+        };
+        let body = client.get(list..).unwrap_or_default();
+        let body = body.split_once('[').map_or("", |(_, rest)| rest);
+        let body = body.split(']').next().unwrap_or_default();
+        ids.extend(body.split('"').skip(1).step_by(2).map(str::to_owned));
+    }
+    ids
+}
+
 /// The app clients in `rex client ls --json`: each client id with its label (empty when the
 /// client has none). The kind and the label sit in the client's `info`.
 fn rex_app_clients(clients: &str) -> Vec<(String, String)> {
@@ -666,6 +731,19 @@ fn rex_window_of_block(view: &str, block: &str) -> Option<(String, Option<String
                 return Some((window, focused));
             }
             from = next;
+        }
+        at = after;
+    }
+    None
+}
+
+/// The focused block of the active window in a `session.view` result.
+fn rex_focused_block_of(view: &str) -> Option<String> {
+    let (active, _) = json_string(view, "active_window_id", 0)?;
+    let mut at = 0;
+    while let Some((window, after)) = json_string(view, "window_id", at) {
+        if window == active {
+            return json_string(view, "focused_block_id", after).map(|(block, _)| block);
         }
         at = after;
     }
@@ -1340,7 +1418,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -1389,6 +1467,66 @@ mod tests {
         // The application remains snapshot-owned; only a later Harold snapshot may change rows.
         app.mark_disconnected();
         assert_eq!(app.snapshot.rows.len(), 1);
+    }
+
+    #[test]
+    fn focused_pane_uses_exact_argv_and_ignores_suspended_clients() {
+        let (navigator, runner) = navigator_with(
+            FakeRunner::successful(
+                "1790945360\tattached,focused,suspended,UTF-8\t%0\n\
+                 1791018376\tattached,focused,suspended,UTF-8\t%36\n\
+                 1791453304\tattached,focused,UTF-8\t%53\n",
+            ),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%53".to_owned())));
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "tmux".into(),
+                vec![
+                    "list-clients".into(),
+                    "-F".into(),
+                    "#{client_activity}\t#{client_flags}\t#{pane_id}".into()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn focused_client_beats_a_more_recent_unfocused_one_and_activity_breaks_ties() {
+        let (navigator, _) = navigator_with(
+            FakeRunner::successful("900\tattached,UTF-8\t%1\n100\tattached,focused\t%2\n"),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%2".to_owned())));
+
+        let (navigator, _) = navigator_with(
+            FakeRunner::successful("100\tattached\t%1\n900\tattached\t%2\n500\tattached\t%3\n"),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%2".to_owned())));
+    }
+
+    #[test]
+    fn no_usable_client_is_none_and_command_failure_is_an_error() {
+        for stdout in [
+            "",
+            "\n",
+            "garbage\n",
+            "x\tattached\t%1\n",
+            "5\tattached,suspended\t%1\n",
+            "5\tattached\t\n",
+        ] {
+            let (navigator, _) =
+                navigator_with(FakeRunner::successful(stdout), FakeContext::valid());
+            assert_eq!(navigator.focused_pane(), Ok(None), "{stdout:?}");
+        }
+        let (navigator, _) = navigator_with(
+            FakeRunner::failed("no server running"),
+            FakeContext::valid(),
+        );
+        assert!(navigator.focused_pane().is_err());
     }
 
     // ---- Rex ----
@@ -1455,6 +1593,37 @@ mod tests {
     }
   ]
 }"#;
+
+    const CLIENTS: &str = r#"{
+  "clients": [
+    {
+      "client_id": "client:cli",
+      "info": { "kind": "cli", "name": "rex" },
+      "connection_state": "connected"
+    },
+    {
+      "client_id": "client:app",
+      "info": {
+        "kind": "app",
+        "name": "Rex Beta"
+      },
+      "connection_state": "connected",
+      "session_ids": [
+        "session:aaa",
+        "session:bbb"
+      ]
+    },
+    {
+      "client_id": "client:other",
+      "info": { "kind": "cli", "name": "rex" },
+      "session_ids": ["session:zzz"]
+    }
+  ]
+}"#;
+
+    const CLIENTS_ONE_SESSION: &str = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"},"session_ids":["session:aaa"]}]}"#;
+
+    const VIEW_OF_AAA: &str = r#"{"revision":1,"session_id":"session:aaa","label":"arid-moor","active_window_id":"window:2","windows":[{"window_id":"window:1","label":"One","focused_block_id":"block:one","layers":[]},{"window_id":"window:2","label":"Two","focused_block_id":"block:two","layers":[{"layer_id":"layer:x","blocks":[{"block_id":"block:two"}]}]}]}"#;
 
     fn args(call: &RecordedCall) -> Vec<&str> {
         call.1.iter().map(String::as_str).collect()
@@ -1563,6 +1732,63 @@ mod tests {
 
         assert!(error.to_string().contains("no such block"), "{error}");
         assert_eq!(observed.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_rex_focus_is_the_focused_block_of_the_active_window_of_the_shown_session() {
+        let (navigator, runner) =
+            rex_navigator(vec![REX_SERVER], vec![CLIENTS_ONE_SESSION, VIEW_OF_AAA]);
+
+        assert_eq!(
+            navigator.rex_focused_block().unwrap(),
+            Some("block:two".into())
+        );
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            args(&calls[0]),
+            [
+                "client",
+                "--autostart=false",
+                "--timeout=3s",
+                "ls",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            args(&calls[1]),
+            [
+                "api",
+                "--autostart=false",
+                "--timeout=3s",
+                "call",
+                "session.view",
+                r#"{"session_id":"session:aaa"}"#
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rex_focus_is_unknown_with_several_sessions_or_no_rex() {
+        let (navigator, runner) = rex_navigator(vec![REX_SERVER], vec![CLIENTS]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+        assert_eq!(runner.calls().len(), 1);
+
+        let (navigator, runner) = rex_navigator(vec![], vec![]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+        assert!(runner.calls().is_empty());
+
+        let (navigator, _) = rex_navigator(vec![REX_SERVER], vec![r#"{"clients":[]}"#]);
+        assert_eq!(navigator.rex_focused_block().unwrap(), None);
+    }
+
+    #[test]
+    fn only_the_app_clients_sessions_count_as_shown() {
+        assert_eq!(
+            super::rex_app_session_ids(CLIENTS),
+            vec!["session:aaa".to_owned(), "session:bbb".to_owned()]
+        );
     }
 
     #[test]

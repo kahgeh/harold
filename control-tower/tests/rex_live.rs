@@ -11,6 +11,12 @@ fn enter_on_a_live_rex_block_shows_it() {
     let block = std::env::var("REX_LIVE_BLOCK").expect("REX_LIVE_BLOCK");
     let navigator = TmuxNavigator::new();
 
-    // Look at the Rex app: it shows the block. Harold, not the control-tower, reads the focus.
     navigator.focus_rex_block(&session, &block).unwrap();
+
+    let focused = navigator.rex_focused_block().unwrap();
+    println!("focused: {focused:?}");
+    // With more than one Rex session the control-tower does not guess, so the reading is `None`.
+    if let Some(focused) = focused {
+        assert_eq!(focused, block);
+    }
 }

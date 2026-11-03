@@ -1600,8 +1600,9 @@ fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> 
     format!("{}{suffix}", fit(&head, width - suffix_width))
 }
 
-/// The list's right-hand title: `(focus tracking off)` while Harold does not know the
-/// focused pane (`focus_known`), and nothing otherwise. Waiting agents show by their ◆ marks instead.
+/// The list's right-hand title: `(focus tracking off)` while the focused pane is not
+/// known, and nothing otherwise. A newer Harold says it in `focus_known`; for an older
+/// Harold the local focus probe decides. Waiting agents show by their ◆ marks instead.
 fn focus_tracking_title(app: &App) -> Line<'static> {
     if app.focus_tracking() {
         return Line::default();
@@ -2279,7 +2280,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2417,7 +2418,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2464,7 +2465,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2837,7 +2838,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Stale,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2929,7 +2930,7 @@ mod tests {
         );
 
         app.apply_later_snapshot(Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2954,7 +2955,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -3170,7 +3171,7 @@ mod tests {
         let unknown = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -4148,7 +4149,7 @@ mod tests {
 
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -5195,7 +5196,7 @@ mod tests {
         let mut app = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -5428,13 +5429,63 @@ mod tests {
         let mut app = live_app(Vec::new(), None);
         // Harold serves %3 and %2 as waiting, and knows the focus.
         let mut served = layout_with_states([Working, Idle, Idle], 43);
-        served.focus_known = true;
+        served.focus_known = Some(true);
         for (row, since) in served.rows.iter_mut().skip(1).zip([2, 1]) {
             row.waiting = true;
             row.waiting_since_ms = since;
         }
         app.apply_later_snapshot(served).unwrap();
         app
+    }
+
+    /// The old (f2b043c) `waiting_app`: an older Harold sends no `focus_known`, so the
+    /// local rule marks %3 and %2 and the local probe sees the focus on %99.
+    fn older_harold_waiting_app() -> App {
+        use AgentState::{Idle, Working};
+        let mut app = live_app(Vec::new(), None);
+        app.observe_focus(crate::app::FocusReading::Active("%99".into()));
+        app.apply_later_snapshot(layout_with_states([Working, Working, Working], 43))
+            .unwrap();
+        app.apply_later_snapshot(layout_with_states([Working, Working, Idle], 44))
+            .unwrap();
+        app.apply_later_snapshot(layout_with_states([Working, Idle, Idle], 45))
+            .unwrap();
+        app
+    }
+
+    #[test]
+    fn an_older_harold_shows_the_same_screen_as_a_newer_harold_that_serves_the_marks() {
+        let older = older_harold_waiting_app();
+        assert_eq!(older.snapshot.focus_known, None);
+        // `waiting_app` at the older app's revision, so the masthead is the same too.
+        let mut newer = live_app(Vec::new(), None);
+        let mut served = layout_with_states(
+            [AgentState::Working, AgentState::Idle, AgentState::Idle],
+            45,
+        );
+        served.focus_known = Some(true);
+        for (row, since) in served.rows.iter_mut().skip(1).zip([2, 1]) {
+            row.waiting = true;
+            row.waiting_since_ms = since;
+        }
+        newer.apply_later_snapshot(served).unwrap();
+        for (width, height) in [(140, 38), (118, 38), (100, 38)] {
+            let older_lines = rendered_lines(&older, width, height, 100_000);
+            assert_eq!(
+                older_lines,
+                rendered_lines(&newer, width, height, 100_000),
+                "{width}"
+            );
+            assert_eq!(older_lines.matches('◆').count(), 2, "{older_lines}");
+            assert!(!older_lines.contains("focus tracking off"), "{older_lines}");
+        }
+
+        // Without a probe reading, the older Harold shows `(focus tracking off)`.
+        let mut untracked = older;
+        untracked.observe_focus(crate::app::FocusReading::Unavailable);
+        let lines = rendered_lines(&untracked, 140, 38, 100_000);
+        assert!(lines.contains("(focus tracking off)"), "{lines}");
+        assert_eq!(lines.matches('◆').count(), 2, "{lines}");
     }
 
     #[test]
@@ -6013,7 +6064,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
-                focus_known: false,
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,

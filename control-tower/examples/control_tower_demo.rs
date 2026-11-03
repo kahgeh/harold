@@ -61,7 +61,7 @@ fn demo_app() -> App {
     App::new(
         ConnectionState::Live,
         Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,

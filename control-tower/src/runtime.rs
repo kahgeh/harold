@@ -9,13 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use tokio::runtime::Builder;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, FocusRead, FocusRecord, SharedSeen, SourceError, SourceStream};
 use crate::app::{
-    App, CallAction, CallView, ConnectionState, Effect, RuntimeStatus, SearchState, Snapshot,
-    SnapshotError,
+    App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
+    Snapshot, SnapshotError,
 };
 use crate::cli::Options;
 use crate::navigation::{
@@ -30,6 +30,7 @@ const ERROR_LIMIT: usize = 512;
 const RETRY_DELAYS_MS: [u64; 6] = [250, 500, 1_000, 2_000, 4_000, 5_000];
 const INPUT_CHANNEL_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FOCUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const CALL_POLL_DURING_CALL: Duration = Duration::from_millis(500);
 const CALL_POLL_OTHERWISE: Duration = Duration::from_secs(5);
@@ -750,6 +751,10 @@ fn handle_input(
     match item {
         Some(Ok(RuntimeInput::Key(key))) => Ok(core.handle_key(key, navigator)),
         Some(Ok(RuntimeInput::Redraw)) => Ok(Control::Continue),
+        Some(Ok(RuntimeInput::Focus(reading))) => {
+            core.app.observe_focus(reading);
+            Ok(Control::Continue)
+        }
         Some(Err(detail)) => Err(AppError::Input(detail)),
         None => Err(AppError::Input("terminal input worker stopped".into())),
     }
@@ -844,12 +849,17 @@ enum InputMessage {
 pub(crate) enum RuntimeInput {
     Key(KeyEvent),
     Redraw,
+    Focus(FocusReading),
 }
+
+type FocusReceiver = watch::Receiver<Option<FocusReading>>;
 
 pub(crate) struct InputPump {
     receiver: mpsc::Receiver<InputMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    focus_worker: Option<JoinHandle<()>>,
+    focus: Option<FocusReceiver>,
     redraw_pending: Arc<AtomicBool>,
 }
 
@@ -873,6 +883,87 @@ impl RedrawCadence {
     }
 }
 
+trait FocusProbe: Send + 'static {
+    fn read(&mut self) -> FocusReading;
+
+    /// Whether the worker reads now. While it does not, it runs no command.
+    fn wanted(&self) -> bool {
+        true
+    }
+}
+
+/// Set when the snapshot's agents have `block:` ids (Rex), cleared when they have `%` ids (tmux).
+static AGENTS_ARE_IN_REX: AtomicBool = AtomicBool::new(false);
+
+/// Set while the latest snapshot has no `focus_known` (an older Harold) and before the
+/// first snapshot. Only then does the local probe read the focus: a newer Harold reads
+/// the focus itself, so the probe runs no command for it.
+static LOCAL_FOCUS_RULE: AtomicBool = AtomicBool::new(true);
+
+/// Reads the one multiplexer the agents run in. The other one may run too, so the order
+/// of the two is not used to choose.
+fn read_focus(
+    agents_are_in_rex: bool,
+    tmux: impl FnOnce() -> Option<String>,
+    rex: impl FnOnce() -> Option<String>,
+) -> FocusReading {
+    let pane = if agents_are_in_rex { rex() } else { tmux() };
+    pane.map_or(FocusReading::Unavailable, FocusReading::Active)
+}
+
+struct TmuxFocusProbe;
+
+impl FocusProbe for TmuxFocusProbe {
+    fn read(&mut self) -> FocusReading {
+        // Built per read: TmuxNavigator's ports are not Send, and construction is free.
+        let navigator = TmuxNavigator::new();
+        read_focus(
+            AGENTS_ARE_IN_REX.load(Ordering::Acquire),
+            || navigator.focused_pane().ok().flatten(),
+            || navigator.rex_focused_block().ok().flatten(),
+        )
+    }
+
+    fn wanted(&self) -> bool {
+        LOCAL_FOCUS_RULE.load(Ordering::Acquire)
+    }
+}
+
+/// Publishes the latest reading on a `watch` channel, only when it changed. A watch
+/// is never full, so the newest reading can neither block nor be lost, and the input
+/// channel keeps a single sender (the input worker) so it closes when that worker dies.
+/// While the probe is not wanted, the worker reads nothing and forgets the last reading,
+/// so the first reading after that is always published.
+fn spawn_focus_worker(
+    mut probe: impl FocusProbe,
+    sender: watch::Sender<Option<FocusReading>>,
+    cancelled: Arc<AtomicBool>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut next = Instant::now();
+        while !cancelled.load(Ordering::Acquire) && !sender.is_closed() {
+            if !probe.wanted() {
+                sender.send_if_modified(|current| {
+                    *current = None;
+                    false
+                });
+            } else if Instant::now() >= next {
+                next = Instant::now() + interval;
+                let reading = probe.read();
+                sender.send_if_modified(|current| {
+                    let changed = current.as_ref() != Some(&reading);
+                    if changed {
+                        *current = Some(reading);
+                    }
+                    changed
+                });
+            }
+            std::thread::sleep(interval.min(INPUT_POLL_INTERVAL));
+        }
+    })
+}
+
 pub(crate) trait TerminalInput: Send + 'static {
     fn poll(&mut self, timeout: Duration) -> std::io::Result<bool>;
     fn read(&mut self) -> std::io::Result<Event>;
@@ -892,7 +983,20 @@ impl TerminalInput for CrosstermInput {
 
 impl InputPump {
     fn start() -> Self {
-        Self::start_with(CrosstermInput)
+        Self::start_with_focus(CrosstermInput, TmuxFocusProbe)
+    }
+
+    fn start_with_focus(input: impl TerminalInput, probe: impl FocusProbe) -> Self {
+        let mut pump = Self::start_with(input);
+        let (sender, receiver) = watch::channel(None);
+        pump.focus = Some(receiver);
+        pump.focus_worker = Some(spawn_focus_worker(
+            probe,
+            sender,
+            Arc::clone(&pump.cancelled),
+            FOCUS_POLL_INTERVAL,
+        ));
+        pump
     }
 
     pub(crate) fn start_with(mut input: impl TerminalInput) -> Self {
@@ -941,6 +1045,8 @@ impl InputPump {
             receiver,
             cancelled,
             worker: Some(worker),
+            focus_worker: None,
+            focus: None,
             redraw_pending,
         }
     }
@@ -954,14 +1060,24 @@ impl InputPump {
                 receiver,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 worker: None,
+                focus_worker: None,
+                focus: None,
                 redraw_pending: Arc::new(AtomicBool::new(false)),
             },
         )
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<RuntimeInput, String>> {
-        // The channel has one sender (the input worker): it closes when that worker dies.
-        self.receiver.recv().await.map(|message| match message {
+        // Input first: the main channel has one sender (the input worker), so it
+        // closing means that worker died and ends the stream even while focus lives.
+        let message = tokio::select! {
+            biased;
+            message = self.receiver.recv() => message,
+            Some(reading) = next_focus(&mut self.focus) => {
+                return Some(Ok(RuntimeInput::Focus(reading)));
+            }
+        };
+        message.map(|message| match message {
             InputMessage::Key(key) => Ok(RuntimeInput::Key(key)),
             InputMessage::Redraw => {
                 self.redraw_pending.store(false, Ordering::Release);
@@ -970,6 +1086,17 @@ impl InputPump {
             InputMessage::Error(detail) => Err(detail),
         })
     }
+}
+
+/// The next published focus reading; `None` (disabling the select branch) when there is
+/// no focus worker or it has gone away.
+async fn next_focus(focus: &mut Option<FocusReceiver>) -> Option<FocusReading> {
+    let receiver = focus.as_mut()?;
+    if receiver.changed().await.is_err() {
+        *focus = None;
+        return None;
+    }
+    receiver.borrow_and_update().clone()
 }
 
 fn queue_redraw(sender: &mpsc::Sender<InputMessage>, pending: &AtomicBool) {
@@ -990,6 +1117,9 @@ impl Drop for InputPump {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        // Detached, not joined: a hung tmux must not delay terminal restore on quit. The
+        // worker exits at its next loop check, or when its send finds the receiver gone.
+        drop(self.focus_worker.take());
     }
 }
 
@@ -1121,7 +1251,8 @@ impl RuntimeCore {
             app: App::new(
                 ConnectionState::Connecting,
                 Snapshot {
-                    focus_known: false,
+                    // Unknown until the first snapshot: the local focus probe runs.
+                    focus_known: None,
                     harold_version: None,
                     tts_muted: false,
                     messaging_paused: false,
@@ -1369,6 +1500,7 @@ impl RuntimeCore {
             .find(|row| !row.incarnation.pane_id.starts_with(REX_HOST_PREFIX))
         {
             let in_rex = row.incarnation.pane_id.starts_with(REX_BLOCK_PREFIX);
+            AGENTS_ARE_IN_REX.store(in_rex, Ordering::Release);
             self.agents_in_rex = Some(in_rex);
         }
         let result = if self.first_snapshot_pending {
@@ -1377,6 +1509,7 @@ impl RuntimeCore {
             self.app.apply_later_snapshot(snapshot)
         };
 
+        LOCAL_FOCUS_RULE.store(self.app.snapshot.focus_known.is_none(), Ordering::Release);
         match result {
             Ok(accepted) => {
                 if self.first_snapshot_pending {
@@ -1557,15 +1690,16 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Backoff, BoxFuture, ClockPort, Control, InputMessage, InputPump, NowRead, OpenOutcome,
-        QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort,
-        SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream,
-        handle_input, merge_exit, open_stream, resolve_client, run_loop, wait_for_retry,
+        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, NowRead,
+        OpenOutcome, QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort,
+        ShutdownPort, SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval,
+        consume_stream, handle_input, merge_exit, open_stream, resolve_client, run_loop,
+        spawn_focus_worker, wait_for_retry,
     };
     use crate::api::{FocusRead, FocusRecord, SeenReporter, SharedSeen, SourceError};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
-        MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
+        FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{HostJump, NavigationError, PaneNavigator};
     use crate::notes::NoteLine;
@@ -1832,6 +1966,25 @@ mod tests {
             Some(RuntimeStatus::NavigationFailed(_))
         ));
         assert_eq!(failed.app.snapshot.rows.len(), 1);
+    }
+
+    #[test]
+    fn focus_is_read_from_the_multiplexer_of_the_agents_ids() {
+        let tmux = || Some("%1".to_owned());
+        let rex = || Some("block:a".to_owned());
+
+        assert_eq!(
+            super::read_focus(true, tmux, rex),
+            FocusReading::Active("block:a".into())
+        );
+        assert_eq!(
+            super::read_focus(false, tmux, rex),
+            FocusReading::Active("%1".into())
+        );
+        assert_eq!(
+            super::read_focus(true, tmux, || None),
+            FocusReading::Unavailable
+        );
     }
 
     struct RexNavigator {
@@ -4582,7 +4735,7 @@ mod tests {
 
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
-            focus_known: false,
+            focus_known: None,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -5218,6 +5371,189 @@ mod tests {
         }
     }
 
+    struct ScriptedProbe(std::collections::VecDeque<FocusReading>);
+
+    impl FocusProbe for ScriptedProbe {
+        fn read(&mut self) -> FocusReading {
+            if self.0.len() > 1 {
+                self.0.pop_front().unwrap()
+            } else {
+                self.0.front().cloned().unwrap_or(FocusReading::Unavailable)
+            }
+        }
+    }
+
+    fn pump_with_focus(
+        probe: impl FocusProbe,
+        interval: Duration,
+    ) -> (
+        mpsc::Sender<InputMessage>,
+        InputPump,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (input, mut pump) = InputPump::channel();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        pump.focus = Some(receiver);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = spawn_focus_worker(probe, sender, Arc::clone(&cancelled), interval);
+        (input, pump, cancelled, worker)
+    }
+
+    #[tokio::test]
+    async fn focus_worker_reports_changes_only_and_stops_on_cancel() {
+        let (_input, mut pump, cancelled, worker) = pump_with_focus(
+            ScriptedProbe(
+                [
+                    FocusReading::Active("%1".into()),
+                    FocusReading::Active("%1".into()),
+                    FocusReading::Active("%2".into()),
+                ]
+                .into(),
+            ),
+            Duration::from_millis(5),
+        );
+        // A watch keeps only the latest value, so %1 may be skipped, but no reading is
+        // repeated and the final state is always delivered.
+        let mut seen = Vec::new();
+        while seen.last() != Some(&FocusReading::Active("%2".into())) {
+            let Some(Ok(RuntimeInput::Focus(reading))) = pump.recv().await else {
+                panic!("expected a focus reading");
+            };
+            seen.push(reading);
+        }
+        assert!(seen.windows(2).all(|pair| pair[0] != pair[1]), "{seen:?}");
+        // Unchanged readings publish nothing further.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), pump.recv())
+                .await
+                .is_err()
+        );
+        cancelled.store(true, Ordering::Release);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn focus_input_updates_the_app_without_changing_control_flow() {
+        let navigator = FakeNavigator::successful();
+        let mut core = RuntimeCore::new(None);
+        let control = handle_input(
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%7".into())))),
+            &mut core,
+            &navigator,
+        )
+        .unwrap();
+        assert!(matches!(control, Control::Continue));
+        assert!(core.app.focus_tracking());
+
+        handle_input(
+            Some(Ok(RuntimeInput::Focus(FocusReading::Unavailable))),
+            &mut core,
+            &navigator,
+        )
+        .unwrap();
+        assert!(!core.app.focus_tracking());
+    }
+
+    #[test]
+    fn focus_input_changes_nothing_for_a_newer_harold() {
+        let navigator = FakeNavigator::successful();
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        let mut newer = snapshot(1, MonitorHealthState::Healthy);
+        newer.focus_known = Some(true);
+        newer.rows[0].waiting = true;
+        newer.rows[0].waiting_since_ms = 5;
+        core.accept_snapshot(newer, 1);
+        let pane = core.app.snapshot.rows[0].incarnation.clone();
+        for reading in [
+            FocusReading::Active(pane.pane_id.clone()),
+            FocusReading::Unavailable,
+        ] {
+            handle_input(
+                Some(Ok(RuntimeInput::Focus(reading))),
+                &mut core,
+                &navigator,
+            )
+            .unwrap();
+            assert!(core.app.focus_tracking());
+            assert!(core.app.is_waiting(&pane));
+        }
+    }
+
+    /// A probe that counts its reads and reads only while `wanted` is set.
+    struct GatedProbe {
+        wanted: Arc<AtomicBool>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FocusProbe for GatedProbe {
+        fn read(&mut self) -> FocusReading {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            FocusReading::Active("%1".into())
+        }
+
+        fn wanted(&self) -> bool {
+            self.wanted.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_focus_worker_reads_nothing_while_the_probe_is_not_wanted() {
+        let wanted = Arc::new(AtomicBool::new(true));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_input, mut pump, cancelled, worker) = pump_with_focus(
+            GatedProbe {
+                wanted: Arc::clone(&wanted),
+                reads: Arc::clone(&reads),
+            },
+            Duration::from_millis(5),
+        );
+        assert_eq!(
+            pump.recv().await,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
+        );
+
+        wanted.store(false, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(60));
+        let stopped_at = reads.load(Ordering::Acquire);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(reads.load(Ordering::Acquire), stopped_at);
+
+        // The same reading is published again after the pause.
+        wanted.store(true, Ordering::Release);
+        let again = tokio::time::timeout(Duration::from_secs(30), pump.recv())
+            .await
+            .expect("a reading after the pause");
+        assert_eq!(
+            again,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
+        );
+        cancelled.store(true, Ordering::Release);
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_input_is_delivered_first_and_the_latest_focus_is_never_lost() {
+        let (input, mut pump, cancelled, worker) = pump_with_focus(
+            ScriptedProbe([FocusReading::Active("%1".into())].into()),
+            Duration::from_millis(5),
+        );
+        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
+            input.try_send(InputMessage::Redraw).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
+            assert_eq!(pump.recv().await, Some(Ok(RuntimeInput::Redraw)));
+        }
+        assert_eq!(
+            pump.recv().await,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
+        );
+        cancelled.store(true, Ordering::Release);
+        worker.join().unwrap();
+    }
+
     struct PanickingInput;
 
     impl TerminalInput for PanickingInput {
@@ -5231,8 +5567,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dead_input_worker_ends_the_stream() {
-        let mut pump = InputPump::start_with(PanickingInput);
+    async fn a_dead_input_worker_ends_the_stream_even_with_a_live_focus_worker() {
+        let mut pump = InputPump::start_with_focus(
+            PanickingInput,
+            ScriptedProbe([FocusReading::Active("%1".into())].into()),
+        );
         let ended = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if pump.recv().await.is_none() {
@@ -5242,5 +5581,34 @@ mod tests {
         })
         .await;
         assert!(ended.is_ok(), "recv never reported the dead input worker");
+    }
+
+    struct BlockingProbe(std::sync::mpsc::Receiver<()>);
+
+    impl FocusProbe for BlockingProbe {
+        fn read(&mut self) -> FocusReading {
+            let _ = self.0.recv();
+            FocusReading::Unavailable
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
+    fn dropping_the_pump_does_not_wait_for_a_hung_focus_probe() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let pump = InputPump::start_with_focus(
+            SequenceInput {
+                events: Vec::new().into(),
+            },
+            BlockingProbe(blocked),
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        drop(pump);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
     }
 }

@@ -557,7 +557,7 @@ async fn remote_loop<S: RemoteSource>(
             input = keys.next_input() => {
                 let key = match input {
                     Some(Ok(RuntimeInput::Key(key))) => key,
-                    Some(Ok(RuntimeInput::Redraw)) => {
+                    Some(Ok(RuntimeInput::Redraw | RuntimeInput::Focus(_))) => {
                         screen.show(&model)?;
                         continue;
                     }
@@ -1276,7 +1276,7 @@ mod tests {
 
     fn snapshot(version: u64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
-            focus_known: false,
+            focus_known: None,
             through_event_version: version,
             server_time_ms: 0,
             monitor_health: Vec::new(),
