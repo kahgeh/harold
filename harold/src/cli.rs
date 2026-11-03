@@ -1154,6 +1154,11 @@ fn parse_watch_remind(name: &str, args: &[&str]) -> Result<WatchCommand, String>
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let slot = match *arg {
+            // After `--` the next argument is the text, even if it starts with `-`.
+            "--" if text.is_none() => {
+                text = Some((*rest.next().ok_or_else(|| WATCH_USAGE_LINE.to_string())?).into());
+                continue;
+            }
             "--in" => &mut within,
             "--at" => &mut at,
             "--report-to" => &mut report_to,
@@ -2260,12 +2265,12 @@ fn watch_reminder_line(reminder: &watch_api::Reminder, offset: time::UtcOffset) 
     )
 }
 
-/// The count line for `pause --all` and `resume --all`. `why` tells why a watch was
-/// skipped.
-fn watch_count_line(verb: &str, done: &[String], skipped: &[String], why: &str) -> String {
+/// The count line for `pause --all` and `resume --all`. The daemon skips only the
+/// watches that the daily budget caps.
+fn watch_count_line(verb: &str, done: &[String], skipped: &[String]) -> String {
     let mut line = format!("{verb} {}", done.len());
     if !skipped.is_empty() {
-        line.push_str(&format!(", skipped {} ({why})", skipped.join(", ")));
+        line.push_str(&format!(", skipped {} (budget)", skipped.join(", ")));
     }
     line
 }
@@ -2412,9 +2417,7 @@ pub(crate) async fn watch_within(
                     .into_inner();
                 let mut line = match name {
                     Some(name) => format!("paused {name}"),
-                    None => {
-                        watch_count_line("paused", &paused.paused, &paused.skipped, "not running")
-                    }
+                    None => watch_count_line("paused", &paused.paused, &paused.skipped),
                 };
                 if let Some(minutes) = for_minutes {
                     line.push_str(&format!(" for {minutes} minutes"));
@@ -2433,9 +2436,7 @@ pub(crate) async fn watch_within(
                     .into_inner();
                 Ok(match name {
                     Some(name) => format!("resumed {name}"),
-                    None => {
-                        watch_count_line("resumed", &resumed.resumed, &resumed.skipped, "budget")
-                    }
+                    None => watch_count_line("resumed", &resumed.resumed, &resumed.skipped),
                 })
             }
             WatchCommand::Remind {
@@ -7048,6 +7049,44 @@ mod tests {
             watch_reminder_line(&waiting, utc),
             "reminder release-check due 16:30, reporting to chief"
         );
+    }
+
+    #[test]
+    fn a_watch_count_line_names_the_capped_watches() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            watch_count_line("resumed", &names(&["a"]), &names(&["pods"])),
+            "resumed 1, skipped pods (budget)"
+        );
+        assert_eq!(
+            watch_count_line("paused", &names(&["a"]), &names(&["pods"])),
+            "paused 1, skipped pods (budget)"
+        );
+        assert_eq!(
+            watch_count_line("paused", &names(&["a", "b"]), &names(&["x", "y"])),
+            "paused 2, skipped x, y (budget)"
+        );
+        assert_eq!(watch_count_line("resumed", &[], &[]), "resumed 0");
+    }
+
+    #[test]
+    fn tool_watch_remind_takes_text_after_a_double_dash() {
+        assert_eq!(
+            watch_command(&["remind", "x", "--in", "5m", "--", "-check it"]),
+            Ok(WatchCommand::Remind {
+                name: "x".into(),
+                when: RemindWhen::In(5),
+                report_to: None,
+                text: "-check it".into()
+            })
+        );
+        for args in [
+            vec!["remind", "x", "--in", "5m", "--"],
+            vec!["remind", "x", "--in", "5m", "--", "a", "b"],
+            vec!["remind", "x", "--in", "5m", "t", "--", "u"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
     }
 
     #[tokio::test]
