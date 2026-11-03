@@ -1184,23 +1184,40 @@ async fn cron_prompt_skipped_time_runs_once_at_0300() {
     assert!(prompts.round().await.is_empty());
 
     fake.clock("2026-10-04", "03:00:00");
-    let reports = prompts.round().await;
-    assert!(
-        matches!(
-            &reports[..],
-            [Report::Typed {
-                schedule: "cron",
-                missed: 0,
-                ..
-            }]
-        ),
-        "{reports:?}"
-    );
+    // `late_s` counts by the local clock: 02:30 to 03:00 is 1800 s, though no time went by.
+    assert_eq!(prompts.round().await, [typed_cron("digest", 1800, 0)]);
     fake.clock("2026-10-04", "03:00:05");
     assert!(prompts.round().await.is_empty());
     fake.clock("2026-10-04", "03:30:00");
     assert!(prompts.round().await.is_empty());
     assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn cron_prompt_skipped_hour_with_a_small_window_is_skipped() {
+    // In Sydney on 2026-10-04 the clock goes from 01:59 to 03:00. The window uses local
+    // minutes, so the match at 02:00 is 60 minutes old at 03:00: more than 30.
+    let store = TestStore::new().await;
+    let fake = Fake::at("2026-10-04", "01:59:00");
+    let entry = TimedPromptSettings {
+        give_up_after_minutes: 30,
+        ..cron_entry("digest", "0 2 * * *")
+    };
+    let mut prompts = cron_prompts(&fake, &store, &[entry], &[]);
+    assert!(prompts.round().await.is_empty());
+
+    fake.clock("2026-10-04", "03:00:00");
+    assert_eq!(
+        prompts.round().await,
+        [Report::Skipped {
+            name: "digest".into(),
+            reason: Reason::WindowPassed,
+            missed: 1,
+        }]
+    );
+    fake.clock("2026-10-04", "03:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
 }
 
 #[tokio::test]

@@ -1548,8 +1548,9 @@ fn default_give_up_after_minutes() -> i64 {
 }
 
 /// One `[[timed_prompts]]` entry: a text Harold types into the pane of the agent running
-/// in `folder` at `at` each day, or at each minute that `cron` matches. Every key defaults to empty when the entry is read, so
-/// `validate` reports a missing key by the entry's position like any other invalid value.
+/// in `folder` at `at` each day, or at each minute that `cron` matches. Every key defaults
+/// to empty when the entry is read, so `validate` reports a missing key by the entry's
+/// position like any other invalid value.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct TimedPromptSettings {
     /// Names the prompt in the log and in the stored record.

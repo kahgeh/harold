@@ -213,6 +213,9 @@ For a cron prompt, Harold also writes the newest checked minute, `YYYY-MM-DD HH:
 - **An `at` entry is typed once a day.** For days of the week, dates or intervals, use `cron`.
 - **A cron match that waits is in memory only.** A restart while a match waits for the pane drops that match, because the checked minute has moved on.
 - **`late_s` uses the local clock.** After a skipped hour, a match at 02:30 that is typed at 03:00 shows `late_s = 1800`, though no time went by.
+- **The window uses the local clock too.** A skipped hour counts as 60 minutes in the window, though no time went by. So a small `give_up_after_minutes` can drop a match in a skipped hour. For example, in Sydney on 2026-10-04 the clock goes from 01:59 to 03:00. With `0 2 * * *` and `give_up_after_minutes = 30`, the match at 02:00 is 60 minutes old at 03:00. Harold skips it with `window_passed` and `missed = 1`, and types nothing.
+- **A repeated hour can make a window longer.** In a repeated hour the clock goes back, so a waiting match has a negative age. Its window can then last up to 60 minutes longer.
+- **A failed write can type a match twice.** If the write of the checked minute fails and Harold restarts inside the window, a cron prompt can type the same match a second time.
 - **Nothing is sent to the phone** when a prompt is typed or skipped. Pausing messages to the phone has no effect on timed prompts.
 - **Not on the control-tower.** The log is where to see what happened to a prompt.
 
