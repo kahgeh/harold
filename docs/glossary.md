@@ -93,13 +93,17 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | push | How the web app shows a phone notification on the phone's lock screen, through the phone's push service | "alert" for a push |
 | machine name | This Mac's name, as tagged on its messages | — |
 | routing tag | The `[machine/pane]` text at the start of a reply that picks its pane | — |
-| watch | A schedule an agent asks Harold for: run one of its skills with a model every few minutes for a set time, and report to the chief or the agent itself. It is not the agent monitor's watching of agents ("Watching agents"), and not the `WatchAgentStates` stream | "scheduled job", "monitoring job", "job" (a background job is Harold's own thread), "watcher", "monitor" |
+| watch | A schedule an agent asks Harold for: run one of its skills with a model every few minutes, for a set time or with no end, and report to the chief or the agent itself. It is not the agent monitor's watching of agents ("Watching agents"), and not the `WatchAgentStates` stream | "scheduled job", "monitoring job", "job" (a background job is Harold's own thread), "watcher", "monitor" |
 | watch skill | The Claude Code skill a watch runs, named under the watch's folder's `.claude/skills/` (its files there or in a watch skill folder), holding the checks, what is worth reporting, and in `allowed-tools` what the model may use, and in `add-dirs` the folders outside the watch's folder its run may reach | "watch prompt", "watch config" |
 | watch skill folder | A folder the user lists in `[watch] skill_folders`, where a watch skill linked into `.claude/skills/` may keep its files, such as the chief-of-pods repository's standard watch skills or an organisation repository's own | "skill root", "skill path", "skills directory" |
 | watch run | One run of a watch's model, with its facts and its answer | "tick", "job run" |
 | run limit | The most time one watch run may take before Harold stops it, set with `--run-limit` and logged as `run_ms` against it, with `wait_ms` as the wait for the model before it | "timeout" for the setting, "run timeout", "run time limit", "run cap", "run budget" (the run budget is the most a run may spend) |
 | watch report | A `WATCH <name> …` line Harold types for a watch: a run's `REPORT` line, a `quiet` line under `--every-run`, or a closing line. What is worth reporting is the watch skill's to decide | "alert" (an alert is HyperDX's), "problem" for every report |
 | watch tool | The tool that holds the watches, runs them and types their reports | — |
+| open-ended watch | A watch started with no `--for`: it runs until `watch stop`, and needs a daily budget | "forever watch", "permanent watch" |
+| paused watch | A watch that runs nothing until `watch resume` or its pause ends. It is not the **messaging pause** | "suspended" |
+| capped watch | An open-ended watch that the spent daily budget paused until the next local day. `list` shows it as `paused (budget)`. `resume` and `W` do not resume it | "over budget" for the state |
+| watch reminder | A `REMIND <name>: <text>` line that the watch tool types once at a set time, with no model | "alarm", "timer" |
 | facts | What Harold hands the model on each watch run: agents, pods, the chief's pane and the run numbers; and, for a call, the call facts | "context", "evidence" |
 
 ## Watching agents
@@ -175,6 +179,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | pick-up | The short rising two-note sound that ends the ringback; the call is listening when it ends | "answer", "beep" |
 | metered | Harold's guess that the Mac is on the iPhone's Personal Hotspot, from the default gateway, which holds back a speech model download | "cellular", "expensive", "offline" |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
+| restart reminder | The one line Harold types into the chief's pane when its session is old or has compacted often, asking it to hand off and restart | "reminder" alone, for this or for a watch reminder |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
 | dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |
 | photo | An image you attach to a web app reply, kept by Harold in `app-photos/` and named in the line typed to the chief | "attachment" alone, "image upload", "media" |
