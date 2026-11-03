@@ -364,3 +364,30 @@ async fn insert_copy_keeps_every_field() {
         source.counts().await.unwrap()
     );
 }
+
+#[tokio::test]
+async fn opening_read_only_leaves_the_bytes_unchanged() {
+    let folder = TempFolder::new();
+    {
+        let file = open_file(&folder).await;
+        put(&file, "a-1", Priority::Later, Status::Idea).await;
+    }
+    let path = folder.file(FILE);
+    let before = std::fs::read(&path).unwrap();
+    let names_before = dir_names(&folder);
+    {
+        let file = WorkFile::open_read_only(&path).await.unwrap();
+        assert!(file.get("a-1").await.unwrap().is_some());
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(dir_names(&folder), names_before);
+}
+
+fn dir_names(folder: &TempFolder) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&folder.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}

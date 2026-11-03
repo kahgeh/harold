@@ -118,7 +118,7 @@ impl WorkFile {
             .ok_or_else(|| StoreError::Data("work file path is not UTF-8".into()))?;
         let database = turso::Builder::new_local(path).build().await?;
         let conn = database.connect()?;
-        configure(&conn).await?;
+        configure(&conn, read_only).await?;
         if !read_only {
             begin(&conn).await?;
             finish(&conn, apply_migrations(&conn).await).await?;
@@ -411,8 +411,12 @@ impl WorkFile {
     }
 }
 
-async fn configure(conn: &Connection) -> Result<()> {
+/// A read-only open skips the pragmas that write to the file.
+async fn configure(conn: &Connection, read_only: bool) -> Result<()> {
     conn.busy_timeout(Duration::from_millis(5_000))?;
+    if read_only {
+        return Ok(());
+    }
     let mut rows = conn.query("PRAGMA journal_mode = WAL", ()).await?;
     while rows.next().await?.is_some() {}
     conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
