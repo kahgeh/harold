@@ -2325,6 +2325,14 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset, now_ms: i6
     format!("{} ended ({why}) in {}, {counts}", watch.name, watch.folder)
 }
 
+/// The line `remind` prints: `reminder <name> at HH:MM`, with the date before the time
+/// when the due day is not today (a cron reminder can be days away), as in `list`.
+fn watch_remind_line(name: &str, due_at_ms: i64, offset: time::UtcOffset, now_ms: i64) -> String {
+    let today = watch_local_minute(now_ms, offset);
+    let due = watch_local_minute(due_at_ms, offset);
+    format!("reminder {name} at {}", watch_short_minute(&due, &today))
+}
+
 /// The line of a waiting reminder. A cron reminder can be days away, so its due time has
 /// the date when it is not today, and the line names its expression.
 fn watch_reminder_line(
@@ -2585,10 +2593,10 @@ pub(crate) async fn watch_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
-                Ok(format!(
-                    "reminder {name} at {}",
-                    watch_time(reminded.due_at_ms, offset)
-                ))
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as i64);
+                Ok(watch_remind_line(name, reminded.due_at_ms, offset, now_ms))
             }
         }
     })
@@ -7205,6 +7213,27 @@ mod tests {
         ] {
             assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
         }
+    }
+
+    #[test]
+    fn the_remind_confirmation_shows_the_date_when_the_reminder_is_not_today() {
+        let utc = time::UtcOffset::UTC;
+        // 2026-11-03 10:00 UTC.
+        let now_ms = 1_793_700_000_000 - 1_793_700_000_000 % 86_400_000 + 10 * 3_600_000;
+        assert_eq!(watch_local_minute(now_ms, utc), "2026-11-03 10:00");
+        assert_eq!(
+            watch_remind_line("release-check", now_ms + 45 * 60_000, utc, now_ms),
+            "reminder release-check at 10:45"
+        );
+        assert_eq!(
+            watch_remind_line(
+                "digest-check",
+                now_ms + 6 * 86_400_000 - 90 * 60_000,
+                utc,
+                now_ms
+            ),
+            "reminder digest-check at 2026-11-09 08:30"
+        );
     }
 
     #[test]

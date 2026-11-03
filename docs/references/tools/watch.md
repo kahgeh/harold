@@ -126,7 +126,7 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 | `"<text>"` | The text of the reminder | At least one visible character. Harold removes control characters, escape sequences and Unicode format characters (for example a right-to-left override), and cuts it to 300 characters |
 
 - **Give one of `--in`, `--at` and `--cron`.** A cron reminder is a one-time reminder: it is typed at the next matching minute, then it ends. It has no 2-minute rule. A text that starts with `-` goes after `--`.
-- **The output** is `reminder <name> at HH:MM`, the due time in local time.
+- **The output** is `reminder <name> at HH:MM`, the due time in local time. When the reminder is not due today, the date comes before the time: `reminder <name> at YYYY-MM-DD HH:MM`. A cron reminder can be days away.
 - **Harold types** `REMIND <name>: <text>` once, with the checks of the watch reports (see The lines Harold types).
 - **A missed reminder.** A reminder (a cron reminder too) that is 120 minutes or more late is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
 - **`watch stop <name>`** cancels a waiting reminder. `list` shows each waiting reminder as `reminder <name> due HH:MM, reporting to <chief|self>`.
@@ -387,7 +387,7 @@ Migration `003_controls.sql` copies every row of the old table, with the old col
 | `Resume` | `name`, `all`, `caller` | `resumed`, `skipped` (the capped watches) |
 | `Remind` | `name`, `folder`, `in_minutes`, `at_local` or `cron` (7), `report_to`, `text` | `due_at_ms` |
 
-`Watch` gains `cron` (18) and `checked_local` (19), both empty when unused, and `Reminder` gains `cron` (4). `Watch` also gains `paused`, optional `paused_until_ms`, `pause_how` and optional `ends_at_ms`. Refusals: `InvalidArgument` `invalid <field>`; `NotFound` `unknown_skill` and `unknown_watch`; `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset`, `not_running`, `not_paused`, `budget_day` and `name_in_use`; `Unavailable` when the database write fails.
+`Watch` gains `cron` (18) and `checked_local` (19), both empty when unused, and `Reminder` gains `cron` (4). `Watch` also gains `paused`, optional `paused_until_ms`, `pause_how` and optional `ends_at_ms`. Refusals: `InvalidArgument` `invalid <field>`, or for a bad `cron` (`StartWatch` and `Remind`) the cron error sentence, such as `minute 75 is out of range: use 0 to 59`; `StartWatch` also gives `InvalidArgument` `give exactly one of every_minutes and cron` and `this schedule runs more often than every 2 minutes`; `NotFound` `unknown_skill` and `unknown_watch`; `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset`, `not_running`, `not_paused`, `budget_day` and `name_in_use`; `Unavailable` when the database write fails.
 
 ## Rollback
 

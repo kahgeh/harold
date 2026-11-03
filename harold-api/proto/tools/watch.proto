@@ -30,7 +30,12 @@
 // Refusals:
 //   InvalidArgument      message "invalid <field>" (including "invalid folder"). A Remind
 //                        with no `in_minutes`, no `at_local` and no `cron` is "invalid when".
-//                        A bad `cron` is "invalid cron".
+//                        A bad `cron` (StartWatch and Remind) is the cron error
+//                        sentence, for example "minute 75 is out of range: use 0 to 59".
+//                        StartWatch with both or neither of `every_minutes` and `cron` is
+//                        "give exactly one of every_minutes and cron". A cron watch with two
+//                        runs less than 2 minutes apart is "this schedule runs more often
+//                        than every 2 minutes".
 //   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch, Pause,
 //                        Resume).
 //   FailedPrecondition   "too_many_watches", "daily_budget_spent", "daily_budget_unset"

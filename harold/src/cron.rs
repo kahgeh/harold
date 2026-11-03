@@ -51,8 +51,8 @@ pub(crate) enum CronError {
 
 impl CronError {
     /// The name of the field with the fault, or `cron` for the whole expression.
-    // The watch tool uses this in a later task.
-    #[allow(dead_code)]
+    // Only the tests use this.
+    #[cfg(test)]
     pub(crate) fn field(&self) -> &'static str {
         match self {
             CronError::TooLong
@@ -354,8 +354,8 @@ impl Cron {
         self.hours & (1 << hour) != 0 && self.minutes & (1u64 << minute) != 0
     }
 
-    // The watch tool uses this in a later task.
-    #[allow(dead_code)]
+    // Only the tests use this.
+    #[cfg(test)]
     pub(crate) fn matches(&self, minute: LocalMinute) -> bool {
         self.day_matches(minute.year, minute.month, minute.day)
             && self.time_matches(minute.hour, minute.minute)
@@ -500,8 +500,8 @@ impl LocalMinute {
     }
 
     /// 0 is Sunday.
-    // The watch tool uses this in a later task.
-    #[allow(dead_code)]
+    // Only the tests use this.
+    #[cfg(test)]
     pub(crate) fn weekday(self) -> u32 {
         weekday_of(self.year, self.month, self.day)
     }
