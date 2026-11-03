@@ -55,14 +55,96 @@ pub(super) fn jump_wall_clock(ms: i64) {
 /// saving time takes effect without a restart.
 pub(super) trait LocalOffset: Send + Sync {
     fn offset(&self) -> BoxFuture<'_, UtcOffset>;
+
+    /// The start of the local day after the day that holds `day_ms`, in milliseconds. It
+    /// is the real instant: on a day with a daylight saving change it is 23 or 25 hours
+    /// after the day's start.
+    fn midnight_after(&self, day_ms: i64) -> BoxFuture<'_, Result<i64, ClockReason>>;
+}
+
+/// Why the clock could not give the next local midnight: the `reason` of the
+/// `watch clock unreadable` log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClockReason {
+    /// `/bin/date` did not start.
+    Missing,
+    /// `/bin/date` ran and failed, or took too long.
+    Refused,
+    /// `/bin/date` printed text that is not a whole number.
+    Unparsable,
+}
+
+impl ClockReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            ClockReason::Missing => "missing",
+            ClockReason::Refused => "refused",
+            ClockReason::Unparsable => "unparsable",
+        }
+    }
+}
+
+/// The whole number in the text of `date +%s`, in seconds. `None` for any other text.
+pub(super) fn parse_epoch(text: &str) -> Option<i64> {
+    text.trim().parse().ok()
+}
+
+/// The program that prints a local midnight, and the longest it may take.
+const DATE_PROGRAM: &str = "/bin/date";
+const DATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The arguments that make `/bin/date` print the instant of `00:00:00` on `date`.
+fn midnight_args(date: Date) -> Vec<String> {
+    vec![
+        "-j".into(),
+        "-f".into(),
+        "%Y-%m-%d %H:%M:%S".into(),
+        format!(
+            "{:04}-{:02}-{:02} 00:00:00",
+            date.year(),
+            u8::from(date.month()),
+            date.day()
+        ),
+        "+%s".into(),
+    ]
+}
+
+/// What `program` prints. A program that cannot start is `Missing`. A program that fails,
+/// runs out of time (then it is killed) or prints text that is not UTF-8 is `Refused`.
+async fn bounded_text(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<String, ClockReason> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| ClockReason::Refused)?
+        .map_err(|_| ClockReason::Missing)?;
+    if !output.status.success() {
+        return Err(ClockReason::Refused);
+    }
+    String::from_utf8(output.stdout).map_err(|_| ClockReason::Refused)
+}
+
+async fn run_date(args: Vec<String>) -> Result<String, ClockReason> {
+    bounded_text(DATE_PROGRAM, &args, DATE_TIMEOUT).await
 }
 
 type Reader = Box<dyn Fn() -> BoxFuture<'static, Option<UtcOffset>> + Send + Sync>;
+type EpochRunner =
+    Box<dyn Fn(Vec<String>) -> BoxFuture<'static, Result<String, ClockReason>> + Send + Sync>;
 
 /// The production offset: it asks `/bin/date` each time. When `/bin/date` fails, it gives
 /// the last good offset.
 pub(super) struct DateClock {
     reader: Reader,
+    epoch: EpochRunner,
     last_good: Mutex<UtcOffset>,
 }
 
@@ -79,8 +161,21 @@ impl DateClock {
     {
         Self {
             reader: Box::new(move || Box::pin(reader())),
+            epoch: Box::new(|args| Box::pin(run_date(args))),
             last_good: Mutex::new(crate::telemetry::local_offset()),
         }
+    }
+
+    /// The same clock, with `runner` in place of `/bin/date` for the next local midnight.
+    /// `runner` gets the arguments of `/bin/date` and gives what it prints.
+    #[cfg(test)]
+    fn with_date_runner<F, Fut>(mut self, runner: F) -> Self
+    where
+        F: Fn(Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, ClockReason>> + Send + 'static,
+    {
+        self.epoch = Box::new(move |args| Box::pin(runner(args)));
+        self
     }
 }
 
@@ -96,6 +191,19 @@ impl LocalOffset for DateClock {
                 *last = offset;
             }
             *last
+        })
+    }
+
+    fn midnight_after(&self, day_ms: i64) -> BoxFuture<'_, Result<i64, ClockReason>> {
+        Box::pin(async move {
+            let offset = self.offset().await;
+            let next = at(day_ms, offset)
+                .date()
+                .next_day()
+                .ok_or(ClockReason::Unparsable)?;
+            let text = (self.epoch)(midnight_args(next)).await?;
+            let seconds = parse_epoch(&text).ok_or(ClockReason::Unparsable)?;
+            seconds.checked_mul(1000).ok_or(ClockReason::Unparsable)
         })
     }
 }
@@ -256,5 +364,93 @@ mod local_ms_tests {
         ] {
             assert_eq!(local_ms(text, utc), None, "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod midnight_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn a_whole_number_is_an_epoch_and_other_text_is_not() {
+        assert_eq!(parse_epoch("1791036000\n"), Some(1_791_036_000));
+        for text in ["", "abc", "12.5", "12 13", "\n"] {
+            assert_eq!(parse_epoch(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_date_arguments_name_the_next_date_at_midnight() {
+        let date = Date::from_calendar_date(2026, time::Month::October, 5).unwrap();
+        assert_eq!(
+            midnight_args(date),
+            [
+                "-j",
+                "-f",
+                "%Y-%m-%d %H:%M:%S",
+                "2026-10-05 00:00:00",
+                "+%s"
+            ]
+        );
+    }
+
+    fn clock_with(
+        reply: Result<&'static str, ClockReason>,
+    ) -> (DateClock, Arc<Mutex<Vec<Vec<String>>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let clock =
+            DateClock::with_reader(|| async { Some(UtcOffset::from_hms(10, 0, 0).unwrap()) })
+                .with_date_runner(move |args| {
+                    record.lock().unwrap().push(args);
+                    let reply = reply.map(str::to_owned);
+                    async move { reply }
+                });
+        (clock, seen)
+    }
+
+    #[tokio::test]
+    async fn the_next_midnight_is_the_printed_instant_in_milliseconds() {
+        let (clock, seen) = clock_with(Ok("1791036000\n"));
+        // 2026-10-20 23:30 at +10:00: the next date is 2026-10-21.
+        let day = local_ms("2026-10-20 23:30", UtcOffset::from_hms(10, 0, 0).unwrap()).unwrap();
+        assert_eq!(clock.midnight_after(day).await, Ok(1_791_036_000_000));
+        assert_eq!(seen.lock().unwrap()[0][3], "2026-10-21 00:00:00");
+    }
+
+    #[tokio::test]
+    async fn each_failure_of_the_date_read_has_its_reason() {
+        for (reply, reason) in [
+            (Err(ClockReason::Missing), ClockReason::Missing),
+            (Err(ClockReason::Refused), ClockReason::Refused),
+            (Ok("abc"), ClockReason::Unparsable),
+            (Ok(""), ClockReason::Unparsable),
+        ] {
+            let (clock, _) = clock_with(reply);
+            assert_eq!(clock.midnight_after(0).await, Err(reason));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_that_does_not_start_fails_or_runs_out_of_time_has_its_reason() {
+        let second = Duration::from_secs(1);
+        assert_eq!(
+            bounded_text("/bin/echo", &["safe".into()], second).await,
+            Ok("safe\n".into())
+        );
+        assert_eq!(
+            bounded_text("/nonexistent/harold-test-command", &[], second).await,
+            Err(ClockReason::Missing)
+        );
+        assert_eq!(
+            bounded_text("/usr/bin/false", &[], second).await,
+            Err(ClockReason::Refused)
+        );
+        assert_eq!(
+            bounded_text("/bin/sleep", &["5".into()], Duration::from_millis(50)).await,
+            Err(ClockReason::Refused)
+        );
     }
 }

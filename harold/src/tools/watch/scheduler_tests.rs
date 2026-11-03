@@ -1813,6 +1813,107 @@ async fn a_capped_watch_logs_budget_day_when_it_pauses_and_when_it_resumes_by_it
     assert!(!resumed[0].contains("paused_until"), "{}", resumed[0]);
 }
 
+fn utc_ms(year: i32, month: time::Month, day: u8, hour: u8) -> i64 {
+    time::OffsetDateTime::new_utc(
+        time::Date::from_calendar_date(year, month, day).unwrap(),
+        time::Time::from_hms(hour, 0, 0).unwrap(),
+    )
+    .unix_timestamp()
+        * 1000
+}
+
+/// A watch caps at `now` (in the zone with `offset`) on a day that is 23 or 25 hours long.
+/// The scripted `midnight` is the real start of the next day. The watch must pause until
+/// `midnight`, not until the day's start plus 24 hours, and resume there.
+async fn caps_and_resumes_at_the_real_midnight(offset_hours: i8, now: i64, midnight: i64) {
+    let local = ScriptedOffset::at(offset(offset_hours));
+    local.set_midnight(Ok(midnight));
+    let h = harness_on(with_daily(0.5), vec![answer("QUIET", 0.01)], &local).await;
+    clock::jump_wall_clock(now - clock_ms());
+    let (day_start, sum_end) = day_bounds(clock_ms(), offset(offset_hours));
+    assert_ne!(sum_end, midnight, "the day is not 24 hours long");
+    assert_eq!(sum_end - day_start, 86_400_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    h.start_capped("pods").await;
+
+    let pods = h.row("pods").await;
+    assert_eq!(pods.state, WatchState::Paused);
+    assert_eq!(
+        (pods.pause_how.as_deref(), pods.paused_until_ms),
+        (Some("budget_day"), Some(midnight))
+    );
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH pods paused: daily budget of $0.50 spent, resumes at 00:00"]
+    );
+
+    pass(Duration::from_millis((midnight - clock_ms()) as u64) - Duration::from_secs(1)).await;
+    assert_eq!(h.row("pods").await.state, WatchState::Paused);
+    assert!(log_lines(&logs.text(), "watch resumed", "pods").is_empty());
+    // The next call would cap the resumed watch again: give it a later midnight.
+    local.set_midnight(Ok(midnight + 86_400_000));
+    pass(Duration::from_secs(5)).await;
+    let text = logs.text();
+    let resumed = log_lines(&text, "watch resumed", "pods");
+    assert_eq!(resumed.len(), 1, "{text}");
+    assert!(resumed[0].contains("how=\"budget_day\""), "{}", resumed[0]);
+    assert!(!text.contains("watch clock unreadable"), "{text}");
+}
+
+fn offset(hours: i8) -> UtcOffset {
+    UtcOffset::from_hms(hours, 0, 0).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_capped_on_a_23_hour_day_resumes_at_the_next_local_midnight() {
+    // Sydney, 2026-10-04: the clocks go from 02:00 to 03:00 (+10:00 to +11:00). The watch
+    // caps at 01:00 (+10:00); the day ends at 00:00 on 2026-10-05 (+11:00), 23 hours on.
+    caps_and_resumes_at_the_real_midnight(
+        10,
+        utc_ms(2026, time::Month::October, 3, 15),
+        utc_ms(2026, time::Month::October, 4, 13),
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_capped_on_a_25_hour_day_resumes_at_the_next_local_midnight() {
+    // Sydney, 2027-04-04: the clocks go from 03:00 to 02:00 (+11:00 to +10:00). The watch
+    // caps at 01:00 (+11:00); the day ends at 00:00 on 2027-04-05 (+10:00), 25 hours on.
+    caps_and_resumes_at_the_real_midnight(
+        11,
+        utc_ms(2027, time::Month::April, 3, 14),
+        utc_ms(2027, time::Month::April, 4, 14),
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_date_read_falls_back_to_the_sum_and_logs_once() {
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    local.set_midnight(Err(clock::ClockReason::Refused));
+    let h = harness_on(with_daily(0.5), vec![answer("QUIET", 0.01)], &local).await;
+    start_just_after_midnight().await;
+    let day_end = next_day_start();
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    h.start_capped("pods").await;
+
+    assert_eq!(h.row("pods").await.paused_until_ms, Some(day_end));
+    let text = logs.text();
+    let unreadable: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("watch clock unreadable"))
+        .collect();
+    assert_eq!(unreadable.len(), 1, "{text}");
+    assert!(
+        unreadable[0].contains("reason=\"refused\""),
+        "{}",
+        unreadable[0]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_capped_watch_stays_paused_over_a_restart_and_resumes_at_the_next_day_start() {
     let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;

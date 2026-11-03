@@ -1285,8 +1285,17 @@ impl Scheduler {
         let Ok(running) = self.deps.store.running().await else {
             return;
         };
-        let (_, next_day) = self.today().await;
-        let resumes_at = local_text(next_day, self.offset().await);
+        let (day_start, day_end) = self.today().await;
+        // The real next midnight; on a day of 23 or 25 hours it is not the sum. When the
+        // clock cannot give it, the sum is used and one line tells so.
+        let (next_day, resumes_clock) = match self.deps.local.midnight_after(day_start).await {
+            Ok(midnight) => (midnight, "00:00".to_owned()),
+            Err(reason) => {
+                obs::clock_unreadable(reason);
+                let text = local_text(day_end, self.offset().await);
+                (day_end, clock_of(&text).to_owned())
+            }
+        };
         for row in running {
             if row.ends_at_ms.is_some() {
                 self.end(&row, EndReason::DailyBudgetSpent, Some(daily))
@@ -1305,7 +1314,7 @@ impl Scheduler {
                 "WATCH {} paused: daily budget of {} spent, resumes at {}",
                 row.name,
                 dollars(daily),
-                clock_of(&resumes_at)
+                resumes_clock
             );
             slot.offer(line, obs::ReportObs::new(&row.name, row.runs));
         }

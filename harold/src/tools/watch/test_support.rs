@@ -12,7 +12,7 @@ use crate::tools::{AgentFact, Agents, BoxFuture, ChiefPane, PaneTyping, Pods, Ty
 
 use time::UtcOffset;
 
-use super::clock::LocalOffset;
+use super::clock::{ClockReason, LocalOffset};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 
 pub(super) struct TempFolder(pub std::path::PathBuf);
@@ -313,15 +313,23 @@ impl ModelRunner for FakeRunner {
 }
 
 /// An offset the test sets and changes, as daylight saving time does.
-pub(super) struct ScriptedOffset(Mutex<UtcOffset>);
+pub(super) struct ScriptedOffset(Mutex<UtcOffset>, Mutex<Result<i64, ClockReason>>);
 
 impl ScriptedOffset {
     pub(super) fn at(offset: UtcOffset) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(offset)))
+        Arc::new(Self(
+            Mutex::new(offset),
+            Mutex::new(Err(ClockReason::Missing)),
+        ))
     }
 
     pub(super) fn set(&self, offset: UtcOffset) {
         *self.0.lock().unwrap() = offset;
+    }
+
+    /// The answer of `midnight_after`. Until the test sets it, the answer is `Missing`.
+    pub(super) fn set_midnight(&self, answer: Result<i64, ClockReason>) {
+        *self.1.lock().unwrap() = answer;
     }
 }
 
@@ -329,5 +337,10 @@ impl LocalOffset for ScriptedOffset {
     fn offset(&self) -> BoxFuture<'_, UtcOffset> {
         let offset = *self.0.lock().unwrap();
         Box::pin(async move { offset })
+    }
+
+    fn midnight_after(&self, _day_ms: i64) -> BoxFuture<'_, Result<i64, ClockReason>> {
+        let answer = *self.1.lock().unwrap();
+        Box::pin(async move { answer })
     }
 }

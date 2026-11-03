@@ -10,6 +10,7 @@ use tracing::field::Empty;
 use tracing::{Span, debug, info, info_span, warn};
 
 use super::answer::{Cause, Failure};
+use super::clock::ClockReason;
 use super::runner::Exit;
 use crate::cron::LocalMinute;
 use crate::telemetry::{self, TRACE_TARGET};
@@ -122,6 +123,12 @@ pub(super) fn watch_stopped(watch: &str, reason: EndReason, runs: u32, cost_usd:
 /// leaves it out.
 pub(super) fn watch_paused(watch: &str, how: How, paused_until: Option<&str>) {
     info!(watch, how = how.as_str(), paused_until, "watch paused");
+}
+
+/// `watch clock unreadable`: `/bin/date` could not give the next local midnight, so the
+/// watch uses the day's start plus 24 hours.
+pub(super) fn clock_unreadable(reason: ClockReason) {
+    warn!(reason = reason.as_str(), "watch clock unreadable");
 }
 
 /// `watch resumed`.
