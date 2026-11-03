@@ -37,8 +37,6 @@ PAGE_TITLE = 'Browser Test Page'
 MD_TITLE = 'Browser Test Notes'
 POLICY = ("sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; "
           "script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
-SCREENS = Path('/private/tmp/claude-502/-Users-kahgeh-Dev-p-harold-page-collections/'
-               '874405dc-68e6-49cb-9764-94106d3247d7/scratchpad')
 # A 2 x 2 red PNG.
 PNG = ('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQI12P8z8Dwn4GBgYGJAQoAHxcCAr7'
        'Eb3cAAAAASUVORK5CYII=')
@@ -61,7 +59,7 @@ import path from "node:path";
 const args = JSON.parse(process.argv[2]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "collections-chrome-"));
-const port = 9300 + Math.floor(Math.random() * 500);
+const port = args.debugPort;
 const chrome = spawn(args.chrome, ["--headless=new", `--remote-debugging-port=${port}`,
   `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--mute-audio",
   "--disable-extensions", "--window-size=390,844", "about:blank"], { stdio: "ignore" });
@@ -293,7 +291,7 @@ def main(argv=None):
     parser.add_argument('--keep', action='store_true', help='keep the scratch folder')
     parser.add_argument('--harold', type=Path, default=REPO / 'target' / 'debug' / 'harold')
     parser.add_argument('--default-config', type=Path, default=REPO / 'harold' / 'config' / 'default.toml')
-    parser.add_argument('--screens', type=Path, default=SCREENS, help='where to keep the screenshots')
+    parser.add_argument('--screens', type=Path, help='where to keep the screenshots (default: a new temporary folder)')
     args = parser.parse_args(argv)
     for tool in ('tmux', 'node'):
         if not shutil.which(tool):
@@ -327,13 +325,21 @@ def main(argv=None):
         out = run.scratch / 'browser.json'
         script = run.scratch / 'browser.mjs'
         script.write_text(BROWSER)
-        args.screens.mkdir(parents=True, exist_ok=True)
+        screens = args.screens or Path(tempfile.mkdtemp(prefix='collections-browser-'))
+        screens.mkdir(parents=True, exist_ok=True)
         config = json.dumps({'chrome': ot.CHROME, 'base': base, 'other': other, 'login': ct.LOGIN,
-                             'name': NAME, 'shots': str(args.screens), 'out': str(out)})
-        done = subprocess.run(['node', str(script), config], capture_output=True, text=True,
-                              timeout=240, start_new_session=True)
+                             'name': NAME, 'shots': str(screens), 'out': str(out), 'debugPort': ct.free_port()})
+        node = subprocess.Popen(['node', str(script), config], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        try:
+            stdout, stderr = node.communicate(timeout=240)
+        except subprocess.TimeoutExpired:
+            # The group holds node and its Chrome.
+            os.killpg(node.pid, signal.SIGKILL)
+            stdout, stderr = node.communicate()
+            stderr = 'the browser program timed out. ' + stderr
         if not out.exists():
-            results.check('browser ran', False, (done.stderr or done.stdout)[:400])
+            results.check('browser ran', False, (stderr or stdout)[:400])
             return 1
         data = json.loads(out.read_text())
         if data['errors']:
@@ -382,7 +388,7 @@ def main(argv=None):
                       not shown_page and refused, o)
         results.check('back control goes to the collection list', data['afterBack'] == '/c/' + NAME, data['afterBack'])
         print('info: other origin saw child {}, logs {}'.format(o['childUrl'], o['logs'][:2]))
-        print('screenshots in ' + str(args.screens))
+        print('screenshots in ' + str(screens))
     except ct.StepFailed as error:
         results.check('test Harold starts', False, error)
     finally:
