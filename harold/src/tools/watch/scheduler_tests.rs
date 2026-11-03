@@ -4,11 +4,12 @@ use std::time::Duration;
 use super::*;
 use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::InputBox;
+use crate::tools::watch::store::WatchState;
 use crate::tools::watch::test_support::{
     FakeAgents, FakeChief, FakePods, FakeRunner, FakeTyping, ScriptedOffset, Step, TempFolder,
     agent, answer,
 };
-use crate::tools::watch::validate::Checked;
+use crate::tools::watch::validate::{Caller, Checked, CheckedPause, CheckedResume, Target as Aim};
 
 const CHIEF_PANE: &str = "%1";
 const MINUTE: Duration = Duration::from_secs(60);
@@ -1163,4 +1164,581 @@ async fn day_bounds_and_end_time_follow_a_changed_offset() {
 
     local.set(plus_eleven);
     assert_eq!(h.scheduler.list().await.unwrap().spent_usd_micros, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Open-ended watches, pause and resume, and the capped watch
+// ---------------------------------------------------------------------------
+
+/// Settings with a daily budget of `daily` dollars.
+fn with_daily(daily: f64) -> WatchSettings {
+    WatchSettings {
+        daily_budget_usd: Some(daily),
+        ..settings()
+    }
+}
+
+fn pause_of(name: &str, for_minutes: Option<u32>) -> CheckedPause {
+    CheckedPause {
+        target: Aim::Name(name.into()),
+        for_minutes,
+        caller: Caller::Cli,
+    }
+}
+
+fn pause_all() -> CheckedPause {
+    CheckedPause {
+        target: Aim::All,
+        for_minutes: None,
+        caller: Caller::Cli,
+    }
+}
+
+fn resume_of(name: &str) -> CheckedResume {
+    CheckedResume {
+        target: Aim::Name(name.into()),
+        caller: Caller::Cli,
+    }
+}
+
+fn resume_all() -> CheckedResume {
+    CheckedResume {
+        target: Aim::All,
+        caller: Caller::Cli,
+    }
+}
+
+impl Harness {
+    /// A watch with no end.
+    fn open(&self, name: &str, every: u32) -> Checked {
+        Checked {
+            for_minutes: None,
+            ..self.checked(name, every, 1)
+        }
+    }
+
+    async fn start_open(&self, name: &str, every: u32) {
+        self.scheduler.start(self.open(name, every)).await.unwrap();
+    }
+
+    async fn pause(&self, name: &str, for_minutes: Option<u32>) {
+        self.scheduler
+            .pause(pause_of(name, for_minutes))
+            .await
+            .unwrap();
+    }
+
+    async fn resume(&self, name: &str) {
+        self.scheduler
+            .resume_watches(resume_of(name))
+            .await
+            .unwrap();
+    }
+
+    /// Starts an open-ended watch whose run budget is over the daily budget: the budget
+    /// check pauses it before its first run.
+    async fn start_capped(&self, name: &str) {
+        let mut checked = self.open(name, 10);
+        checked.run_budget_usd_micros = Some(600_000);
+        self.scheduler.start(checked).await.unwrap();
+        pass(Duration::from_secs(5)).await;
+        assert_eq!(
+            self.row(name).await.pause_how.as_deref(),
+            Some("budget_day")
+        );
+    }
+}
+
+/// The start of the next local day, at the harness's offset (UTC).
+fn next_day_start() -> i64 {
+    day_bounds(clock_ms(), UtcOffset::UTC).1
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ended_watch_runs_past_1440_minutes() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    let mut checked = h.open("pods", 60);
+    checked.every_run = true;
+    h.scheduler.start(checked).await.unwrap();
+    assert_eq!(h.row("pods").await.ends_at_ms, None);
+
+    pass(1501 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 26, "runs at 0, 60 ... 1500 minutes");
+    let row = h.row("pods").await;
+    assert!(row.running);
+    assert_eq!((row.runs, row.ends_at_ms), (26, None));
+    let typed = h.typing.typed();
+    assert_eq!(typed.len(), 26);
+    assert_eq!(typed[0], "WATCH pods 1: quiet");
+    assert_eq!(typed[25], "WATCH pods 26: quiet");
+    let facts: serde_json::Value =
+        serde_json::from_slice(&h.runner.jobs.lock().unwrap()[0].facts_json).unwrap();
+    assert_eq!(facts["watch"]["run"], 1);
+    assert!(facts["watch"].get("runs_left").is_none(), "{facts}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ended_watch_survives_a_restart() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    h.start_open("pods", 10).await;
+    pass(25 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 3);
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+
+    let (scheduler, runner, _stop) = restarted(&h);
+    scheduler.resume().await;
+    pass(1500 * MINUTE).await;
+
+    assert_eq!(runner.calls(), 150, "runs at 30, 40 ... 1520 minutes");
+    let row = h.row("pods").await;
+    assert!(row.running);
+    assert_eq!((row.runs, row.ends_at_ms), (153, None));
+    assert!(h.typing.typed().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_without_for_and_without_a_daily_budget_is_refused() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+
+    assert_eq!(
+        h.scheduler.start(h.open("pods", 10)).await,
+        Err(StartRefusal::DailyBudgetUnset)
+    );
+    assert_eq!(h.store.get("pods").await.unwrap(), None, "nothing stored");
+    pass(30 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 0);
+    assert!(h.scheduler.start(h.checked("pods", 10, 60)).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spent_budget_stops_a_watch_with_an_end_and_pauses_an_open_ended_one_until_the_next_day_then_it_resumes()
+ {
+    let h = harness(with_daily(1.0), vec![answer("QUIET", 0.6)]).await;
+    start_just_after_midnight().await;
+    let mut ending = h.checked("a", 10, 120);
+    ending.run_budget_usd_micros = Some(600_000);
+    h.scheduler.start(ending).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1, "a spent $0.60");
+    let mut open = h.open("pods", 10);
+    open.run_budget_usd_micros = Some(600_000);
+    h.scheduler.start(open).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+
+    // pods' run could pass $1.00: a stops, pods pauses until the next day.
+    let mut typed = h.typing.typed();
+    typed.sort();
+    assert_eq!(
+        typed,
+        [
+            "WATCH a stopped: daily budget of $1.00 spent",
+            "WATCH pods paused: daily budget of $1.00 spent, resumes at 00:00",
+        ]
+    );
+    assert_eq!(h.runner.calls(), 1);
+    let next_day = next_day_start();
+    let pods = h.row("pods").await;
+    assert_eq!(pods.state, WatchState::Paused);
+    assert_eq!(
+        (pods.pause_how.as_deref(), pods.paused_until_ms),
+        (Some("budget_day"), Some(next_day))
+    );
+    let listing = h.scheduler.list().await.unwrap();
+    let listed = listing.watches.iter().find(|w| w.name == "pods").unwrap();
+    assert_eq!(listed.state, WatchState::Paused);
+    assert_eq!(listed.paused_until_ms, Some(next_day));
+    assert_eq!(
+        h.scheduler.start(h.checked("c", 10, 60)).await,
+        Err(StartRefusal::DailyBudgetSpent)
+    );
+
+    // Nothing runs until the next day; then pods resumes by itself and runs once at once.
+    pass(Duration::from_millis((next_day - clock_ms()) as u64) - Duration::from_secs(1)).await;
+    assert_eq!(h.runner.calls(), 1);
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 2, "one run after the day change");
+    let pods = h.row("pods").await;
+    assert_eq!((pods.state, pods.runs), (WatchState::Running, 1));
+
+    // Its next run could pass the new day's budget: it pauses until the day after.
+    pass(10 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 2);
+    let pods = h.row("pods").await;
+    assert_eq!(pods.state, WatchState::Paused);
+    assert_eq!(pods.paused_until_ms, Some(next_day + 86_400_000));
+    assert_eq!(h.typing.typed().len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_watch_whose_run_could_pass_the_daily_budget_pauses_again_each_day() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_capped("pods").await;
+    let first_day_end = next_day_start();
+
+    pass(Duration::from_millis((first_day_end - clock_ms()) as u64) + MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 0, "no run passes the daily budget");
+    let pods = h.row("pods").await;
+    assert_eq!(pods.state, WatchState::Paused);
+    assert_eq!(pods.paused_until_ms, Some(first_day_end + 86_400_000));
+    assert_eq!(
+        h.typing.typed(),
+        [
+            "WATCH pods paused: daily budget of $0.50 spent, resumes at 00:00",
+            "WATCH pods paused: daily budget of $0.50 spent, resumes at 00:00",
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_and_pause_refuse_budget_day() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_capped("pods").await;
+
+    assert_eq!(
+        h.scheduler.resume_watches(resume_of("pods")).await,
+        Err(ResumeRefusal::BudgetDay)
+    );
+    assert_eq!(
+        h.scheduler.pause(pause_of("pods", Some(30))).await,
+        Err(PauseRefusal::BudgetDay)
+    );
+    let pods = h.row("pods").await;
+    assert_eq!(pods.pause_how.as_deref(), Some("budget_day"));
+    assert_eq!(pods.paused_until_ms, Some(next_day_start()));
+    // A capped watch keeps today's rule for a new watch, as a budget stop does.
+    assert_eq!(
+        h.scheduler.start(h.checked("other", 10, 60)).await,
+        Err(StartRefusal::DailyBudgetSpent)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_all_skips_and_names_a_capped_watch() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", None).await;
+    h.start_capped("pods").await;
+
+    // pause --all skips the capped watch and names it; w is already paused.
+    assert_eq!(
+        h.scheduler.pause(pause_all()).await,
+        Ok(Changed {
+            done: vec![],
+            skipped: vec!["pods".into()],
+        })
+    );
+    let changed = h.scheduler.resume_watches(resume_all()).await.unwrap();
+
+    assert_eq!(changed.done, ["w"]);
+    assert_eq!(changed.skipped, ["pods"]);
+    assert_eq!(h.row("w").await.state, WatchState::Running);
+    assert_eq!(h.row("pods").await.state, WatchState::Paused);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_stops_runs_and_spend_until_resume() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_open("pods", 10).await;
+    pass(5 * MINUTE).await;
+    h.pause("pods", None).await;
+    let spent = h.scheduler.list().await.unwrap().spent_usd_micros;
+
+    pass(120 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 1, "a paused watch runs nothing");
+    assert_eq!(h.scheduler.list().await.unwrap().spent_usd_micros, spent);
+    let row = h.row("pods").await;
+    assert_eq!(row.state, WatchState::Paused);
+    assert_eq!(
+        (row.paused_until_ms, row.pause_how.as_deref()),
+        (None, Some("cli"))
+    );
+
+    h.resume("pods").await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 2);
+    let row = h.row("pods").await;
+    assert_eq!((row.state, row.runs), (WatchState::Running, 2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_pause_then_resume_runs_exactly_once() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 600).await;
+    pass(5 * MINUTE).await;
+    let started = h.row("w").await.started_at_ms;
+    h.pause("w", None).await;
+    pass(180 * MINUTE).await;
+
+    h.resume("w").await;
+    pass(4 * MINUTE).await;
+
+    assert_eq!(
+        h.runner.calls(),
+        2,
+        "the resume runs once; missed runs do not catch up"
+    );
+    let row = h.row("w").await;
+    assert_eq!((row.runs, row.started_at_ms), (2, started));
+    assert_eq!(
+        row.next_run_at_ms,
+        started + 190 * MINUTE_MS,
+        "the grid stays"
+    );
+    pass(2 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_for_resumes_at_its_end_with_a_run_at_once() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    h.start_open("pods", 10).await;
+    pass(5 * MINUTE).await;
+    h.pause("pods", Some(30)).await;
+    assert_eq!(
+        h.row("pods").await.paused_until_ms,
+        Some(clock_ms() + 30 * MINUTE_MS)
+    );
+
+    pass(29 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 1);
+    pass(MINUTE + Duration::from_secs(5)).await;
+
+    assert_eq!(h.runner.calls(), 2, "a run at once at the end of the pause");
+    let row = h.row("pods").await;
+    assert_eq!(row.state, WatchState::Running);
+    assert_eq!((row.paused_until_ms, row.pause_how), (None, None));
+    assert_eq!(row.runs, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_all_pauses_every_running_watch() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("a", 10, 120).await;
+    h.start("b", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 2);
+
+    let changed = h.scheduler.pause(pause_all()).await.unwrap();
+
+    assert_eq!(changed.done, ["a", "b"]);
+    assert!(changed.skipped.is_empty());
+    pass(60 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 2);
+    for name in ["a", "b"] {
+        assert_eq!(h.row(name).await.state, WatchState::Paused);
+    }
+    // A watch already paused is skipped and not named.
+    assert_eq!(h.scheduler.pause(pause_all()).await, Ok(Changed::default()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_with_an_end_ends_while_paused() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 60).await;
+    pass(15 * MINUTE).await;
+    h.pause("w", Some(120)).await;
+
+    pass(50 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 2);
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w ended: 2 runs, 0 reports, $0.02"]
+    );
+    let row = h.row("w").await;
+    assert_eq!(
+        (row.state, row.stop_reason.as_deref()),
+        (WatchState::Stopped, Some("ended"))
+    );
+    pass(120 * MINUTE).await;
+    assert_eq!(h.runner.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_paused_state_survives_a_restart() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    for name in ["held", "timed", "short"] {
+        h.start_open(name, 10).await;
+    }
+    pass(5 * MINUTE).await;
+    h.pause("held", None).await;
+    h.pause("timed", Some(60)).await;
+    h.pause("short", Some(10)).await;
+    let until = h.row("timed").await.paused_until_ms;
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+    // Down for 20 minutes: the pause of "short" ends meanwhile.
+    pass(20 * MINUTE).await;
+
+    let (scheduler, runner, _stop) = restarted(&h);
+    scheduler.resume().await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(runner.calls(), 1, "short resumes at once");
+    assert_eq!(h.row("short").await.state, WatchState::Running);
+    let held = h.row("held").await;
+    assert_eq!(
+        (held.state, held.paused_until_ms),
+        (WatchState::Paused, None)
+    );
+    let timed = h.row("timed").await;
+    assert_eq!(
+        (timed.state, timed.paused_until_ms),
+        (WatchState::Paused, until)
+    );
+
+    // "timed" resumes at its end with a run at once; "held" waits for a resume.
+    pass(Duration::from_millis((until.unwrap() - clock_ms()) as u64) + Duration::from_secs(5))
+        .await;
+    assert_eq!(h.row("timed").await.state, WatchState::Running);
+    assert_eq!(h.row("timed").await.runs, 2);
+    assert_eq!(h.row("held").await.state, WatchState::Paused);
+    assert_eq!(h.row("held").await.runs, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_drops_a_waiting_report_and_stops_a_run_in_progress() {
+    let h = harness(with_daily(100.0), vec![answer("REPORT x", 0.01)]).await;
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+    h.start_open("w", 10).await;
+    pass(MINUTE).await;
+    h.pause("w", None).await;
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Idle);
+    pass(MINUTE).await;
+    assert!(
+        h.typing.typed().is_empty(),
+        "the waiting report was dropped"
+    );
+
+    let h = harness(
+        with_daily(100.0),
+        vec![Step::Answer {
+            result: "REPORT late".into(),
+            cost: 0.01,
+            after: Duration::from_secs(50),
+        }],
+    )
+    .await;
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(h.runner.calls(), 1);
+    h.pause("w", None).await;
+    pass(5 * MINUTE).await;
+
+    assert!(h.typing.typed().is_empty(), "the stopped run typed nothing");
+    let row = h.row("w").await;
+    assert_eq!((row.state, row.runs), (WatchState::Paused, 0));
+    assert_eq!(h.runner.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_and_resume_type_no_line() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    h.start_open("w", 10).await;
+    h.start_open("t", 10).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", None).await;
+    h.pause("t", Some(5)).await;
+    pass(MINUTE).await;
+    h.resume("w").await;
+    pass(10 * MINUTE).await;
+
+    assert_eq!(h.row("t").await.state, WatchState::Running);
+    assert_eq!(h.row("w").await.state, WatchState::Running);
+    assert!(h.typing.typed().is_empty(), "{:?}", h.typing.typed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paused_watch_counts_toward_five_and_start_replaces_it() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    for index in 0..5 {
+        h.start(&format!("w{index}"), 10, 120).await;
+    }
+    pass(Duration::from_secs(5)).await;
+    h.pause("w0", None).await;
+
+    assert_eq!(
+        h.scheduler.start(h.checked("w5", 10, 120)).await,
+        Err(StartRefusal::TooManyWatches)
+    );
+    h.start("w0", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    let row = h.row("w0").await;
+    assert_eq!((row.state, row.runs), (WatchState::Running, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_watch() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    assert_eq!(
+        h.scheduler.pause(pause_of("nope", None)).await,
+        Err(PauseRefusal::UnknownWatch)
+    );
+    assert_eq!(
+        h.scheduler.resume_watches(resume_of("nope")).await,
+        Err(ResumeRefusal::UnknownWatch)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn not_running() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("paused", 10, 120).await;
+    h.start("stopped", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("paused", None).await;
+    h.scheduler.stop("stopped").await.unwrap();
+
+    for name in ["paused", "stopped"] {
+        assert_eq!(
+            h.scheduler.pause(pause_of(name, None)).await,
+            Err(PauseRefusal::NotRunning),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn not_paused() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("running", 10, 120).await;
+    h.start("stopped", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    h.scheduler.stop("stopped").await.unwrap();
+
+    for name in ["running", "stopped"] {
+        assert_eq!(
+            h.scheduler.resume_watches(resume_of(name)).await,
+            Err(ResumeRefusal::NotPaused),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_ends_a_paused_watch() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", Some(30)).await;
+
+    h.scheduler.stop("w").await.unwrap();
+    pass(60 * MINUTE).await;
+
+    let row = h.row("w").await;
+    assert_eq!(
+        (row.state, row.stop_reason.as_deref()),
+        (WatchState::Stopped, Some("stopped"))
+    );
+    assert_eq!(h.runner.calls(), 1);
+    assert!(h.typing.typed().is_empty());
 }

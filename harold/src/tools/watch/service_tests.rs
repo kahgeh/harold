@@ -353,3 +353,71 @@ async fn pause_resume_and_remind_check_their_input_first() {
         .expect_err("refused");
     assert_eq!((status.code(), status.message()), (invalid, "invalid when"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ended_watch_pauses_and_resumes_through_the_service() {
+    let budget = crate::settings::WatchSettings {
+        daily_budget_usd: Some(1.0),
+        ..settings()
+    };
+    let h = harness(budget.clone(), vec![answer("QUIET", 0.01)]).await;
+    let service = WatchToolService::new(Arc::clone(&h.scheduler), budget);
+    let mut open = request(&h, "pods");
+    open.for_minutes = None;
+
+    let started = service
+        .start_watch(Request::new(open))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(started.ends_at_ms, None);
+    pass(Duration::from_secs(5)).await;
+    let paused = service
+        .pause(Request::new(pb::PauseRequest {
+            name: "pods".into(),
+            for_minutes: Some(30),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (paused.paused, paused.skipped),
+        (vec!["pods".to_string()], vec![])
+    );
+
+    let listed = service
+        .list_watches(Request::new(pb::ListWatchesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let watch = &listed.watches[0];
+    assert!(watch.paused && !watch.running);
+    assert_eq!(watch.ends_at_ms, None);
+    assert_eq!(watch.pause_how, "cli");
+    assert!(watch.paused_until_ms.is_some());
+
+    let resumed = service
+        .resume(Request::new(pb::ResumeRequest {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (resumed.resumed, resumed.skipped),
+        (vec!["pods".to_string()], vec![])
+    );
+    let status = service
+        .resume(Request::new(pb::ResumeRequest {
+            name: "pods".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        (status.code(), status.message()),
+        (tonic::Code::FailedPrecondition, "not_paused")
+    );
+}

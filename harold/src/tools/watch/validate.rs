@@ -143,15 +143,6 @@ pub(super) enum Caller {
     ControlTower,
 }
 
-impl Caller {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Caller::Cli => "cli",
-            Caller::ControlTower => "control_tower",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckedPause {
     pub target: Target,

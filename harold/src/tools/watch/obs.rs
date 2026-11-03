@@ -13,20 +13,32 @@ use super::answer::{Cause, Failure};
 use super::runner::Exit;
 use crate::telemetry::{self, TRACE_TARGET};
 
-/// How a watch started: the `how` of `watch started`.
+/// How a watch started (the `how` of `watch started`), or who paused or resumed it (the
+/// `how` of `watch paused` and `watch resumed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum How {
     Started,
     Replaced,
     Resumed,
+    /// A person or an agent, through `harold tool watch`.
+    Cli,
+    ControlTower,
+    /// The end of `pause --for`.
+    Timed,
+    /// The daily budget: a capped watch, or the next local day that resumes it.
+    BudgetDay,
 }
 
 impl How {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             How::Started => "started",
             How::Replaced => "replaced",
             How::Resumed => "resumed",
+            How::Cli => "cli",
+            How::ControlTower => "control_tower",
+            How::Timed => "timed",
+            How::BudgetDay => "budget_day",
         }
     }
 }
@@ -103,6 +115,17 @@ pub(super) fn watch_stopped(watch: &str, reason: EndReason, runs: u32, cost_usd:
         cost_usd,
         "watch stopped"
     );
+}
+
+/// `watch paused`. `paused_until` is the local time the pause ends; a pause with no end
+/// leaves it out.
+pub(super) fn watch_paused(watch: &str, how: How, paused_until: Option<&str>) {
+    info!(watch, how = how.as_str(), paused_until, "watch paused");
+}
+
+/// `watch resumed`.
+pub(super) fn watch_resumed(watch: &str, how: How) {
+    info!(watch, how = how.as_str(), "watch resumed");
 }
 
 /// Where a run's time went, in whole milliseconds.

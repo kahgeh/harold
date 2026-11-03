@@ -60,7 +60,7 @@ async fn the_facts_hold_every_field_the_spec_names() {
         now_ms,
         WatchEntry {
             run: 3,
-            runs_left: 9,
+            runs_left: Some(9),
             previous_outcome: Some("quiet".into()),
         },
     )
@@ -130,7 +130,7 @@ async fn watch_facts_write_working_for_a_working_agent() {
         now_ms,
         WatchEntry {
             run: 1,
-            runs_left: 1,
+            runs_left: Some(1),
             previous_outcome: None,
         },
     )
@@ -151,7 +151,7 @@ async fn no_chief_and_no_agents_give_an_empty_document() {
         1_800_000_000_000,
         WatchEntry {
             run: 1,
-            runs_left: 0,
+            runs_left: Some(0),
             previous_outcome: None,
         },
     )
@@ -177,7 +177,7 @@ async fn the_watch_facts_have_no_current_step_field() {
         1_800_000_000_000,
         WatchEntry {
             run: 1,
-            runs_left: 1,
+            runs_left: Some(1),
             previous_outcome: None,
         },
     )
@@ -212,7 +212,7 @@ async fn the_watch_facts_have_no_recap() {
         1_800_000_000_000,
         WatchEntry {
             run: 1,
-            runs_left: 1,
+            runs_left: Some(1),
             previous_outcome: None,
         },
     )

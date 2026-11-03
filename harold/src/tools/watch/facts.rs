@@ -62,7 +62,9 @@ pub(super) struct SpecEntry {
 #[derive(Debug, Serialize, PartialEq)]
 pub(super) struct WatchEntry {
     pub run: u32,
-    pub runs_left: u32,
+    /// `None` for a watch with no end: the field is left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs_left: Option<u32>,
     pub previous_outcome: Option<String>,
 }
 

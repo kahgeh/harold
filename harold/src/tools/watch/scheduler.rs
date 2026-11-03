@@ -19,9 +19,10 @@ use super::facts::{self, Sources, WatchEntry};
 use super::obs::{self, EndReason, How, RunObs, Timing};
 use super::report::{ReportSlot, Target, Typist};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
-use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchStore};
+use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchState, WatchStore};
 use super::validate::{
-    Checked, CheckedPause, CheckedRemind, CheckedResume, ReportTo, read_skill, to_micros,
+    Caller, Checked, CheckedPause, CheckedRemind, CheckedResume, ReportTo, Target as Aim,
+    read_skill, to_micros,
 };
 use crate::settings::WatchSettings;
 use crate::timed_prompts::LocalNow;
@@ -152,11 +153,30 @@ pub(super) fn next_on_grid(started_ms: i64, every_minutes: u32, now_ms: i64) -> 
     started_ms + ((now_ms - started_ms).max(0) / every + 1) * every
 }
 
-/// How many runs the watch's time holds: `--for` over `--every`, rounded up.
-pub(super) fn total_runs(row: &WatchRow) -> u32 {
+/// How many runs the watch's time holds: `--for` over `--every`, rounded up. `None` for
+/// a watch with no end.
+pub(super) fn total_runs(row: &WatchRow) -> Option<u32> {
     let every = i64::from(row.every_minutes) * MINUTE_MS;
-    let span = row.ends_at_ms.unwrap_or(row.started_at_ms) - row.started_at_ms;
-    ((span + every - 1) / every).max(1) as u32
+    let span = row.ends_at_ms? - row.started_at_ms;
+    Some(((span + every - 1) / every).max(1) as u32)
+}
+
+/// The `how` of a pause or a resume that a person or an agent asked for.
+fn asked_by(caller: Caller) -> How {
+    match caller {
+        Caller::Cli => How::Cli,
+        Caller::ControlTower => How::ControlTower,
+    }
+}
+
+/// True for a capped watch: the daily budget paused it.
+fn is_capped(row: &WatchRow) -> bool {
+    row.state == WatchState::Paused && row.pause_how.as_deref() == Some(How::BudgetDay.as_str())
+}
+
+/// `HH:MM` of a local time text `YYYY-MM-DD HH:MM:SS`.
+fn clock_of(text: &str) -> &str {
+    text.get(11..16).unwrap_or(text)
 }
 
 fn counted(count: u32, one: &str, many: &str) -> String {
@@ -223,22 +243,21 @@ impl Scheduler {
     // Commands
     // -----------------------------------------------------------------------
 
-    /// Starts a watch, or replaces a running one of the same name. Returns when it ends.
+    /// Starts a watch, or replaces a running or paused one of the same name. Returns when
+    /// it ends: `None` for a watch with no end.
     pub(super) async fn start(
         self: &Arc<Self>,
         checked: Checked,
     ) -> Result<Option<i64>, StartRefusal> {
+        // A watch with no end always has a daily cap.
+        if checked.for_minutes.is_none() && self.daily_budget_micros().is_none() {
+            return Err(StartRefusal::DailyBudgetUnset);
+        }
         let _one_start = self.start_lock.lock().await;
         let store = &self.deps.store;
-        let running = store
-            .running()
-            .await
-            .map_err(|_| StartRefusal::Unavailable)?;
-        let replaced = running.iter().any(|row| row.name == checked.name);
-        let others = running
-            .iter()
-            .filter(|row| row.name != checked.name)
-            .count();
+        let live = store.live().await.map_err(|_| StartRefusal::Unavailable)?;
+        let replaced = live.iter().any(|row| row.name == checked.name);
+        let others = live.iter().filter(|row| row.name != checked.name).count();
         if others >= MAX_WATCHES {
             return Err(StartRefusal::TooManyWatches);
         }
@@ -253,7 +272,10 @@ impl Scheduler {
                 .budget_stopped_since(day_start)
                 .await
                 .map_err(|_| StartRefusal::Unavailable)?;
-            if spent >= daily || stopped {
+            let capped = live
+                .iter()
+                .any(|row| is_capped(row) && row.paused_until_ms.is_some_and(|at| at > now));
+            if spent >= daily || stopped || capped {
                 return Err(StartRefusal::DailyBudgetSpent);
             }
         }
@@ -295,22 +317,98 @@ impl Scheduler {
         Ok(ends_at_ms)
     }
 
-    /// Holds a running watch, or every running watch.
+    /// Holds a running watch, or every running watch. `--all` skips a capped watch and
+    /// names it, and skips a paused watch without a name.
     pub(super) async fn pause(
         self: &Arc<Self>,
-        _checked: CheckedPause,
+        checked: CheckedPause,
     ) -> Result<Changed, PauseRefusal> {
-        // Task 4 replaces this stub.
-        Err(PauseRefusal::Unavailable)
+        let _one_command = self.start_lock.lock().await;
+        let until = checked
+            .for_minutes
+            .map(|minutes| clock_ms() + i64::from(minutes) * MINUTE_MS);
+        let how = asked_by(checked.caller);
+        let store = &self.deps.store;
+        let mut changed = Changed::default();
+        let rows = match checked.target {
+            Aim::Name(name) => {
+                let row = store
+                    .get(&name)
+                    .await
+                    .map_err(|_| PauseRefusal::Unavailable)?
+                    .ok_or(PauseRefusal::UnknownWatch)?;
+                if is_capped(&row) {
+                    return Err(PauseRefusal::BudgetDay);
+                }
+                if row.state != WatchState::Running {
+                    return Err(PauseRefusal::NotRunning);
+                }
+                vec![row]
+            }
+            Aim::All => {
+                let live = store.live().await.map_err(|_| PauseRefusal::Unavailable)?;
+                let (running, paused): (Vec<_>, Vec<_>) = live
+                    .into_iter()
+                    .partition(|row| row.state == WatchState::Running);
+                changed.skipped = paused
+                    .into_iter()
+                    .filter(is_capped)
+                    .map(|row| row.name)
+                    .collect();
+                running
+            }
+        };
+        for row in rows {
+            if self.hold(&row, until, how).await.is_some() {
+                changed.done.push(row.name);
+            }
+        }
+        Ok(changed)
     }
 
-    /// Releases a paused watch, or every paused watch.
+    /// Releases a paused watch, or every paused watch. A capped watch is never resumed by
+    /// hand: `--all` skips it and names it.
     pub(super) async fn resume_watches(
         self: &Arc<Self>,
-        _checked: CheckedResume,
+        checked: CheckedResume,
     ) -> Result<Changed, ResumeRefusal> {
-        // Task 4 replaces this stub.
-        Err(ResumeRefusal::Unavailable)
+        let _one_command = self.start_lock.lock().await;
+        let how = asked_by(checked.caller);
+        let store = &self.deps.store;
+        let mut changed = Changed::default();
+        let rows = match checked.target {
+            Aim::Name(name) => {
+                let row = store
+                    .get(&name)
+                    .await
+                    .map_err(|_| ResumeRefusal::Unavailable)?
+                    .ok_or(ResumeRefusal::UnknownWatch)?;
+                if is_capped(&row) {
+                    return Err(ResumeRefusal::BudgetDay);
+                }
+                if row.state != WatchState::Paused {
+                    return Err(ResumeRefusal::NotPaused);
+                }
+                vec![row]
+            }
+            Aim::All => {
+                let live = store.live().await.map_err(|_| ResumeRefusal::Unavailable)?;
+                let (capped, paused): (Vec<_>, Vec<_>) = live
+                    .into_iter()
+                    .filter(|row| row.state == WatchState::Paused)
+                    .partition(is_capped);
+                changed.skipped = capped.into_iter().map(|row| row.name).collect();
+                paused
+            }
+        };
+        for row in rows {
+            if self.release(&row, how).await.is_some() {
+                // A new task runs the first check at once.
+                self.spawn_task(&row);
+                changed.done.push(row.name);
+            }
+        }
+        Ok(changed)
     }
 
     /// Stores a reminder. Returns the time it is due, in milliseconds.
@@ -322,8 +420,8 @@ impl Scheduler {
         Err(RemindRefusal::Unavailable)
     }
 
-    /// Ends a running watch at once. A run in progress is stopped, its report is not
-    /// typed, and no closing line is typed.
+    /// Ends a running or paused watch at once. A run in progress is stopped, its report is
+    /// not typed, and no closing line is typed.
     pub(super) async fn stop(self: &Arc<Self>, name: &str) -> Result<(), StopRefusal> {
         let row = self
             .deps
@@ -332,17 +430,17 @@ impl Scheduler {
             .await
             .map_err(|_| StopRefusal::Unavailable)?
             .ok_or(StopRefusal::UnknownWatch)?;
-        if !row.running {
+        if !row.is_live() {
             return Err(StopRefusal::NotRunning);
         }
         self.end(&row, EndReason::Stopped, None).await;
         Ok(())
     }
 
-    /// Every running watch, and every watch that ended today.
+    /// Every running or paused watch, and every watch that ended today.
     pub(super) async fn list(&self) -> Result<Listing, StoreError> {
         let (day_start, day_end) = self.today().await;
-        let mut watches = self.deps.store.running().await?;
+        let mut watches = self.deps.store.live().await?;
         watches.extend(self.deps.store.ended_since(day_start).await?);
         let spent_usd_micros = self.deps.store.spent_micros(day_start, day_end).await?;
         Ok(Listing {
@@ -351,14 +449,14 @@ impl Scheduler {
         })
     }
 
-    /// Resumes every watch that was running when Harold stopped. One whose time ran out
-    /// meanwhile ends now.
+    /// Resumes every watch that was running or paused when Harold stopped. A paused watch
+    /// stays paused until its pause ends. One whose time ran out meanwhile ends now.
     pub(super) async fn resume(self: &Arc<Self>) {
-        let Ok(running) = self.deps.store.running().await else {
+        let Ok(live) = self.deps.store.live().await else {
             return;
         };
-        for row in running {
-            if clock_ms() >= row.ends_at_ms.unwrap_or(i64::MAX) {
+        for row in live {
+            if row.ends_at_ms.is_some_and(|end| clock_ms() >= end) {
                 self.end(&row, EndReason::Ended, None).await;
             } else {
                 self.spawn_watch(&row, How::Resumed).await;
@@ -379,7 +477,26 @@ impl Scheduler {
     }
 
     async fn spawn_watch(self: &Arc<Self>, row: &WatchRow, how: How) {
-        let ends_at = local_text(row.ends_at_ms.unwrap_or(0), self.offset().await);
+        let ends_at = match row.ends_at_ms {
+            Some(end) => local_text(end, self.offset().await),
+            None => "none".to_owned(),
+        };
+        self.spawn_task(row);
+        obs::watch_started(&obs::Started {
+            watch: &row.name,
+            folder: &row.folder,
+            skill: &row.skill,
+            ends_at: &ends_at,
+            every_minutes: row.every_minutes,
+            every_run: row.every_run,
+            how,
+            model: &self.deps.settings.model,
+        });
+    }
+
+    /// Gives the watch a new task and a new report slot. The old task is cancelled (a run
+    /// in progress types nothing) and a report waiting in the old slot is dropped.
+    fn spawn_task(self: &Arc<Self>, row: &WatchRow) -> Arc<ReportSlot> {
         let (cancel, cancelled) = signal::channel(false);
         let slot = ReportSlot::new(Arc::clone(&self.typist), Self::target(row), self.retry);
         let old = self.state().live.insert(
@@ -394,22 +511,51 @@ impl Scheduler {
             let _ = old.cancel.send(true);
             old.slot.close(None);
         }
-        obs::watch_started(&obs::Started {
-            watch: &row.name,
-            folder: &row.folder,
-            skill: &row.skill,
-            ends_at: &ends_at,
-            every_minutes: row.every_minutes,
-            every_run: row.every_run,
-            how,
-            model: &self.deps.settings.model,
-        });
         tokio::spawn(Arc::clone(self).watch_task(
             row.name.clone(),
             row.started_at_ms,
             cancelled,
-            slot,
+            Arc::clone(&slot),
         ));
+        slot
+    }
+
+    /// Pauses a running watch until `until` (or a resume), and gives it a task that only
+    /// waits. Returns the new report slot, or `None` when the watch was not running.
+    async fn hold(
+        self: &Arc<Self>,
+        row: &WatchRow,
+        until: Option<i64>,
+        how: How,
+    ) -> Option<Arc<ReportSlot>> {
+        let paused = self
+            .deps
+            .store
+            .pause(&row.name, row.started_at_ms, until, how.as_str())
+            .await
+            .ok()
+            .flatten()?;
+        let slot = self.spawn_task(&paused);
+        let until_text = match until {
+            Some(at) => Some(local_text(at, self.offset().await)),
+            None => None,
+        };
+        obs::watch_paused(&row.name, how, until_text.as_deref());
+        Some(slot)
+    }
+
+    /// Stores a paused watch as running, due at once. Returns the watch, or `None` when it
+    /// was not paused.
+    async fn release(&self, row: &WatchRow, how: How) -> Option<WatchRow> {
+        let resumed = self
+            .deps
+            .store
+            .resume(&row.name, row.started_at_ms, clock_ms())
+            .await
+            .ok()
+            .flatten()?;
+        obs::watch_resumed(&row.name, how);
+        Some(resumed)
     }
 
     async fn watch_task(
@@ -421,19 +567,33 @@ impl Scheduler {
     ) {
         let mut shutdown = self.deps.shutdown.clone();
         loop {
+            if *cancelled.borrow() {
+                return;
+            }
             let Ok(Some(row)) = self.deps.store.get(&name).await else {
                 return;
             };
-            if !row.running || row.started_at_ms != started_at_ms {
+            if !row.is_live() || row.started_at_ms != started_at_ms {
                 return;
             }
             let now = clock_ms();
-            if now >= row.ends_at_ms.unwrap_or(i64::MAX) {
+            if row.ends_at_ms.is_some_and(|end| now >= end) {
                 self.end(&row, EndReason::Ended, None).await;
                 return;
             }
+            if row.state == WatchState::Paused {
+                match self
+                    .wait_while_paused(&row, &mut cancelled, &mut shutdown)
+                    .await
+                {
+                    Flow::Continue => continue,
+                    Flow::Over => return,
+                }
+            }
             if now < row.next_run_at_ms {
-                let until = row.next_run_at_ms.min(row.ends_at_ms.unwrap_or(i64::MAX));
+                let until = row
+                    .ends_at_ms
+                    .map_or(row.next_run_at_ms, |end| row.next_run_at_ms.min(end));
                 let wait = Duration::from_millis((until - now) as u64);
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
@@ -446,6 +606,39 @@ impl Scheduler {
                 Flow::Over => return,
             }
         }
+    }
+
+    /// Waits while `row` is paused: until its pause ends, or its end comes, or the task is
+    /// cancelled. A pause that ends resumes the watch, and its first check runs at once.
+    async fn wait_while_paused(
+        &self,
+        row: &WatchRow,
+        cancelled: &mut signal::Receiver<bool>,
+        shutdown: &mut signal::Receiver<()>,
+    ) -> Flow {
+        let wake = [row.paused_until_ms, row.ends_at_ms]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(wake) = wake else {
+            // No end and no pause end: only a resume (a new task) or a stop goes on.
+            interrupted(cancelled, shutdown).await;
+            return Flow::Over;
+        };
+        let wait = Duration::from_millis((wake - clock_ms()).max(0) as u64);
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = interrupted(cancelled, shutdown) => return Flow::Over,
+        }
+        if row.paused_until_ms.is_some_and(|until| clock_ms() >= until) {
+            let how = if is_capped(row) {
+                How::BudgetDay
+            } else {
+                How::Timed
+            };
+            self.release(row, how).await;
+        }
+        Flow::Continue
     }
 
     /// One run of `row`, inside its `harold.watch.run` span.
@@ -508,7 +701,7 @@ impl Scheduler {
                 .await
                 .unwrap_or(0);
             if spent + budget.unwrap_or(0) > daily {
-                self.stop_all_for_budget().await;
+                self.stop_all_for_budget(daily).await;
                 return Flow::Over;
             }
         }
@@ -618,13 +811,12 @@ impl Scheduler {
             offset: self.offset().await,
         };
         let now = clock_ms();
-        let total = total_runs(row);
         let facts = facts::gather(
             &sources,
             now,
             WatchEntry {
                 run: run_no,
-                runs_left: total.saturating_sub(run_no),
+                runs_left: total_runs(row).map(|total| total.saturating_sub(run_no)),
                 previous_outcome: row.last_outcome.clone(),
             },
         )
@@ -690,8 +882,8 @@ impl Scheduler {
     // Ending
     // -----------------------------------------------------------------------
 
-    /// Ends a running watch: stores why, cancels its task, and types its closing line.
-    /// `Stopped` types no closing line.
+    /// Ends a running or paused watch: stores why, cancels its task, and types its closing
+    /// line. `Stopped` types no closing line.
     async fn end(self: &Arc<Self>, row: &WatchRow, reason: EndReason, daily: Option<i64>) {
         let ended = match self
             .deps
@@ -765,20 +957,41 @@ impl Scheduler {
         slot.close(closing.map(|line| (line, obs::ReportObs::new(&ended.name, ended.runs))));
     }
 
-    /// The daily budget would be passed: every running watch stops with its own closing
-    /// line.
-    async fn stop_all_for_budget(self: &Arc<Self>) {
+    /// The daily budget would be passed. Every running watch with an end stops with its
+    /// own closing line. Every running watch with no end becomes a capped watch: paused
+    /// until the next local day, with one line that tells so.
+    async fn stop_all_for_budget(self: &Arc<Self>, daily: i64) {
         let Ok(running) = self.deps.store.running().await else {
             return;
         };
+        let (_, next_day) = self.today().await;
+        let resumes_at = local_text(next_day, self.offset().await);
         for row in running {
-            self.end(&row, EndReason::DailyBudgetSpent, None).await;
+            if row.ends_at_ms.is_some() {
+                self.end(&row, EndReason::DailyBudgetSpent, Some(daily))
+                    .await;
+                continue;
+            }
+            let Some(slot) = self.hold(&row, Some(next_day), How::BudgetDay).await else {
+                continue;
+            };
+            let line = format!(
+                "WATCH {} paused: daily budget of {} spent, resumes at {}",
+                row.name,
+                dollars(daily),
+                clock_of(&resumes_at)
+            );
+            slot.offer(line, obs::ReportObs::new(&row.name, row.runs));
         }
     }
 }
 
-fn report_line(name: &str, run: u32, total: u32, text: &str) -> String {
-    format!("WATCH {name} {run}/{total}: {text}")
+/// A run's report line. A watch with no end shows no total.
+fn report_line(name: &str, run: u32, total: Option<u32>, text: &str) -> String {
+    match total {
+        Some(total) => format!("WATCH {name} {run}/{total}: {text}"),
+        None => format!("WATCH {name} {run}: {text}"),
+    }
 }
 
 /// Completes when the watch is cancelled or Harold shuts down.

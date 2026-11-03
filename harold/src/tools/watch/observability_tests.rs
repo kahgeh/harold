@@ -650,3 +650,53 @@ async fn other_failures_log_none_of_the_cause_fields() {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn pause_and_resume_are_logged_with_who_and_until_when() {
+    use crate::tools::watch::validate::{Caller, CheckedPause, CheckedResume, Target as Aim};
+
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let (held, timed) = (unique("held"), unique("timed"));
+    h.start(&held, 10, 600).await;
+    h.start(&timed, 10, 600).await;
+    pass(Duration::from_secs(5)).await;
+    let pause = |name: &str, for_minutes, caller| CheckedPause {
+        target: Aim::Name(name.into()),
+        for_minutes,
+        caller,
+    };
+    h.scheduler
+        .pause(pause(&held, None, Caller::ControlTower))
+        .await
+        .unwrap();
+    h.scheduler
+        .pause(pause(&timed, Some(30), Caller::Cli))
+        .await
+        .unwrap();
+    h.scheduler
+        .resume_watches(CheckedResume {
+            target: Aim::Name(held.clone()),
+            caller: Caller::Cli,
+        })
+        .await
+        .unwrap();
+    pass(Duration::from_secs(31 * 60)).await;
+
+    let text = logs.text();
+    let paused = lines(&text, "watch paused", &held);
+    assert_eq!(paused.len(), 1, "{text}");
+    assert!(paused[0].contains("how=\"control_tower\""), "{}", paused[0]);
+    assert!(!paused[0].contains("paused_until="), "{}", paused[0]);
+    let resumed = lines(&text, "watch resumed", &held);
+    assert_eq!(resumed.len(), 1, "{text}");
+    assert!(resumed[0].contains("how=\"cli\""), "{}", resumed[0]);
+
+    let paused = lines(&text, "watch paused", &timed);
+    assert_eq!(paused.len(), 1, "{text}");
+    assert!(paused[0].contains("how=\"cli\"") && paused[0].contains("paused_until=\""));
+    let resumed = lines(&text, "watch resumed", &timed);
+    assert_eq!(resumed.len(), 1, "{text}");
+    assert!(resumed[0].contains("how=\"timed\""), "{}", resumed[0]);
+}
