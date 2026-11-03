@@ -420,7 +420,7 @@ def follow(cwd, run_id, deadline):
 
 
 def wait_for_build(cwd, tag, release_url, published):
-    """Step 5. Returns when the run succeeded and both files are attached to the release."""
+    """Step 5. Returns when the run succeeded and the archive and checksum of every package are attached to the release."""
     start = clock()
     found = find_run(cwd, tag, published, start + FIND_LIMIT)
     if found is None:
@@ -435,8 +435,11 @@ def wait_for_build(cwd, tag, release_url, published):
         assets = gh_json(cwd, 'release', 'view', tag, '--json', 'assets')['assets']
     except Stopped:
         raise Stopped(build_failed(tag, found['url'], 'finished, but its files could not be read')) from None
-    if not {ARCHIVE, CHECKSUM} <= {asset['name'] for asset in assets}:
-        raise Stopped(build_failed(tag, found['url'], 'finished without both files attached'))
+    wanted = [name + suffix for name in PACKAGES for suffix in ('.tar.gz', '.tar.gz.sha256')]
+    attached = {asset['name'] for asset in assets}
+    missing = [name for name in wanted if name not in attached]
+    if missing:
+        raise Stopped(build_failed(tag, found['url'], 'finished without {} attached'.format(', '.join(missing))))
 
 
 def mark_latest(cwd, tag):

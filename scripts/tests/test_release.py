@@ -79,6 +79,8 @@ class FakeGitHub:
         self.new_run = None
         self.outcome, self.polls, self.attach, self.appears_after = 'success', 3, True, 0
         self.failing_views = 0
+        # Files that a successful run leaves off the release.
+        self.unattached = ()
         # The `--json` fields for which `gh release view` fails.
         self.failing_release_views = ()
         self.files = {}
@@ -195,7 +197,8 @@ class FakeGitHub:
             self.events.append('build ' + self.outcome)
             if self.outcome == 'success' and self.attach:
                 self.releases[self.created['tag']]['assets'] = [
-                    {'name': release.ARCHIVE}, {'name': release.CHECKSUM}]
+                    {'name': package + suffix} for package in release.PACKAGES
+                    for suffix in ('.tar.gz', '.tar.gz.sha256') if package + suffix not in self.unattached]
         value = {'status': 'completed' if finished else 'in_progress',
                  'conclusion': self.outcome if finished else '',
                  'url': self.new_run['url'], 'jobs': [{'name': 'build', 'steps': steps}]}
@@ -920,8 +923,19 @@ class BuildTests(ReleaseTestCase):
 
     def test_a_build_without_both_files_is_a_failed_build(self):
         self.github.attach = False
-        self.assert_failed_build('finished without both files attached',
+        self.assert_failed_build('finished without ' + ', '.join(
+            name + suffix for name in release.PACKAGES for suffix in ('.tar.gz', '.tar.gz.sha256')) + ' attached',
                                  'https://github.com/kahgeh/harold/actions/runs/2')
+
+    def test_a_build_without_the_linux_checksum_names_that_file(self):
+        self.github.unattached = ('harold-x86_64-unknown-linux-gnu.tar.gz.sha256',)
+        self.assert_failed_build('finished without harold-x86_64-unknown-linux-gnu.tar.gz.sha256 attached',
+                                 'https://github.com/kahgeh/harold/actions/runs/2')
+
+    def test_a_build_with_all_four_files_goes_on(self):
+        self.wait()
+        names = {asset['name'] for asset in self.github.releases['v0.6.0']['assets']}
+        self.assertEqual(len(names), 4)
 
     def test_files_that_cannot_be_read_after_the_build_are_a_failed_build(self):
         self.github.failing_release_views = ('assets',)
