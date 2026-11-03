@@ -1821,6 +1821,34 @@ pub(crate) struct PodSnapshot {
     /// The work waiting by product and list: `awaiting_approval`, `approved_not_started`
     /// and `in_progress`.
     pub inventory: BTreeMap<String, BTreeMap<&'static str, ListStats>>,
+    /// Every live pane of the poll with its role, product and spec id. `pod.agents` counts
+    /// the same panes, so the two agree.
+    pub panes: HashMap<String, PaneIdentity>,
+}
+
+/// What a live pane is: its role and, for a pod's roles, its product. A build worker also
+/// has the id of the spec it builds, when a `started` file names its worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneIdentity {
+    pub role: Role,
+    pub product: Option<String>,
+    pub spec_id: Option<String>,
+}
+
+/// The identity of a pane in the last poll. A pane that the poll did not see is `other`,
+/// with no product and no spec.
+pub(crate) fn pane_identity(pane_id: &str) -> PaneIdentity {
+    let snapshot = gauge_snapshot();
+    let snapshot = lock(&snapshot);
+    snapshot
+        .panes
+        .get(pane_id)
+        .cloned()
+        .unwrap_or(PaneIdentity {
+            role: Role::Other,
+            product: None,
+            spec_id: None,
+        })
 }
 
 pub(crate) struct PodStats<G: Git> {
@@ -1930,6 +1958,7 @@ impl<G: Git> PodStats<G> {
         let mut snapshot = PodSnapshot::default();
         let live = (self.agents)();
         let mut claimed: HashMap<String, (Role, Option<String>)> = HashMap::new();
+        let mut specs_of_panes: HashMap<String, String> = HashMap::new();
         for product in &products {
             // HyperDX reads a running total's first point as 0, so each product's merge
             // counters start at 0 before its first merge can be counted.
@@ -1957,7 +1986,7 @@ impl<G: Git> PodStats<G> {
                     free: slots.free,
                 },
             );
-            claim_build_workers(product, &slots, &live, &mut claimed);
+            claim_build_workers(product, &slots, &live, &mut claimed, &mut specs_of_panes);
             match self.poll_history(product, &slots).await {
                 Ok(specs) => {
                     self.history_unavailable.remove(&product.name);
@@ -1975,18 +2004,32 @@ impl<G: Git> PodStats<G> {
                 }
             }
         }
-        (snapshot.agents, snapshot.agent_states) = self.tally(&products, &live, claimed);
+        let claimed = self.claim_the_rest(&live, claimed);
+        (snapshot.agents, snapshot.agent_states) = tally(&products, &live, &claimed);
+        snapshot.panes = claimed
+            .into_iter()
+            .map(|(pane_id, (role, product))| {
+                let spec_id = specs_of_panes.remove(&pane_id);
+                (
+                    pane_id,
+                    PaneIdentity {
+                        role,
+                        product,
+                        spec_id,
+                    },
+                )
+            })
+            .collect();
         *lock(&self.snapshot) = snapshot;
     }
 
     /// The live agents by role: the panes the pods claimed, the chief's pane or panes, and
     /// the rest as `other`. Every pod role of every product has a count, 0 included.
-    fn tally(
+    fn claim_the_rest(
         &self,
-        products: &[Product],
         live: &[LivePane],
         mut claimed: HashMap<String, (Role, Option<String>)>,
-    ) -> (AgentCounts, AgentStateCounts) {
+    ) -> HashMap<String, (Role, Option<String>)> {
         for pane in live {
             let role = match &self.chief {
                 Some(chief) if same_folder(&pane.folder, chief) => Role::Chief,
@@ -1994,6 +2037,17 @@ impl<G: Git> PodStats<G> {
             };
             claimed.entry(pane.pane_id.clone()).or_insert((role, None));
         }
+        claimed
+    }
+}
+
+/// The live agents by role and state, from the claimed panes.
+fn tally(
+    products: &[Product],
+    live: &[LivePane],
+    claimed: &HashMap<String, (Role, Option<String>)>,
+) -> (AgentCounts, AgentStateCounts) {
+    {
         let mut counts = BTreeMap::new();
         for product in products {
             for role in Role::POD {
@@ -2009,15 +2063,17 @@ impl<G: Git> PodStats<G> {
             }
         }
         for (pane_id, key) in claimed {
-            if let Some(pane) = live.iter().find(|pane| pane.pane_id == pane_id) {
+            if let Some(pane) = live.iter().find(|pane| pane.pane_id == *pane_id) {
                 let (role, product) = key.clone();
                 *by_state.entry((role, product, pane.state)).or_insert(0) += 1;
             }
-            *counts.entry(key).or_insert(0) += 1;
+            *counts.entry(key.clone()).or_insert(0) += 1;
         }
         (counts, by_state)
     }
+}
 
+impl<G: Git> PodStats<G> {
     /// Reads the product's specs and records its merges, each under the spec it names
     /// (and its stage) and with that merge's lead times, from one read of the base
     /// branch's tip and reflog. Specs are read first and the tip is saved before anything
@@ -2371,6 +2427,27 @@ fn claim_pod_panes(
     running
 }
 
+/// The id of the spec whose `started/<id>.md` file names `worktree` in its `worktree:`
+/// pair. A worktree without such a file has no spec id.
+fn build_worker_spec(pod: &Path, worktree: &BusyWorktree) -> Option<String> {
+    let wanted = worktree.path.to_string_lossy();
+    let wanted_real = std::fs::canonicalize(&worktree.path).ok();
+    let mut names: Vec<_> = std::fs::read_dir(pod.join("started"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    names.sort();
+    names.into_iter().find_map(|path| {
+        let text = read_text(&path)?;
+        let named = *key_values(&text).get("worktree")?;
+        let same = same_folder(&wanted, named)
+            || wanted_real.is_some() && std::fs::canonicalize(named).ok() == wanted_real;
+        same.then(|| path.file_stem()?.to_str().map(str::to_owned))?
+    })
+}
+
 /// Claims the live panes that the busy worktrees of `product` name in their agent-pane
 /// file. A pane a pod file claimed before stays with its role.
 fn claim_build_workers(
@@ -2378,6 +2455,7 @@ fn claim_build_workers(
     slots: &Slots,
     live: &[LivePane],
     claimed: &mut HashMap<String, (Role, Option<String>)>,
+    specs_of_panes: &mut HashMap<String, String>,
 ) {
     for worktree in &slots.busy_worktrees {
         let Some(text) = read_text(&worktree.path.join(AGENT_PANE)) else {
@@ -2385,9 +2463,14 @@ fn claim_build_workers(
         };
         for pane in pane_ids(&text).into_iter().take(1) {
             if live.iter().any(|live| live.pane_id == pane) {
-                claimed
-                    .entry(pane.to_owned())
-                    .or_insert((Role::BuildWorker, Some(product.name.clone())));
+                if let std::collections::hash_map::Entry::Vacant(vacant) =
+                    claimed.entry(pane.to_owned())
+                {
+                    vacant.insert((Role::BuildWorker, Some(product.name.clone())));
+                    if let Some(id) = build_worker_spec(&product.repo.join(POD_FOLDER), worktree) {
+                        specs_of_panes.insert(pane.to_owned(), id);
+                    }
+                }
             }
         }
     }

@@ -4296,3 +4296,120 @@ fn a_merge_seen_only_from_a_gone_worktree_logs_an_unknown_commit() {
     );
     assert_eq!(text.matches(&line).count(), 1, "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// The pane lookup
+// ---------------------------------------------------------------------------
+
+/// Polls the pod once into the process-wide snapshot, which `pane_identity` reads.
+async fn poll_into_gauge_snapshot(pod: &Pod, repo: &Path, panes: Vec<LivePane>, chief: &str) {
+    let agents: AgentSource = Arc::new(move || panes.clone());
+    let tips = tips_file(&pod.root.join("data/store"));
+    let mut stats = PodStats::new(
+        one_product(pod, repo),
+        tips,
+        test_git(),
+        gauge_snapshot(),
+        UtcOffset::UTC,
+        agents,
+        Some(chief.to_owned()),
+    );
+    stats.poll().await;
+}
+
+fn started_file(repo: &Path, id: &str, worktree: &Path) {
+    write(
+        &pod_files(repo).join(format!("started/{id}.md")),
+        &format!(
+            "# {id}\nstarted: 2026-11-01T00:00:00Z\nworktree: {}\n",
+            worktree.display()
+        ),
+    );
+}
+
+#[tokio::test]
+async fn pane_identity_gives_pod_roles_and_product() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    write(&pod_files(&repo).join("agent-panes"), "%80\n%81\n");
+    let panes = vec![live("%80", "/pods/a"), live("%81", "/pods/b")];
+
+    poll_into_gauge_snapshot(&pod, &repo, panes, "/work/chief").await;
+
+    let coordination = pane_identity("%80");
+    assert_eq!(coordination.role, Role::PodCoordination);
+    assert_eq!(coordination.product.as_deref(), Some(pod.name.as_str()));
+    assert_eq!(coordination.spec_id, None);
+    let pnem = pane_identity("%81");
+    assert_eq!(pnem.role, Role::Pnem);
+    assert_eq!(pnem.product.as_deref(), Some(pod.name.as_str()));
+}
+
+#[tokio::test]
+async fn pane_identity_gives_a_build_worker_its_spec_id() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let worktree = pod.worktree(&repo, "w", true);
+    started_file(&repo, "spec-one", &worktree);
+    started_file(&repo, "spec-two", &pod.root.join("elsewhere"));
+
+    poll_into_gauge_snapshot(&pod, &repo, vec![live("%7", "/pods/w")], "/work/chief").await;
+
+    let worker = pane_identity("%7");
+    assert_eq!(worker.role, Role::BuildWorker);
+    assert_eq!(worker.product.as_deref(), Some(pod.name.as_str()));
+    assert_eq!(worker.spec_id.as_deref(), Some("spec-one"));
+}
+
+#[tokio::test]
+async fn pane_identity_has_no_spec_without_a_started_file() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    pod.worktree(&repo, "w", true);
+
+    poll_into_gauge_snapshot(&pod, &repo, vec![live("%7", "/pods/w")], "/work/chief").await;
+
+    let worker = pane_identity("%7");
+    assert_eq!(worker.role, Role::BuildWorker);
+    assert_eq!(worker.product.as_deref(), Some(pod.name.as_str()));
+    assert_eq!(worker.spec_id, None);
+}
+
+#[tokio::test]
+async fn pane_identity_gives_chief_and_other() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let panes = vec![live("%99", "/work/chief"), live("%55", "/work/elsewhere")];
+
+    poll_into_gauge_snapshot(&pod, &repo, panes, "/work/chief").await;
+
+    let chief = pane_identity("%99");
+    assert_eq!(
+        (chief.role, chief.product, chief.spec_id),
+        (Role::Chief, None, None)
+    );
+    let other = pane_identity("%55");
+    assert_eq!(
+        (other.role, other.product, other.spec_id),
+        (Role::Other, None, None)
+    );
+}
+
+#[tokio::test]
+async fn pane_identity_of_an_unknown_pane_is_other() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+
+    poll_into_gauge_snapshot(&pod, &repo, Vec::new(), "/work/chief").await;
+
+    let unknown = pane_identity("%404");
+    assert_eq!(
+        (unknown.role, unknown.product, unknown.spec_id),
+        (Role::Other, None, None)
+    );
+}
