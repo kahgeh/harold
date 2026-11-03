@@ -224,6 +224,10 @@ async fn a_bad_post_gets_400_and_types_nothing() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_full_queue_still_answers_204_and_logs_the_drop() {
     let logs = CapturedLogs::start();
     let (queue_tx, mut queue_rx) = mpsc::channel(1);

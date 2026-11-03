@@ -791,6 +791,10 @@ async fn watch_sends_complete_current_snapshot_then_coalesced_newer_truth() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn watch_stream_closes_within_shutdown_deadline() {
     let directory = TestDirectory::new();
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());

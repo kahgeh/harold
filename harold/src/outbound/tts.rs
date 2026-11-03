@@ -450,6 +450,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     fn a_stopped_line_counts_as_said_and_skips_the_fallback() {
         let dir = std::env::temp_dir();
         let out = dir.join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
@@ -719,6 +723,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_line_stopped_while_it_plays_counts_as_said_and_skips_the_fallback() {
         let fixture = fixture().await;
         let folder = scratch_folder();

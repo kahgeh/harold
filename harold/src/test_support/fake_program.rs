@@ -98,6 +98,10 @@ mod tests {
     // writing (it has no "Text file busy"), so the probe works at once there and nothing waits.
     #[cfg(target_os = "linux")]
     #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     fn the_helper_waits_for_a_child_that_holds_a_write_handle_and_then_starts_the_script() {
         let folder = folder();
         let path = folder.join("fake");

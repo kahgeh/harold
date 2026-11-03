@@ -360,6 +360,10 @@ impl Harold for ProbeServer {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn readiness_probe_reads_only_one_snapshot_and_handles_eof_error_and_timeout() {
     for kind in [
         ResponseKind::Snapshot,

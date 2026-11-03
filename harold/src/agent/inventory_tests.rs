@@ -330,6 +330,10 @@ fn inventory_command_returns_its_stdout() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 fn stopped_inventory_command_is_killed_and_fails() {
     let signal = StopSignal::default();
     signal.request();

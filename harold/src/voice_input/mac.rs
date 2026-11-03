@@ -863,6 +863,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_run_over_the_limit_speaks_the_fallback_sentence() {
         let runner = ScriptedRunner::giving(
             RunResult::Exited {
@@ -1098,6 +1102,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_late_first_read_is_stamped_from_the_spawn_and_later_reads_from_real_time() {
         let (spawned, blocks) = read_stamped("wait(3)\nburst(3)\nstream(2.5)\n").await;
 
@@ -1120,6 +1128,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_prompt_stream_is_stamped_within_100_ms_of_its_reads() {
         let (spawned, blocks) = read_stamped("stream(2.5)\n").await;
 

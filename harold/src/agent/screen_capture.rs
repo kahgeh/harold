@@ -218,6 +218,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     fn child_capture_drains_success_and_enforces_size_and_time_bounds() {
         let output =
             bounded_output("/bin/sh", &["-c", "printf safe"], Duration::from_secs(1), 8).unwrap();

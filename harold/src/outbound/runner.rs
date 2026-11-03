@@ -59,6 +59,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     fn run_with_timeout_kills_a_program_that_runs_too_long() {
         let started = std::time::Instant::now();
         assert!(!run_with_timeout(

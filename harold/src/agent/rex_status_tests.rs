@@ -467,6 +467,10 @@ fn a_lookup_never_reads_a_record_and_a_mark_half_set() {
 // -- stop_all and sync do not wait on the wrong thread -------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn stop_all_blocks_no_tokio_worker_and_ends_within_three_seconds() {
     let script = Script::new("stopasync", true);
     let gate = Gate::new("block:a", Ok(no_root()), Ok(no_root()));
@@ -512,6 +516,10 @@ async fn stop_all_blocks_no_tokio_worker_and_ends_within_three_seconds() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 fn a_restart_of_an_ended_stream_does_not_wait_for_the_old_reader() {
     within_30s(
         "a_restart_of_an_ended_stream_does_not_wait_for_the_old_reader",

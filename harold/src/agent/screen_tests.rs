@@ -732,6 +732,10 @@ fn request_stop_after(signal: &StopSignal, delay: Duration) {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 fn stoppable_output_kills_a_stopped_child() {
     let signal = StopSignal::default();
     request_stop_after(&signal, Duration::from_millis(50));
@@ -762,6 +766,10 @@ fn stoppable_output_drains_more_than_a_pipe_buffer() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 fn bounded_output_stops_on_request() {
     let signal = StopSignal::default();
     request_stop_after(&signal, Duration::from_millis(50));

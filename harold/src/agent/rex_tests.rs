@@ -1106,6 +1106,10 @@ fn rex_is_looked_for_in_the_documented_order() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 fn an_absent_program_is_absent_and_a_slow_one_times_out() {
     let missing = run_program(
         Path::new("/nonexistent/rex"),

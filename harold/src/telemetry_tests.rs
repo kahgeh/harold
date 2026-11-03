@@ -719,6 +719,10 @@ fn the_health_lines_are_written_to_harold_log() {
 
 #[cfg(feature = "imessage")]
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line() {
     // A port nobody listens on: bind, read the port, drop the listener.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -767,6 +771,10 @@ async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_collector_that_never_answers_does_not_hold_up_shutdown() {
     // Accepts connections and never answers on them, so each send waits for its timeout.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

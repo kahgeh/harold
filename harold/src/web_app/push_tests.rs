@@ -202,6 +202,10 @@ async fn each_push_outcome_adds_one_to_the_push_counter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_push_service_that_does_not_answer_counts_as_unreachable() {
     let service = FakePushService::start_silent().await;
     let (key, _directory) = fresh_key();
@@ -228,6 +232,10 @@ async fn a_push_service_that_does_not_answer_counts_as_unreachable() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_slow_push_response_body_is_cut_off_at_the_deadline() {
     let service = FakePushService::start(201).await;
     service.set_slow_body(Duration::from_millis(50), 200);
@@ -247,6 +255,10 @@ async fn a_slow_push_response_body_is_cut_off_at_the_deadline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_large_push_response_is_read_no_further_than_64_kib() {
     let service = FakePushService::start(201).await;
     service.set_response_body_len(1024 * 1024);

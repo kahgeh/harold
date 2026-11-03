@@ -2441,6 +2441,10 @@ impl VisibleScreenPort for SlowScreen {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn slow_inventory_uses_its_own_budget_while_screen_keeps_the_short_deadline() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
@@ -5265,6 +5269,10 @@ async fn retry_never_starts_while_the_gate_stays_held() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_slow_scan_never_holds_the_monitor_past_inventory_timeout() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
@@ -5418,6 +5426,10 @@ async fn retry_that_fails_is_asked_to_stop() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the_retry_ends() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
@@ -5680,6 +5692,10 @@ fn let_slow_reads_finish() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn two_panes_timing_out_in_one_pass_leave_the_screen_healthy() {
     let screen = TimingScreen::default();
     for pane_id in ["%8", "%9"] {
@@ -5720,6 +5736,10 @@ async fn two_panes_timing_out_in_one_pass_leave_the_screen_healthy() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_pane_unread_for_four_seconds_degrades_the_screen_until_a_read_works() {
     let screen = TimingScreen::default();
     screen.stuck.store(true, Ordering::SeqCst);
@@ -5770,6 +5790,10 @@ async fn a_pane_unread_for_four_seconds_degrades_the_screen_until_a_read_works()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_read_that_fails_for_another_reason_degrades_the_screen_in_the_same_pass() {
     let screen = TimingScreen::default();
     screen.capture_fails.store(true, Ordering::SeqCst);
@@ -5791,6 +5815,10 @@ async fn a_read_that_fails_for_another_reason_degrades_the_screen_in_the_same_pa
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_prompt_scan_that_fails_for_another_reason_degrades_the_screen() {
     // The pane's first scan runs when the inventory finds it.
     let screen = TimingScreen::default();
@@ -5810,6 +5838,10 @@ async fn a_prompt_scan_that_fails_for_another_reason_degrades_the_screen() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_prompt_scan_that_times_out_is_cleared_by_the_next_good_screen_read() {
     let screen = TimingScreen::default();
     screen.scan_timeouts.store(true, Ordering::SeqCst);
@@ -5828,6 +5860,10 @@ async fn a_prompt_scan_that_times_out_is_cleared_by_the_next_good_screen_read() 
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn departed_and_busy_panes_start_no_count() {
     let screen = TimingScreen::default();
     let fixture = ScreenHealthFixture::new(screen, 1).await;
@@ -5964,12 +6000,20 @@ async fn a_resolve_over_one_second_logs_its_wait_and_total_time() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_fast_resolve_logs_no_resolve_line() {
     let (logs, _, _) = resolve_logs(Duration::ZERO, Duration::ZERO, false).await;
     assert!(!logs.contains("agent pane resolve slow"), "{logs}");
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn a_resolve_sent_during_a_tick_waits_at_least_the_rest_of_that_tick() {
     // The tick runs 1,200 ms and the resolve is sent 100 ms in, so it waits about 1,100 ms.
     let (logs, wait_ms, elapsed_ms) =

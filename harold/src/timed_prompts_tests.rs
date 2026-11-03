@@ -1343,6 +1343,10 @@ async fn no_report_carries_the_text() {
 // --- the real ports and the loop ---
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn bounded_stdout_gives_the_output_of_a_command_that_succeeds_in_time() {
     let second = Duration::from_secs(1);
 
