@@ -165,7 +165,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `gg` / `G` | First / last row | First / last todo | Same | Same | Same | Types |
 | `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected, when Harold serves the knowledge tool) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
-| `m` / `p` / `C` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call. Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
+| `m` / `p` / `C` / `W` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call · `W`: pause or resume every watch (it shows when a watch runs or a person or an agent paused one, and it never resumes a watch that the daily budget paused). Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -184,12 +184,12 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   now while the call is speaking.
 - **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
-  Each row shows its key at the right: `m` voice, `p` messaging, `C` call. These keys
+  The watch row reads `Watches: pause all` or `Watches: resume all`. Each row shows its key at the right: `m` voice, `p` messaging, `C` call, `W` watches. These keys
   also run the command from the list with the palette closed. The keys `v` and `w`
   are kept for later and no command uses them.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). After
-  them it adds `m voice  p pause  C call` for the commands that show now, where they fit;
+  them it adds `m voice  p pause  C call  W watches` for the commands that show now, where they fit;
   they drop first on a narrow screen. On a
   todo row, under a `TODO` label, it lists the row's own keys first, then `j/k` move,
   `n/N` todo, `o` link (only when the todo has a web link), `Esc` close, `^L` retry and
@@ -218,7 +218,7 @@ iMessage traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
 every connected control-tower shows `■ MSG PAUSED` after the voice state; nothing is shown
-while messaging is running. The masthead title always shows the control-tower's own release version (`source` for a
+while messaging is running. The masthead also counts the watches after that: `WATCHES 2` while two run, `■ WATCHES PAUSED` when a person or an agent paused them, and `(CAP)` for a watch that the daily budget paused. It shows nothing while there is no watch. The masthead title always shows the control-tower's own release version (`source` for a
 source build), whatever Harold reports and even before the first snapshot or after a
 disconnect. A control-tower left running through an install shows its old version until it is
 restarted. As the line gets tight `HAROLD / CONTROL-TOWER` shortens to `CONTROL-TOWER`, then `CONTROL-TOWER`

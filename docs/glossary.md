@@ -202,7 +202,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 
 | Term | Meaning | Not to use |
 | --- | --- | --- |
-| masthead | The control-tower's top line: version, transport, REV, voice and the messaging pause | "header" for it |
+| masthead | The control-tower's top line: version, transport, REV, voice, the messaging pause and the watches | "header" for it |
 | summary strip | The line under the masthead with the count of agents in each state, `unknown` only when above 0, and the server's clock. It always shows WORKING and IDLE. It shows BLOCKED, DONE and ERROR only when above 0 | "summary" alone |
 | transport | The control-tower's connection to Harold: `LIVE`, `STALE` and the like | — |
 | filter | The control-tower's search, which hides agent rows that don't match | — |
