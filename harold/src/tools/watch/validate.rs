@@ -103,7 +103,9 @@ pub(super) fn check_start(
     if !is_token(&request.skill) {
         return Err(Refusal::Invalid("skill"));
     }
-    if !EVERY_MINUTES.contains(&request.every_minutes) {
+    // `cron` is not used yet: an absent `every_minutes` stays invalid.
+    let every_minutes = request.every_minutes.unwrap_or(0);
+    if !EVERY_MINUTES.contains(&every_minutes) {
         return Err(Refusal::Invalid("every_minutes"));
     }
     if request
@@ -121,7 +123,7 @@ pub(super) fn check_start(
         folder,
         skill: request.skill.clone(),
         report_to,
-        every_minutes: request.every_minutes,
+        every_minutes,
         for_minutes: request.for_minutes,
         every_run: request.every_run,
         run_budget_usd_micros,
@@ -222,6 +224,8 @@ pub(super) fn check_remind(
         Some(When::InMinutes(minutes)) if IN_MINUTES.contains(minutes) => (Some(*minutes), None),
         Some(When::InMinutes(_)) => return Err(Refusal::Invalid("in_minutes")),
         Some(When::AtLocal(text)) => (None, Some(next_local(text, now)?)),
+        // A cron reminder is not handled yet: refuse it, do not crash.
+        Some(When::Cron(_)) => return Err(Refusal::Invalid("cron")),
         None => return Err(Refusal::Invalid("when")),
     };
     let report_to = report_to(&request.report_to)?;

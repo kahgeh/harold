@@ -126,6 +126,7 @@ impl Reminders {
             // with the offset in force at each wake-up.
             due_at_ms: req.in_minutes.map(|_| due_at_ms),
             due_local: req.in_minutes.is_none().then_some(req.due_local).flatten(),
+            cron: None,
         };
         self.store
             .put_reminder(&reminder, now_ms)

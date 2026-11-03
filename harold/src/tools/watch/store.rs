@@ -11,13 +11,14 @@ use super::runner::RUN_LIMIT;
 
 const DATABASE: &str = "watch.db";
 
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     ("001_watches", include_str!("migrations/001_watches.sql")),
     (
         "002_run_limit",
         include_str!("migrations/002_run_limit.sql"),
     ),
     ("003_controls", include_str!("migrations/003_controls.sql")),
+    ("004_cron", include_str!("migrations/004_cron.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +47,9 @@ pub(super) struct NewWatch {
     /// `None` for a watch with no end.
     pub ends_at_ms: Option<i64>,
     pub next_run_at_ms: i64,
+    /// The cron expression, or `None` for a watch at an interval. A cron watch has
+    /// `every_minutes` 0.
+    pub cron: Option<String>,
 }
 
 /// Where a watch is in its life.
@@ -87,6 +91,10 @@ pub(super) struct WatchRow {
     pub paused_until_ms: Option<i64>,
     /// Who paused the watch: `cli`, `control_tower` or `budget_day`.
     pub pause_how: Option<String>,
+    /// The cron expression, or `None` for a watch at an interval.
+    pub cron: Option<String>,
+    /// The newest local minute the cron schedule checked. `None` when none.
+    pub checked_local: Option<String>,
 }
 
 impl WatchRow {
@@ -94,6 +102,15 @@ impl WatchRow {
     pub(super) fn is_live(&self) -> bool {
         self.state != WatchState::Stopped
     }
+}
+
+/// Which table `set_checked_local` writes.
+// The cron scheduler (Task 6) is the first caller; only tests call it now.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckedKind {
+    Watch,
+    Reminder,
 }
 
 /// A reminder to store.
@@ -105,6 +122,8 @@ pub(super) struct NewReminder {
     pub text: String,
     pub due_at_ms: Option<i64>,
     pub due_local: Option<String>,
+    /// The cron expression, or `None` for a reminder that is not a cron reminder.
+    pub cron: Option<String>,
 }
 
 /// Where a reminder is in its life.
@@ -139,6 +158,10 @@ pub(super) struct ReminderRow {
     pub state: ReminderState,
     pub created_at_ms: i64,
     pub ended_at_ms: Option<i64>,
+    /// The cron expression, or `None` for a reminder that is not a cron reminder.
+    pub cron: Option<String>,
+    /// The newest local minute the cron schedule checked. `None` when none.
+    pub checked_local: Option<String>,
 }
 
 /// What a finished run does to the count of runs failed in a row.
@@ -168,7 +191,7 @@ pub(super) struct RunRecord {
 const COLUMNS: &str = "name, folder, skill, report_to, every_minutes, every_run, \
     run_budget_usd_micros, state, started_at_ms, ends_at_ms, next_run_at_ms, runs, reports, \
     failed_in_a_row, cost_usd_micros, last_outcome, stop_reason, ended_at_ms, run_limit_secs, \
-    paused_until_ms, pause_how";
+    paused_until_ms, pause_how, cron, checked_local";
 
 pub(super) struct WatchStore {
     conn: Mutex<Connection>,
@@ -204,8 +227,8 @@ impl WatchStore {
             conn.execute(
                 "INSERT OR REPLACE INTO watches (name, folder, skill, report_to, every_minutes, \
                  every_run, run_budget_usd_micros, state, started_at_ms, ends_at_ms, \
-                 next_run_at_ms, run_limit_secs) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10, ?11)",
+                 next_run_at_ms, run_limit_secs, cron, checked_local) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10, ?11, ?12, NULL)",
                 turso::params_from_iter(vec![
                     Value::from(watch.name.as_str()),
                     Value::from(watch.folder.as_str()),
@@ -218,6 +241,7 @@ impl WatchStore {
                     optional(watch.ends_at_ms),
                     Value::from(watch.next_run_at_ms),
                     Value::from(i64::from(watch.run_limit_secs)),
+                    watch.cron.as_deref().map_or(Value::Null, Value::from),
                 ]),
             )
             .await?;
@@ -323,7 +347,8 @@ impl WatchStore {
         let work = async {
             conn.execute(
                 "INSERT OR REPLACE INTO reminders (name, folder, report_to, text, due_at_ms, \
-                 due_local, state, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'waiting', ?7)",
+                 due_local, state, created_at_ms, cron, checked_local) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'waiting', ?7, ?8, NULL)",
                 turso::params_from_iter(vec![
                     Value::from(reminder.name.as_str()),
                     Value::from(reminder.folder.as_str()),
@@ -335,7 +360,40 @@ impl WatchStore {
                         .as_deref()
                         .map_or(Value::Null, Value::from),
                     Value::from(now_ms),
+                    reminder.cron.as_deref().map_or(Value::Null, Value::from),
                 ]),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    // The cron scheduler (Task 6) is the first caller; only tests call it now.
+    #[allow(dead_code)]
+    /// Records the newest local minute ("YYYY-MM-DD HH:MM") a cron schedule checked.
+    /// The value moves forward only: an older or equal minute changes nothing. A name
+    /// with no row changes nothing.
+    pub(super) async fn set_checked_local(
+        &self,
+        kind: CheckedKind,
+        name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let table = match kind {
+            CheckedKind::Watch => "watches",
+            CheckedKind::Reminder => "reminders",
+        };
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET checked_local = ?2 \
+                     WHERE name = ?1 AND (checked_local IS NULL OR checked_local < ?2)"
+                ),
+                turso::params_from_iter(vec![Value::from(name), Value::from(value)]),
             )
             .await?;
             Ok(())
@@ -659,6 +717,8 @@ fn to_watch(row: &turso::Row) -> Result<WatchRow> {
         ended_at_ms: optional_integer(row, 17)?,
         paused_until_ms: optional_integer(row, 19)?,
         pause_how: optional_text(row, 20)?,
+        cron: optional_text(row, 21)?,
+        checked_local: optional_text(row, 22)?,
     })
 }
 
@@ -680,11 +740,13 @@ fn to_reminder(row: &turso::Row) -> Result<ReminderRow> {
         state,
         created_at_ms: integer(row, 7)?,
         ended_at_ms: optional_integer(row, 8)?,
+        cron: optional_text(row, 9)?,
+        checked_local: optional_text(row, 10)?,
     })
 }
 
-const REMINDER_COLUMNS: &str =
-    "name, folder, report_to, text, due_at_ms, due_local, state, created_at_ms, ended_at_ms";
+const REMINDER_COLUMNS: &str = "name, folder, report_to, text, due_at_ms, due_local, state, created_at_ms, ended_at_ms, \
+     cron, checked_local";
 
 async fn fetch_reminder(conn: &Connection, name: &str) -> Result<Option<ReminderRow>> {
     let mut rows = conn

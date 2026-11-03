@@ -327,6 +327,7 @@ impl Scheduler {
             started_at_ms: now,
             ends_at_ms,
             next_run_at_ms: now,
+            cron: None,
         };
         store
             .put_watch(&watch)

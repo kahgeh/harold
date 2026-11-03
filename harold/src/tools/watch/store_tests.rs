@@ -29,6 +29,7 @@ fn new_watch(name: &str) -> NewWatch {
         started_at_ms: 1_000,
         ends_at_ms: Some(1_000 + 120 * 60_000),
         next_run_at_ms: 1_000,
+        cron: None,
     }
 }
 
@@ -479,6 +480,7 @@ fn new_reminder(name: &str) -> NewReminder {
         text: "call back".into(),
         due_at_ms: Some(9_000),
         due_local: Some("2026-11-03 09:00".into()),
+        cron: None,
     }
 }
 
@@ -542,7 +544,7 @@ async fn a_watch_row_with_an_unknown_state_is_a_data_error() {
     let row_with = |state: &str| {
         format!(
             "SELECT 'w', '/work', 'pod-watch', 'chief', 10, 0, NULL, '{state}', 1000, NULL, \
-             1000, 0, 0, 0, 0, NULL, NULL, NULL, 120, NULL, NULL"
+             1000, 0, 0, 0, 0, NULL, NULL, NULL, 120, NULL, NULL, NULL, NULL"
         )
     };
     let mut rows = conn.query(&row_with("stopped"), ()).await.unwrap();
@@ -555,4 +557,137 @@ async fn a_watch_row_with_an_unknown_state_is_a_data_error() {
         matches!(&read, Err(StoreError::Data(text)) if text == "unknown watch state sleeping"),
         "{read:?}"
     );
+}
+
+/// Opens a database as the version before cron did: migrations 001 to 003 only.
+async fn open_at_v003(folder: &std::path::Path) -> (turso::Database, Connection) {
+    let path = folder.join(DATABASE);
+    let database = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, sql) in &MIGRATIONS[..3] {
+        conn.execute_batch(sql).await.unwrap();
+        let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, checksum),
+        )
+        .await
+        .unwrap();
+    }
+    (database, conn)
+}
+
+#[tokio::test]
+async fn migration_004_keeps_old_rows_and_gives_them_null_cron_columns() {
+    let temp = Temp::new();
+    {
+        let (_database, conn) = open_at_v003(&temp.0).await;
+        conn.execute(
+            "INSERT INTO watches (name, folder, skill, report_to, every_minutes, every_run, \
+             state, started_at_ms, ends_at_ms, next_run_at_ms, run_limit_secs) \
+             VALUES ('old', '/work', 'pod-watch', 'chief', 10, 0, 'running', 1, 2, 1, 77)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reminders (name, folder, report_to, text, due_at_ms, state, \
+             created_at_ms) VALUES ('rem', '/work', 'chief', 'hi', 9, 'waiting', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let watch = store.get("old").await.unwrap().unwrap();
+    assert_eq!((watch.every_minutes, watch.run_limit_secs), (10, 77));
+    assert_eq!((watch.cron, watch.checked_local), (None, None));
+    let reminder = store.reminder("rem").await.unwrap().unwrap();
+    assert_eq!(reminder.due_at_ms, Some(9));
+    assert_eq!((reminder.cron, reminder.checked_local), (None, None));
+}
+
+#[tokio::test]
+async fn a_cron_watch_round_trips_and_checked_local_moves_forward_only() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let mut watch = new_watch("c");
+    watch.every_minutes = 0;
+    watch.cron = Some("*/5 9-17 * * 1-5".into());
+    store.put_watch(&watch).await.unwrap();
+    let row = store.get("c").await.unwrap().unwrap();
+    assert_eq!(row.cron.as_deref(), Some("*/5 9-17 * * 1-5"));
+    assert_eq!((row.every_minutes, row.checked_local), (0, None));
+
+    let minute = "2026-11-03 09:05";
+    store
+        .set_checked_local(CheckedKind::Watch, "c", minute)
+        .await
+        .unwrap();
+    let row = store.get("c").await.unwrap().unwrap();
+    assert_eq!(row.checked_local.as_deref(), Some(minute));
+    // An older minute changes nothing. The same minute changes nothing.
+    for older in ["2026-11-03 09:00", minute] {
+        store
+            .set_checked_local(CheckedKind::Watch, "c", older)
+            .await
+            .unwrap();
+        let row = store.get("c").await.unwrap().unwrap();
+        assert_eq!(row.checked_local.as_deref(), Some(minute));
+    }
+    store
+        .set_checked_local(CheckedKind::Watch, "c", "2026-11-03 09:10")
+        .await
+        .unwrap();
+    let row = store.get("c").await.unwrap().unwrap();
+    assert_eq!(row.checked_local.as_deref(), Some("2026-11-03 09:10"));
+
+    // A new start replaces the schedule: the checked minute resets.
+    store.put_watch(&watch).await.unwrap();
+    let row = store.get("c").await.unwrap().unwrap();
+    assert_eq!(row.checked_local, None);
+}
+
+#[tokio::test]
+async fn a_cron_reminder_round_trips_and_checked_local_moves_forward_only() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let mut reminder = new_reminder("r");
+    reminder.cron = Some("0 9 * * *".into());
+    store.put_reminder(&reminder, 1_000).await.unwrap();
+    let row = store.reminder("r").await.unwrap().unwrap();
+    assert_eq!(row.cron.as_deref(), Some("0 9 * * *"));
+    assert_eq!(row.checked_local, None);
+    assert_eq!(
+        store.waiting_reminders().await.unwrap()[0].cron.as_deref(),
+        Some("0 9 * * *")
+    );
+
+    for (value, expected) in [
+        ("2026-11-03 09:00", "2026-11-03 09:00"),
+        ("2026-11-02 09:00", "2026-11-03 09:00"),
+        ("2026-11-04 09:00", "2026-11-04 09:00"),
+    ] {
+        store
+            .set_checked_local(CheckedKind::Reminder, "r", value)
+            .await
+            .unwrap();
+        let row = store.reminder("r").await.unwrap().unwrap();
+        assert_eq!(row.checked_local.as_deref(), Some(expected));
+    }
+    // A name that does not exist changes nothing and is no error.
+    store
+        .set_checked_local(CheckedKind::Reminder, "none", "2026-11-05 09:00")
+        .await
+        .unwrap();
 }

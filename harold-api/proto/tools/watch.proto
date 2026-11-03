@@ -6,6 +6,8 @@
 //                `report_to` is "chief" or "self"; empty means "self".
 //                `run_budget_usd` 0 means none given. `run_limit_secs` 0 means none given:
 //                the run limit is then 120 seconds.
+//                Give `every_minutes` or `cron` (a five-field cron expression in local time),
+//                not both. A cron watch has no `every_minutes`.
 //                `for_minutes` absent means the watch has no end. Such a watch needs
 //                `[watch] daily_budget_usd` to be set. The response has no `ends_at_ms`.
 //   StopWatch    ends a running watch at once.
@@ -16,8 +18,10 @@
 //                `all`, a watch that is not running is skipped and not named.
 //   Resume       releases a paused watch. `name` or `all` (not both). `resumed` names the
 //                watches released. `skipped` names the capped watches, which stay paused.
-//   Remind       types one line to `report_to` when it is due. Give `in_minutes` (1 to 1440)
-//                or `at_local` ("HH:MM", 24 hours, the next time the local clock reads it).
+//   Remind       types one line to `report_to` when it is due. Give `in_minutes` (1 to 1440),
+//                `at_local` ("HH:MM", 24 hours, the next time the local clock reads it) or
+//                `cron` (a five-field cron expression in local time: it is due at the next
+//                match).
 //                The line is "REMIND <name>: <text>". The text is cut to 300 characters.
 //                The response holds the due time.
 //   ListWatches  every watch running or paused, every watch that ended today, and every
@@ -25,7 +29,8 @@
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" (including "invalid folder"). A Remind
-//                        with no `in_minutes` and no `at_local` is "invalid when".
+//                        with no `in_minutes`, no `at_local` and no `cron` is "invalid when".
+//                        A bad `cron` is "invalid cron".
 //   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch, Pause,
 //                        Resume).
 //   FailedPrecondition   "too_many_watches", "daily_budget_spent", "daily_budget_unset"
@@ -53,13 +58,16 @@ message StartWatchRequest {
   string name = 1;
   string folder = 2;
   string skill = 3;
-  uint32 every_minutes = 4;
+  // Absent for a cron watch.
+  optional uint32 every_minutes = 4;
   // Absent means the watch has no end.
   optional uint32 for_minutes = 5;
   string report_to = 6;
   double run_budget_usd = 7;
   bool every_run = 8;
   uint32 run_limit_secs = 9;
+  // A five-field cron expression in local time. Absent for an interval watch.
+  optional string cron = 10;
 }
 
 message StartWatchResponse {
@@ -98,6 +106,10 @@ message Watch {
   optional int64 paused_until_ms = 16;
   // Who paused the watch: "cli", "control_tower" or "budget_day". Empty when not paused.
   string pause_how = 17;
+  // The cron expression. Empty when the watch runs at an interval.
+  string cron = 18;
+  // The newest local minute ("YYYY-MM-DD HH:MM") the schedule checked. Empty when none.
+  string checked_local = 19;
 }
 
 message ListWatchesResponse {
@@ -112,6 +124,8 @@ message Reminder {
   string name = 1;
   string report_to = 2;
   int64 due_at_ms = 3;
+  // The cron expression. Empty when the reminder is not a cron reminder.
+  string cron = 4;
 }
 
 message PauseRequest {
@@ -144,6 +158,7 @@ message RemindRequest {
   oneof when {
     uint32 in_minutes = 3;
     string at_local = 4;
+    string cron = 7;
   }
   string report_to = 5;
   string text = 6;

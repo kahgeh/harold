@@ -1,5 +1,7 @@
 use harold_api::FILE_DESCRIPTOR_SET;
-use harold_api::tools::watch::v1::{PauseRequest, StartWatchRequest, Watch};
+use harold_api::tools::watch::v1::{
+    PauseRequest, RemindRequest, StartWatchRequest, Watch, remind_request,
+};
 use prost::Message;
 
 #[derive(Clone, PartialEq, Message)]
@@ -134,4 +136,25 @@ fn the_new_fields_have_the_numbers_the_spec_gives() {
     assert_eq!(field("ResumeResponse", "skipped"), (2, false));
     assert_eq!(field("Reminder", "due_at_ms"), (3, false));
     assert_eq!(PauseRequest::default().for_minutes, None);
+}
+
+#[test]
+fn the_cron_fields_have_new_numbers_and_the_old_ones_stay() {
+    // `every_minutes` keeps number 4 and becomes optional.
+    assert_eq!(field("StartWatchRequest", "every_minutes"), (4, true));
+    assert_eq!(field("StartWatchRequest", "cron"), (10, true));
+    assert_eq!(field("RemindRequest", "in_minutes"), (3, false));
+    assert_eq!(field("RemindRequest", "at_local"), (4, false));
+    assert_eq!(field("RemindRequest", "cron"), (7, false));
+    assert_eq!(field("Watch", "cron"), (18, false));
+    assert_eq!(field("Watch", "checked_local"), (19, false));
+    assert_eq!(field("Reminder", "cron"), (4, false));
+
+    let request = StartWatchRequest::default();
+    assert_eq!((request.every_minutes, request.cron), (None, None));
+    let remind = RemindRequest {
+        when: Some(remind_request::When::Cron("0 9 * * *".into())),
+        ..Default::default()
+    };
+    assert!(matches!(remind.when, Some(remind_request::When::Cron(_))));
 }

@@ -137,6 +137,8 @@ impl WatchService for WatchToolService {
                 paused: row.state == WatchState::Paused,
                 paused_until_ms: row.paused_until_ms,
                 pause_how: row.pause_how.unwrap_or_default(),
+                cron: row.cron.unwrap_or_default(),
+                checked_local: row.checked_local.unwrap_or_default(),
             })
             .collect();
         Ok(Response::new(pb::ListWatchesResponse {
@@ -149,6 +151,8 @@ impl WatchService for WatchToolService {
                     name: reminder.name,
                     report_to: reminder.report_to,
                     due_at_ms: reminder.due_at_ms,
+                    // Task 7 fills this in; the list holds no cron reminder yet.
+                    cron: String::new(),
                 })
                 .collect(),
         }))

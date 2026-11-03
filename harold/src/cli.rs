@@ -2374,7 +2374,8 @@ pub(crate) async fn watch_within(
                         name: name.clone(),
                         folder: folder.to_string_lossy().into_owned(),
                         skill: skill.clone(),
-                        every_minutes: *every_minutes,
+                        every_minutes: Some(*every_minutes),
+                        cron: None,
                         for_minutes: *for_minutes,
                         report_to: report_to.clone().unwrap_or_default(),
                         run_budget_usd: run_budget_usd
@@ -7143,6 +7144,7 @@ mod tests {
             name: "release-check".into(),
             report_to: "chief".into(),
             due_at_ms: at_1630,
+            cron: String::new(),
         };
         assert_eq!(
             watch_reminder_line(&waiting, utc),

@@ -32,7 +32,8 @@ fn request(folder: &Path) -> StartWatchRequest {
         name: "after-release".into(),
         folder: folder.to_str().unwrap().into(),
         skill: "pod-watch".into(),
-        every_minutes: 10,
+        every_minutes: Some(10),
+        cron: None,
         for_minutes: Some(120),
         report_to: String::new(),
         run_budget_usd: 0.0,
@@ -79,7 +80,7 @@ fn every_for_and_report_to_outside_the_table_are_refused() {
     let temp = Temp::with_skill("pod-watch", "x");
     for (every, ok) in [(1, false), (2, true), (240, true), (241, false)] {
         let mut asked = request(&temp.0);
-        asked.every_minutes = every;
+        asked.every_minutes = Some(every);
         assert_eq!(check(&asked).is_ok(), ok, "every {every}");
     }
     for (minutes, ok) in [(0, false), (1, true), (1440, true), (1441, false)] {

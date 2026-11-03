@@ -15,7 +15,8 @@ fn request(h: &Harness, name: &str) -> StartWatchRequest {
         name: name.into(),
         folder: h.folder.0.to_string_lossy().into_owned(),
         skill: "pod-watch".into(),
-        every_minutes: 10,
+        every_minutes: Some(10),
+        cron: None,
         for_minutes: Some(120),
         report_to: "chief".into(),
         run_budget_usd: 0.0,
@@ -107,7 +108,7 @@ async fn start_refuses_with_the_codes_and_messages_the_proto_names() {
         (invalid, "invalid skill".into())
     );
     let mut asked = request(&h, "w");
-    asked.every_minutes = 1;
+    asked.every_minutes = Some(1);
     assert_eq!(
         refusal(&service, asked).await,
         (invalid, "invalid every_minutes".into())
@@ -453,6 +454,7 @@ async fn remind_answers_its_time_list_shows_it_and_a_name_in_use_is_refused() {
             name: "release-check".into(),
             report_to: "chief".into(),
             due_at_ms: answered.due_at_ms,
+            cron: String::new(),
         }]
     );
 
