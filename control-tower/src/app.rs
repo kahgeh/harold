@@ -988,17 +988,22 @@ impl App {
     }
 
     /// A change of the waiting agents or of `focus_known` does not raise the event
-    /// version, so a snapshot at the same version still counts when a pane it shares
-    /// with the current snapshot waits or stops waiting, or waits since another time.
+    /// version, so a snapshot at the same version still counts when the waiting rows
+    /// differ: a pane waits or stops waiting, waits since another time, or a waiting
+    /// row appears or goes.
     pub fn waiting_changed_in(&self, snapshot: &Snapshot) -> bool {
+        let waiting_set = |snapshot: &Snapshot| -> Vec<(String, i64)> {
+            let mut set: Vec<(String, i64)> = snapshot
+                .rows
+                .iter()
+                .filter(|row| row.waiting)
+                .map(|row| (row.incarnation.pane_id.clone(), row.waiting_since_ms))
+                .collect();
+            set.sort();
+            set
+        };
         snapshot.focus_known != self.snapshot.focus_known
-            || snapshot.rows.iter().any(|new| {
-                self.snapshot.rows.iter().any(|old| {
-                    old.incarnation.pane_id == new.incarnation.pane_id
-                        && (old.waiting != new.waiting
-                            || old.waiting_since_ms != new.waiting_since_ms)
-                })
-            })
+            || waiting_set(snapshot) != waiting_set(&self.snapshot)
     }
 
     pub fn mark_disconnected(&mut self) {
@@ -3463,6 +3468,30 @@ mod tests {
         let same = served(fleet([Idle, Idle, Idle], 5), &[("%2", 150)], false);
         assert!(!app.waiting_changed_in(&same));
         assert!(!app.apply_later_snapshot(same).unwrap());
+    }
+
+    #[test]
+    fn waiting_changed_in_sees_a_waiting_row_that_goes() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(served(fleet([Idle, Idle, Idle], 5), &[("%3", 100)], true))
+            .unwrap();
+        let mut gone = served(fleet([Idle, Idle, Idle], 5), &[], true);
+        gone.rows.retain(|row| row.incarnation.pane_id != "%3");
+        assert!(app.waiting_changed_in(&gone));
+        assert!(app.apply_later_snapshot(gone).unwrap());
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn waiting_changed_in_sees_a_new_waiting_row() {
+        let mut app = empty_app();
+        let mut first = served(fleet([Idle, Idle, Idle], 5), &[], true);
+        first.rows.retain(|row| row.incarnation.pane_id != "%3");
+        app.apply_first_snapshot(first).unwrap();
+        let arrived = served(fleet([Idle, Idle, Idle], 5), &[("%3", 100)], true);
+        assert!(app.waiting_changed_in(&arrived));
+        assert!(app.apply_later_snapshot(arrived).unwrap());
+        assert_eq!(waiting_panes(&app), ["%3"]);
     }
 
     #[test]
