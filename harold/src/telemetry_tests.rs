@@ -1272,6 +1272,8 @@ fn instruments_have_the_spec_names_units_and_buckets() {
     i.phone_requests_wrong.add(1, &ours);
     i.phone_request_latency.record(3.0, &ours);
     i.turns.add(1, &ours);
+    i.turn_tokens.add(1, &ours);
+    i.turn_tokens_by_spec.add(1, &ours);
     i.turn_duration.record(42.0, &ours);
     i.pod_merges.add(1, &ours);
     i.pod_merged_lines.add(12, &ours);
@@ -1293,6 +1295,8 @@ fn instruments_have_the_spec_names_units_and_buckets() {
             histogram(&[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
         ),
         ("harold.turns", counter("{turn}")),
+        ("harold.turn.tokens", counter("{token}")),
+        ("harold.turn.tokens.by_spec", counter("{token}")),
         (
             "harold.turn.duration",
             histogram(&[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0]),
@@ -1989,6 +1993,8 @@ const METRICS: &[&str] = &[
     "harold.phone_requests.wrong",
     "harold.phone_request.latency",
     "harold.turns",
+    "harold.turn.tokens",
+    "harold.turn.tokens.by_spec",
     "harold.turn.duration",
     "pod.specs",
     "pod.spec.words",
@@ -5600,5 +5606,236 @@ fn the_work_metrics_are_noted_on_the_thread_that_made_them() {
             },
             WorkNoted::Slices(3),
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Turn tokens
+// ---------------------------------------------------------------------------
+
+fn unique(tag: &str) -> String {
+    format!("{tag}-{}", uuid::Uuid::new_v4())
+}
+
+fn tokens(input: u64, output: u64, cache_read: u64, cache_write: u64) -> TurnTokens {
+    TurnTokens {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    }
+}
+
+#[test]
+fn record_turn_tokens_adds_four_kinds_and_two_by_spec_for_a_build_worker() {
+    test_support::install();
+    let product = unique("p");
+    let spec = unique("s");
+    record_turn_tokens(
+        &tokens(1, 2, 3, 4),
+        "claude-sonnet-5-5",
+        "build_worker",
+        Some(&product),
+        Some(&spec),
+    );
+    for (kind, want) in [
+        ("input", 1),
+        ("output", 2),
+        ("cache_read", 3),
+        ("cache_write", 4),
+    ] {
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.turn.tokens",
+                &[
+                    ("kind", kind),
+                    ("model", "claude-sonnet-5-5"),
+                    ("role", "build_worker"),
+                    ("pod.product", &product),
+                ]
+            ),
+            Some(want),
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.turn.tokens.by_spec",
+            &[("spec.id", &spec), ("kind", "input")]
+        ),
+        Some(1 + 3 + 4)
+    );
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.turn.tokens.by_spec",
+            &[("spec.id", &spec), ("kind", "output")]
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn record_turn_tokens_adds_nothing_for_empty_tokens() {
+    test_support::install();
+    let product = unique("p");
+    let spec = unique("s");
+    assert!(tokens(0, 0, 0, 0).is_empty());
+    assert!(!tokens(0, 1, 0, 0).is_empty());
+    record_turn_tokens(
+        &tokens(0, 0, 0, 0),
+        "claude-sonnet-5-5",
+        "build_worker",
+        Some(&product),
+        Some(&spec),
+    );
+    assert_eq!(
+        test_support::counter_value("harold.turn.tokens", &[("pod.product", &product)]),
+        None
+    );
+    assert_eq!(
+        test_support::counter_value("harold.turn.tokens.by_spec", &[("spec.id", &spec)]),
+        None
+    );
+}
+
+#[test]
+fn a_strange_model_string_counts_as_other() {
+    let long = format!("claude-{}", "a".repeat(41));
+    let at_limit = format!("claude-{}", "a".repeat(40));
+    assert_eq!(counted_model(&long), "other");
+    assert_eq!(counted_model(&at_limit), at_limit);
+    assert_eq!(counted_model("Claude-Opus-4"), "other");
+    assert_eq!(counted_model("claude-opus\n"), "other");
+    assert_eq!(counted_model("claude-"), "other");
+    assert_eq!(counted_model("gpt-5"), "other");
+    assert_eq!(counted_model(""), "other");
+    assert_eq!(counted_model("claude-opus-4-1"), "claude-opus-4-1");
+    assert_eq!(counted_model("none"), "none");
+
+    test_support::install();
+    let product = unique("p");
+    record_turn_tokens(
+        &tokens(5, 0, 0, 0),
+        "Strange\nModel",
+        "chief",
+        Some(&product),
+        None,
+    );
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.turn.tokens",
+            &[
+                ("kind", "input"),
+                ("model", "other"),
+                ("role", "chief"),
+                ("pod.product", &product),
+            ]
+        ),
+        Some(5)
+    );
+}
+
+#[test]
+fn by_spec_input_is_input_plus_cache() {
+    test_support::install();
+    let spec = unique("s");
+    record_turn_tokens(
+        &tokens(10, 7, 100, 1000),
+        "claude-opus-4-1",
+        "build_worker",
+        None,
+        Some(&spec),
+    );
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.turn.tokens.by_spec",
+            &[("spec.id", &spec), ("kind", "input")]
+        ),
+        Some(1110)
+    );
+}
+
+#[test]
+fn non_worker_turn_adds_no_by_spec_series() {
+    test_support::install();
+    let spec = unique("s");
+    record_turn_tokens(
+        &tokens(1, 1, 1, 1),
+        "claude-opus-4-1",
+        "pnem",
+        Some("x"),
+        Some(&spec),
+    );
+    record_turn_tokens(
+        &tokens(1, 1, 1, 1),
+        "claude-opus-4-1",
+        "build_worker",
+        Some("x"),
+        None,
+    );
+    assert_eq!(
+        test_support::counter_value("harold.turn.tokens.by_spec", &[("spec.id", &spec)]),
+        None
+    );
+}
+
+#[test]
+fn register_turn_token_counters_seeds_kinds_times_roles_with_model_none() {
+    test_support::install();
+    register_turn_token_counters();
+    let mut seeded = 0;
+    for kind in ["input", "output", "cache_read", "cache_write"] {
+        for role in ["chief", "pnem", "pod_coordination", "build_worker", "other"] {
+            let value = test_support::exact_counter_value(
+                "harold.turn.tokens",
+                &[("kind", kind), ("model", "none"), ("role", role)],
+            );
+            assert!(value.is_some(), "{kind} {role}");
+            seeded += 1;
+        }
+    }
+    assert_eq!(seeded, 20);
+}
+
+#[test]
+fn harold_turns_carries_role_and_product_and_no_model() {
+    test_support::install();
+    let product = unique("p");
+    let session = unique("sess");
+    let trace = begin_turn_complete(
+        "%7",
+        Some(&session),
+        None,
+        time::OffsetDateTime::now_utc(),
+        "build_worker",
+        Some(&product),
+    );
+    drop(trace);
+    let mut attributes =
+        test_support::counter_attributes("harold.turns", &[("session.id", &session)]);
+    attributes.sort();
+    let keys: Vec<&str> = attributes.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["pane_id", "pod.product", "role", "session.id", "started_by"]
+    );
+    assert!(attributes.contains(&("role".into(), "build_worker".into())));
+    assert!(attributes.contains(&("pod.product".into(), product)));
+
+    let session = unique("sess");
+    drop(begin_turn_complete(
+        "%7",
+        Some(&session),
+        None,
+        time::OffsetDateTime::now_utc(),
+        "other",
+        None,
+    ));
+    let attributes = test_support::counter_attributes("harold.turns", &[("session.id", &session)]);
+    assert!(attributes.contains(&("role".into(), "other".into())));
+    assert!(
+        attributes
+            .iter()
+            .all(|(key, _)| key != "pod.product" && key != "model")
     );
 }

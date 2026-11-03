@@ -126,6 +126,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "cost_micros",
     "input_tokens",
     "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
     "hand_over_id",
     "typed_while_busy",
     "photo_bytes",
@@ -343,6 +345,10 @@ pub(crate) struct Instruments {
     pub phone_request_latency: Histogram<f64>,
     /// `harold.turns`, `{turn}`.
     pub turns: Counter<u64>,
+    /// `harold.turn.tokens`, `{token}`.
+    pub turn_tokens: Counter<u64>,
+    /// `harold.turn.tokens.by_spec`, `{token}`.
+    pub turn_tokens_by_spec: Counter<u64>,
     /// `harold.turn.duration`, seconds.
     pub turn_duration: Histogram<f64>,
     /// `pod.merges`, `{merge}`.
@@ -438,6 +444,8 @@ fn build_instruments(meter: &Meter) -> Instruments {
             &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
         ),
         turns: counter("harold.turns", "{turn}"),
+        turn_tokens: counter("harold.turn.tokens", "{token}"),
+        turn_tokens_by_spec: counter("harold.turn.tokens.by_spec", "{token}"),
         turn_duration: seconds(
             "harold.turn.duration",
             &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
@@ -2013,6 +2021,8 @@ pub(crate) fn begin_turn_complete(
     session_id: Option<&str>,
     hook_time: Option<&str>,
     hook_reached: OffsetDateTime,
+    role: &str,
+    product: Option<&str>,
 ) -> TurnTrace {
     let prompt = match take_prompt(pane_id, hook_reached) {
         Some((typed_at, started_by, cx)) if typed_at > hook_reached => {
@@ -2054,14 +2064,16 @@ pub(crate) fn begin_turn_complete(
     turn_cx.span().end_with_timestamp(hook_reached.into());
 
     let instruments = instruments();
-    instruments.turns.add(
-        1,
-        &[
-            KeyValue::new("session.id", session),
-            KeyValue::new("pane_id", pane_id.to_string()),
-            KeyValue::new("started_by", started_by),
-        ],
-    );
+    let mut turn_attributes = vec![
+        KeyValue::new("session.id", session),
+        KeyValue::new("pane_id", pane_id.to_string()),
+        KeyValue::new("started_by", started_by),
+        KeyValue::new("role", role.to_owned()),
+    ];
+    if let Some(product) = product {
+        turn_attributes.push(KeyValue::new("pod.product", product.to_owned()));
+    }
+    instruments.turns.add(1, &turn_attributes);
     if let Some(at) = start.at {
         let duration = Duration::try_from(hook_reached - at).unwrap_or(Duration::ZERO);
         instruments.turn_duration.record(
@@ -2075,6 +2087,105 @@ pub(crate) fn begin_turn_complete(
     // Fails only when no export layer is installed, and then there is no trace to join.
     let _ = turn_complete.set_parent(turn_cx);
     TurnTrace { turn_complete }
+}
+
+/// The tokens of one turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TurnTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TurnTokens {
+    /// Whether the turn has no tokens of any kind.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_write == 0
+    }
+}
+
+/// The model label of a count: `model` when it is `claude-` and 1 to 40 of `a-z`, `0-9`
+/// and `-`, or the seed label `none`. Any other string is `other`, so a caller cannot add
+/// series.
+fn counted_model(model: &str) -> &str {
+    if model == "none" {
+        return model;
+    }
+    let valid = model.strip_prefix("claude-").is_some_and(|rest| {
+        (1..=40).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    if valid { model } else { "other" }
+}
+
+/// Adds one turn's tokens to `harold.turn.tokens`, and for a `build_worker` turn with a
+/// spec id to `harold.turn.tokens.by_spec`. A turn with no tokens adds nothing.
+pub(crate) fn record_turn_tokens(
+    tokens: &TurnTokens,
+    model: &str,
+    role: &str,
+    product: Option<&str>,
+    spec_id: Option<&str>,
+) {
+    if tokens.is_empty() {
+        return;
+    }
+    let instruments = instruments();
+    let model = counted_model(model);
+    let kinds = [
+        ("input", tokens.input),
+        ("output", tokens.output),
+        ("cache_read", tokens.cache_read),
+        ("cache_write", tokens.cache_write),
+    ];
+    for (kind, count) in kinds {
+        let mut attributes = vec![
+            KeyValue::new("kind", kind),
+            KeyValue::new("model", model.to_owned()),
+            KeyValue::new("role", role.to_owned()),
+        ];
+        if let Some(product) = product {
+            attributes.push(KeyValue::new("pod.product", product.to_owned()));
+        }
+        instruments.turn_tokens.add(count, &attributes);
+    }
+    let (true, Some(spec_id)) = (role == "build_worker", spec_id) else {
+        return;
+    };
+    let input = tokens
+        .input
+        .saturating_add(tokens.cache_read)
+        .saturating_add(tokens.cache_write);
+    for (kind, count) in [("input", input), ("output", tokens.output)] {
+        instruments.turn_tokens_by_spec.add(
+            count,
+            &[
+                KeyValue::new("spec.id", spec_id.to_owned()),
+                KeyValue::new("kind", kind),
+            ],
+        );
+    }
+}
+
+/// Adds 0 to `harold.turn.tokens` for each kind and role, with model `none` and no
+/// product, so the series exist before the first turn.
+pub(crate) fn register_turn_token_counters() {
+    let instruments = instruments();
+    for kind in ["input", "output", "cache_read", "cache_write"] {
+        for role in ["chief", "pnem", "pod_coordination", "build_worker", "other"] {
+            instruments.turn_tokens.add(
+                0,
+                &[
+                    KeyValue::new("kind", kind),
+                    KeyValue::new("model", "none"),
+                    KeyValue::new("role", role),
+                ],
+            );
+        }
+    }
 }
 
 /// Whether `a` and `b` hold the same span.

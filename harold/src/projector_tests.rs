@@ -5299,7 +5299,14 @@ async fn a_reply_with_a_traceparent_joins_the_phones_trace_through_the_chiefs_tu
     );
 
     // The chief's turn ends.
-    let trace = telemetry::begin_turn_complete(&pane, None, None, time::OffsetDateTime::now_utc());
+    let trace = telemetry::begin_turn_complete(
+        &pane,
+        None,
+        None,
+        time::OffsetDateTime::now_utc(),
+        "other",
+        None,
+    );
     let turn_cx = trace.turn_complete.context();
     telemetry::keep_pending_turn(&pane, turn_cx);
     drop(trace);

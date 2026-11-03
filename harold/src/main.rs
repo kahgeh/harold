@@ -470,6 +470,8 @@ impl Harold for HaroldService {
             non_empty(&req.session_id),
             non_empty(&req.turn_started_at),
             hook_reached,
+            "other",
+            None,
         );
         let turn_cx = trace.turn_complete.context();
         // Kept by the pane before the monitor stores the turn end: the event handler may
