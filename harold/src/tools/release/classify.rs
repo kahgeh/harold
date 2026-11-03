@@ -76,6 +76,9 @@ pub(super) fn classify(name: &str, facts: &Facts<'_>) -> ProductNext {
         match spec.state {
             SpecState::Completed if is_merged_since_release(spec, facts) => {
                 next.merged.push(line(id, None));
+                if let Some(merged_at) = spec.merged_at {
+                    next.merged_at.push(merged_at);
+                }
             }
             SpecState::InProgress => match facts.branch_commits.get(id).copied() {
                 Some(Branch::Commits(commits)) => next.in_progress.push(line(id, Some(commits))),

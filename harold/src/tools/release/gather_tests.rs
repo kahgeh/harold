@@ -80,15 +80,15 @@ const REFLOG: [&str; 5] = [
 ];
 
 /// A fake product: a pod folder in a temporary folder and the answers git gives.
-struct Fixture {
+pub(in crate::tools::release) struct Fixture {
     folder: TempFolder,
-    repo: PathBuf,
+    pub(in crate::tools::release) repo: PathBuf,
     /// The `worktree list` entries after the base checkout: (folder name, branch).
     worktrees: Vec<(String, String)>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(in crate::tools::release) fn new() -> Self {
         let folder = TempFolder::new();
         let root = std::fs::canonicalize(&folder.0).expect("canonical folder");
         let repo = root.join("repo");
@@ -114,7 +114,7 @@ impl Fixture {
         self.repo.join(crate::pod_stats::POD_FOLDER)
     }
 
-    fn spec(&self, id: &str, text: &str) {
+    pub(in crate::tools::release) fn spec(&self, id: &str, text: &str) {
         write(&self.pod().join(format!("specs/{id}.md")), text);
     }
 
@@ -129,7 +129,7 @@ impl Fixture {
         );
     }
 
-    fn merge(&self, id: &str, commit: &str) {
+    pub(in crate::tools::release) fn merge(&self, id: &str, commit: &str) {
         write(
             &self.pod().join(format!("merged/{id}.md")),
             &format!("# Merged: {id}\n\nmerged: {MERGE_TIME}\ncommit: {commit}\n"),
@@ -148,7 +148,7 @@ impl Fixture {
     }
 
     /// The answers of a product whose base branch has no release.
-    fn git(&self) -> FakeGit {
+    pub(in crate::tools::release) fn git(&self) -> FakeGit {
         let mut listing = format!(
             "worktree {}\nHEAD {COMMIT}\nbranch refs/heads/main\n\n",
             self.repo.display()

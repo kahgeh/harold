@@ -19,6 +19,9 @@ pub(super) struct ProductNext {
     /// The newest release tag. Empty when the product has no release.
     pub release: String,
     pub merged: Vec<Line>,
+    /// The merge times of the specs in `merged`, in no set order. A spec with no merge time
+    /// has no entry, so this list may be shorter than `merged`.
+    pub merged_at: Vec<time::OffsetDateTime>,
     pub in_progress: Vec<Line>,
     pub approved: Vec<Line>,
     pub parked: Vec<Line>,
