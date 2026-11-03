@@ -473,6 +473,25 @@ async fn an_applied_import_from_the_chief_stores_the_records() {
 }
 
 #[tokio::test]
+async fn history_of_imported_record_shows_imported() {
+    let setup = Setup::new();
+    let service = setup.service();
+    let folder = chief_folder(&setup, GOOD);
+    import_call(&service, &folder, &[], true, CHIEF)
+        .await
+        .unwrap();
+    let history = service
+        .history(Request::new(pb::HistoryRequest {
+            name: "good-one".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(history.moves[0].from, "imported");
+    assert_eq!(history.moves[0].to, "idea");
+}
+
+#[tokio::test]
 async fn import_refusals_name_their_reason() {
     let setup = Setup::new();
     let service = setup.service();
@@ -1306,6 +1325,47 @@ mod metrics {
             )),
             "{again:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn closing_an_imported_record_notes_imported() {
+        let log = LogText::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let setup = Setup::new();
+        let start = noon_ms("2026-11-01");
+        let clock = SetClock::at(start);
+        let service = setup.service_at(clock.clone());
+        let folder = chief_folder(
+            &setup,
+            "# built-one: Built\nPriority: next\nStatus: building\n",
+        );
+        import_call(&service, &folder, &[], true, CHIEF)
+            .await
+            .unwrap();
+        take_noted_work();
+
+        clock.set(start + 2 * HOUR_MS);
+        set_status(&service, "built-one", "checked by the user").await;
+        let noted = take_noted_work();
+        let discovery: Vec<f64> = noted
+            .iter()
+            .filter_map(|n| match n {
+                WorkNoted::LeadTime {
+                    phase: "discovery",
+                    seconds,
+                } => Some(*seconds),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(discovery, [0.0]);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("imported=true"), "{text}");
+        assert!(!text.contains("imported=false"), "{text}");
     }
 
     #[tokio::test]

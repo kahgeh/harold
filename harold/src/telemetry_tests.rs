@@ -5326,7 +5326,6 @@ fn new_log_fields_are_allowed() {
         "open_records",
         "decisions",
         "links",
-        "record",
         "phase",
         "lead_s",
         "slices",
@@ -5439,6 +5438,60 @@ fn the_work_lead_time_records_seconds_by_phase() {
     assert_eq!(
         test_support::histogram_sum("harold.work.lead_time", &[("phase", "lead_probe")]),
         Some(5400.0)
+    );
+}
+
+#[test]
+fn the_work_lead_time_and_slices_have_the_spec_unit_and_buckets() {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    test_support::install();
+    record_work_lead_time("unit_probe", 7200.0);
+    record_work_slices(3);
+    let lead = test_support::metrics().iter().rev().find_map(|resource| {
+        resource
+            .scope_metrics()
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == "harold.work.lead_time")
+            .find_map(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .find(|p| {
+                        p.attributes().any(|kv| {
+                            kv.key.as_str() == "phase" && kv.value.as_str() == "unit_probe"
+                        })
+                    })
+                    .map(|p| (metric.unit().to_string(), p.bounds().collect::<Vec<f64>>())),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        lead,
+        Some((
+            "s".to_string(),
+            vec![
+                3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 345600.0, 604800.0, 1209600.0
+            ]
+        ))
+    );
+    let slices = test_support::metrics().iter().rev().find_map(|resource| {
+        resource
+            .scope_metrics()
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == "harold.work.slices")
+            .find_map(|metric| match metric.data() {
+                AggregatedMetrics::U64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .next()
+                    .map(|p| (metric.unit().to_string(), p.bounds().collect::<Vec<f64>>())),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        slices,
+        Some((
+            "{slice}".to_string(),
+            vec![1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0]
+        ))
     );
 }
 

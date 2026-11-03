@@ -80,7 +80,7 @@ pub(super) struct Counts {
     pub(super) moves: u32,
 }
 
-/// One change of status. A new record has one move with an empty `from_status`.
+/// One change of status. A record made by `put` has one move with an empty `from_status`; an import writes `imported`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Move {
     pub(super) from_status: String,
@@ -178,7 +178,11 @@ impl WorkFile {
             Err(refusal) => return Ok(Err(refusal)),
         };
         let conn: &Connection = &guard;
-        finish_refusable(conn, put_in(conn, &self.file_name, &record, now_ms).await).await
+        finish_refusable(
+            conn,
+            put_in(conn, &self.file_name, &record, now_ms, Origin::Put).await,
+        )
+        .await
     }
 
     /// Changes some fields of a record.
@@ -396,7 +400,9 @@ impl WorkFile {
                 if exists(conn, &record.name).await? {
                     return Ok(Err((Refusal::NameInUse, record.name.clone())));
                 }
-                if let Err(refusal) = put_in(conn, &self.file_name, record, now_ms).await? {
+                if let Err(refusal) =
+                    put_in(conn, &self.file_name, record, now_ms, Origin::Import).await?
+                {
                     return Ok(Err((refusal, record.name.clone())));
                 }
             }
@@ -844,11 +850,19 @@ async fn focus_has_room(conn: &Connection, record: &Record) -> Result<bool> {
     Ok(held < FOCUS_MAX)
 }
 
+/// How a new record comes in. The first move of an import comes from `imported`.
+#[derive(Clone, Copy)]
+enum Origin {
+    Put,
+    Import,
+}
+
 async fn put_in(
     conn: &Connection,
     file_name: &str,
     record: &Record,
     now_ms: i64,
+    origin: Origin,
 ) -> Result<std::result::Result<PutOutcome, Refusal>> {
     match load(conn, &record.name).await? {
         None => {
@@ -862,7 +876,11 @@ async fn put_in(
             new.status_since_ms = now_ms;
             insert_record(conn, &new).await?;
             insert_parts(conn, &new).await?;
-            insert_move(conn, &new.name, "", new.status.as_str(), now_ms).await?;
+            let from = match origin {
+                Origin::Put => "",
+                Origin::Import => "imported",
+            };
+            insert_move(conn, &new.name, from, new.status.as_str(), now_ms).await?;
             Ok(Ok(PutOutcome::Created))
         }
         // A closed record keeps its name for life.

@@ -76,10 +76,12 @@ harold tool work link work-records "note:Wait for the first rotation."
 
 harold tool work show work-records
 harold tool work history work-records
+# in work-2026-11-03.db
 # ...the work record, then:
 # moves:
 # 2026-11-03 09:12  created → idea
 # 2026-11-03 09:40  idea → building
+# A work record with no moves prints "moves: none". The times are UTC.
 harold tool work search rotation
 ```
 
@@ -232,18 +234,19 @@ records: work-records, pnem-switcher, ...
 
 A **status move** is one change of the status of a work record. The tool writes one move for each change, in the same transaction as the change. A move holds the work record, the status it left (`from`), the status it entered (`to`) and its time.
 
-- A new work record writes one move. Its `from` is empty.
+- A work record that `put` makes writes one move. Its `from` is empty.
+- A work record that the import makes writes one move. Its `from` is `imported`.
 - A `put` or `set` with the same status writes no move.
 - A rotation copies the moves of each open work record to the new file. A work record from before migration 002 has no moves, so it copies none.
 - The history of an imported work record before the import is not known.
 
-`history <name>` prints the moves after the work record, one line each, oldest first. The line is the time, the status that the work record left and the new status. The first move of a new work record shows `created` for the status that it left.
+`history <name>` prints the moves after the work record, one line each, oldest first. The line is the time, the status that the work record left and the new status. The first line of the output is `in <file>`, the name of the file that holds the work record. The times are UTC. If the work record has no moves, the output ends with `moves: none`. The first move of a work record that `put` made shows `created` for the status that it left. The first move of an imported work record shows `imported`.
 
 ## The closing figures
 
 When a work record moves to `checked by the user`, the tool records these figures:
 
-- one count of value in use, by priority;
+- one count on the counter `harold.work.checked`, by priority;
 - the lead time: the time from `created_at` to the closing;
 - the time of four phases, each the sum of the time spent in its statuses;
 - the slices: the number of `spec:` links of the work record.
@@ -261,7 +264,7 @@ Work that the user never checks stays open. It is inventory, never value.
 
 ## Rollback
 
-After migration 002, v0.75.0 or earlier cannot open the new work file. Its work tool refuses with `incompatible work schema`. The old file stays as it was, because a rotation never changes it, so an older Harold can open it. The release notes carry this line.
+After migration 002, v0.75.0 or earlier cannot open the new work file. Its work tool refuses with `incompatible work schema`. The old file stays as it was, because a rotation never changes it, so an older Harold can open it. The release notes carry this line. Adding it to the release notes is a release step for the coordinator.
 
 ## Reads
 

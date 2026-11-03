@@ -523,6 +523,7 @@ async fn rotation_copies_moves_of_open_records() {
     let t = ms_of(START);
     file.put(record("a"), t).await.unwrap().unwrap();
     file.put(record("c"), t).await.unwrap().unwrap();
+    file.put_new_all(&[record("d")], t).await.unwrap().unwrap();
     for (name, status, at) in [
         ("a", Status::Discovery, t + 10),
         ("a", Status::Building, t + 20),
@@ -536,8 +537,10 @@ async fn rotation_copies_moves_of_open_records() {
     }
     let old_a = file.moves("a").await.unwrap();
     let old_c = file.moves("c").await.unwrap();
+    let old_d = file.moves("d").await.unwrap();
     assert_eq!(old_a.len(), 3);
     assert_eq!(old_c.len(), 2);
+    assert_eq!(old_d[0].from_status, "imported");
     drop(file);
 
     let clock = FakeClock::at("2026-11-15");
@@ -545,11 +548,12 @@ async fn rotation_copies_moves_of_open_records() {
     let Outcome::Done { counts, .. } = outcome else {
         panic!("expected a done rotation, got {outcome:?}");
     };
-    assert_eq!(counts.open_records, 2);
-    assert_eq!(counts.moves, 5);
+    assert_eq!(counts.open_records, 3);
+    assert_eq!(counts.moves, 6);
     let new = read(&folder, "2026-11-15").await;
     assert_eq!(new.moves("a").await.unwrap(), old_a);
     assert_eq!(new.moves("c").await.unwrap(), old_c);
+    assert_eq!(new.moves("d").await.unwrap(), old_d);
     assert_eq!(new.counts().await.unwrap(), counts);
 }
 

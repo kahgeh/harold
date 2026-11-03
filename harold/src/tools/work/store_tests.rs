@@ -542,7 +542,7 @@ async fn move_and_record_commit_together() {
 }
 
 #[tokio::test]
-async fn put_new_all_writes_one_move_each() {
+async fn put_new_all_writes_imported_moves() {
     let folder = TempFolder::new();
     let file = open_file(&folder).await;
     let mut a = record("a");
@@ -550,8 +550,14 @@ async fn put_new_all_writes_one_move_each() {
     let mut b = record("b");
     b.status = Status::Idea;
     file.put_new_all(&[a, b], 50).await.unwrap().unwrap();
-    assert_eq!(file.moves("a").await.unwrap(), [mv("", "building", 50)]);
-    assert_eq!(file.moves("b").await.unwrap(), [mv("", "idea", 50)]);
+    assert_eq!(
+        file.moves("a").await.unwrap(),
+        [mv("imported", "building", 50)]
+    );
+    assert_eq!(file.moves("b").await.unwrap(), [mv("imported", "idea", 50)]);
+    // A record made by `put` keeps the empty `from_status`.
+    file.put(record("c"), 60).await.unwrap().unwrap();
+    assert_eq!(file.moves("c").await.unwrap(), [mv("", "idea", 60)]);
 }
 
 #[tokio::test]
