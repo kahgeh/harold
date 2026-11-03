@@ -1,0 +1,108 @@
+// The telemetry tool: an agent declares a named signal, then records it.
+//
+// Declare    names a counter, a gauge or an event, with its attribute keys and
+//            allowed values. The same declaration again changes nothing.
+// Count      adds n to a counter.
+// Gauge      sets a gauge to a value.
+// Event      records one event. An event carries no free text.
+// List       shows the declared signals, optionally for one name prefix.
+// Remove     removes a declared signal.
+//
+// Every request carries caller_pane. The server decides from the pane which
+// name prefixes the caller may write.
+//
+// Refusals (gRPC code): PermissionDenied, InvalidArgument,
+// FailedPrecondition, ResourceExhausted. The message is a reason word.
+//
+// The server trusts local callers: there is no token.
+syntax = "proto3";
+
+package harold.tools.telemetry.v1;
+
+service TelemetryService {
+  rpc Declare(DeclareRequest) returns (DeclareResponse);
+  rpc Count(CountRequest) returns (CountResponse);
+  rpc Gauge(GaugeRequest) returns (GaugeResponse);
+  rpc Event(EventRequest) returns (EventResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+}
+
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  COUNTER = 1;
+  GAUGE = 2;
+  EVENT = 3;
+}
+
+// An attribute key and the values it may take. A value may be a whole-number
+// range such as "0-50".
+message Attr {
+  string key = 1;
+  repeated string values = 2;
+}
+
+// An attribute key and the one value of a single record.
+message Pair {
+  string key = 1;
+  string value = 2;
+}
+
+message DeclareRequest {
+  string caller_pane = 1;
+  string name = 2;
+  Kind kind = 3;
+  string meaning = 4;
+  repeated Attr attrs = 5;
+}
+
+message DeclareResponse {}
+
+message CountRequest { // n 0 = the default, 1
+  string caller_pane = 1;
+  string name = 2;
+  uint64 n = 3;
+  repeated Pair attrs = 4;
+}
+
+message CountResponse {}
+
+message GaugeRequest {
+  string caller_pane = 1;
+  string name = 2;
+  double value = 3;
+  repeated Pair attrs = 4;
+}
+
+message GaugeResponse {}
+
+message EventRequest {
+  string caller_pane = 1;
+  string name = 2;
+  repeated Pair attrs = 3;
+}
+
+message EventResponse {}
+
+message Signal {
+  string name = 1;
+  Kind kind = 2;
+  string meaning = 3;
+  repeated Attr attrs = 4;
+}
+
+message ListRequest { // prefix "" = every prefix
+  string caller_pane = 1;
+  string prefix = 2;
+}
+
+message ListResponse {
+  repeated Signal signals = 1;
+}
+
+message RemoveRequest {
+  string caller_pane = 1;
+  string name = 2;
+}
+
+message RemoveResponse {}

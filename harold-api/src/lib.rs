@@ -33,6 +33,11 @@ pub mod tools {
             tonic::include_proto!("harold.tools.release.v1");
         }
     }
+    pub mod telemetry {
+        pub mod v1 {
+            tonic::include_proto!("harold.tools.telemetry.v1");
+        }
+    }
     pub mod watch {
         pub mod v1 {
             tonic::include_proto!("harold.tools.watch.v1");
