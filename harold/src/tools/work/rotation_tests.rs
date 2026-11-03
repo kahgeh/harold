@@ -515,3 +515,118 @@ async fn empty_current_file_rotates_with_zero_counts() {
     let new = read(&folder, "2026-11-15").await;
     assert_eq!(new.counts().await.unwrap(), Counts::default());
 }
+
+#[tokio::test]
+async fn rotation_copies_moves_of_open_records() {
+    let folder = TempFolder::new();
+    let file = WorkFile::open(&folder.file(&name_of(START))).await.unwrap();
+    let t = ms_of(START);
+    file.put(record("a"), t).await.unwrap().unwrap();
+    file.put(record("c"), t).await.unwrap().unwrap();
+    for (name, status, at) in [
+        ("a", Status::Discovery, t + 10),
+        ("a", Status::Building, t + 20),
+        ("c", Status::SpecDrafted, t + 30),
+    ] {
+        let patch = Patch {
+            status: Some(status),
+            ..Patch::default()
+        };
+        file.set(name, patch, at).await.unwrap().unwrap();
+    }
+    let old_a = file.moves("a").await.unwrap();
+    let old_c = file.moves("c").await.unwrap();
+    assert_eq!(old_a.len(), 3);
+    assert_eq!(old_c.len(), 2);
+    drop(file);
+
+    let clock = FakeClock::at("2026-11-15");
+    let outcome = rotator(&folder, &clock).tick(14).await;
+    let Outcome::Done { counts, .. } = outcome else {
+        panic!("expected a done rotation, got {outcome:?}");
+    };
+    assert_eq!(counts.open_records, 2);
+    assert_eq!(counts.moves, 5);
+    let new = read(&folder, "2026-11-15").await;
+    assert_eq!(new.moves("a").await.unwrap(), old_a);
+    assert_eq!(new.moves("c").await.unwrap(), old_c);
+    assert_eq!(new.counts().await.unwrap(), counts);
+}
+
+#[tokio::test]
+async fn rotation_leaves_closed_record_moves_in_old_file() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    let clock = FakeClock::at("2026-11-15");
+    assert!(matches!(
+        rotator(&folder, &clock).tick(14).await,
+        Outcome::Done { .. }
+    ));
+    let old = read(&folder, START).await;
+    assert_eq!(old.moves("b").await.unwrap().len(), 2);
+    let new = read(&folder, "2026-11-15").await;
+    assert!(new.moves("b").await.unwrap().is_empty());
+    assert_eq!(new.moves("a").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn file_from_before_002_rotates_with_zero_moves() {
+    use sha2::{Digest, Sha256};
+
+    let folder = TempFolder::new();
+    let path = folder.file(&name_of(START));
+    let sql = include_str!("migrations/001_work.sql");
+    {
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+             checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute_batch(sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
+            (
+                "001_work",
+                hex::encode(Sha256::digest(sql.as_bytes())),
+                ms_of(START),
+            ),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO records (name, title, priority, status, created_in, created_at_ms, \
+             updated_at_ms, status_since_ms) VALUES ('a', 'Title a', 'later', 'idea', ?1, ?2, ?2, ?2)",
+            (name_of(START), ms_of(START)),
+        )
+        .await
+        .unwrap();
+    }
+
+    // A read-only open does not migrate: the file has no moves table.
+    let before = read(&folder, START).await;
+    assert!(before.moves("a").await.unwrap().is_empty());
+    assert_eq!(before.counts().await.unwrap().moves, 0);
+    drop(before);
+
+    // A normal open applies 002. The old record has no moves.
+    let file = WorkFile::open(&path).await.unwrap();
+    assert!(file.moves("a").await.unwrap().is_empty());
+    drop(file);
+    let clock = FakeClock::at("2026-11-15");
+    let outcome = rotator(&folder, &clock).tick(14).await;
+    let Outcome::Done { counts, .. } = outcome else {
+        panic!("expected a done rotation, got {outcome:?}");
+    };
+    assert_eq!(counts.open_records, 1);
+    assert_eq!(counts.moves, 0);
+    let new = read(&folder, "2026-11-15").await;
+    assert_eq!(new.counts().await.unwrap(), counts);
+    assert!(new.moves("a").await.unwrap().is_empty());
+}
