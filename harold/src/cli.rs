@@ -4170,6 +4170,7 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             cli_path: "claude".into(),
+            grpc_addr: None,
             shutdown,
         })
         .await
@@ -4250,6 +4251,7 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             cli_path: "claude".into(),
+            grpc_addr: None,
             shutdown,
         })
         .await
@@ -4920,6 +4922,7 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             cli_path: "claude".into(),
+            grpc_addr: None,
             shutdown,
         })
         .await
@@ -5403,6 +5406,7 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             cli_path: "claude".into(),
+            grpc_addr: None,
             shutdown,
         })
         .await
@@ -5768,6 +5772,7 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             cli_path: "/usr/bin/true".into(),
+            grpc_addr: None,
             shutdown,
         })
         .await

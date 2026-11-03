@@ -33,4 +33,9 @@ pub mod tools {
             tonic::include_proto!("harold.tools.watch.v1");
         }
     }
+    pub mod work {
+        pub mod v1 {
+            tonic::include_proto!("harold.tools.work.v1");
+        }
+    }
 }

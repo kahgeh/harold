@@ -8,7 +8,7 @@ use crate::tools::{ChiefPane, PaneFolder, Products};
 
 /// Why a write was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Refused {
+pub(crate) enum Refused {
     NoPane,
     UnknownProduct,
     WrongProduct,
@@ -18,7 +18,7 @@ pub(super) enum Refused {
 
 impl Refused {
     /// The fixed word the refusal goes by in a status message and a log line.
-    pub(super) fn reason(self) -> &'static str {
+    pub(crate) fn reason(self) -> &'static str {
         match self {
             Refused::NoPane => "no_pane",
             Refused::UnknownProduct => "unknown_product",
@@ -29,14 +29,14 @@ impl Refused {
     }
 }
 
-pub(super) struct Guard {
+pub(crate) struct Guard {
     pane_folder: Arc<dyn PaneFolder>,
     products: Arc<dyn Products>,
     chief_pane: Arc<dyn ChiefPane>,
 }
 
 impl Guard {
-    pub(super) fn new(
+    pub(crate) fn new(
         pane_folder: Arc<dyn PaneFolder>,
         products: Arc<dyn Products>,
         chief_pane: Arc<dyn ChiefPane>,
@@ -50,7 +50,7 @@ impl Guard {
 
     /// The pane may write `product`'s backlog: it is the chief, or it sits in the
     /// product's repo folder.
-    pub(super) fn may_write_product(
+    pub(crate) fn may_write_product(
         &self,
         caller_pane: &str,
         product: &str,
@@ -78,7 +78,7 @@ impl Guard {
     }
 
     /// Only the chief writes the queue.
-    pub(super) fn may_write_queue(&self, caller_pane: &str) -> Result<(), Refused> {
+    pub(crate) fn may_write_queue(&self, caller_pane: &str) -> Result<(), Refused> {
         if caller_pane.is_empty() {
             return Err(Refused::NoPane);
         }
@@ -89,7 +89,7 @@ impl Guard {
     }
 
     /// For a dry-run import, which needs no pane: the product is in the registry.
-    pub(super) fn product_known(&self, product: &str) -> Result<(), Refused> {
+    pub(crate) fn product_known(&self, product: &str) -> Result<(), Refused> {
         match self.products()?.iter().any(|(name, _)| name == product) {
             true => Ok(()),
             false => Err(Refused::UnknownProduct),
@@ -97,7 +97,7 @@ impl Guard {
     }
 
     /// The registry's products as `(name, repo)`.
-    pub(super) fn products(&self) -> Result<Vec<(String, PathBuf)>, Refused> {
+    pub(crate) fn products(&self) -> Result<Vec<(String, PathBuf)>, Refused> {
         self.products
             .products()
             .map_err(|_| Refused::RegistryUnreadable)

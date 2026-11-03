@@ -1,5 +1,6 @@
 //! Each product's backlog and the chief's queue, Harold's second tool. Outside
-//! this module only `NAME` and `start` are used.
+//! this module only `NAME`, `start` and the `guard` (which the work tool shares)
+//! are used.
 
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use tonic::service::Routes;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
-mod guard;
+pub(crate) mod guard;
 mod markdown;
 mod schema;
 mod service;

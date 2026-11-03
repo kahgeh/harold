@@ -141,6 +141,9 @@ pub(crate) struct ToolContext {
     /// The environment a tool's hosted-model process runs with, and nothing else.
     pub(crate) model_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     pub(crate) cli_path: String,
+    /// Harold's own gRPC address on loopback, the one the CLI calls. A tool reads
+    /// another tool through it. `None` when the `[grpc]` setting gives no address.
+    pub(crate) grpc_addr: Option<std::net::SocketAddr>,
     pub(crate) shutdown: tokio::sync::watch::Receiver<()>,
 }
 
@@ -156,6 +159,8 @@ pub(crate) struct Extras {
     pub(crate) cli_path: String,
     /// The knowledge tool's launch; `None` unless `[knowledge] vault` is set.
     pub(crate) knowledge: Option<knowledge::Launch>,
+    /// Harold's own gRPC address, for `ToolContext::grpc_addr`.
+    pub(crate) grpc_addr: Option<std::net::SocketAddr>,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -237,6 +242,7 @@ pub(crate) async fn start(
             settings: cfg.knowledge.clone(),
             machine_name: cfg.machine_name.clone(),
         }),
+        grpc_addr: cfg.grpc.addr().ok(),
     };
     let pane_folder = SnapshotPaneFolder { ports };
     start_with(
@@ -270,6 +276,7 @@ async fn start_with(
     let [
         (questions_name, questions_ctx),
         (backlog_name, backlog_ctx),
+        (work_name, work_ctx),
         (watch_name, watch_ctx),
     ] = contexts(
         store_path,
@@ -286,6 +293,7 @@ async fn start_with(
         &mut tools,
     );
     start_tool(backlog_name, backlog::start(backlog_ctx).await, &mut tools);
+    start_tool(work_name, work::start(work_ctx).await, &mut tools);
     start_tool(watch_name, watch::start(watch_ctx).await, &mut tools);
     if let Some(launch) = knowledge_launch {
         start_tool(
@@ -303,8 +311,8 @@ async fn start_with(
 }
 
 /// Each tool's name and context, in the order they start. The question tool types as
-/// `questions`, the watch tool as `watch` through `extras.watch_typing`, and the backlog tool is
-/// given no typing.
+/// `questions`, the watch tool as `watch` through `extras.watch_typing`, and the backlog and work
+/// tools are given no typing.
 fn contexts(
     store_path: &str,
     typing: Arc<dyn PaneTyping>,
@@ -313,7 +321,7 @@ fn contexts(
     products: Arc<dyn Products>,
     extras: Extras,
     shutdown: tokio::sync::watch::Receiver<()>,
-) -> [(&'static str, ToolContext); 3] {
+) -> [(&'static str, ToolContext); 4] {
     let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
         data_folder: data_folder(store_path, name),
         typing,
@@ -325,11 +333,13 @@ fn contexts(
         watch_settings: extras.watch_settings.clone(),
         model_environment: extras.model_environment.clone(),
         cli_path: extras.cli_path.clone(),
+        grpc_addr: extras.grpc_addr,
         shutdown: shutdown.clone(),
     };
     [
         (questions::NAME, context(questions::NAME, Some(typing))),
         (backlog::NAME, context(backlog::NAME, None)),
+        (work::NAME, context(work::NAME, None)),
         (
             watch::NAME,
             context(watch::NAME, Some(Arc::clone(&extras.watch_typing))),

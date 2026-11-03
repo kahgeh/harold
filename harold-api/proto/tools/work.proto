@@ -1,0 +1,256 @@
+// The work tool: the chief's work records, kept in Turso files of their own.
+//
+// A work record is one piece of work: its priority, status, what it waits for,
+// its next step, its decisions and its links. The newest work file is the
+// current one. Harold moves the open work records to a new file every
+// `rotation_days` days by itself.
+//
+// The chief of pods calls the writes:
+//   Put      makes a work record, or replaces the fields of an open one. A
+//            replacement keeps the decisions, the links and the times it was made.
+//   Set      changes some fields of a work record. A field that is not set stays.
+//   Decide   adds a decision, dated today (UTC), and gives its number from 1.
+//   Mark     changes the mark of one decision.
+//   Link     adds a link; Unlink removes one.
+//   Import   reads the chief's files (apply false is a dry run). Not served yet:
+//            it gives Unimplemented.
+//
+// Anyone calls the reads:
+//   List     the open work records of the current file: focus, then next, then
+//            later. `all` adds the closed ones after them.
+//   Show     one work record of the current file.
+//   Check    one mismatch for each work record of the current file that does
+//            not agree with its specs or its questions. None when all agree.
+//   Rotate   with `dry_run` true: what a rotation would copy now. It changes
+//            nothing.
+//   History  a work record from the newest work file that holds it.
+//   Search   the work records that hold a word, newest file first.
+//
+// Values:
+//   priority  "focus", "next" or "later".
+//   status    "idea", "discovery", "spec drafted", "architect checked",
+//             "waiting for the user", "approved", "building", "merged",
+//             "released" or "checked by the user" (closed).
+//   mark      "agreed", "draft", "dropped" or "open".
+//   link      "spec:<product>/<id>", "question:<id>" or "note:<text>".
+//
+// Refusals (gRPC code, message):
+//   PermissionDenied     "not_chief", "no_pane" (a write from a pane that is
+//                        not the chief's, or with no pane).
+//   InvalidArgument      "invalid <field>" (for example "invalid link"). Nothing
+//                        is stored.
+//   NotFound             "not_found" (a work record, decision or link that is
+//                        not there).
+//   FailedPrecondition   "focus_full" (two open work records are in focus
+//                        already), "name_in_use" (the name belongs to a closed
+//                        work record of the current file), "read_only",
+//                        "rotation_is_harolds" (Rotate with dry_run false: only
+//                        Harold rotates).
+//   Unavailable          "the work database is unavailable".
+//   Unimplemented        Import, until it is built.
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tools.work.v1;
+
+service WorkService {
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Show(ShowRequest) returns (ShowResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Set(SetRequest) returns (SetResponse);
+  rpc Decide(DecideRequest) returns (DecideResponse);
+  rpc Mark(MarkRequest) returns (MarkResponse);
+  rpc Link(LinkRequest) returns (LinkResponse);
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+  rpc Check(CheckRequest) returns (CheckResponse);
+  rpc Import(ImportRequest) returns (ImportResponse);
+  rpc Rotate(RotateRequest) returns (RotateResponse);
+  rpc History(HistoryRequest) returns (HistoryResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+// One decision. Its number is its place in the list, from 1.
+message Decision {
+  // The date, `YYYY-MM-DD`.
+  string at = 1;
+  // "the user", "the chief" or a session name.
+  string who = 2;
+  string mark = 3;
+  string text = 4;
+}
+
+message WorkRecord {
+  // 1 to 48 characters of `a-z`, `0-9` and `-`.
+  string name = 1;
+  string title = 2;
+  string priority = 3;
+  string status = 4;
+  string waits_for = 5;
+  string next_step = 6;
+  // Set by the tool: the work file that first held the work record.
+  string created_in = 7;
+  int64 created_at_ms = 8;
+  int64 updated_at_ms = 9;
+  // When the status last changed. A rotation keeps it.
+  int64 status_since_ms = 10;
+  repeated Decision decisions = 11;
+  repeated string links = 12;
+}
+
+message ListRequest {
+  bool all = 1;
+}
+
+message ListResponse {
+  repeated WorkRecord records = 1;
+  // The name of the current work file, for example `work-2026-11-03.db`.
+  string file = 2;
+}
+
+message ShowRequest {
+  string name = 1;
+}
+
+message ShowResponse {
+  WorkRecord record = 1;
+}
+
+// A new work record may carry decisions and links. A replacement keeps the
+// stored ones and ignores these.
+message PutRequest {
+  WorkRecord record = 1;
+  string caller_pane = 2;
+}
+
+message PutResponse {
+  // True for a new work record, false for a replacement.
+  bool created = 1;
+}
+
+message SetRequest {
+  string name = 1;
+  optional string title = 2;
+  optional string priority = 3;
+  optional string status = 4;
+  optional string waits_for = 5;
+  optional string next_step = 6;
+  string caller_pane = 7;
+}
+
+message SetResponse {}
+
+message DecideRequest {
+  string name = 1;
+  string mark = 2;
+  string who = 3;
+  string text = 4;
+  string caller_pane = 5;
+}
+
+message DecideResponse {
+  uint32 number = 1;
+}
+
+message MarkRequest {
+  string name = 1;
+  // The decision number, from 1.
+  uint32 number = 2;
+  string mark = 3;
+  string caller_pane = 4;
+}
+
+message MarkResponse {}
+
+message LinkRequest {
+  string name = 1;
+  string link = 2;
+  string caller_pane = 3;
+}
+
+message LinkResponse {}
+
+message UnlinkRequest {
+  string name = 1;
+  string link = 2;
+  string caller_pane = 3;
+}
+
+message UnlinkResponse {}
+
+message CheckRequest {}
+
+// One work record that does not agree with a spec or a question.
+message Mismatch {
+  string record = 1;
+  // The rule, for example "merged_status_behind".
+  string kind = 2;
+  // One short sentence that starts with the work record's name.
+  string line = 3;
+}
+
+message CheckResponse {
+  repeated Mismatch mismatches = 1;
+}
+
+message ImportRequest {
+  // The folder of the chief's `*.md` files.
+  string folder = 1;
+  // The queue item ids to import, such as "N12".
+  repeated string queue = 2;
+  bool apply = 3;
+  string caller_pane = 4;
+}
+
+// A line of a chief's file that fits no field.
+message Unplaced {
+  string file = 1;
+  // From 1.
+  uint32 line = 2;
+  string text = 3;
+}
+
+message ImportResponse {
+  // What is stored, or with apply false, what would be stored.
+  repeated WorkRecord records = 1;
+  repeated Unplaced unplaced = 2;
+}
+
+message RotateRequest {
+  // Must be true: only Harold rotates.
+  bool dry_run = 1;
+}
+
+message RotateResponse {
+  uint32 open_records = 1;
+  uint32 decisions = 2;
+  uint32 links = 3;
+  // The names of the open work records that a rotation would copy.
+  repeated string records = 4;
+  // The name of the new work file.
+  string target = 5;
+}
+
+message HistoryRequest {
+  string name = 1;
+}
+
+message HistoryResponse {
+  // The work file that holds the work record.
+  string file = 1;
+  WorkRecord record = 2;
+}
+
+message SearchRequest {
+  string word = 1;
+}
+
+// A work record and the work file it was found in.
+message Found {
+  string file = 1;
+  WorkRecord record = 2;
+}
+
+message SearchResponse {
+  repeated Found found = 1;
+}

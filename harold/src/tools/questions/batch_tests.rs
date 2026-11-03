@@ -935,6 +935,7 @@ async fn start_creates_questions_db_and_serves() {
         watch_settings: Default::default(),
         model_environment: Vec::new(),
         cli_path: "claude".into(),
+        grpc_addr: None,
         shutdown: shutdown_rx,
     })
     .await
@@ -992,6 +993,7 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
         watch_settings: Default::default(),
         model_environment: Vec::new(),
         cli_path: "claude".into(),
+        grpc_addr: None,
         shutdown: shutdown_rx,
     })
     .await;

@@ -5,6 +5,7 @@ use std::time::Duration;
 use harold_api::harold as hp;
 use harold_api::tools::backlog::v1 as bp;
 use harold_api::tools::questions::v1 as pb;
+use harold_api::tools::work::v1 as wp;
 use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::{Request, Response, Status};
@@ -19,6 +20,7 @@ use crate::timed_prompts::{AgentPane, AgentsView, Attempt, Ports, Reason, type_w
 const CANARY: &str = "QUEUE-CANARY-2207";
 const QUESTIONS: &str = "harold.tools.questions.v1.QuestionService";
 const BACKLOG: &str = "harold.tools.backlog.v1.BacklogService";
+const WORK: &str = "harold.tools.work.v1.WorkService";
 const DAY: &str = "2026-10-14";
 
 /// A folder under the system's temporary folder, removed when dropped.
@@ -74,6 +76,7 @@ pub(crate) fn no_extras() -> Extras {
         knowledge: None,
         model_environment: Vec::new(),
         cli_path: "claude".into(),
+        grpc_addr: None,
     }
 }
 
@@ -270,6 +273,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         [
             " WARN harold::tools: tool failed to start tool=\"questions\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"backlog\" reason=\"store_open_failed\"",
+            " WARN harold::tools: tool failed to start tool=\"work\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"watch\" reason=\"store_open_failed\"",
         ],
         "{text}"
@@ -471,7 +475,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 3);
+    assert_eq!(tools.tasks.len(), 4);
     assert!(folder.0.join("tools/backlog/backlog.db").is_file());
     let listing: bp::ListQueueResponse = call(
         &tools.routes,
@@ -498,12 +502,53 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
         .expect("both tools stop on shutdown");
 }
 
+#[tokio::test]
+async fn the_work_tool_starts_and_makes_the_current_work_file() {
+    let folder = TempFolder::new();
+    let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (shutdown, shutdown_rx) = watch::channel(());
+
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        chief,
+        folders,
+        products,
+        no_extras(),
+        shutdown_rx,
+    )
+    .await;
+
+    assert_eq!(tools.tasks.len(), 4);
+    let made: Vec<String> = std::fs::read_dir(folder.0.join("tools/work"))
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with("work-") && name.ends_with(".db"))
+        .collect();
+    assert_eq!(made.len(), 1, "{made:?}");
+    let listing: wp::ListResponse =
+        call(&tools.routes, WORK, "List", wp::ListRequest { all: true })
+            .await
+            .unwrap();
+    assert!(listing.records.is_empty());
+    assert_eq!(listing.file, made[0]);
+    drop(shutdown);
+    tokio::time::timeout(Duration::from_secs(5), tools.stopped())
+        .await
+        .expect("every tool stops on shutdown");
+}
+
 #[test]
 fn the_backlog_tool_is_given_no_typing() {
     let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
     let (_shutdown, shutdown_rx) = watch::channel(());
 
-    let [(first, questions), (second, backlog), (third, watch_ctx)] = contexts(
+    let [
+        (first, questions),
+        (second, backlog),
+        (third, work_ctx),
+        (fourth, watch_ctx),
+    ] = contexts(
         "/Users/me/.harold/store",
         typing,
         chief,
@@ -514,11 +559,21 @@ fn the_backlog_tool_is_given_no_typing() {
     );
 
     assert_eq!(
-        (first, second, third),
-        (questions::NAME, backlog::NAME, crate::tools::watch::NAME)
+        (first, second, third, fourth),
+        (
+            questions::NAME,
+            backlog::NAME,
+            crate::tools::work::NAME,
+            crate::tools::watch::NAME
+        )
     );
     assert!(questions.typing.is_some());
     assert!(backlog.typing.is_none());
+    assert!(work_ctx.typing.is_none());
+    assert_eq!(
+        work_ctx.data_folder,
+        PathBuf::from("/Users/me/.harold/tools/work")
+    );
     assert!(watch_ctx.typing.is_some());
     assert_eq!(
         backlog.data_folder,
@@ -544,7 +599,7 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 3);
+    assert_eq!(tools.tasks.len(), 4);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
@@ -659,7 +714,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 3);
+    assert_eq!(tools.tasks.len(), 4);
     // An item id no other test uses, so this test's lines can be told apart.
     let id = unique_id();
 
@@ -974,6 +1029,7 @@ async fn the_question_tool_refuses_to_start_without_typing() {
         watch_settings: WatchSettings::default(),
         model_environment: Vec::new(),
         cli_path: "claude".into(),
+        grpc_addr: None,
     })
     .await;
 

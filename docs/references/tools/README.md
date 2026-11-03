@@ -22,6 +22,7 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 | `agents` | An `Agents`, read only ([ADR 0004](../../adr/0004-tools-may-read-agents-and-pods.md)): `agents()` gives a copy of Harold's agent list, each pane with its folder, provider, state, when it entered that state and its work summary, and `input_box(pane)` reads the pane's Claude Code input box afresh. |
 | `pods` | A `Pods`, read only: `pods()` gives a copy of pod stats' latest snapshot, the slots and specs of each product. |
 | `watch_settings`, `model_environment`, `cli_path` | The `[watch]` settings, and the environment and program path Harold uses to start Claude Code. Only the watch tool reads them. |
+| `grpc_addr` | An `Option<SocketAddr>`: Harold's own gRPC address on loopback, from `[grpc]`, the one the CLI calls. A tool that reads another tool calls it there. `None` when the setting gives no address. The work tool uses it to read the question states. |
 | `shutdown` | A `watch::Receiver<()>` that fires when Harold stops. |
 
 `start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and `task`, the background job the host joins on shutdown. The job must end when `shutdown` fires.

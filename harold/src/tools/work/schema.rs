@@ -29,6 +29,8 @@ impl Priority {
     }
 
     /// 0 for `focus`, so a sort by it lists focus first.
+    // Only the tests use it so far.
+    #[allow(dead_code)]
     pub(super) fn ordinal(self) -> u8 {
         self as u8
     }

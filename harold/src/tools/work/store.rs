@@ -138,6 +138,8 @@ impl WorkFile {
 
     /// Writes the log into the file and closes it, so that the file alone
     /// holds every row. A rotation calls it before it renames the file.
+    // The rotation's `tick` uses it, and Task 8 calls `tick`.
+    #[allow(dead_code)]
     pub(super) async fn close(self) -> Result<()> {
         let conn = self.conn.into_inner();
         roll_back_abandoned(&conn).await?;
@@ -335,6 +337,8 @@ impl WorkFile {
 
     /// Stores a record as it is, with its times, decisions and links. A rotation
     /// uses it. A name that the file holds already is `NameInUse`.
+    // The rotation's `tick` uses it, and Task 8 calls `tick`.
+    #[allow(dead_code)]
     pub(super) async fn insert_copy(
         &self,
         record: &Record,
