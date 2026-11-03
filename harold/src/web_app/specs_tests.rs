@@ -847,6 +847,44 @@ async fn specs_listener_starts_with_collections_and_no_registry() {
     running.handle.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_web_app_start_seeds_the_collection_counters() {
+    crate::telemetry::test_support::install();
+    let directory = Repo::new();
+    let store = store(&directory.root).await;
+    let store_path = directory.root.join("store");
+    let grpc = crate::web_app::idle_grpc();
+    let mut two = settings();
+    let mut entries = one_collection(&directory.root);
+    entries[0].name = "seeded-one".into();
+    let mut second = entries[0].clone();
+    second.name = "seeded-two".into();
+    entries.push(second);
+    two.collections = entries;
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let running = crate::web_app::start(
+        &two,
+        store,
+        &store_path,
+        shutdown_rx,
+        None,
+        crate::web_app::idle_agents(&grpc),
+    )
+    .await
+    .unwrap();
+    for name in ["seeded-one", "seeded-two", "unknown"] {
+        for result in crate::telemetry::COLLECTION_RESULTS {
+            let point = crate::telemetry::test_support::exact_counter_value(
+                "harold.web_app.collection_pages",
+                &[("collection", name), ("result", result)],
+            );
+            assert!(point.is_some(), "{name} {result}");
+        }
+    }
+    drop(shutdown);
+    running.handle.await.unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn specs_listener_serves_collections_for_get_only() {
     let directory = Repo::new();
@@ -893,6 +931,38 @@ async fn specs_listener_serves_collections_for_get_only() {
             .unwrap();
         assert_eq!(foreign.status(), 403, "Host {path}");
     }
+    let head = client
+        .head(server.url("/c/explainers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert!(head.bytes().await.unwrap().is_empty());
+    let policy = |response: &reqwest::Response| {
+        response
+            .headers()
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    };
+    let html = client
+        .get(server.url("/c/explainers/a.html"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        policy(&html),
+        crate::web_app::pages::COLLECTION_SHELL_CONTENT_SECURITY_POLICY
+    );
+    let md = client
+        .get(server.url("/c/explainers/n.md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        policy(&md),
+        crate::web_app::pages::SPEC_CONTENT_SECURITY_POLICY
+    );
     let shell = client
         .get(server.url("/c/explainers/a.html"))
         .send()
