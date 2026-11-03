@@ -1,6 +1,9 @@
 //! The chief's work records, kept in Turso files of their own. Task 6 adds
 //! `start`; until then the items below have no caller outside the tests.
 
+// used from Task 6
+#[allow(dead_code)]
+mod check;
 // used from Task 4 and Task 6
 #[allow(dead_code)]
 mod files;
