@@ -505,9 +505,9 @@ def tmux(env, *args, check=True):
 # never logs a pairing code; the only form a code takes is HAROLD_PAIRING_CODE=<value> (the
 # pairing file) or "pairing code: <value>" in text, so the pattern matches both.
 SECRET_PATTERNS = {
-    'device-cookie': re.compile(r'harold_device='),
+    'device-cookie': re.compile(r'harold_device["\']?\s*[=:]'),
     'pairing-code': re.compile(r'HAROLD_PAIRING_CODE\s*[=:]|pairing[ _-]?code["\']?\s*[=:]\s*\S', re.IGNORECASE),
-    'authorization-header': re.compile(r'Authorization:', re.IGNORECASE),
+    'authorization-header': re.compile(r'Authorization["\']?\s*:', re.IGNORECASE),
     'bearer': re.compile(r'\bBearer\s+\S', re.IGNORECASE),
     'aws-key': re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'),
     'github-token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})'),
@@ -830,10 +830,19 @@ class Run:
         """The files the test-run copy step keeps, by part name."""
         return {'harold': self.log_path}
 
+    test_log_kept = False
+
+    def keep_logs(self):
+        """Copies the test logs once, however many times it is called."""
+        if self.test_log_kept:
+            return
+        self.test_log_kept = True
+        keep_test_log(self.test_log_parts())
+
     def finish(self, passed):
         if not passed and self.stand_in_to_print:
             print(self.stand_in_text)
-        keep_test_log(self.test_log_parts())
+        self.keep_logs()
         if passed and not self.keep:
             shutil.rmtree(self.scratch, ignore_errors=True)
             return
@@ -1228,6 +1237,7 @@ def main(argv=None):
         results.append(StepResult('run', False, 0, '{}: {}'.format(type(error).__name__, error)))
     finally:
         run.tear_down()
+        run.keep_logs()  # on every exit path, a signal too
     lines, code = report(results)
     print('\n'.join(lines))
     if code and run.pane_snapshot:

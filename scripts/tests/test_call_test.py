@@ -1,7 +1,9 @@
 import importlib.util
 import io
 from pathlib import Path
+import signal
 import sys
+import tempfile
 import time
 import tomllib
 import unittest
@@ -11,6 +13,8 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
 import call_test as ct  # noqa: E402
+import otel_test as ot  # noqa: E402
+from unittest import mock  # noqa: E402
 
 INSTALLED = '''machines = ["A", "B"]
 
@@ -345,11 +349,6 @@ class OneMomentTests(unittest.TestCase):
     def test_none_when_the_answer_is_the_first_sound(self):
         self.assertEqual(0, ct.one_moment_sounds([(0.0, self.shown('a', 'Fine.'))]))
 
-
-import tempfile  # noqa: E402
-
-import otel_test as ot  # noqa: E402
-
 PLANTED = {
     'device-cookie': 'Cookie: harold_device=PLANTED123',
     'pairing-code': 'HAROLD_PAIRING_CODE=made-up-1',
@@ -359,7 +358,13 @@ PLANTED = {
     'github-token': 'token ghp_abcdefghijklmnopqrstuvwxyz0123',
     'private-key': '-----BEGIN RSA PRIVATE KEY-----',
 }
-NORMAL = 'INFO harold started\nINFO call ended, listening for the next turn\nINFO answer sent\n'
+JSON_FORMS = [
+    ('authorization-header', '{"Authorization": "Basic abc"}'),
+    ('device-cookie', '{"harold_device":"abc"}'),
+]
+NORMAL = ('INFO harold started\nINFO call ended, listening for the next turn\nINFO answer sent\n'
+          'WARN app pairing code failed\nINFO no HAROLD_PAIRING_CODE line in the file\n'
+          'INFO request headers read, no authorization sent\n')
 
 
 class TestLogCopyTests(unittest.TestCase):
@@ -448,6 +453,96 @@ class TestLogCopyTests(unittest.TestCase):
         browser = (self.out / 'stem-browser.log').read_text()
         self.assertIn('{"a": 1}', browser)
         self.assertIn('{"b": 2}', browser)
+
+    def test_json_forms_detected(self):
+        for key, text in JSON_FORMS:
+            with self.subTest(key=key):
+                self.assertEqual(key, ct.first_secret(text))
+
+    def test_copy_survives_removal_of_the_scratch_folder(self):
+        run = self.stub()
+        run.keep = False
+        self.finish(run, True)
+        self.assertFalse(self.scratch.exists())
+        self.assertEqual(NORMAL, (self.out / 'stem-harold.log').read_text())
+
+    def run_main(self, module, run_class, **patches):
+        saved = {n: signal.getsignal(n) for n in (signal.SIGTERM, signal.SIGHUP)}
+        binary = self.root / 'harold'
+        binary.write_text('')
+        env = dict(self.env)
+        calls = []
+        real = ct.keep_test_log
+        with mock.patch.object(ct.os, 'environ', env), \
+                mock.patch.object(module.shutil, 'which', lambda tool: '/bin/true'), \
+                mock.patch.object(module, run_class[0], run_class[1]), \
+                mock.patch.object(ct, 'keep_test_log', lambda parts: calls.append(1) or real(parts, env)), \
+                mock.patch.object(sys, 'stdout', io.StringIO()):
+            for name, value in patches.items():
+                mock.patch.object(module, name, value).start()
+                self.addCleanup(mock.patch.stopall)
+            try:
+                module.main(['--harold', str(binary)])
+            finally:
+                for n, handler in saved.items():
+                    signal.signal(n, handler)
+        return calls
+
+    def stub_class(self, base, error):
+        outer = self
+
+        class Stub(base):
+            def __init__(self, *args, **kwargs):
+                self.scratch = outer.scratch
+                self.log_path = outer.scratch / 'harold.log'
+                self.log_path.write_text(NORMAL)
+                self.keep = True
+                self.stand_in_to_print = False
+                self.pane = None
+                self.pane_snapshot = None
+                self.phone = None
+                self.sampler = None
+
+            def write_config(self):
+                raise error
+
+            def tear_down(self):
+                pass
+
+            def log(self):
+                return NORMAL
+
+        return Stub
+
+    def test_call_main_copies_after_an_exception_once(self):
+        stub = self.stub_class(ct.Run, RuntimeError('boom'))
+        calls = self.run_main(ct, ('Run', stub))
+        self.assertEqual(1, len(calls))
+        self.assertTrue((self.out / 'stem-harold.log').exists())
+
+    def test_call_main_copies_after_a_signal_once(self):
+        stub = self.stub_class(ct.Run, SystemExit(143))
+        with self.assertRaises(SystemExit):
+            self.run_main(ct, ('Run', stub))
+        self.assertTrue((self.out / 'stem-harold.log').exists())
+
+    def otel_main(self, error):
+        stub = self.stub_class(ot.OtelRun, error)
+        chrome = self.root / 'chrome'
+        chrome.write_text('')
+        return self.run_main(ot, ('OtelRun', stub), CHROME=str(chrome),
+                             start_collector=lambda scratch, ports: (None, scratch / 'spans.jsonl'))
+
+    def test_otel_main_copies_after_an_exception_once(self):
+        calls = []
+        with self.assertRaises(RuntimeError):
+            calls = self.otel_main(RuntimeError('boom'))
+        self.assertTrue((self.out / 'stem-harold.log').exists())
+
+    def test_otel_main_copies_after_a_signal(self):
+        with self.assertRaises(SystemExit):
+            self.otel_main(SystemExit(143))
+        self.assertTrue((self.out / 'stem-harold.log').exists())
 
 
 if __name__ == '__main__':

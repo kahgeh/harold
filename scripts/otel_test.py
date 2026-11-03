@@ -457,6 +457,7 @@ def main(argv=None):
         run.tear_down()
         if collector is not None and collector.poll() is None:
             os.killpg(collector.pid, signal.SIGTERM)
+        run.keep_logs()  # on every exit path, a signal too
     log = run.log()
     problems = [line for line in log.splitlines() if 'iMessage listener started' in line]
     outside = [pane for pane in ct.typed_panes(log) if pane != run.pane]
