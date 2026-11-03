@@ -96,8 +96,9 @@ entry is 0. The remote reads the same `WatchAgentStates` stream as the control-t
 | Enter | Jump to the selected entry, and close the remote. |
 | `j` / `k` | Select the next or the previous entry. |
 | `J` / `K` | Move the selected PnEM down or up, and save the new order. The chief never moves. |
-| `n` | Jump to the next waiting entry, and close the remote. |
-| Esc, Ctrl+C | Close the remote with no jump. |
+| Esc | Close the remote with no jump. |
+
+No other key does anything.
 
 Harold keeps the order in `remote-order.json`. See the
 [remote control reference](../docs/references/control-tower/remote-control-rex-calls.md#the-remote-order).
@@ -105,9 +106,6 @@ A failed jump shows on the last line of the remote, with the step that failed.
 
 Limits:
 
-- `n` finds only the agents that finish while the remote is open. The `◆` marks are kept
-  in memory by each control-tower program, and the remote starts with none. Just after the
-  remote opens, `n` usually shows `no waiting agent`.
 - The remote does not reconnect. When Harold is down, the remote stays down.
 - Before it exits, the remote closes its own floating layer. Closing needs Rex v0.72.0 or
   later. The remote never closes a tiled block.

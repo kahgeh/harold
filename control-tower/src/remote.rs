@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::runtime::Builder;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
-use crate::app::{AgentRow, App, ConnectionState, SearchState, Snapshot};
+use crate::app::{AgentRow, Snapshot};
 use crate::cli::Options;
 use crate::navigation::{PaneNavigator, TmuxNavigator};
 use crate::runtime::{
@@ -41,8 +41,6 @@ pub struct Entry {
     pub product: String,
     /// `Chief`, or `PnEM · <product>`.
     pub label: String,
-    /// True when the agent is a waiting agent (marked `◆` in the control-tower).
-    pub waiting: bool,
     pub is_chief: bool,
 }
 
@@ -72,13 +70,8 @@ pub struct Model {
 /// Build the entries: the chief first, then the PnEMs in the given order.
 ///
 /// Only rows of this Mac (empty `host`) are used. A PnEM whose product is not
-/// in `order` comes after the others, in row order. `is_waiting` tells if a row
-/// is a waiting agent.
-pub fn entries(
-    rows: &[AgentRow],
-    order: &[String],
-    is_waiting: impl Fn(&AgentRow) -> bool,
-) -> Vec<Entry> {
+/// in `order` comes after the others, in row order.
+pub fn entries(rows: &[AgentRow], order: &[String]) -> Vec<Entry> {
     let local = || rows.iter().filter(|row| row.host.is_empty());
     let make = |row: &AgentRow, is_chief: bool| Entry {
         pane_id: row.incarnation.pane_id.clone(),
@@ -94,7 +87,6 @@ pub fn entries(
         } else {
             format!("PnEM \u{b7} {}", row.pod_product)
         },
-        waiting: is_waiting(row),
         is_chief,
     };
 
@@ -168,21 +160,6 @@ impl Model {
         }
     }
 
-    /// Jump to the next waiting entry. With none, the last line shows "no waiting agent".
-    fn next_waiting(&mut self) -> Action {
-        let len = self.entries.len();
-        let next = (1..=len)
-            .map(|step| (self.selected + step) % len)
-            .find(|&index| self.entries[index].waiting);
-        match next {
-            Some(index) => Action::Jump(index),
-            None => {
-                self.notice = Some("no waiting agent".to_string());
-                Action::None
-            }
-        }
-    }
-
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind == KeyEventKind::Release
             || key
@@ -215,7 +192,6 @@ impl Model {
             }
             KeyCode::Char('J') => self.move_selected(false),
             KeyCode::Char('K') => self.move_selected(true),
-            KeyCode::Char('n') => self.next_waiting(),
             _ => Action::None,
         }
     }
@@ -262,7 +238,7 @@ pub fn draw(frame: &mut Frame, model: &Model) {
             format!("  {notice}"),
             Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
         ),
-        None => Line::styled("  Enter jump   n next waiting   Esc close", muted),
+        None => Line::styled("  Enter jump   Esc close", muted),
     });
 
     // Draw the hint lines at the bottom of the box; the rows and the blank
@@ -454,24 +430,6 @@ async fn remote_loop<S: RemoteSource>(
     navigator: &TmuxNavigator,
 ) -> Result<(), AppError> {
     let mut model = Model::new(Vec::new());
-    let mut app = App::new(
-        ConnectionState::Connecting,
-        Snapshot {
-            through_event_version: 0,
-            server_time_ms: 0,
-            monitor_health: Vec::new(),
-            rows: Vec::new(),
-            tts_muted: false,
-            messaging_paused: false,
-            harold_version: None,
-        },
-        SearchState {
-            query: String::new(),
-            editing: false,
-        },
-        None,
-    );
-    let mut first_snapshot = true;
     let mut order: Vec<String> = Vec::new();
     let mut stream: Option<S::Stream> = None;
     let mut opening = true;
@@ -502,22 +460,7 @@ async fn remote_loop<S: RemoteSource>(
             item = next_snapshot(&mut stream) => {
                 match item {
                     Some(Ok(snapshot)) => {
-                        let applied = if first_snapshot {
-                            app.apply_first_snapshot(snapshot).map(|()| true)
-                        } else {
-                            app.apply_later_snapshot(snapshot)
-                        };
-                        match applied {
-                            Ok(_) => {
-                                first_snapshot = false;
-                                model.replace_entries(entries(&app.snapshot.rows, &order, |row| {
-                                    app.is_waiting(&row.incarnation)
-                                }));
-                            }
-                            Err(error) => {
-                                model.notice = Some(notice("Harold sent a bad snapshot", &error.to_string()));
-                            }
-                        }
+                        model.replace_entries(entries(&snapshot.rows, &order));
                     }
                     Some(Err(error)) => {
                         model.notice = Some(notice("Harold stream failed", error.detail()));
@@ -539,9 +482,6 @@ async fn remote_loop<S: RemoteSource>(
                     Some(Err(detail)) => return Err(AppError::Input(detail)),
                     None => return Err(AppError::Input("terminal input worker stopped".into())),
                 };
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    return Ok(());
-                }
                 match model.key(key) {
                     Action::Close => return Ok(()),
                     Action::Jump(index) => {
@@ -638,15 +578,11 @@ mod tests {
         list.iter().map(|e| e.label.as_str()).collect()
     }
 
-    fn none(_: &AgentRow) -> bool {
-        false
-    }
-
     fn model(products: &[&str]) -> Model {
         let rows: Vec<AgentRow> = std::iter::once(chief())
             .chain(products.iter().map(|p| pnem(p)))
             .collect();
-        Model::new(entries(&rows, &names(products), none))
+        Model::new(entries(&rows, &names(products)))
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -665,7 +601,7 @@ mod tests {
     #[test]
     fn the_chief_is_first_then_pnems_in_the_given_order() {
         let rows = [pnem("a"), pnem("b"), chief(), pnem("c")];
-        let list = entries(&rows, &names(&["c", "a", "b"]), none);
+        let list = entries(&rows, &names(&["c", "a", "b"]));
         assert_eq!(labels(&list), ["Chief", "PnEM · c", "PnEM · a", "PnEM · b"]);
         assert!(list[0].is_chief);
         assert!(!list[1].is_chief);
@@ -677,7 +613,7 @@ mod tests {
     #[test]
     fn a_pnem_not_in_the_order_comes_last() {
         let rows = [chief(), pnem("x"), pnem("a"), pnem("y")];
-        let list = entries(&rows, &names(&["a"]), none);
+        let list = entries(&rows, &names(&["a"]));
         assert_eq!(labels(&list), ["Chief", "PnEM · a", "PnEM · x", "PnEM · y"]);
     }
 
@@ -691,33 +627,25 @@ mod tests {
             row("block:o", "s", "", "", ""),
             pnem("a"),
         ];
-        let list = entries(&rows, &names(&["a"]), none);
+        let list = entries(&rows, &names(&["a"]));
         assert_eq!(labels(&list), ["Chief", "PnEM · a"]);
     }
 
     #[test]
     fn only_one_chief_is_listed() {
         let rows = [chief(), row("block:c2", "s", "chief", "", "")];
-        assert_eq!(entries(&rows, &[], none).len(), 1);
-    }
-
-    #[test]
-    fn waiting_comes_from_the_given_function() {
-        let rows = [chief(), pnem("a"), pnem("b")];
-        let list = entries(&rows, &names(&["a", "b"]), |r| r.pod_product == "b");
-        let waiting: Vec<bool> = list.iter().map(|e| e.waiting).collect();
-        assert_eq!(waiting, [false, false, true]);
+        assert_eq!(entries(&rows, &[]).len(), 1);
     }
 
     #[test]
     fn no_pnem_running_lists_only_the_chief() {
-        let list = entries(&[chief()], &names(&["a"]), none);
+        let list = entries(&[chief()], &names(&["a"]));
         assert_eq!(labels(&list), ["Chief"]);
     }
 
     #[test]
     fn no_chief_found_lists_the_pnems_numbered_from_0() {
-        let mut m = Model::new(entries(&[pnem("a"), pnem("b")], &names(&["a", "b"]), none));
+        let mut m = Model::new(entries(&[pnem("a"), pnem("b")], &names(&["a", "b"])));
         assert_eq!(labels(&m.entries), ["PnEM · a", "PnEM · b"]);
         assert_eq!(m.key(ch('0')), Action::Jump(0));
         assert_eq!(m.key(ch('1')), Action::Jump(1));
@@ -728,7 +656,7 @@ mod tests {
         let rows = [chief(), pnem("a"), pnem("a")];
         let mut second = rows.to_vec();
         second[2].incarnation.pane_id = "block:second".into();
-        let list = entries(&second, &names(&["a"]), none);
+        let list = entries(&second, &names(&["a"]));
         assert_eq!(list.len(), 3);
         assert_eq!(list[1].pane_id, "block:a");
         assert_eq!(list[2].pane_id, "block:second");
@@ -836,33 +764,7 @@ mod tests {
         assert_eq!(m.key(press(KeyCode::Enter)), Action::None);
         assert_eq!(m.key(ch('0')), Action::None);
         assert_eq!(m.key(ch('j')), Action::None);
-        assert_eq!(m.key(ch('n')), Action::None);
         assert_eq!(m.selected, 0);
-    }
-
-    fn model_waiting(products: &[&str], waiting: &[&str]) -> Model {
-        let rows: Vec<AgentRow> = std::iter::once(chief())
-            .chain(products.iter().map(|p| pnem(p)))
-            .collect();
-        Model::new(entries(&rows, &names(products), |r| {
-            waiting.contains(&r.pod_product.as_str())
-        }))
-    }
-
-    #[test]
-    fn n_jumps_to_the_next_waiting_entry_and_wraps() {
-        let mut m = model_waiting(&["a", "b", "c"], &["a", "c"]);
-        assert_eq!(m.key(ch('n')), Action::Jump(1));
-        m.selected = 1;
-        assert_eq!(m.key(ch('n')), Action::Jump(3));
-        m.selected = 3;
-        assert_eq!(m.key(ch('n')), Action::Jump(1));
-    }
-
-    #[test]
-    fn n_with_no_waiting_entry_does_nothing() {
-        let mut m = model_waiting(&["a"], &[]);
-        assert_eq!(m.key(ch('n')), Action::None);
     }
 
     #[test]
@@ -890,7 +792,7 @@ mod tests {
         let mut m = model(&["a", "b", "c"]);
         m.selected = 2;
         let rows = [chief(), pnem("c"), pnem("a"), pnem("b")];
-        m.replace_entries(entries(&rows, &names(&["c", "a", "b"]), none));
+        m.replace_entries(entries(&rows, &names(&["c", "a", "b"])));
         assert_eq!(m.entries[m.selected].pane_id, "block:b");
     }
 
@@ -898,10 +800,61 @@ mod tests {
     fn replace_entries_clamps_when_the_pane_is_gone() {
         let mut m = model(&["a", "b", "c"]);
         m.selected = 3;
-        m.replace_entries(entries(&[chief(), pnem("a")], &names(&["a"]), none));
+        m.replace_entries(entries(&[chief(), pnem("a")], &names(&["a"])));
         assert_eq!(m.selected, 1);
         m.replace_entries(Vec::new());
         assert_eq!(m.selected, 0);
+    }
+
+    /// Keys that are not a digit, `j`, `k`, `J`, `K`, Enter or Esc.
+    fn other_keys() -> Vec<KeyEvent> {
+        let mut keys = vec![
+            ch('a'),
+            ch('n'),
+            ch('x'),
+            press(KeyCode::Tab),
+            ch(' '),
+            press(KeyCode::Backspace),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            press(KeyCode::Up),
+            press(KeyCode::Down),
+            press(KeyCode::Left),
+            press(KeyCode::Right),
+        ];
+        keys.extend((1..=12).map(|n| press(KeyCode::F(n))));
+        keys
+    }
+
+    #[test]
+    fn no_other_key_does_anything() {
+        for key in other_keys() {
+            let mut m = model(&["a", "b"]);
+            m.selected = 1;
+            let before = m.entries.clone();
+            assert_eq!(m.key(key), Action::None, "{key:?}");
+            assert_eq!(m.selected, 1, "{key:?}");
+            assert_eq!(m.entries, before, "{key:?}");
+            assert_eq!(m.notice, None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_digit_with_no_entry_and_a_blocked_move_stay_silent() {
+        let mut m = model(&["a", "b"]);
+        let before = m.entries.clone();
+        assert_eq!(m.key(ch('7')), Action::None);
+        // The chief never moves.
+        assert_eq!(m.key(ch('J')), Action::None);
+        m.selected = 1;
+        // The first PnEM never moves above the chief.
+        assert_eq!(m.key(ch('K')), Action::None);
+        m.selected = 2;
+        // The last PnEM cannot move down.
+        assert_eq!(m.key(ch('J')), Action::None);
+        assert_eq!(m.entries, before);
+        assert_eq!(m.selected, 2);
+        assert_eq!(m.notice, None);
     }
 
     #[test]
@@ -948,7 +901,7 @@ mod tests {
         assert_eq!(rows[5], inner("  3   PnEM \u{b7} buckwal"));
         assert_eq!(rows[6], inner(""));
         assert_eq!(rows[7], inner("  0-9 jump   j/k select   J/K move row"));
-        assert_eq!(rows[8], inner("  Enter jump   n next waiting   Esc close"));
+        assert_eq!(rows[8], inner("  Enter jump   Esc close"));
     }
 
     #[test]
@@ -1185,8 +1138,6 @@ mod tests {
         rex: fake_rex::Calls,
         saved: Vec<Vec<String>>,
         last: Model,
-        /// Every model the screen showed, in order.
-        shown: Vec<Model>,
     }
 
     impl Outcome {
@@ -1257,12 +1208,7 @@ mod tests {
             rex,
             saved,
             last: screen.shown.last().cloned().expect("the remote draws"),
-            shown: screen.shown,
         }
-    }
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[tokio::test]
@@ -1302,16 +1248,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_c_closes_without_a_jump() {
+    async fn other_keys_do_nothing_and_the_remote_stays_open() {
         let outcome = run_case(Case {
-            keys: vec![ctrl('c')],
-            rex: vec![Ok(VIEW), CLOSE],
+            keys: other_keys(),
             ..Case::default()
         })
         .await;
 
-        assert!(matches!(outcome.result, Some(Ok(()))));
-        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
+        assert!(outcome.result.is_none(), "the remote stays open");
+        assert!(outcome.rex.borrow().is_empty(), "no rex call");
+        assert!(outcome.saved.is_empty());
+        assert_eq!(outcome.last.selected, 0);
+        assert_eq!(outcome.last.notice, None);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · a", "PnEM · b"]
+        );
     }
 
     #[tokio::test]
@@ -1361,52 +1313,6 @@ mod tests {
             outcome.last.notice.as_deref(),
             Some("this agent is not in a Rex pane")
         );
-    }
-
-    #[tokio::test]
-    async fn n_jumps_to_the_next_waiting_agent() {
-        let mut working = pnem("b");
-        working.state = AgentState::Working;
-        let outcome = run_case(Case {
-            snapshots: vec![
-                snapshot(1, vec![chief(), pnem("a"), working]),
-                snapshot(2, vec![chief(), pnem("a"), pnem("b")]),
-            ],
-            keys: vec![ch('n')],
-            rex: vec![Ok(""), Ok(sessions_named("b")), Ok(""), Ok(VIEW), CLOSE],
-            ..Case::default()
-        })
-        .await;
-
-        assert!(matches!(outcome.result, Some(Ok(()))));
-        assert_eq!(outcome.rex.borrow()[0][3..], ["--session=b", "block:b"]);
-    }
-
-    #[tokio::test]
-    async fn n_with_no_waiting_agent_shows_a_line_and_the_next_key_clears_it() {
-        let outcome = run_case(Case {
-            keys: vec![ch('n'), ch('j')],
-            ..Case::default()
-        })
-        .await;
-
-        assert!(outcome.result.is_none(), "the remote stays open");
-        assert!(outcome.rex.borrow().is_empty(), "no focus call");
-        let with_notice: Vec<&Model> = outcome
-            .shown
-            .iter()
-            .filter(|model| model.notice.is_some())
-            .collect();
-        assert_eq!(with_notice.len(), 1);
-        assert_eq!(with_notice[0].notice.as_deref(), Some("no waiting agent"));
-        assert_eq!(with_notice[0].selected, 0);
-        let rows = render(with_notice[0], 60, 10);
-        assert_eq!(
-            rows[8],
-            format!("\u{2502}{:<58}\u{2502}", "  no waiting agent")
-        );
-        assert_eq!(outcome.last.notice, None);
-        assert_eq!(outcome.last.selected, 1);
     }
 
     #[tokio::test]

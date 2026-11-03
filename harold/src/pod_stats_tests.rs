@@ -194,6 +194,25 @@ fn tips_path(pod: &Pod) -> PathBuf {
 // --- the registry ---
 
 #[test]
+fn the_registry_lists_products_in_the_alphabetical_order_of_their_names() {
+    let pod = Pod::new();
+    let path = registry(
+        &pod,
+        "[products.keymap]\nrepo = \"/k\"\nbase = \"main\"\n\n\
+         [products.buckwal]\nrepo = \"/b\"\nbase = \"main\"\n\n\
+         [products.harold]\nrepo = \"/h\"\nbase = \"main\"\n",
+    );
+
+    let names: Vec<String> = read_registry(&path)
+        .unwrap()
+        .into_iter()
+        .map(|product| product.name)
+        .collect();
+
+    assert_eq!(names, ["buckwal", "harold", "keymap"]);
+}
+
+#[test]
 fn the_registry_reads_products_and_defaults_slots_to_three() {
     let pod = Pod::new();
     let path = registry(
