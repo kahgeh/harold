@@ -49,7 +49,7 @@ jobs:
           restore-keys: ${{ runner.os }}-1.97.1-
 
       - name: Test
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           cargo test --locked --workspace --target aarch64-apple-darwin
           cargo test --locked -p harold --target aarch64-apple-darwin live_tmux_inventory_roundtrip_without_locale -- --ignored

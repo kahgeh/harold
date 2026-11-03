@@ -19,4 +19,4 @@ The macOS checks are free because the repository is public. A private repository
 
 A test build may use a cache. A release build never does.
 
-Each push-check job restores the cache before the build and saves it after, with `if: always()` on the save. A step that fails or times out still saves the work it did, so the next run starts closer to done. The `Check the feature mixes` step has a limit of 30 minutes.
+Each push-check job restores the cache before the build and saves it after, with `if: always()` on the save. A step that fails or times out still saves the work it did, so the next run starts closer to done. The `Test` step has a limit of 40 minutes. The `Check the feature mixes` step has a limit of 30 minutes.

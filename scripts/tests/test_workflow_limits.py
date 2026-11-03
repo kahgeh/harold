@@ -72,7 +72,7 @@ class WorkflowLimitsTest(unittest.TestCase):
 
     def test_macos_checks_steps(self):
         text = read("macos-checks.yml")
-        self.assertEqual(step_limit(text, "test", "Test"), 35)
+        self.assertEqual(step_limit(text, "test", "Test"), 40)
         self.assertEqual(step_limit(text, "features", "Check the feature mixes"), 30)
 
     def test_build_linux_job_has_no_test_step(self):
