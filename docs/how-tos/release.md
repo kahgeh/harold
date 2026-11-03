@@ -9,11 +9,11 @@ and its `.sha256` checksum to that release. The archive contains `harold`,
 revision and the release version. Draft releases, pushes, and pull requests do not trigger builds.
 Re-running a release workflow replaces its matching assets.
 
-The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job only tests Harold on Linux with `linux-defaults`, and uploads nothing. If the `linux` job fails, the run fails, and `make release` does not mark the release latest.
+The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job builds, packages and smoke-tests Harold on Linux, and uploads the Linux package. If the `linux` job fails, the run fails, and `make release` does not mark the release latest. The release run only builds, checks the binaries and uploads them: the tests run on each push to `main`, and the release run keeps no cache.
 
-Each long step has its own `timeout-minutes` limit: 35 for the macOS `Test` step, 25 for each Linux `Test` step, 15 for `Check the feature mixes` and 20 for `Build release binaries`. A hung step fails in minutes, and the 60-minute job limit stays as the outer bound.
+Each long step has its own `timeout-minutes` limit: 20 for `Build release binaries`. A hung step fails in minutes, and the 30-minute job limit of each job is the outer bound.
 
-The **Linux tests** workflow (`linux-tests.yml`) runs the same Linux tests on each push to `main`. `make release` makes a release only when that workflow passed on the commit it releases ([ADR 0026](../adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a Linux failure stops a release before anything is public.
+The **push checks** are the **Linux tests** workflow (`linux-tests.yml`) and the **macOS checks** workflow (`macos-checks.yml`). Both run on each push to `main`, with a cache of the compiled dependencies. `make release` makes a release only when both workflows have a push run with the conclusion `success` for the exact commit it releases ([ADR 0033](../adr/0033-a-release-trusts-the-checks-of-each-push.md), which supersedes the gate of [ADR 0026](../adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a failure on either system stops a release before anything is public.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The
@@ -22,7 +22,7 @@ builds are not provided. A published release containing the installer is require
 
 ### Cut a release
 
-Run `make release` in this checkout to publish the pushed `main` as the next release and install it on this Mac. It first checks that the checkout is on `main`, that no tracked file has uncommitted changes, that `main` matches `origin/main`, that `gh` is signed in, that the new tag is free, that the Linux tests workflow passed on the commit, and that the tests of the `build` job pass. It does not run the Linux tests itself. If the Linux run is still running, failed or missing, it prints the run to wait for. When a check fails it prints why and publishes nothing.
+Run `make release` in this checkout to publish the pushed `main` as the next release and install it on this Mac. It first checks that the checkout is on `main`, that no tracked file has uncommitted changes, that `main` matches `origin/main`, that `gh` is signed in, that the new tag is free, and that both push checks passed on the commit. It then runs only the timing tests on this Mac. If a push check is still running, failed or missing, it prints the run, or the missing workflow, to wait for. When a check fails it prints why and publishes nothing.
 
 It then creates the release as a pre-release, which GitHub's latest-release link skips, so the bootstrap on another Mac keeps installing the previous release until this one has a build. It prints each build step as it finishes, marks the release latest when the build succeeds, downloads the archive, checks it against its checksum and runs its installer. The last line names the version, its commit and the running Harold's process ID:
 
