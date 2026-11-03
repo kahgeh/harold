@@ -629,9 +629,6 @@ fn render_state_message(
 
 fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let wide = area.width >= COMPACT_WIDTH;
-    let where_width: u16 = if wide { 26 } else { 20 };
-    let widths = inventory_widths(wide);
-    let work_width = work_cell_width(area, &widths);
     let chief = app.chief_row().map(|row| &row.incarnation);
     let groups = app.visible_groups();
     // The rows of an open question follow the chief's row, or lead the list when the
@@ -661,6 +658,27 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 .iter()
                 .any(|agent| !host_mark(&agent.host_icon, app.host_marker, &agent.host).is_empty())
         });
+    let where_width = if wide {
+        let longest = groups
+            .iter()
+            .flat_map(|(_, agents)| agents.iter())
+            .map(|agent| {
+                let (name, suffix) = app.label_parts(agent);
+                Line::raw(format!(
+                    "{}{}{suffix}",
+                    host_prefix(agent, app.host_marker, pad),
+                    where_text(agent, name)
+                ))
+                .width()
+            })
+            .max()
+            .unwrap_or(0);
+        wide_where_width(longest)
+    } else {
+        NARROW_WHERE_WIDTH
+    };
+    let widths = inventory_widths(wide, where_width);
+    let work_width = work_cell_width(area, &widths);
     for (group, agents) in groups {
         let mut header = Row::new(vec![
             Cell::from(""),
@@ -1284,13 +1302,24 @@ fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
     Some(format!("{label} {text}█"))
 }
 
+/// The WHERE column's narrow width, and the least and most it takes when wide.
+const NARROW_WHERE_WIDTH: u16 = 20;
+const WIDE_WHERE_MIN: u16 = 20;
+const WIDE_WHERE_MAX: u16 = 36;
+
+/// The wide WHERE column: its longest text plus the 2-column indent, from 20 to 36.
+fn wide_where_width(longest_text: usize) -> u16 {
+    let wanted = u16::try_from(longest_text + 2).unwrap_or(u16::MAX);
+    wanted.clamp(WIDE_WHERE_MIN, WIDE_WHERE_MAX)
+}
+
 /// The column widths. A call never changes them: the chief's buttons share its
 /// work cell.
-fn inventory_widths(wide: bool) -> Vec<Constraint> {
+fn inventory_widths(wide: bool, where_width: u16) -> Vec<Constraint> {
     if wide {
         vec![
             Constraint::Length(13),
-            Constraint::Length(26),
+            Constraint::Length(where_width),
             Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Min(12),
@@ -1299,7 +1328,7 @@ fn inventory_widths(wide: bool) -> Vec<Constraint> {
     } else {
         vec![
             Constraint::Length(11),
-            Constraint::Length(20),
+            Constraint::Length(where_width),
             Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Min(8),
@@ -3257,9 +3286,9 @@ mod tests {
         assert!(content.contains("▶ ● WORKING"));
         assert!(content.contains("cx"));
         assert!(!content.contains("control-tower:2.17"));
-        // The work column takes whatever width the fixed columns leave, and
-        // the current layout leaves it wider than before (40 -> 42 glyphs).
-        assert_eq!(content.matches('界').count(), 42);
+        // The work column takes whatever width the fixed columns leave. The WHERE
+        // column now fits its short text in 20 columns, so all 43 glyphs show.
+        assert_eq!(content.matches('界').count(), 43);
     }
 
     #[test]
@@ -3360,6 +3389,43 @@ mod tests {
             assert!(content.contains("…"), "{width}: {content}");
             assert!(!content.contains("never-fits-in-the-column"), "{width}");
         }
+    }
+
+    #[test]
+    fn the_wide_where_width_follows_the_longest_text_from_20_to_36() {
+        assert_eq!(super::wide_where_width(0), 20);
+        assert_eq!(super::wide_where_width(18), 20);
+        assert_eq!(super::wide_where_width(24), 26);
+        assert_eq!(super::wide_where_width(34), 36);
+        assert_eq!(super::wide_where_width(50), 36);
+    }
+
+    #[test]
+    fn a_window_name_of_18_characters_shows_in_full_at_120_columns() {
+        let worker = plain_row("timing-tests-local", "/w/harold", "", "harold:0.1", 1);
+        let content = rendered_lines(&live_app(vec![worker], None), 120, 29, 100_000);
+        assert!(content.contains("timing-tests-local"), "{content}");
+    }
+
+    #[test]
+    fn a_long_window_name_is_cut_with_an_ellipsis_at_the_36_column_limit() {
+        let name = "w".repeat(50);
+        let worker = plain_row(&name, "/w/harold", "", "harold:0.1", 1);
+        let content = rendered_lines(&live_app(vec![worker], None), 140, 29, 100_000);
+        let cut = format!("{}…", "w".repeat(33));
+        assert!(content.contains(&cut), "{content}");
+        assert!(!content.contains(&"w".repeat(34)), "{content}");
+    }
+
+    #[test]
+    fn a_window_name_wider_than_the_narrow_column_is_cut_at_60_columns() {
+        let worker = plain_row("timing-tests-local-two", "/w/harold", "", "harold:0.1", 1);
+        let content = rendered_lines(&live_app(vec![worker], None), 60, 29, 100_000);
+        assert!(
+            content.contains("timing-tests-local…") || content.contains("timing-tests-loca…"),
+            "{content}"
+        );
+        assert!(!content.contains("timing-tests-local-two"), "{content}");
     }
 
     fn plain_row(window: &str, dir: &str, role: &str, target: &str, n: u32) -> AgentRow {
@@ -5315,15 +5381,15 @@ mod tests {
         for (width, state, expected) in [
             (60, CallState::Thinking, short_thinking.clone()),
             (70, CallState::Thinking, short_thinking.clone()),
-            (84, CallState::Thinking, short_thinking.clone()),
+            (84, CallState::Thinking, thinking.clone()),
             (100, CallState::Thinking, thinking.clone()),
-            (125, CallState::Thinking, short_thinking.clone()),
+            (125, CallState::Thinking, thinking.clone()),
             (140, CallState::Thinking, thinking.clone()),
             (60, CallState::Speaking, "[c] 📞 end call".to_owned()),
             (70, CallState::Speaking, short.clone()),
-            (84, CallState::Speaking, short.clone()),
+            (84, CallState::Speaking, middle.clone()),
             (100, CallState::Speaking, middle.clone()),
-            (125, CallState::Speaking, short.clone()),
+            (125, CallState::Speaking, middle.clone()),
             (140, CallState::Speaking, middle.clone()),
         ] {
             let lines = text_lines(&call_layout(chief_call(state)), width, 38, now_ms);
