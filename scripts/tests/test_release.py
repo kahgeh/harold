@@ -242,6 +242,10 @@ class ReleaseTestCase(unittest.TestCase):
         self.installer_code = 0
         self.installed_version = None
         self.ready = True
+        # The outcomes of the `harold` calls, in order: (argv or None, exit code or an exception, seconds).
+        # With the list empty, a call exits 0. `harold_hangs` makes every call use its whole timeout.
+        self.harold = []
+        self.harold_hangs = False
         # What the command prints, kept out of the test output.
         self.stdout = io.StringIO()
         self.patch(patch.object(sys, 'stdout', self.stdout))
@@ -256,9 +260,11 @@ class ReleaseTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fake_run(self, argv, cwd, inherit=False, merge=False):
+    def fake_run(self, argv, cwd, inherit=False, merge=False, timeout=None):
         argv = [str(item) for item in argv]
         self.calls.append(argv)
+        if argv[0] == 'harold':
+            return self.fake_harold(argv, timeout)
         if argv[0] == 'git':
             return REAL_RUN(argv, cwd, inherit=inherit, merge=merge)
         if argv[0] == 'gh':
@@ -272,6 +278,20 @@ class ReleaseTestCase(unittest.TestCase):
             status = {'ready': self.ready, 'pid': 16897 if self.ready else None, 'grpc_addr': '127.0.0.1:50060'}
             return done(argv, 0 if self.ready else 1, json.dumps(status) + '\n', '')
         raise AssertionError('unexpected command: {}'.format(argv))
+
+    def fake_harold(self, argv, timeout):
+        """The next outcome of `self.harold`; a delay moves the clock, a timeout ends the call with 124."""
+        if self.harold_hangs:
+            self.clock.now += timeout
+            return done(argv, 124, '', 'timed out')
+        _, code, delay = self.harold.pop(0) if self.harold else (None, 0, 0)
+        if isinstance(code, BaseException):
+            raise code
+        if timeout is not None and delay > timeout:
+            self.clock.now += timeout
+            return done(argv, 124, '', 'timed out')
+        self.clock.now += delay
+        return done(argv, code, '', '')
 
     def fake_installer(self, argv):
         """Copies VERSION and REVISION as scripts/install.py does, or writes `installed_version`."""
@@ -323,6 +343,72 @@ class ReleaseTestCase(unittest.TestCase):
         digest = checksum or hashlib.sha256(data).hexdigest()
         self.github.files = {release.ARCHIVE: data,
                              release.CHECKSUM: '{}  {}\n'.format(digest, release.ARCHIVE).encode()}
+
+
+def harold_calls(test):
+    """The `harold` calls of the test, each without the leading `harold tool telemetry`."""
+    return [call[3:] for call in test.calls if call[0] == 'harold']
+
+
+class RecorderTests(ReleaseTestCase):
+    ATTEMPTS = ['declare', 'harold.release.attempts', 'counter', 'Release attempts',
+                '--attr', 'result=ok,failed,stopped',
+                '--attr', 'step=checks,local_tests,publish,github_build,install,none']
+    SECONDS = ['declare', 'harold.release.seconds', 'counter', 'Seconds in each release step',
+               '--attr', 'result=ok,failed,stopped',
+               '--attr', 'step=checks,local_tests,publish,github_build,install']
+
+    def record(self, result='ok', step='none', seconds=None):
+        return release.Recorder(self.work).record(result, step, {'checks': 3.0, 'publish': 7.4}
+                                                  if seconds is None else seconds)
+
+    def test_the_declarations_come_before_the_counts(self):
+        self.assertIsNone(self.record())
+        self.assertEqual(harold_calls(self), [
+            self.ATTEMPTS, self.SECONDS,
+            ['count', 'harold.release.attempts', '--attr', 'result=ok', '--attr', 'step=none'],
+            ['count', 'harold.release.seconds', '3', '--attr', 'result=ok', '--attr', 'step=checks'],
+            ['count', 'harold.release.seconds', '7', '--attr', 'result=ok', '--attr', 'step=publish']])
+        self.assertEqual(self.calls[0][:3], ['harold', 'tool', 'telemetry'])
+
+    def test_a_second_attempt_declares_again(self):
+        self.record()
+        self.record()
+        declares = [call for call in harold_calls(self) if call[0] == 'declare']
+        self.assertEqual(declares, [self.ATTEMPTS, self.SECONDS] * 2)
+
+    def test_a_failed_call_is_tried_once_more_after_5_seconds(self):
+        self.harold = [(None, 1, 0), (None, 0, 0)]
+        self.assertIsNone(self.record(seconds={}))
+        self.assertGreaterEqual(self.clock.now, 5)
+        self.assertEqual(len(harold_calls(self)), 4)  # the first declare twice, the second, the count
+
+    def test_a_call_that_fails_twice_skips_the_rest(self):
+        self.harold = [(None, 0, 0), (None, 3, 0), (None, 3, 0)]
+        reason = self.record()
+        self.assertIn('3', reason)
+        self.assertEqual(len(harold_calls(self)), 3)
+
+    def test_a_missing_harold_is_not_tried_again(self):
+        self.harold = [(None, 127, 0)]
+        self.assertIn('127', self.record())
+        self.assertEqual(len(harold_calls(self)), 1)
+
+    def test_the_budget_holds_when_harold_never_answers(self):
+        self.harold_hangs = True
+        reason = self.record()
+        self.assertTrue(reason)
+        self.assertLessEqual(self.clock.now, release.RECORD_BUDGET)
+
+    def test_a_second_ctrl_c_stops_the_recording(self):
+        self.harold = [(None, KeyboardInterrupt(), 0)]
+        self.assertTrue(self.record())
+        self.assertEqual(len(harold_calls(self)), 1)
+
+    def test_a_short_step_records_one_second(self):
+        self.record(seconds={'checks': 0.2})
+        self.assertIn(['count', 'harold.release.seconds', '1', '--attr', 'result=ok', '--attr', 'step=checks'],
+                      harold_calls(self))
 
 
 class CheckTests(ReleaseTestCase):

@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -37,6 +38,13 @@ TESTS = (('cargo', 'test', '--workspace', '--locked', '--features',
 BUILD_LIMIT = 60 * 60  # the workflow's timeout-minutes
 FIND_LIMIT = 2 * 60
 POLL = 10
+# The steps of a release attempt, in order, and the results an attempt can have.
+STEP_NAMES = ('checks', 'local_tests', 'publish', 'github_build', 'install')
+RESULTS = ('ok', 'failed', 'stopped')
+# Recording an attempt may take 20 seconds in all. A call may take 5. A failed call waits 5 and runs once more.
+RECORD_BUDGET = 20
+CALL_LIMIT = 5
+RETRY_WAIT = 5
 VERSION_PATTERN = re.compile(r'v?(\d+)\.(\d+)\.(\d+)')
 # The tests replace these, so that no test waits.
 clock = time.monotonic
@@ -51,8 +59,10 @@ class Interrupted(Exception):
     """Ctrl-C while waiting for the build; the message says what is left on GitHub."""
 
 
-def run(argv, cwd, inherit=False, merge=False):
+def run(argv, cwd, inherit=False, merge=False, timeout=None):
     """Run `argv` in `cwd` and return the finished process; a missing program exits 127.
+
+    A call that takes more than `timeout` seconds is stopped and exits 124.
 
     `inherit` leaves the terminal connected; otherwise output is captured, with stderr in
     stdout when `merge` is set.
@@ -61,10 +71,86 @@ def run(argv, cwd, inherit=False, merge=False):
     streams = {} if inherit else {'stdout': subprocess.PIPE,
                                   'stderr': subprocess.STDOUT if merge else subprocess.PIPE}
     try:
-        return subprocess.run(argv, cwd=str(cwd), text=True, **streams)
+        return subprocess.run(argv, cwd=str(cwd), text=True, timeout=timeout, **streams)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, '', 'timed out')
     except FileNotFoundError:
         text = '{} is not installed\n'.format(argv[0])
         return subprocess.CompletedProcess(argv, 127, text if merge else '', None if merge else text)
+
+
+class Recorder:
+    """Sends the result of a release attempt to the telemetry tool of Harold."""
+
+    ATTEMPTS = ('declare', 'harold.release.attempts', 'counter', 'Release attempts',
+                '--attr', 'result=' + ','.join(RESULTS),
+                '--attr', 'step=' + ','.join(STEP_NAMES + ('none',)))
+    SECONDS = ('declare', 'harold.release.seconds', 'counter', 'Seconds in each release step',
+               '--attr', 'result=' + ','.join(RESULTS),
+               '--attr', 'step=' + ','.join(STEP_NAMES))
+
+    def __init__(self, cwd):
+        self.cwd = cwd
+        self.start = 0
+
+    def left(self):
+        return RECORD_BUDGET - (clock() - self.start)
+
+    def calls(self, result, step, seconds):
+        yield self.ATTEMPTS
+        yield self.SECONDS
+        yield ('count', 'harold.release.attempts', '--attr', 'result=' + result, '--attr', 'step=' + step)
+        for name, taken in seconds.items():
+            yield ('count', 'harold.release.seconds', str(max(1, round(taken))),
+                   '--attr', 'result=' + result, '--attr', 'step=' + name)
+
+    def call(self, args):
+        """None when the call works, or the reason it does not. A failed call runs once more."""
+        for attempt in (1, 2):
+            left = self.left()
+            if left <= 0:
+                return 'the {} second budget is spent'.format(RECORD_BUDGET)
+            done = run(('harold', 'tool', 'telemetry') + args, self.cwd, merge=True,
+                       timeout=min(CALL_LIMIT, left))
+            if not done.returncode:
+                return None
+            reason = 'harold tool telemetry {} exited {}'.format(args[0], done.returncode)
+            if done.returncode == 127 or attempt == 2 or self.left() <= RETRY_WAIT:
+                return reason
+            sleep(RETRY_WAIT)
+        return reason
+
+    def record(self, result, step, seconds):
+        """None when every call worked, or why the rest were skipped. Never raises.
+
+        A signal during the recording stops it, in the way a second Ctrl-C does.
+        """
+        def stop(number, frame):
+            raise KeyboardInterrupt
+
+        saved = {}
+        try:
+            for number in (signal.SIGTERM, signal.SIGHUP):
+                saved[number] = signal.signal(number, stop)
+        except ValueError:  # not the main thread
+            pass
+        try:
+            self.start = clock()
+            for args in self.calls(result, step, seconds):
+                reason = self.call(args)
+                if reason:
+                    return reason
+            return None
+        except KeyboardInterrupt:
+            return 'stopped by the user'
+        except Exception as error:
+            return 'failed with {}'.format(type(error).__name__)
+        finally:
+            for number, handler in saved.items():
+                try:
+                    signal.signal(number, handler)
+                except (ValueError, TypeError):
+                    pass
 
 
 def git(cwd, *args):
