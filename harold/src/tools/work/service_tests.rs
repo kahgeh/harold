@@ -89,7 +89,7 @@ impl Setup {
         std::fs::write(folder.join(format!("{id}.md")), "x").unwrap();
     }
 
-    fn service_with(&self, questions: FakeQuestions) -> WorkToolService {
+    fn service_with(&self, questions: impl QuestionStates + 'static) -> WorkToolService {
         let files = WorkFiles::new(self.tmp.0.join("work"));
         let clock: Arc<dyn Clock> = Arc::new(FixedClock);
         let rotator = Arc::new(Rotator::new(files.clone(), Arc::clone(&clock)));
@@ -683,6 +683,7 @@ impl QuestionService for FakeQuestionService {
     ) -> Result<Response<qp::ShowQuestionResponse>, tonic::Status> {
         let id = request.into_inner().id;
         match self.0.get(&id) {
+            Some(Ok(state)) if state == "hang" => std::future::pending().await,
             Some(Ok(state)) => Ok(Response::new(qp::ShowQuestionResponse {
                 state: state.clone(),
                 ..qp::ShowQuestionResponse::default()
@@ -768,4 +769,89 @@ async fn no_address_or_no_server_makes_every_question_unreadable() {
         unreadable
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_question_tool_that_never_answers_gives_no_line_in_bounded_time() {
+    let ids = ["H1", "H2", "H3", "H4"];
+    let address = serve(FakeQuestionService(
+        ids.iter()
+            .map(|id| (id.to_string(), Ok("hang".to_string())))
+            .collect(),
+    ))
+    .await;
+    let setup = Setup::new();
+    // Four calls of 200 ms each would take 800 ms: the 500 ms limit ends it first.
+    let service = setup.service_with(LoopbackQuestions::with_limits(
+        Some(address),
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(500),
+    ));
+    put(&service, CHIEF, record("a")).await.unwrap();
+    for id in ids {
+        link(&service, "a", &format!("question:{id}"))
+            .await
+            .unwrap();
+    }
+    set_status(&service, "a", "approved").await;
+
+    let started = std::time::Instant::now();
+    let checked = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        service.check(Request::new(pb::CheckRequest {})),
+    )
+    .await
+    .expect("check ends")
+    .unwrap()
+    .into_inner();
+
+    assert!(checked.mismatches.is_empty(), "{:?}", checked.mismatches);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn stored_links_that_climb_out_of_the_pod_read_no_file() {
+    let setup = Setup::new();
+    // Decoys: `spec:p/../../x` would read `p/.superpowers/x.md`, and `spec:p/..`
+    // would read `...md` in each pod folder.
+    std::fs::write(setup.tmp.0.join("p/.superpowers/x.md"), "decoy").unwrap();
+    for folder in ["specs", "merged", "approvals"] {
+        setup.pod_file(folder, "..");
+    }
+    let service = setup.service();
+    put(&service, CHIEF, record("a")).await.unwrap();
+    // The service refuses such links, so they are stored past it, as an old or
+    // imported file could hold them.
+    {
+        let file = service.rotator.current().await.unwrap();
+        for bad in ["spec:p/../../x", "spec:p/..", "spec:../p", "spec:p/a\\b"] {
+            file.link("a", bad, NOW_MS).await.unwrap().unwrap();
+        }
+    }
+
+    let kinds: Vec<String> = service
+        .check(Request::new(pb::CheckRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .mismatches
+        .into_iter()
+        .map(|m| m.kind)
+        .collect();
+
+    assert!(kinds.iter().all(|kind| kind == "missing_link"), "{kinds:?}");
+}
+
+#[test]
+fn unsafe_path_parts_are_refused() {
+    for part in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+        assert!(!safe_part(part), "{part:?}");
+    }
+    for part in ["s1", "work-records", "...", "a.b"] {
+        assert!(safe_part(part), "{part:?}");
+    }
 }

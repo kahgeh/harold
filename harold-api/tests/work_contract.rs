@@ -163,6 +163,41 @@ fn record_decision_and_mismatch_fields_keep_their_numbers() {
 }
 
 #[test]
+fn request_and_response_fields_keep_their_numbers() {
+    let expected: [(&str, &[(&str, i32)]); 8] = [
+        ("PutRequest", &[("record", 1), ("caller_pane", 2)]),
+        (
+            "DecideRequest",
+            &[
+                ("name", 1),
+                ("mark", 2),
+                ("who", 3),
+                ("text", 4),
+                ("caller_pane", 5),
+            ],
+        ),
+        (
+            "MarkRequest",
+            &[("name", 1), ("number", 2), ("mark", 3), ("caller_pane", 4)],
+        ),
+        (
+            "LinkRequest",
+            &[("name", 1), ("link", 2), ("caller_pane", 3)],
+        ),
+        (
+            "UnlinkRequest",
+            &[("name", 1), ("link", 2), ("caller_pane", 3)],
+        ),
+        ("ListResponse", &[("records", 1), ("file", 2)]),
+        ("HistoryResponse", &[("file", 1), ("record", 2)]),
+        ("Found", &[("file", 1), ("record", 2)]),
+    ];
+    for (message, numbers) in expected {
+        assert_eq!(message_fields(message), fields(numbers), "{message}");
+    }
+}
+
+#[test]
 fn every_write_request_carries_caller_pane() {
     for write in ["Put", "Set", "Decide", "Mark", "Link", "Unlink", "Import"] {
         let name = format!("{write}Request");

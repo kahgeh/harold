@@ -26,8 +26,11 @@ use crate::tools::BoxFuture;
 use crate::tools::backlog::guard::{Guard, Refused};
 
 /// The longest wait for the question tool: for the connection, and for each call.
-/// So a check never hangs on it.
 const QUESTION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The longest wait for all the question states of one check, so a check never
+/// hangs. The ids that are not read by then are `Unreadable`.
+const QUESTIONS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The question tool's answer about each question id.
 pub(super) trait QuestionStates: Send + Sync {
@@ -38,19 +41,42 @@ pub(super) trait QuestionStates: Send + Sync {
 /// loopback address, as the CLI does. It only reads.
 pub(super) struct LoopbackQuestions {
     address: Option<SocketAddr>,
+    /// The limit for the connection and for each call.
+    per_call: Duration,
+    /// The limit for all the calls of one lookup.
+    overall: Duration,
 }
 
 impl LoopbackQuestions {
     pub(super) fn new(address: Option<SocketAddr>) -> Self {
-        Self { address }
+        Self::with_limits(address, QUESTION_TIMEOUT, QUESTIONS_TIMEOUT)
+    }
+
+    pub(super) fn with_limits(
+        address: Option<SocketAddr>,
+        per_call: Duration,
+        overall: Duration,
+    ) -> Self {
+        Self {
+            address,
+            per_call,
+            overall,
+        }
+    }
+
+    /// The wait for the next step: the per-call limit, but never past `deadline`.
+    fn limit(&self, deadline: tokio::time::Instant) -> Duration {
+        self.per_call
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
     }
 }
 
 impl QuestionStates for LoopbackQuestions {
     fn states<'a>(&'a self, ids: &'a [String]) -> BoxFuture<'a, HashMap<String, QuestionFact>> {
         Box::pin(async move {
+            let deadline = tokio::time::Instant::now() + self.overall;
             let client = match self.address {
-                Some(address) if !ids.is_empty() => connect(address).await,
+                Some(address) if !ids.is_empty() => connect(address, self.limit(deadline)).await,
                 _ => None,
             };
             let Some(mut client) = client else {
@@ -61,19 +87,24 @@ impl QuestionStates for LoopbackQuestions {
             };
             let mut states = HashMap::new();
             for id in ids {
-                states.insert(id.clone(), show(&mut client, id).await);
+                let limit = self.limit(deadline);
+                let fact = match limit.is_zero() {
+                    true => QuestionFact::Unreadable,
+                    false => show(&mut client, id, limit).await,
+                };
+                states.insert(id.clone(), fact);
             }
             states
         })
     }
 }
 
-async fn connect(address: SocketAddr) -> Option<QuestionServiceClient<Channel>> {
+async fn connect(address: SocketAddr, limit: Duration) -> Option<QuestionServiceClient<Channel>> {
     let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
         .ok()?
-        .connect_timeout(QUESTION_TIMEOUT)
+        .connect_timeout(limit)
         .timeout(QUESTION_TIMEOUT);
-    let channel = tokio::time::timeout(QUESTION_TIMEOUT, endpoint.connect())
+    let channel = tokio::time::timeout(limit, endpoint.connect())
         .await
         .ok()?
         .ok()?;
@@ -82,9 +113,13 @@ async fn connect(address: SocketAddr) -> Option<QuestionServiceClient<Channel>> 
 
 /// `waiting` is `Waiting`. Any other state is `Answered`. `NotFound` with
 /// `unknown_question` is `Missing`. Any other error is `Unreadable`.
-async fn show(client: &mut QuestionServiceClient<Channel>, id: &str) -> QuestionFact {
+async fn show(
+    client: &mut QuestionServiceClient<Channel>,
+    id: &str,
+    limit: Duration,
+) -> QuestionFact {
     let call = client.show_question(qp::ShowQuestionRequest { id: id.into() });
-    match tokio::time::timeout(QUESTION_TIMEOUT, call).await {
+    match tokio::time::timeout(limit, call).await {
         Ok(Ok(response)) if response.get_ref().state == "waiting" => QuestionFact::Waiting,
         Ok(Ok(_)) => QuestionFact::Answered,
         Ok(Err(status))
@@ -108,6 +143,13 @@ impl Facts for GatheredFacts {
         let Ok(products) = &self.products else {
             return SpecFacts::default();
         };
+        // A part that could leave the pod folder names no spec.
+        if !safe_part(product) || !safe_part(id) {
+            return SpecFacts {
+                registry_ok: true,
+                ..SpecFacts::default()
+            };
+        }
         match products.iter().find(|(name, _)| name == product) {
             Some((_, repo)) => spec_facts(repo, id),
             // A product that is not in the registry has no spec.
@@ -126,11 +168,24 @@ impl Facts for GatheredFacts {
     }
 }
 
+/// A product name or a spec id that is safe in a path: not empty, not `.` or
+/// `..`, and with no `/`, `\` or NUL.
+fn safe_part(part: &str) -> bool {
+    !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\', '\0'])
+}
+
 /// What the pod files `.superpowers/pod/{specs,merged,withdrawn,approvals}/<id>.md`
-/// of the product in `repo` say. A repo folder that is not there cannot be read.
+/// of the product in `repo` say. A repo folder that is not there cannot be read,
+/// and an unsafe `id` names no spec.
 fn spec_facts(repo: &Path, id: &str) -> SpecFacts {
     if !repo.is_dir() {
         return SpecFacts::default();
+    }
+    if !safe_part(id) {
+        return SpecFacts {
+            registry_ok: true,
+            ..SpecFacts::default()
+        };
     }
     let pod = repo.join(".superpowers").join("pod");
     let has = |folder: &str| pod.join(folder).join(format!("{id}.md")).is_file();
