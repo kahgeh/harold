@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use super::NAME;
 use super::metrics;
 use super::rotation::{Clock, Outcome, Rotator};
-use crate::settings::{Settings, WorkSettings};
+use crate::settings::{MAX_ROTATION_DAYS, Settings, WorkSettings};
 
 /// The time from one check to the next.
 pub(super) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -26,10 +26,18 @@ pub(super) type ReadDays = Box<dyn Fn() -> Option<u32> + Send + Sync>;
 const SETTINGS_UNREADABLE: &str = "settings_unreadable";
 
 /// Reads `rotation_days` from the settings files and the environment again.
+/// A value above the limit counts as unreadable, like a failed load.
 pub(super) fn read_rotation_days() -> Option<u32> {
-    Settings::load()
-        .ok()
-        .map(|settings| settings.work.rotation_days)
+    accept_days(
+        Settings::load()
+            .ok()
+            .map(|settings| settings.work.rotation_days),
+    )
+}
+
+/// The value when it is at most `MAX_ROTATION_DAYS`, and `None` otherwise.
+fn accept_days(days: Option<u32>) -> Option<u32> {
+    days.filter(|days| *days <= MAX_ROTATION_DAYS)
 }
 
 /// Runs the check at start and then each `DAY`, until `shutdown` changes or its

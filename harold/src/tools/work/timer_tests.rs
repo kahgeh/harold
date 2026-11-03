@@ -83,7 +83,8 @@ async fn a_failure_logs_warn_once() {
     })));
     take_noted_work();
 
-    for day in ["2026-11-16", "2026-11-17", "2026-11-18"] {
+    // The first check fails and logs warn. Three daily retries fail and log no more.
+    for day in ["2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19"] {
         clock.set(noon_ms(day));
         check(&rotator, clock.as_ref(), 14).await;
     }
@@ -107,7 +108,7 @@ async fn a_failure_logs_warn_once() {
     assert_eq!(file_names(&folder), ["work-2026-11-01.db"]);
 
     rotator.set_copy_hook(None);
-    clock.set(noon_ms("2026-11-19"));
+    clock.set(noon_ms("2026-11-20"));
     check(&rotator, clock.as_ref(), 14).await;
     let text = logs.text();
     let done: Vec<&str> = text
@@ -122,7 +123,7 @@ async fn a_failure_logs_warn_once() {
         "decisions=0",
         "links=0",
         "file=work-2026-11-01.db",
-        "new_file=work-2026-11-19.db",
+        "new_file=work-2026-11-20.db",
     ] {
         assert!(line.contains(field), "{field} in {line}");
     }
@@ -134,7 +135,7 @@ async fn a_failure_logs_warn_once() {
     );
     assert_eq!(
         rotations(&take_noted_work()),
-        ["failed", "failed", "failed", "done"]
+        ["failed", "failed", "failed", "failed", "done"]
     );
 }
 
@@ -354,4 +355,12 @@ fn the_telemetry_lists_name_every_priority_and_open_status() {
         .map(Status::ordinal)
         .collect();
     assert_eq!(ordinals, (0..9).collect::<Vec<u8>>());
+}
+
+#[test]
+fn a_rotation_days_above_365_counts_as_unreadable() {
+    assert_eq!(accept_days(Some(365)), Some(365));
+    assert_eq!(accept_days(Some(0)), Some(0));
+    assert_eq!(accept_days(Some(366)), None);
+    assert_eq!(accept_days(None), None);
 }

@@ -615,6 +615,49 @@ async fn the_folder_is_read_flat_with_limits() {
     assert!(matches!(result, Err(ImportError::BadFolder)), "{result:?}");
 }
 
+#[tokio::test]
+async fn a_hidden_or_upper_case_md_file_is_unplaced_not_dropped() {
+    let setup = Setup::new();
+    let text = "# good-one: Good\nPriority: later\nStatus: idea\n";
+    setup.write("good.md", text);
+    setup.write(".hidden.md", text);
+    setup.write("UPPER.MD", text);
+    setup.write("notes.txt", "not read");
+    let report = setup
+        .run(&setup.chief(), &[], false, &FakeQueue::default())
+        .await
+        .unwrap();
+    let mut unplaced: Vec<(&str, u32)> = report
+        .unplaced
+        .iter()
+        .map(|u| (u.file.as_str(), u.line))
+        .collect();
+    unplaced.sort();
+    assert_eq!(unplaced, [(".hidden.md", 0), ("UPPER.MD", 0)]);
+    let result = setup
+        .run(&setup.chief(), &[], true, &FakeQueue::default())
+        .await;
+    assert!(
+        matches!(result, Err(ImportError::Unplaced(2))),
+        "{result:?}"
+    );
+    assert!(setup.stored().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_queue_id_that_makes_an_invalid_name_is_refused_with_the_id() {
+    let setup = Setup::new();
+    let queue = FakeQueue::with(&[("N 1", "Fix the bar")]);
+    for apply in [false, true] {
+        let result = setup.run(&setup.chief(), &["N 1"], apply, &queue).await;
+        match result {
+            Err(ImportError::BadQueueName(id)) => assert_eq!(id, "N 1"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(setup.stored().await.is_empty());
+}
+
 // --- The queue over loopback, with the real backlog tool --------------------
 
 struct Chief;

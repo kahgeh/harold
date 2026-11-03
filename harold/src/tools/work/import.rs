@@ -130,6 +130,8 @@ pub(super) enum ImportError {
     /// An empty queue id.
     BadQueueId,
     QueueUnreadable,
+    /// The queue item's id does not make a valid record name.
+    BadQueueName(String),
     /// The id is not the `now` item or a parked item of the queue.
     NotOpenQueueItem(String),
     /// `--apply` with this many unplaced lines.
@@ -239,6 +241,9 @@ pub(super) async fn import(
                 .find(|item| item.id.eq_ignore_ascii_case(&id))
                 .ok_or_else(|| ImportError::NotOpenQueueItem(id.clone()))?;
             let record = queue_record(&item.id, &item.text);
+            if !valid_name(&record.name) {
+                return Err(ImportError::BadQueueName(item.id.clone()));
+            }
             match names.insert(record.name.clone()) {
                 true => report.records.push(record),
                 false => report.unplaced.push(Unplaced {
@@ -315,10 +320,16 @@ fn read_folder(folder: &Path) -> Result<FolderFiles, ImportError> {
     }
     let entries = std::fs::read_dir(folder).map_err(|_| ImportError::BadFolder)?;
     let mut paths: Vec<(String, PathBuf)> = Vec::new();
+    // Files the import does not read. They are listed, so `--apply` refuses.
+    let mut hidden_or_upper: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| ImportError::BadFolder)?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".md") || name.starts_with('.') {
+        if !name.to_ascii_lowercase().ends_with(".md") {
+            continue;
+        }
+        if name.starts_with('.') || !name.ends_with(".md") {
+            hidden_or_upper.push(name);
             continue;
         }
         paths.push((name, entry.path()));
@@ -327,13 +338,20 @@ fn read_folder(folder: &Path) -> Result<FolderFiles, ImportError> {
         }
     }
     paths.sort();
-    Ok(paths
+    let mut files: FolderFiles = paths
         .into_iter()
         .map(|(name, path)| {
             let text = read_file(&path);
             (name, text)
         })
-        .collect())
+        .collect();
+    hidden_or_upper.sort();
+    files.extend(
+        hidden_or_upper
+            .into_iter()
+            .map(|name| (name, Err("a hidden or upper-case .md file is not read"))),
+    );
+    Ok(files)
 }
 
 /// A plain file of at most `FILE_MAX` bytes of UTF-8 text. A link is not

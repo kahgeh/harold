@@ -964,10 +964,10 @@ async fn a_question_tool_that_never_answers_gives_no_line_in_bounded_time() {
     ))
     .await;
     let setup = Setup::new();
-    // Four calls of 200 ms each would take 800 ms: the 500 ms limit ends it first.
+    // Each call may take 2 s, so four calls take 8 s: only the 500 ms overall limit ends it in time.
     let service = setup.service_with(LoopbackQuestions::with_limits(
         Some(address),
-        std::time::Duration::from_millis(200),
+        std::time::Duration::from_secs(2),
         std::time::Duration::from_millis(500),
     ));
     put(&service, CHIEF, record("a")).await.unwrap();
@@ -1209,4 +1209,39 @@ mod metrics {
         assert_eq!(expected.len(), 2, "{expected:?}");
         assert_eq!(noted, expected);
     }
+}
+
+#[tokio::test]
+async fn a_decision_date_that_is_not_yyyy_mm_dd_is_refused() {
+    let setup = Setup::new();
+    let service = setup.service();
+    for at in [
+        "yesterday",
+        "2026-1-5",
+        "2026-13-01",
+        "2026-02-30",
+        "2026-11-03T10:00",
+        "20261103",
+    ] {
+        let mut bad = record("a");
+        bad.decisions = vec![pb::Decision {
+            at: at.into(),
+            who: "the user".into(),
+            mark: "agreed".into(),
+            text: "x".into(),
+        }];
+        assert_eq!(
+            refusal(put(&service, CHIEF, bad).await),
+            (Code::InvalidArgument, "invalid at".to_string()),
+            "{at}"
+        );
+    }
+    let mut good = record("a");
+    good.decisions = vec![pb::Decision {
+        at: "2026-11-03".into(),
+        who: "the user".into(),
+        mark: "agreed".into(),
+        text: "x".into(),
+    }];
+    put(&service, CHIEF, good).await.unwrap();
 }

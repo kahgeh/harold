@@ -282,6 +282,7 @@ fn import_refused(error: ImportError) -> Status {
     match error {
         ImportError::BadFolder => invalid("folder"),
         ImportError::BadQueueId => invalid("queue"),
+        ImportError::BadQueueName(id) => Status::invalid_argument(format!("invalid queue id {id}")),
         ImportError::NotOpenQueueItem(id) => Status::not_found(format!("not_open_queue_item {id}")),
         ImportError::TooManyFiles => Status::failed_precondition("too_many_files"),
         ImportError::Unplaced(count) => {
@@ -345,6 +346,9 @@ fn decision_from_proto(decision: pb::Decision, today: &str) -> Result<Decision, 
     filled_line("who", &decision.who)?;
     filled_line("text", &decision.text)?;
     one_line("at", &decision.at)?;
+    if !decision.at.is_empty() && !valid_date(&decision.at) {
+        return Err(invalid("at"));
+    }
     Ok(Decision {
         at: match decision.at.is_empty() {
             true => today.to_string(),
@@ -354,6 +358,29 @@ fn decision_from_proto(decision: pb::Decision, today: &str) -> Result<Decision, 
         mark: mark_of(&decision.mark)?,
         text: decision.text,
     })
+}
+
+/// A real calendar date written as `YYYY-MM-DD`.
+fn valid_date(at: &str) -> bool {
+    let bytes = at.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| -> Option<u32> {
+        let part = &at[range];
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (Some(year), Some(month), Some(day)) = (digits(0..4), digits(5..7), digits(8..10)) else {
+        return false;
+    };
+    let Ok(month) = u8::try_from(month).map(time::Month::try_from) else {
+        return false;
+    };
+    let Ok(month) = month else { return false };
+    time::Date::from_calendar_date(year as i32, month, day as u8).is_ok()
 }
 
 fn record_from_proto(record: pb::WorkRecord, today: &str) -> Result<Record, Status> {
