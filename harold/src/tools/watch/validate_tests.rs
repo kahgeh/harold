@@ -501,6 +501,7 @@ fn read_skill_reads_add_dirs() {
 use harold_api::tools::watch::v1::remind_request::When;
 use harold_api::tools::watch::v1::{PauseRequest, RemindRequest, ResumeRequest};
 
+use crate::cron::LocalMinute;
 use crate::timed_prompts::LocalNow;
 
 #[test]
@@ -593,6 +594,7 @@ fn at_ten() -> LocalNow {
     LocalNow {
         day: "2026-11-03".into(),
         seconds_of_day: 10 * 3600,
+        local_minute: LocalMinute::parse("2026-11-03 10:00").unwrap(),
     }
 }
 
@@ -664,6 +666,12 @@ fn a_time_that_passed_today_is_due_the_next_day() {
         let now = LocalNow {
             day: day.into(),
             seconds_of_day,
+            local_minute: LocalMinute::parse(&format!(
+                "{day} {:02}:{:02}",
+                seconds_of_day / 3600,
+                seconds_of_day / 60 % 60
+            ))
+            .unwrap(),
         };
         let asked = remind(&temp.0, Some(When::AtLocal(at.into())));
         check_remind(&asked, &now).unwrap().due_local.unwrap()

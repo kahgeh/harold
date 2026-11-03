@@ -28,7 +28,7 @@ use super::validate::{
     read_skill, to_micros,
 };
 use crate::settings::WatchSettings;
-use crate::timed_prompts::LocalNow;
+use crate::timed_prompts::{LocalNow, parse_local_now};
 use crate::tools::{Agents, ChiefPane, PaneTyping, Pods, WatchCounts};
 
 /// The answer or the failure, the reported cost, and how the process ended with what
@@ -252,18 +252,9 @@ impl Scheduler {
     /// The local date and time of day now, for a reminder's `at_local`.
     pub(super) async fn local_now(&self) -> LocalNow {
         let text = local_text(clock_ms(), self.offset().await);
-        let (day, clock) = text.split_once(' ').unwrap_or_default();
-        let part = |index: usize| {
-            clock
-                .split(':')
-                .nth(index)
-                .and_then(|digits| digits.parse::<u32>().ok())
-                .unwrap_or(0)
-        };
-        LocalNow {
-            day: day.to_owned(),
-            seconds_of_day: part(0) * 3600 + part(1) * 60 + part(2),
-        }
+        // `local_text` always prints `YYYY-MM-DD HH:MM:SS` from a valid time, so the
+        // parse cannot fail.
+        parse_local_now(&text).expect("local_text prints a valid local date and time")
     }
 
     async fn today(&self) -> (i64, i64) {
