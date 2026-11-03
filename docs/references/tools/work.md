@@ -46,7 +46,7 @@ A value with spaces needs quotes. For example: `--status "waiting for the user"`
 | `check` | Compares the work records with the specs and the questions |
 | `import <folder> [--queue ID,ID] [--apply]` | Reads the chief's files |
 | `rotate --dry-run` | Prints what a rotation would copy. It changes nothing |
-| `history <name>` | Prints the work record from the newest file that holds it |
+| `history <name>` | Prints the work record from the newest file that holds it, then its status moves, oldest first |
 | `search <word>` | Lists the work records that hold the word, newest file first |
 
 ### Examples
@@ -76,6 +76,10 @@ harold tool work link work-records "note:Wait for the first rotation."
 
 harold tool work show work-records
 harold tool work history work-records
+# ...the work record, then:
+# moves:
+# 2026-11-03 09:12  created → idea
+# 2026-11-03 09:40  idea → building
 harold tool work search rotation
 ```
 
@@ -224,6 +228,41 @@ a rotation would copy 7 open work records, 12 decisions and 9 links to work-2026
 records: work-records, pnem-switcher, ...
 ```
 
+## Status moves
+
+A **status move** is one change of the status of a work record. The tool writes one move for each change, in the same transaction as the change. A move holds the work record, the status it left (`from`), the status it entered (`to`) and its time.
+
+- A new work record writes one move. Its `from` is empty.
+- A `put` or `set` with the same status writes no move.
+- A rotation copies the moves of each open work record to the new file. A work record from before migration 002 has no moves, so it copies none.
+- The history of an imported work record before the import is not known.
+
+`history <name>` prints the moves after the work record, one line each, oldest first. The line is the time, the status that the work record left and the new status. The first move of a new work record shows `created` for the status that it left.
+
+## The closing figures
+
+When a work record moves to `checked by the user`, the tool records these figures:
+
+- one count of value in use, by priority;
+- the lead time: the time from `created_at` to the closing;
+- the time of four phases, each the sum of the time spent in its statuses;
+- the slices: the number of `spec:` links of the work record.
+
+| Phase | Statuses |
+| --- | --- |
+| `discovery` | `idea`, `discovery` |
+| `spec_and_approval` | `spec drafted`, `architect checked`, `waiting for the user` |
+| `build_and_merge` | `approved`, `building` |
+| `release_and_check` | `merged`, `released` |
+
+A work record that moves back adds its time to each phase that it passes through again. A work record whose history is not known before its import counts only the phases after the import. The tool also logs the line `work record closed`.
+
+Work that the user never checks stays open. It is inventory, never value.
+
+## Rollback
+
+After migration 002, v0.75.0 or earlier cannot open the new work file. Its work tool refuses with `incompatible work schema`. The old file stays as it was, because a rotation never changes it, so an older Harold can open it. The release notes carry this line.
+
 ## Reads
 
 `list` and `show` read the current file only.
@@ -236,11 +275,11 @@ The work files are in `tools/work/` in Harold's data folder: the folder of the s
 
 The newest name is the current file. There is no pointer file. A temporary file of a rotation in progress does not count as a work file.
 
-Each file has three tables: `records`, `decisions` and `links`, and one index on `status` and `priority`. `backlog.db` and the product backlogs are never touched.
+Each file has four tables: `records`, `decisions`, `links` and `moves`, and one index on `status` and `priority`. `backlog.db` and the product backlogs are never touched.
 
 ## Telemetry
 
-The work tool sends five metrics. The [telemetry reference](../telemetry/README.md) has their attributes.
+The work tool sends eight metrics. The [telemetry reference](../telemetry/README.md) has their attributes.
 
 | Metric | Type | Answers |
 | --- | --- | --- |
@@ -249,6 +288,9 @@ The work tool sends five metrics. The [telemetry reference](../telemetry/README.
 | `harold.work.waiting_long` | gauge, by `priority` | How many open work records are at `waiting for the user` for more than a day? `list` names them |
 | `harold.work.check.mismatches` | counter, by `record` and `kind` | Do the work records agree with the specs and the questions? It is added to at each check |
 | `harold.work.rotations` | counter, by `outcome` (`done`, `failed`) | Does the rotation run by itself? `failed` counts each failed try, retries too |
+| `harold.work.checked` | counter, by `priority` | How many work records reached `checked by the user`? Harold records 0 at start for each priority |
+| `harold.work.lead_time` | histogram, seconds, by `phase` | How long from creation to the check, and in which phase? It is recorded at closing |
+| `harold.work.slices` | histogram, specs | How many specs did a closed work record take? It is recorded at closing |
 
 Harold records 0 at start for each `outcome` and for each priority and status. The dashboard "Harold" has three info cards in the group "Work records". They are "Work by priority and status, and long waits", "Time at each status, p50 and p95, by week" and "Work check mismatches by day". A count above 0 of `harold.work.check.mismatches` at two digests in a row means that you must look at those work records.
 
@@ -259,6 +301,7 @@ Harold records 0 at start for each `outcome` and for each priority and status. T
 | `work rotation done` | `info` | `open_records`, `decisions`, `links` (the counts that were copied), `file` (the old current file), `new_file` |
 | `work rotation failed` | `warn` | `file`, `reason` (`count_mismatch`, `write_failed` or `rename_failed`), `since` (the UTC time when the failure began) |
 | `work rotation failed again` | `debug` | the same fields as `work rotation failed` |
+| `work record closed` | `info` | `record`, `lead_s`, `slices`, `imported` (true when the history began at the import) |
 
 Harold logs `work rotation failed` once when a failure begins for a file. A daily retry that fails again logs `work rotation failed again` at `debug` only. A rotation that then works logs `work rotation done`, which ends the failure.
 

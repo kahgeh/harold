@@ -20,3 +20,5 @@ The chief keeps work records with a priority, a status and decisions. The chief'
 ## Consequences
 
 The views read one small file. A history reads the files newest first. A failed rotation keeps the old file, logs `work rotation failed` once, and fires the alert `work-rotation-failed`. The queue and `backlog.db` do not change. A closed work record stays in the file where it closed.
+
+After migration 002, v0.75.0 or earlier cannot open the new work file: its work tool refuses with `incompatible work schema`. The old file stays readable, because a rotation never changes it.

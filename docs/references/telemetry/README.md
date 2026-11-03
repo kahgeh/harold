@@ -338,6 +338,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.status.duration` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `status` (the status the work record left), `priority` |
 | `harold.work.check.mismatches` | counter, `{mismatch}` | `record` (the work record's name), `kind` (the mismatch rule) |
 | `harold.work.rotations` | counter, `{rotation}` | `outcome` (`done`, `failed`) |
+| `harold.work.checked` | counter, `{record}` | `priority` (`focus`, `next`, `later`). One count when a work record reaches `checked by the user` |
+| `harold.work.lead_time` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `phase` (`whole`, `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check`). Recorded at closing |
+| `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product, 0 included.
@@ -672,7 +675,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
 - `harold.agent.blocked_long`, for each configured provider;
-- `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
+- `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. `harold.work.checked`, for each `priority`. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
