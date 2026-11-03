@@ -19,6 +19,8 @@ use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::release::v1 as release_api;
 use harold_api::tools::release::v1::release_service_client::ReleaseServiceClient;
+use harold_api::tools::telemetry::v1 as telemetry_api;
+use harold_api::tools::telemetry::v1::telemetry_service_client::TelemetryServiceClient;
 use harold_api::tools::watch::v1 as watch_api;
 use harold_api::tools::watch::v1::watch_service_client::WatchServiceClient;
 use harold_api::tools::work::v1 as work_api;
@@ -353,6 +355,7 @@ pub(crate) enum ToolCommand {
     QuestionsShow { id: String },
     QuestionsChecked,
     Backlog(BacklogCommand),
+    Telemetry(TelemetryCommand),
     Watch(WatchCommand),
     Release(ReleaseCommand),
     Knowledge(KnowledgeCommand),
@@ -1515,9 +1518,167 @@ fn parse_backlog(args: &[&str]) -> Result<BacklogCommand, String> {
     }
 }
 
+const TELEMETRY_USAGE_LINE: &str =
+    "invalid argument: usage is harold tool telemetry declare|count|gauge|event|list|remove";
+
+/// The kind of a declared signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelemetryKind {
+    Counter,
+    Gauge,
+    Event,
+}
+
+impl TelemetryKind {
+    fn proto(self) -> telemetry_api::Kind {
+        match self {
+            Self::Counter => telemetry_api::Kind::Counter,
+            Self::Gauge => telemetry_api::Kind::Gauge,
+            Self::Event => telemetry_api::Kind::Event,
+        }
+    }
+}
+
+/// A gauge value. Two values are equal when their bits are equal, so a command can be
+/// compared.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GaugeValue(pub(crate) f64);
+
+impl PartialEq for GaugeValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for GaugeValue {}
+
+/// A `harold tool telemetry` command. The CLI checks only the shape of the command; the
+/// daemon checks names, prefixes, kinds and declared values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TelemetryCommand {
+    Declare {
+        name: String,
+        kind: TelemetryKind,
+        meaning: String,
+        attrs: Vec<(String, Vec<String>)>,
+    },
+    Count {
+        name: String,
+        n: u64,
+        attrs: Vec<(String, String)>,
+    },
+    Gauge {
+        name: String,
+        value: GaugeValue,
+        attrs: Vec<(String, String)>,
+    },
+    Event {
+        name: String,
+        attrs: Vec<(String, String)>,
+    },
+    List {
+        prefix: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+/// The `key=value` pairs of a command's `--attr` flags, in the given order.
+type TelemetryPairs = Vec<(String, String)>;
+
+/// The positional words before the first flag, and the `key=value` of each `--attr` after
+/// them. A flag other than `--attr`, an `--attr` with no value, no `=` or an empty key, a
+/// repeated key, and a word after a flag give the usage line.
+fn telemetry_args<'a>(args: &[&'a str]) -> Result<(Vec<&'a str>, TelemetryPairs), String> {
+    let usage = || TELEMETRY_USAGE_LINE.to_string();
+    let first_flag = args
+        .iter()
+        .position(|arg| arg.starts_with("--"))
+        .unwrap_or(args.len());
+    let (words, flags) = args.split_at(first_flag);
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let (Some(attr), true) = (rest.next(), *flag == "--attr") else {
+            return Err(usage());
+        };
+        let Some((key, value)) = attr.split_once('=') else {
+            return Err(usage());
+        };
+        if key.is_empty() || attrs.iter().any(|(known, _)| known == key) {
+            return Err(usage());
+        }
+        attrs.push((key.into(), value.into()));
+    }
+    Ok((words.to_vec(), attrs))
+}
+
+fn parse_telemetry(args: &[&str]) -> Result<TelemetryCommand, String> {
+    use TelemetryCommand as C;
+    let usage = || TELEMETRY_USAGE_LINE.to_string();
+    let (words, attrs) = telemetry_args(args)?;
+    let no_attrs = |command: C| match attrs.is_empty() {
+        true => Ok(command),
+        false => Err(usage()),
+    };
+    match words.as_slice() {
+        ["declare", name, kind, meaning] => {
+            let kind = match *kind {
+                "counter" => TelemetryKind::Counter,
+                "gauge" => TelemetryKind::Gauge,
+                "event" => TelemetryKind::Event,
+                _ => return Err(usage()),
+            };
+            Ok(C::Declare {
+                name: (*name).into(),
+                kind,
+                meaning: (*meaning).into(),
+                attrs: attrs
+                    .into_iter()
+                    .map(|(key, values)| (key, values.split(',').map(String::from).collect()))
+                    .collect(),
+            })
+        }
+        ["count", name, rest @ ..] => {
+            let n = match rest {
+                [] => 1,
+                [n] => match n.parse::<u64>() {
+                    Ok(0) | Err(_) => return Err(usage()),
+                    Ok(n) => n,
+                },
+                _ => return Err(usage()),
+            };
+            Ok(C::Count {
+                name: (*name).into(),
+                n,
+                attrs,
+            })
+        }
+        ["gauge", name, value] => Ok(C::Gauge {
+            name: (*name).into(),
+            value: GaugeValue(value.parse().map_err(|_| usage())?),
+            attrs,
+        }),
+        ["event", name] => Ok(C::Event {
+            name: (*name).into(),
+            attrs,
+        }),
+        ["list"] => no_attrs(C::List { prefix: None }),
+        ["list", prefix] => no_attrs(C::List {
+            prefix: Some((*prefix).into()),
+        }),
+        ["remove", name] => no_attrs(C::Remove {
+            name: (*name).into(),
+        }),
+        _ => Err(usage()),
+    }
+}
+
 fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
     match args {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
+        ["telemetry", rest @ ..] => parse_telemetry(rest).map(ToolCommand::Telemetry),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
@@ -2136,7 +2297,8 @@ pub(crate) fn caller_pane_from(var: impl Fn(&str) -> Option<String>) -> String {
 
 /// Run a `harold tool` command against the daemon at `address`. `Ok` is the line
 /// to print; `Err` is the one line to print for a refusal. A backlog command sends the
-/// caller's `TMUX_PANE` and works out local midnight in the Mac's UTC offset.
+/// caller's `TMUX_PANE` and works out local midnight in the Mac's UTC offset. A telemetry
+/// command also sends the caller's pane.
 pub(crate) async fn tool(
     address: &str,
     command: &ToolCommand,
@@ -2154,6 +2316,9 @@ pub(crate) async fn tool(
             backlog.deadline(),
         )
         .await;
+    }
+    if let ToolCommand::Telemetry(telemetry) = command {
+        return telemetry_within(address, telemetry, &caller_pane(), CALL_DEADLINE).await;
     }
     if let ToolCommand::Watch(watch) = command {
         let folder = std::env::current_dir().map_err(|_| "invalid folder".to_string())?;
@@ -2681,9 +2846,11 @@ pub(crate) async fn tool_within(
                     watch_time(checked.checked_at_ms, crate::telemetry::local_offset())
                 ))
             }
-            // `tool` runs a backlog command through `backlog_within`, and a watch
+            // `tool` runs a backlog command through `backlog_within`, a telemetry
+            // command through `telemetry_within`, and a watch
             // command through `watch_within`. `main` runs a work command through `work`.
             ToolCommand::Backlog(_)
+            | ToolCommand::Telemetry(_)
             | ToolCommand::Watch(_)
             | ToolCommand::Release(_)
             | ToolCommand::Knowledge(_)
@@ -2711,6 +2878,170 @@ fn backlog_refusal_line(status: &tonic::Status, pane: &str, product: &str) -> St
         (_, "") => "the Harold daemon refused the call".into(),
         (_, message) => message.to_string(),
     }
+}
+
+/// The line printed for a refusal from the telemetry service: the service's own plain
+/// text. The reason word in the `reason` metadata key is for scripts, not for this line.
+fn telemetry_refusal_line(status: &tonic::Status) -> String {
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => {
+            "the Harold daemon does not serve the telemetry tool".into()
+        }
+        (_, "") => "the Harold daemon refused the call".into(),
+        (_, message) => message.to_string(),
+    }
+}
+
+/// The request a telemetry command sends, with `pane` as the caller's pane.
+#[derive(Debug, Clone, PartialEq)]
+enum TelemetryRequest {
+    Declare(telemetry_api::DeclareRequest),
+    Count(telemetry_api::CountRequest),
+    Gauge(telemetry_api::GaugeRequest),
+    Event(telemetry_api::EventRequest),
+    List(telemetry_api::ListRequest),
+    Remove(telemetry_api::RemoveRequest),
+}
+
+fn telemetry_pairs(attrs: &[(String, String)]) -> Vec<telemetry_api::Pair> {
+    attrs
+        .iter()
+        .map(|(key, value)| telemetry_api::Pair {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn telemetry_request(command: &TelemetryCommand, pane: &str) -> TelemetryRequest {
+    use TelemetryCommand as C;
+    let caller_pane = pane.to_string();
+    match command {
+        C::Declare {
+            name,
+            kind,
+            meaning,
+            attrs,
+        } => TelemetryRequest::Declare(telemetry_api::DeclareRequest {
+            caller_pane,
+            name: name.clone(),
+            kind: kind.proto() as i32,
+            meaning: meaning.clone(),
+            attrs: attrs
+                .iter()
+                .map(|(key, values)| telemetry_api::Attr {
+                    key: key.clone(),
+                    values: values.clone(),
+                })
+                .collect(),
+        }),
+        C::Count { name, n, attrs } => TelemetryRequest::Count(telemetry_api::CountRequest {
+            caller_pane,
+            name: name.clone(),
+            n: *n,
+            attrs: telemetry_pairs(attrs),
+        }),
+        C::Gauge { name, value, attrs } => TelemetryRequest::Gauge(telemetry_api::GaugeRequest {
+            caller_pane,
+            name: name.clone(),
+            value: value.0,
+            attrs: telemetry_pairs(attrs),
+        }),
+        C::Event { name, attrs } => TelemetryRequest::Event(telemetry_api::EventRequest {
+            caller_pane,
+            name: name.clone(),
+            attrs: telemetry_pairs(attrs),
+        }),
+        C::List { prefix } => TelemetryRequest::List(telemetry_api::ListRequest {
+            caller_pane,
+            prefix: prefix.clone().unwrap_or_default(),
+        }),
+        C::Remove { name } => TelemetryRequest::Remove(telemetry_api::RemoveRequest {
+            caller_pane,
+            name: name.clone(),
+        }),
+    }
+}
+
+fn telemetry_kind_word(kind: i32) -> &'static str {
+    match telemetry_api::Kind::try_from(kind) {
+        Ok(telemetry_api::Kind::Counter) => "counter",
+        Ok(telemetry_api::Kind::Gauge) => "gauge",
+        Ok(telemetry_api::Kind::Event) => "event",
+        Ok(telemetry_api::Kind::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+/// One line for each signal: its name, kind, quoted meaning and `key=values` attributes.
+fn telemetry_list_lines(signals: &[telemetry_api::Signal]) -> String {
+    if signals.is_empty() {
+        return "no signals are declared".into();
+    }
+    signals
+        .iter()
+        .map(|signal| {
+            let mut line = format!(
+                "{} {} \"{}\"",
+                signal.name,
+                telemetry_kind_word(signal.kind),
+                signal.meaning
+            );
+            for attr in &signal.attrs {
+                line.push_str(&format!(" {}={}", attr.key, attr.values.join(",")));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Run a `harold tool telemetry` command against the daemon at `address`, as `pane`.
+/// `Ok` is the text to print; `Err` the one line. An empty `pane` is sent as it is, and
+/// the daemon refuses it with its `no_pane` text.
+pub(crate) async fn telemetry_within(
+    address: &str,
+    command: &TelemetryCommand,
+    pane: &str,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = TelemetryServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| telemetry_refusal_line(&status);
+        match telemetry_request(command, pane) {
+            TelemetryRequest::Declare(request) => {
+                let name = request.name.clone();
+                client.declare(request).await.map_err(refused)?;
+                Ok(format!("declared {name}"))
+            }
+            TelemetryRequest::Count(request) => {
+                let line = format!("counted {} by {}", request.name, request.n);
+                client.count(request).await.map_err(refused)?;
+                Ok(line)
+            }
+            TelemetryRequest::Gauge(request) => {
+                let line = format!("set {} to {}", request.name, request.value);
+                client.gauge(request).await.map_err(refused)?;
+                Ok(line)
+            }
+            TelemetryRequest::Event(request) => {
+                let name = request.name.clone();
+                client.event(request).await.map_err(refused)?;
+                Ok(format!("recorded {name}"))
+            }
+            TelemetryRequest::List(request) => {
+                let listed = client.list(request).await.map_err(refused)?.into_inner();
+                Ok(telemetry_list_lines(&listed.signals))
+            }
+            TelemetryRequest::Remove(request) => {
+                let name = request.name.clone();
+                client.remove(request).await.map_err(refused)?;
+                Ok(format!("removed {name}"))
+            }
+        }
+    })
+    .await
 }
 
 fn json_optional_text(object: &serde_json::Value, field: &str) -> Result<String, String> {
@@ -5934,6 +6265,372 @@ mod tests {
         }
     }
 
+    fn telemetry_parse(words: &[&str]) -> Result<Mode, String> {
+        let mut args = vec!["tool", "telemetry"];
+        args.extend_from_slice(words);
+        parse(&args)
+    }
+
+    fn telemetry_mode(command: TelemetryCommand) -> Result<Mode, String> {
+        Ok(Mode::Tool(ToolCommand::Telemetry(command)))
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect()
+    }
+
+    #[test]
+    fn tool_telemetry_commands_parse() {
+        use TelemetryCommand as C;
+        let n = || "harold.release.attempts".to_string();
+        for (words, command) in [
+            (
+                vec![
+                    "declare",
+                    "harold.release.attempts",
+                    "counter",
+                    "Release attempts, by result",
+                    "--attr",
+                    "result=ok,failed",
+                ],
+                C::Declare {
+                    name: n(),
+                    kind: TelemetryKind::Counter,
+                    meaning: "Release attempts, by result".into(),
+                    attrs: vec![("result".into(), vec!["ok".into(), "failed".into()])],
+                },
+            ),
+            (
+                vec![
+                    "declare",
+                    "chief.load",
+                    "gauge",
+                    "Load",
+                    "--attr",
+                    "host=a,b",
+                    "--attr",
+                    "slot=0-3",
+                ],
+                C::Declare {
+                    name: "chief.load".into(),
+                    kind: TelemetryKind::Gauge,
+                    meaning: "Load".into(),
+                    attrs: vec![
+                        ("host".into(), vec!["a".into(), "b".into()]),
+                        ("slot".into(), vec!["0-3".into()]),
+                    ],
+                },
+            ),
+            (
+                vec!["declare", "chief.digest", "event", "A digest was sent"],
+                C::Declare {
+                    name: "chief.digest".into(),
+                    kind: TelemetryKind::Event,
+                    meaning: "A digest was sent".into(),
+                    attrs: vec![],
+                },
+            ),
+            (
+                vec!["count", "harold.release.attempts"],
+                C::Count {
+                    name: n(),
+                    n: 1,
+                    attrs: vec![],
+                },
+            ),
+            (
+                vec![
+                    "count",
+                    "harold.release.attempts",
+                    "3",
+                    "--attr",
+                    "result=failed",
+                ],
+                C::Count {
+                    name: n(),
+                    n: 3,
+                    attrs: pairs(&[("result", "failed")]),
+                },
+            ),
+            (
+                vec!["count", "harold.release.attempts", "--attr", "result=ok"],
+                C::Count {
+                    name: n(),
+                    n: 1,
+                    attrs: pairs(&[("result", "ok")]),
+                },
+            ),
+            (
+                vec!["gauge", "chief.load", "-2.5", "--attr", "host=a"],
+                C::Gauge {
+                    name: "chief.load".into(),
+                    value: GaugeValue(-2.5),
+                    attrs: pairs(&[("host", "a")]),
+                },
+            ),
+            (
+                vec![
+                    "event",
+                    "chief.digest",
+                    "--attr",
+                    "items=4",
+                    "--attr",
+                    "kind=week",
+                ],
+                C::Event {
+                    name: "chief.digest".into(),
+                    attrs: pairs(&[("items", "4"), ("kind", "week")]),
+                },
+            ),
+            (vec!["list"], C::List { prefix: None }),
+            (
+                vec!["list", "harold"],
+                C::List {
+                    prefix: Some("harold".into()),
+                },
+            ),
+            (
+                vec!["remove", "chief.digest"],
+                C::Remove {
+                    name: "chief.digest".into(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                telemetry_parse(&words),
+                telemetry_mode(command),
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_telemetry_command_is_refused_with_usage() {
+        let usage = "invalid argument: usage is harold tool telemetry declare|count|gauge|event|list|remove";
+        assert_eq!(TELEMETRY_USAGE_LINE, usage);
+        for words in [
+            vec![],
+            vec!["record", "chief.x"],
+            vec!["declare"],
+            vec!["declare", "chief.x", "counter"],
+            vec!["declare", "chief.x", "timer", "Meaning"],
+            vec!["declare", "--attr", "counter", "Meaning"],
+            vec!["declare", "chief.x", "counter", "Meaning", "extra"],
+            vec!["declare", "chief.x", "counter", "Meaning", "--attr"],
+            vec![
+                "declare", "chief.x", "counter", "Meaning", "--attr", "result",
+            ],
+            vec!["declare", "chief.x", "counter", "Meaning", "--attr", "=ok"],
+            vec![
+                "declare", "chief.x", "counter", "Meaning", "--attr", "a=1", "--attr", "a=2",
+            ],
+            vec!["declare", "chief.x", "counter", "Meaning", "--other", "a=1"],
+            vec!["count"],
+            vec!["count", "chief.x", "x"],
+            vec!["count", "chief.x", "-1"],
+            vec!["count", "chief.x", "0"],
+            vec!["count", "chief.x", "1", "2"],
+            vec!["count", "chief.x", "--attr", "a=1", "3"],
+            vec!["count", "chief.x", "--attr", "a=1", "--attr", "a=2"],
+            vec!["count", "chief.x", "--attr", "a"],
+            vec!["gauge", "chief.x"],
+            vec!["gauge", "chief.x", "four"],
+            vec!["gauge", "chief.x", "1", "2"],
+            vec!["event"],
+            vec!["event", "chief.x", "extra"],
+            vec!["event", "chief.x", "--attr"],
+            vec!["list", "a", "b"],
+            vec!["list", "--attr", "a=1"],
+            vec!["remove"],
+            vec!["remove", "chief.x", "extra"],
+        ] {
+            assert_eq!(telemetry_parse(&words), Err(usage.to_string()), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn the_spec_declare_examples_build_the_right_requests() {
+        let request = |words: &[&str]| {
+            let Ok(Mode::Tool(ToolCommand::Telemetry(command))) = telemetry_parse(words) else {
+                panic!("not a telemetry command: {words:?}");
+            };
+            telemetry_request(&command, "%2")
+        };
+        assert_eq!(
+            request(&[
+                "declare",
+                "harold.release.attempts",
+                "counter",
+                "Release attempts, by result",
+                "--attr",
+                "result=ok,failed",
+            ]),
+            TelemetryRequest::Declare(telemetry_api::DeclareRequest {
+                caller_pane: "%2".into(),
+                name: "harold.release.attempts".into(),
+                kind: telemetry_api::Kind::Counter as i32,
+                meaning: "Release attempts, by result".into(),
+                attrs: vec![telemetry_api::Attr {
+                    key: "result".into(),
+                    values: vec!["ok".into(), "failed".into()],
+                }],
+            })
+        );
+        assert_eq!(
+            request(&[
+                "declare",
+                "chief.digest",
+                "event",
+                "A digest was sent",
+                "--attr",
+                "items=0-50",
+            ]),
+            TelemetryRequest::Declare(telemetry_api::DeclareRequest {
+                caller_pane: "%2".into(),
+                name: "chief.digest".into(),
+                kind: telemetry_api::Kind::Event as i32,
+                meaning: "A digest was sent".into(),
+                attrs: vec![telemetry_api::Attr {
+                    key: "items".into(),
+                    values: vec!["0-50".into()],
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn every_telemetry_request_carries_the_pane_from_caller_pane_from() {
+        use TelemetryCommand as C;
+        let pane = caller_pane_from(|name: &str| (name == "TMUX_PANE").then(|| "%47".to_string()));
+        assert_eq!(pane, "%47");
+        let name = || "chief.x".to_string();
+        let attrs = pairs(&[("k", "v")]);
+        for (command, expected) in [
+            (
+                C::Count {
+                    name: name(),
+                    n: 2,
+                    attrs: attrs.clone(),
+                },
+                TelemetryRequest::Count(telemetry_api::CountRequest {
+                    caller_pane: pane.clone(),
+                    name: name(),
+                    n: 2,
+                    attrs: vec![telemetry_api::Pair {
+                        key: "k".into(),
+                        value: "v".into(),
+                    }],
+                }),
+            ),
+            (
+                C::Gauge {
+                    name: name(),
+                    value: GaugeValue(4.5),
+                    attrs: vec![],
+                },
+                TelemetryRequest::Gauge(telemetry_api::GaugeRequest {
+                    caller_pane: pane.clone(),
+                    name: name(),
+                    value: 4.5,
+                    attrs: vec![],
+                }),
+            ),
+            (
+                C::Event {
+                    name: name(),
+                    attrs: vec![],
+                },
+                TelemetryRequest::Event(telemetry_api::EventRequest {
+                    caller_pane: pane.clone(),
+                    name: name(),
+                    attrs: vec![],
+                }),
+            ),
+            (
+                C::List {
+                    prefix: Some("chief".into()),
+                },
+                TelemetryRequest::List(telemetry_api::ListRequest {
+                    caller_pane: pane.clone(),
+                    prefix: "chief".into(),
+                }),
+            ),
+            (
+                C::Remove { name: name() },
+                TelemetryRequest::Remove(telemetry_api::RemoveRequest {
+                    caller_pane: pane.clone(),
+                    name: name(),
+                }),
+            ),
+        ] {
+            assert_eq!(telemetry_request(&command, &pane), expected, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_telemetry_refusal_prints_the_service_text() {
+        use tonic::{Code, Status};
+        for (status, line) in [
+            (
+                Status::permission_denied("run this from a pane: no TMUX_PANE or REX_BLOCK"),
+                "run this from a pane: no TMUX_PANE or REX_BLOCK",
+            ),
+            (
+                Status::invalid_argument(
+                    "harold.release.attempts would have 120 series: the most is 100",
+                ),
+                "harold.release.attempts would have 120 series: the most is 100",
+            ),
+            (
+                Status::new(Code::Unimplemented, "unknown service"),
+                "the Harold daemon does not serve the telemetry tool",
+            ),
+            (
+                Status::new(Code::Internal, ""),
+                "the Harold daemon refused the call",
+            ),
+        ] {
+            assert_eq!(telemetry_refusal_line(&status), line);
+        }
+    }
+
+    #[test]
+    fn a_telemetry_list_prints_one_line_for_each_signal() {
+        let signal =
+            |name: &str, kind: telemetry_api::Kind, meaning: &str, attrs| telemetry_api::Signal {
+                name: name.into(),
+                kind: kind as i32,
+                meaning: meaning.into(),
+                attrs,
+            };
+        let attr = |key: &str, values: &[&str]| telemetry_api::Attr {
+            key: key.into(),
+            values: values.iter().map(|value| (*value).into()).collect(),
+        };
+        let lines = telemetry_list_lines(&[
+            signal(
+                "harold.release.attempts",
+                telemetry_api::Kind::Counter,
+                "Release attempts, by result",
+                vec![attr("result", &["ok", "failed"]), attr("step", &["0-3"])],
+            ),
+            signal(
+                "chief.digest",
+                telemetry_api::Kind::Event,
+                "A digest was sent",
+                vec![],
+            ),
+        ]);
+        assert_eq!(
+            lines,
+            "harold.release.attempts counter \"Release attempts, by result\" result=ok,failed step=0-3\n\
+             chief.digest event \"A digest was sent\""
+        );
+        assert_eq!(telemetry_list_lines(&[]), "no signals are declared");
+    }
+
     /// A folder under the system temp folder, removed when dropped.
     struct TempFolder(std::path::PathBuf);
 
@@ -6091,6 +6788,172 @@ mod tests {
             )
             .await
         }
+    }
+
+    /// The telemetry tool over a temp folder, with the same panes as `backlog_server`:
+    /// `%40` is in `harold`'s repo, `%51` in `turso`'s, and `%2` is the chief.
+    async fn telemetry_server() -> BacklogServer {
+        let folder = TempFolder::new();
+        let (harold, turso) = (folder.0.join("harold"), folder.0.join("turso"));
+        std::fs::create_dir_all(&harold).unwrap();
+        std::fs::create_dir_all(&turso).unwrap();
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::telemetry::start(crate::tools::ToolContext {
+            data_folder: folder.0.join("data"),
+            typing: None,
+            chief_pane: std::sync::Arc::new(ChiefAt("%2")),
+            pane_folder: std::sync::Arc::new(Folders(vec![
+                ("%40", harold.clone()),
+                ("%51", turso.clone()),
+            ])),
+            products: std::sync::Arc::new(Registry(vec![
+                ("harold".into(), harold),
+                ("turso".into(), turso),
+            ])),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "claude".into(),
+            grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
+            pod_registry: None,
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        BacklogServer {
+            serving: serve(handle.routes).await,
+            folder,
+            _stop: stop,
+        }
+    }
+
+    async fn telemetry_run(
+        server: &BacklogServer,
+        pane: &str,
+        words: &[&str],
+    ) -> Result<String, String> {
+        let Ok(Mode::Tool(ToolCommand::Telemetry(command))) = telemetry_parse(words) else {
+            panic!("not a telemetry command: {words:?}");
+        };
+        telemetry_within(&server.serving.address, &command, pane, TEST_WAIT).await
+    }
+
+    #[tokio::test]
+    async fn the_chief_and_a_product_pane_record_signals_through_the_cli() {
+        let server = telemetry_server().await;
+        let run = |pane: &'static str, words: &'static [&'static str]| {
+            telemetry_run(&server, pane, words)
+        };
+        let declare: &[&str] = &[
+            "declare",
+            "harold.release.attempts",
+            "counter",
+            "Release attempts, by result",
+            "--attr",
+            "result=ok,failed",
+        ];
+        assert_eq!(
+            run("%40", declare).await,
+            Ok("declared harold.release.attempts".into())
+        );
+        // The same declaration again is accepted with no change.
+        assert_eq!(
+            run("%2", declare).await,
+            Ok("declared harold.release.attempts".into())
+        );
+        assert_eq!(
+            run(
+                "%40",
+                &[
+                    "count",
+                    "harold.release.attempts",
+                    "--attr",
+                    "result=failed"
+                ]
+            )
+            .await,
+            Ok("counted harold.release.attempts by 1".into())
+        );
+        assert_eq!(
+            run(
+                "%2",
+                &[
+                    "declare",
+                    "chief.digest",
+                    "event",
+                    "A digest was sent",
+                    "--attr",
+                    "items=0-50"
+                ]
+            )
+            .await,
+            Ok("declared chief.digest".into())
+        );
+        assert_eq!(
+            run("%2", &["event", "chief.digest", "--attr", "items=4"]).await,
+            Ok("recorded chief.digest".into())
+        );
+        assert_eq!(
+            run("%2", &["declare", "chief.load", "gauge", "Load"]).await,
+            Ok("declared chief.load".into())
+        );
+        assert_eq!(
+            run("%2", &["gauge", "chief.load", "0.5"]).await,
+            Ok("set chief.load to 0.5".into())
+        );
+        assert_eq!(
+            run("%51", &["list", "harold"]).await,
+            Ok(
+                "harold.release.attempts counter \"Release attempts, by result\" result=ok,failed"
+                    .into()
+            )
+        );
+        // A pane that may not use the prefix, a run outside a pane, and a wrong value.
+        assert_eq!(
+            run(
+                "%51",
+                &["count", "harold.release.attempts", "--attr", "result=ok"]
+            )
+            .await,
+            Err("harold. is for panes in harold's folder and the chief".into())
+        );
+        assert_eq!(
+            run(
+                "",
+                &["count", "harold.release.attempts", "--attr", "result=ok"]
+            )
+            .await,
+            Err("run this from a pane: no TMUX_PANE or REX_BLOCK".into())
+        );
+        assert_eq!(
+            run(
+                "%40",
+                &["count", "harold.release.attempts", "--attr", "result=maybe"]
+            )
+            .await,
+            Err("result=maybe is not declared: use ok or failed".into())
+        );
+        assert_eq!(
+            run("%2", &["remove", "chief.digest"]).await,
+            Ok("removed chief.digest".into())
+        );
+        assert_eq!(
+            run("%2", &["event", "chief.digest", "--attr", "items=4"]).await,
+            Err("chief.digest is not declared: declare it first".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_daemon_with_no_telemetry_tool_gives_the_unimplemented_line() {
+        let server = backlog_server().await;
+        assert_eq!(
+            telemetry_run(&server, "%2", &["list"]).await,
+            Err("the Harold daemon does not serve the telemetry tool".into())
+        );
     }
 
     fn item_json_input(id: &str) -> String {
