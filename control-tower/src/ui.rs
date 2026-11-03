@@ -5935,6 +5935,7 @@ mod tests {
                 "`o`",
                 "`gg` / `G`",
                 "`c` / `t`, `f`, `/`, `s`, `q`",
+                "`m` / `p` / `C`",
                 "Ctrl+L, Ctrl+Q, Ctrl+C",
             ]
         );
