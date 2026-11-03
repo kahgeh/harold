@@ -2003,6 +2003,11 @@ const METRICS: &[&str] = &[
     "harold.agent.blocked_long",
     "harold.multiplexer.sessions",
     "harold.multiplexer.panes",
+    "harold.work.records",
+    "harold.work.waiting_long",
+    "harold.work.status.duration",
+    "harold.work.check.mismatches",
+    "harold.work.rotations",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -2059,6 +2064,9 @@ const ATTRIBUTES: &[&str] = &[
     "embed_ms_per_passage",
     "passages",
     "buckwal.outcome",
+    "priority",
+    "status",
+    "kind",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -2338,6 +2346,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "alert-phone-request-unavailable.json",
             "alert-slot-idle.json",
             "alert-watch-cost-high.json",
+            "alert-work-rotation-failed.json",
             "alert-wrong-agent.json",
             "dashboard.json",
             "machine.json",
@@ -2351,6 +2360,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "webhook-phone-request-unavailable.json",
             "webhook-slot-idle.json",
             "webhook-watch-cost-high.json",
+            "webhook-work-rotation-failed.json",
             "webhook-wrong-agent.json",
         ]
     );
@@ -2436,6 +2446,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             REMOTE_ORDER_UNREADABLE_CARD.to_string(),
         ])
         .chain(AGENT_CARDS.map(str::to_string))
+        .chain(WORK_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2463,7 +2474,8 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             "Specs",
             "TTS server",
             "Turns",
-            "Web app (the phone's browser)"
+            "Web app (the phone's browser)",
+            "Work records"
         ]
     );
 
@@ -2604,6 +2616,12 @@ const AGENT_CARDS: [&str; 11] = [
     "Recap reads, found and none, by day",
     "Slow inventory scans against load, by hour",
     UNREADABLE_BLOCKS_CARD,
+];
+/// The work records group's cards, in the order the dashboard lists them.
+const WORK_CARDS: [&str; 3] = [
+    "Work by priority and status, and long waits",
+    "Time at each status, p50 and p95, by week",
+    "Work check mismatches by day",
 ];
 const UNREADABLE_BLOCKS_CARD: &str = "Unreadable blocks, last 24 h, by pane";
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
@@ -2768,6 +2786,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("tts", false),
         // The cards read the agent and multiplexer metrics, which carry no product.
         ("agents-multiplexer", false),
+        // The work cards read the work metrics, which carry no product.
+        ("work", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -2859,7 +2879,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // The agents group adds five: calls, failed calls, time in each state, call time and
     // the share of observations read from the screen.
     // The recap card makes one more.
-    assert_eq!(counted, 29);
+    // The work group adds two: time at each status and the check mismatches.
+    assert_eq!(counted, 31);
 }
 
 #[test]
@@ -3047,8 +3068,13 @@ fn the_alert_files_carry_the_spec_thresholds() {
             5,
         ),
     ];
+    // `work-rotation-failed` counts a log line, so it has its own test below.
     assert_eq!(
-        expected.map(|(name, ..)| name),
+        expected
+            .map(|(name, ..)| name)
+            .into_iter()
+            .chain(["work-rotation-failed"])
+            .collect::<Vec<_>>(),
         crate::alerts::ALERT_NAMES,
         "one file per alert Harold accepts"
     );
@@ -3967,8 +3993,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 11, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 11, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -3982,8 +4008,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 10, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 11, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 11, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -4159,8 +4185,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the eight created.
-    assert_eq!(stand_in.objects("webhooks").len(), 11, "{stderr}");
+    // The old webhook, the two kept, and the nine created.
+    assert_eq!(stand_in.objects("webhooks").len(), 12, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -4170,7 +4196,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 8, "{calls:?}");
+    assert_eq!(posts, 9, "{calls:?}");
 }
 
 #[test]
@@ -4515,7 +4541,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 10, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 11, "{stderr}");
     stand_in
 }
 
@@ -4524,7 +4550,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 10 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 11 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),
@@ -5061,6 +5087,99 @@ fn the_agents_and_multiplexer_cards_read_their_metrics_with_the_right_rule() {
             assert!(!lower.contains(word), "{word} in {text}");
         }
     }
+}
+
+#[test]
+fn the_work_cards_read_their_metrics_with_the_right_rule() {
+    let dashboard = definition("dashboard.json");
+    let card = |name: &str| {
+        tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap_or_else(|| panic!("no card {name}"))
+    };
+    // (card, metrics read, the counter rule, the histogram rule)
+    let expected: [(&str, &[&str], bool, bool); 3] = [
+        (
+            WORK_CARDS[0],
+            &["harold.work.records", "harold.work.waiting_long"],
+            false,
+            false,
+        ),
+        (WORK_CARDS[1], &["harold.work.status.duration"], false, true),
+        (
+            WORK_CARDS[2],
+            &["harold.work.check.mismatches"],
+            true,
+            false,
+        ),
+    ];
+    for (name, reads, counter, histogram) in expected {
+        let tile = card(name);
+        assert_eq!(tile["containerId"], "work", "{name}");
+        let config = &tile["config"];
+        assert_eq!(config["configType"], "sql", "{name}");
+        assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@", "{name}");
+        assert_eq!(metrics_read(config), reads, "{name}");
+        let sql = config["sqlTemplate"].as_str().unwrap();
+        assert!(!sql.contains("$__filters"), "{name}: {sql}");
+        for piece in COUNTER_RULE {
+            assert_eq!(sql.contains(piece), counter, "{name} counter rule {piece}");
+        }
+        for piece in HISTOGRAM_RULE {
+            assert_eq!(sql.contains(piece), histogram, "{name} histogram {piece}");
+        }
+        if !counter && !histogram {
+            assert!(sql.contains("FROM $__sourceTable(gauge)"), "{name}: {sql}");
+            assert!(sql.contains("argMax(Value, TimeUnix)"), "{name}: {sql}");
+        }
+    }
+    let by_week = card(WORK_CARDS[1])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    for piece in [
+        "toStartOfWeek(TimeUnix) AS week",
+        "Attributes['status'] AS status",
+        "AS p50_s",
+        "AS p95_s",
+    ] {
+        assert!(by_week.contains(piece), "{piece} in {by_week}");
+    }
+    let by_kind = card(WORK_CARDS[2])["config"]["sqlTemplate"]
+        .as_str()
+        .unwrap();
+    assert!(by_kind.contains("Attributes['kind'] AS kind"), "{by_kind}");
+}
+
+#[test]
+fn the_work_rotation_failed_alert_counts_the_failure_line_over_a_day() {
+    let alert = definition("alert-work-rotation-failed.json");
+    assert_eq!(alert["name"], "work-rotation-failed");
+    assert_eq!(alert["note"], "work-rotation-failed");
+    assert_eq!(alert["source"], "inline");
+    assert_eq!(alert["threshold"].as_f64(), Some(0.0));
+    assert_eq!(alert["thresholdType"], "above_exclusive");
+    assert_eq!(alert["interval"], "1d");
+    assert!(alert.get("numConsecutiveWindows").is_none());
+    assert_eq!(alert["channel"]["type"], "webhook");
+    assert_eq!(alert["channel"]["webhookId"], "@WEBHOOK_ID@");
+    let config = &alert["chartConfig"];
+    assert_eq!(config["sourceId"], "@LOGS_SOURCE_ID@");
+    let select = config["select"].as_array().unwrap();
+    assert_eq!(select.len(), 1);
+    assert_eq!(select[0]["aggFn"], "count");
+    assert_eq!(
+        select[0]["where"],
+        "ServiceName = 'harold' AND Body = 'work rotation failed'"
+    );
+    let webhook = definition("webhook-work-rotation-failed.json");
+    assert_eq!(webhook["name"], "harold-alerts-work-rotation-failed");
+    assert!(
+        webhook["body"]
+            .as_str()
+            .unwrap()
+            .contains("\"alert\": \"work-rotation-failed\"")
+    );
 }
 
 #[test]

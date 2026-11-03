@@ -270,10 +270,18 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | backlog | A product's top 5 items, ranked, and its backlog notes | — |
 | item | One entry in a backlog | — |
 | backlog note | A note kept with a backlog: a rule, history, held or left out | "note" alone |
-| queue | The chief's own list of things to do, with one Now item | — |
+| queue | The chief's own list of things to do, with one Now item. The work records replace it in the chief's use (work-records) | — |
 | Now item | The queue's current item | — |
 | queue item age | How long ago a queue item's text was added or last changed. Moving the item does not change it | "last updated" (a move is not an update) |
 | evidence | A pointer, such as a file and line, that backs an item | — |
+| work record | The chief's record of one piece of work: its priority, status, what it waits for, its next step, its decisions and its links. The work tool keeps it. A work record is not a program status record | "record" alone (the glossary also has the program status record), "ticket", "task card" |
+| priority (of a work record) | `focus`, `next` or `later`. At most two open work records are in focus | — |
+| status (of a work record) | Where the work is, from `idea` to `checked by the user`. It is not an agent state | "state" for it |
+| open, closed (of a work record) | A work record is open before `checked by the user`, and closed at it | — |
+| decision (of a work record) | One thing decided about the work, with its date, who decided and its mark: `agreed`, `draft`, `dropped` or `open`. The decision of a question is one choice within that question | "decision" alone where both could be meant |
+| link (of a work record) | A pointer from a work record to a spec, a question or a note. A todo's `link` is a web address | — |
+| work file | One Turso file of work records. The newest is the current one | "shard" |
+| rotation | Harold's move of the open work records to a new work file every `rotation_days` days | "archive" for the move |
 
 ## Storing and delivering
 

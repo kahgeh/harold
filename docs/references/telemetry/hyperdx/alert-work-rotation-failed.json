@@ -1,0 +1,28 @@
+{
+  "name": "work-rotation-failed",
+  "note": "work-rotation-failed",
+  "message": "A work file did not rotate in the last day. Read the work rotation failed line's file and reason, and the work data folder.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "work-rotation-failed",
+    "displayType": "line",
+    "sourceId": "@LOGS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "count",
+        "where": "ServiceName = 'harold' AND Body = 'work rotation failed'",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0,
+  "thresholdType": "above_exclusive",
+  "interval": "1d",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

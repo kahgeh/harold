@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_ten_alerts_are_the_ones_in_the_specs() {
+fn the_eleven_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -116,7 +116,8 @@ fn the_ten_alerts_are_the_ones_in_the_specs() {
             "disk-low",
             "multiplexer-calls-failing",
             "agent-recaps-stopped",
-            "agent-blocked-long"
+            "agent-blocked-long",
+            "work-rotation-failed"
         ]
     );
     assert_eq!(

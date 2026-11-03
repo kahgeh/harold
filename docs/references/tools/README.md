@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are four: the [question tool](questions.md), the [backlog and queue](backlog.md), the [watch tool](watch.md) and the [knowledge tool](knowledge.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are five: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md) and the [knowledge tool](knowledge.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -67,5 +67,6 @@ The knowledge tool is the one tool with an off switch: it starts only when `[kno
 
 - [Question tool](questions.md): the chief's questions for the user, answered from the control-tower and typed back into the chief's pane.
 - [Backlog and queue](backlog.md): each product's ranked backlog, kept by its product manager, and the chief's own queue.
+- [Work tool](work.md): the chief's work records, with their priority, status and decisions, kept in Turso files that Harold rotates by itself.
 - [Watch tool](watch.md): an agent asks Harold to run one of its skills with a model on a schedule, and Harold types the reports into the chief's pane or the agent's.
 - [Knowledge tool](knowledge.md): Harold's index of the organisation's vault of Markdown notes by meaning, for the chief, the web app's Notes page and the control-tower.
