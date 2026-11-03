@@ -6164,3 +6164,93 @@ fn a_forgotten_name_that_changed_kind_is_absent_from_the_next_export() {
     let names = test_support::metric_names_since(start);
     assert!(!names.contains(&format!("agent.{gone}")), "{names:?}");
 }
+
+/// A metric exporter whose sends wait until the test lets them go.
+struct HeldExporter {
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    sent: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl opentelemetry_sdk::metrics::exporter::PushMetricExporter for HeldExporter {
+    async fn export(
+        &self,
+        _metrics: &opentelemetry_sdk::metrics::data::ResourceMetrics,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        let _ = self.entered.lock().unwrap().send(());
+        let _ = self.release.lock().unwrap().recv();
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: Duration) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+
+    fn temporality(&self) -> opentelemetry_sdk::metrics::Temporality {
+        opentelemetry_sdk::metrics::Temporality::Cumulative
+    }
+}
+
+#[test]
+fn stopping_a_signals_provider_waits_for_the_send_on_its_way() {
+    use opentelemetry_sdk::metrics::exporter::PushMetricExporter as _;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(SignalSendGate::default());
+    let exporter = Arc::new(SharedMetricExporter {
+        inner: Arc::new(HeldExporter {
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+            sent: Arc::clone(&sent),
+        }),
+        stopped: Some(Arc::clone(&gate)),
+    });
+
+    // A send that passed the switch before the stop.
+    let sending = {
+        let exporter = Arc::clone(&exporter);
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(exporter.export(&Default::default()))
+        })
+    };
+    entered.recv().unwrap();
+
+    let stop_returned = Arc::new(AtomicBool::new(false));
+    let stopping = {
+        let gate = Arc::clone(&gate);
+        let stop_returned = Arc::clone(&stop_returned);
+        std::thread::spawn(move || {
+            gate.stop_and_wait(Duration::from_secs(5));
+            stop_returned.store(true, Ordering::SeqCst);
+        })
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !stop_returned.load(Ordering::SeqCst),
+        "the stop returned while a send was on its way"
+    );
+    release.send(()).unwrap();
+    sending.join().unwrap().unwrap();
+    stopping.join().unwrap();
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+
+    // A send after the stop sends nothing.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(exporter.export(&Default::default()))
+        .unwrap();
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}

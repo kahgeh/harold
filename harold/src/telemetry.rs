@@ -2580,7 +2580,7 @@ impl Pipeline {
             )
             .build();
         let signals: Arc<SignalProviderFactory> = Arc::new(Box::new(move || {
-            let stopped = Arc::new(AtomicBool::new(false));
+            let stopped = Arc::new(SignalSendGate::default());
             let provider = SdkMeterProvider::builder()
                 .with_resource(resource.clone())
                 .with_reader(
@@ -3120,7 +3120,7 @@ fn signal_values() -> &'static Mutex<HashMap<String, SignalValues>> {
 
 /// Makes a meter provider for the agent signals that sends through Harold's metric exporter,
 /// and the switch that stops its sends.
-type SignalProviderFactory = Box<dyn Fn() -> (SdkMeterProvider, Arc<AtomicBool>) + Send + Sync>;
+type SignalProviderFactory = Box<dyn Fn() -> (SdkMeterProvider, Arc<SignalSendGate>) + Send + Sync>;
 
 /// The agent signals' own meter provider. A cumulative sum in the SDK keeps every series it
 /// has seen until its provider stops, so a forgotten counter would be sent again at each
@@ -3129,7 +3129,7 @@ type SignalProviderFactory = Box<dyn Fn() -> (SdkMeterProvider, Arc<AtomicBool>)
 /// `signal_values`, so no total is lost.
 struct SignalMeters {
     factory: Arc<SignalProviderFactory>,
-    current: Option<(SdkMeterProvider, Arc<AtomicBool>)>,
+    current: Option<(SdkMeterProvider, Arc<SignalSendGate>)>,
     registered: HashSet<(String, SignalKind)>,
 }
 
@@ -3285,8 +3285,10 @@ pub(crate) fn signal_forget(name: &str) {
         }
         old
     };
-    if let Some((provider, stop)) = old {
-        stop.store(true, Ordering::SeqCst);
+    if let Some((provider, gate)) = old {
+        // An export that the old provider collected before this call can still be on its
+        // way: wait until it has gone, so no export after this call holds `name`.
+        gate.stop_and_wait(EXPORT_TIMEOUT);
         // The provider's last collection runs in its stop, without any lock held here.
         let _ = std::thread::Builder::new()
             .name("telemetry-signals-stop".to_owned())
@@ -3320,24 +3322,60 @@ fn signal_provider_of(factory: &Arc<SignalProviderFactory>) -> Option<SdkMeterPr
         .map(|(provider, _)| provider.clone())
 }
 
+/// The stop switch of an agent signals provider's sends, with the count of its sends that
+/// are on their way. A send checks the switch after it counts itself, and `stop_and_wait`
+/// reads the count after it sets the switch, so each send either sees the switch or is
+/// waited for.
+#[derive(Debug, Default)]
+pub(crate) struct SignalSendGate {
+    stopped: AtomicBool,
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+/// One send through a `SignalSendGate`, counted until it is dropped.
+pub(crate) struct SignalSend<'a>(&'a SignalSendGate);
+
+impl Drop for SignalSend<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl SignalSendGate {
+    /// Counts one send, or `None` when the switch is on.
+    pub(crate) fn enter(&self) -> Option<SignalSend<'_>> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        let send = SignalSend(self);
+        (!self.stopped.load(Ordering::SeqCst)).then_some(send)
+    }
+
+    /// Turns the switch on and waits, at most `limit`, until no send is on its way.
+    pub(crate) fn stop_and_wait(&self, limit: Duration) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + limit;
+        while self.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
 /// Passes metric exports to Harold's one metric exporter, which the main meter provider and
 /// the agent signals' provider share. Only the owner stops the exporter. A signals copy sends
 /// nothing once its switch is on.
 pub(crate) struct SharedMetricExporter<E> {
     inner: Arc<E>,
     /// `None` for the owner; the stop switch for an agent signals provider.
-    stopped: Option<Arc<AtomicBool>>,
+    stopped: Option<Arc<SignalSendGate>>,
 }
 
 impl<E: PushMetricExporter> PushMetricExporter for SharedMetricExporter<E> {
     async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
-        if self
-            .stopped
-            .as_ref()
-            .is_some_and(|stopped| stopped.load(Ordering::SeqCst))
-        {
+        let Some(gate) = &self.stopped else {
+            return self.inner.export(metrics).await;
+        };
+        let Some(_sending) = gate.enter() else {
             return Ok(());
-        }
+        };
         self.inner.export(metrics).await
     }
 
