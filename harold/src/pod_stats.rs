@@ -834,7 +834,11 @@ pub(crate) enum Notice {
     },
     /// A spec with a started file whose last merge has no stage, is over 7 days old and
     /// has no merged file. Harold completed it.
-    CompletedWithoutFile { id: String },
+    CompletedWithoutFile {
+        id: String,
+        merged_at: OffsetDateTime,
+        commit: Option<String>,
+    },
     /// A spec with a started file whose last stage merged over 7 days ago and has no
     /// merged file.
     StageMergedWithoutFile { id: String, stage: String },
@@ -969,6 +973,8 @@ fn parse_merged(pairs: &HashMap<&str, &str>) -> Option<MergedFile> {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct MergeSeen {
     whole: Option<OffsetDateTime>,
+    /// The commit of the reflog entry that gives `whole`. A gone worktree has none.
+    whole_commit: Option<String>,
     stage: Option<(OffsetDateTime, String)>,
 }
 
@@ -990,7 +996,12 @@ fn merges_seen(
         let spec = spec_ref(&name, &is_spec);
         let merges = seen.entry(spec.id).or_default();
         match spec.stage {
-            None => merges.whole = merges.whole.max(Some(time)),
+            None => {
+                if merges.whole.is_none_or(|whole| time > whole) {
+                    merges.whole = Some(time);
+                    merges.whole_commit = Some(entry.hash.clone());
+                }
+            }
             Some(stage) => {
                 if merges
                     .stage
@@ -1004,7 +1015,10 @@ fn merges_seen(
     }
     for (id, time) in gone {
         let merges = seen.entry(id.clone()).or_default();
-        merges.whole = merges.whole.max(Some(*time));
+        if merges.whole.is_none_or(|whole| *time > whole) {
+            merges.whole = Some(*time);
+            merges.whole_commit = None;
+        }
     }
     seen
 }
@@ -1125,8 +1139,12 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
                     && seen.stage.as_ref().is_none_or(|(stage, _)| stage <= whole)
             });
             if withdrawn.is_none() {
-                if completed.is_some() {
-                    notices.push(Notice::CompletedWithoutFile { id: id.to_owned() });
+                if let Some(merged_at) = completed {
+                    notices.push(Notice::CompletedWithoutFile {
+                        id: id.to_owned(),
+                        merged_at,
+                        commit: seen.whole_commit.clone(),
+                    });
                 } else if let Some((stage_at, stage)) = &seen.stage
                     && now - *stage_at > MERGE_WAIT
                     && !waiting_worker
@@ -2054,11 +2072,17 @@ impl<G: Git> PodStats<G> {
                         "pod file unreadable"
                     );
                 }
-                Notice::CompletedWithoutFile { id } => {
+                Notice::CompletedWithoutFile {
+                    id,
+                    merged_at,
+                    commit,
+                } => {
                     if self.warned.insert(format!("{product}\0completed\0{id}")) {
                         warn!(
                             pod.product = %product,
                             spec.id = %id,
+                            merged_at = %rfc3339(*merged_at),
+                            commit = %commit.as_deref().unwrap_or("unknown"),
                             "spec completed without merged file"
                         );
                     }

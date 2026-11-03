@@ -1394,6 +1394,42 @@ fn a_stage_merge_with_a_started_file_and_no_merged_file_never_completes_the_spec
 }
 
 #[test]
+fn completed_notice_names_the_merge() {
+    let pod = Pod::new();
+    let now = OffsetDateTime::now_utc();
+    let dir = staged_spec(&pod, now);
+    let none = HashMap::new();
+    let merge = days_ago(now, 8).replace_nanosecond(0).unwrap();
+    let older = days_ago(now, 9).replace_nanosecond(0).unwrap();
+    let hash = "0123456789abcdef0123456789abcdef01234567".to_owned();
+    let mut newest = entry("merge s: Fast-forward", merge);
+    newest.hash = hash.clone();
+    let reflog = [newest, entry("merge s: Fast-forward", older)];
+
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &reflog, &none);
+    assert_eq!(
+        read.notices,
+        vec![Notice::CompletedWithoutFile {
+            id: "s".into(),
+            merged_at: merge,
+            commit: Some(hash)
+        }]
+    );
+
+    // A merge seen only from a gone worktree has no commit.
+    let gone = HashMap::from([("s".to_owned(), merge)]);
+    let read = read_with(&dir, now, UtcOffset::UTC, &none, &[], &gone);
+    assert_eq!(
+        read.notices,
+        vec![Notice::CompletedWithoutFile {
+            id: "s".into(),
+            merged_at: merge,
+            commit: None
+        }]
+    );
+}
+
+#[test]
 fn a_merge_without_a_stage_over_seven_days_old_completes_a_spec_with_no_merged_file() {
     let pod = Pod::new();
     let now = OffsetDateTime::now_utc();
@@ -1410,7 +1446,11 @@ fn a_merge_without_a_stage_over_seven_days_old_completes_a_spec_with_no_merged_f
     assert_eq!(spec.merged_commit, None);
     assert_eq!(
         read.notices,
-        vec![Notice::CompletedWithoutFile { id: "s".into() }]
+        vec![Notice::CompletedWithoutFile {
+            id: "s".into(),
+            merged_at: merge,
+            commit: Some("h".into())
+        }]
     );
 
     // A worktree of a worker running for the spec holds it back.
