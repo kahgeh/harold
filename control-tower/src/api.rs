@@ -8,8 +8,9 @@ use std::time::Duration;
 use harold_api::harold::{
     AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
     CallAction as ProtoCallAction, CallRequest, CallResponse, CallResult as ProtoCallResult,
-    CallState as ProtoCallState, MonitorHealthState as ProtoMonitorHealthState,
-    SetMessagingPausedRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
+    CallState as ProtoCallState, GetRemoteOrderRequest,
+    MonitorHealthState as ProtoMonitorHealthState, SetMessagingPausedRequest,
+    SetRemoteOrderRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
 };
 use harold_api::tools::backlog::v1::{
@@ -236,6 +237,36 @@ impl SourceStream {
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
+    /// The PnEM products in the remote order. An older Harold answers `Unimplemented`,
+    /// which gives an empty order and no error.
+    pub async fn get_remote_order(&self) -> Result<Vec<String>, SourceError> {
+        let Some(mut client) = self.voice.clone() else {
+            return Err(SourceError::transport("remote order unavailable"));
+        };
+        let result = tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.get_remote_order(GetRemoteOrderRequest {}),
+        )
+        .await
+        .map_err(|_| SourceError::transport("remote order request timed out"))?;
+        remote_order_result(result.map(|response| response.into_inner().products))
+    }
+
+    /// Saves a new remote order.
+    pub async fn set_remote_order(&self, products: &[String]) -> Result<(), SourceError> {
+        let Some(mut client) = self.voice.clone() else {
+            return Err(SourceError::transport("remote order unavailable"));
+        };
+        let request = SetRemoteOrderRequest {
+            products: products.to_vec(),
+        };
+        tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.set_remote_order(request))
+            .await
+            .map_err(|_| SourceError::transport("remote order request timed out"))?
+            .map(|_| ())
+            .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
     pub async fn request_call(&self, action: CallAction) -> Result<CallView, SourceError> {
         let Some(mut client) = self.voice.clone() else {
             return Err(SourceError::transport("call control unavailable"));
@@ -415,6 +446,17 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
 /// What `AnswerQuestion`'s answer means for the block. Only the two refusals the tool
 /// names are told apart; anything else, an older Harold or a failed write included,
 /// means the answer was not saved.
+/// The answer to `GetRemoteOrder`. `Unimplemented` (an older Harold) is an empty order.
+fn remote_order_result(
+    result: Result<Vec<String>, tonic::Status>,
+) -> Result<Vec<String>, SourceError> {
+    match result {
+        Ok(products) => Ok(products),
+        Err(status) if status.code() == tonic::Code::Unimplemented => Ok(Vec::new()),
+        Err(status) => Err(SourceError::transport(status.to_string())),
+    }
+}
+
 pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResult {
     let Err(status) = result else {
         return SendResult::Recorded;
@@ -724,6 +766,7 @@ fn map_monitor_health_state(state: i32) -> MonitorHealthState {
 
 #[cfg(test)]
 mod tests {
+    use super::remote_order_result;
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
@@ -1295,6 +1338,31 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_tts_muted(true).await.unwrap_err();
         assert!(error.detail().contains("voice control unavailable"));
+    }
+
+    #[tokio::test]
+    async fn the_remote_order_calls_without_a_client_report_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.get_remote_order().await.unwrap_err();
+        assert!(error.detail().contains("remote order unavailable"));
+        let error = stream.set_remote_order(&["a".into()]).await.unwrap_err();
+        assert!(error.detail().contains("remote order unavailable"));
+    }
+
+    #[test]
+    fn an_older_harold_without_the_remote_order_gives_an_empty_order() {
+        let unimplemented = Err(tonic::Status::unimplemented("GetRemoteOrder"));
+        assert_eq!(remote_order_result(unimplemented), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn the_remote_order_passes_through_and_other_errors_are_errors() {
+        let products = vec!["harold".to_string(), "keymap".to_string()];
+        assert_eq!(remote_order_result(Ok(products.clone())), Ok(products));
+        let error =
+            remote_order_result(Err(tonic::Status::unavailable("\x1b[31mdown"))).unwrap_err();
+        assert!(error.detail().contains("down"));
+        assert!(!error.detail().contains('\x1b'));
     }
 
     #[tokio::test]

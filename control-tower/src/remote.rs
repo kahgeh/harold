@@ -1,7 +1,12 @@
-//! The remote control. Tasks 6 to 8 fill this module.
+//! The remote control: `control-tower --remote`.
 //!
-//! This part is the model (the list of entries and the keys) and the drawing.
-//! The model has no I/O, so tests can check every rule.
+//! The model (the list of entries and the keys) and the drawing have no I/O, so
+//! tests can check every rule. The run loop takes its Harold stream, keys, screen
+//! and signals through small traits, so tests run it with fakes.
+
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -9,12 +14,18 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use tokio::runtime::Builder;
 
-use crate::api::AgentStateSource;
-use crate::app::AgentRow;
+use crate::api::{AgentStateSource, SourceError, SourceStream};
+use crate::app::{AgentRow, App, ConnectionState, SearchState, Snapshot};
 use crate::cli::Options;
-use crate::navigation::TmuxNavigator;
-use crate::runtime::AppError;
+use crate::navigation::{PaneNavigator, TmuxNavigator};
+use crate::runtime::{
+    AppError, CrosstermInput, InputPump, RuntimeInput, ShutdownPort, ShutdownSignals, merge_exit,
+    panic_detail, sanitize_error,
+};
+use crate::terminal::{TerminalError, TerminalGuard};
+use crate::text::sanitize_display;
 use crate::ui::{AMBER, BOARD, CORAL, INK, MUTED};
 
 /// One line of the remote control.
@@ -268,13 +279,306 @@ pub fn draw(frame: &mut Frame, model: &Model) {
     frame.render_widget(Paragraph::new(hints.to_vec()), hint_area);
 }
 
-/// Run the remote control. It is a stub until Task 8.
+/// The longest notice on the last line, in characters, before the width cuts it.
+const NOTICE_LIMIT: usize = 200;
+
+/// A boxed future that need not be `Send`: the loop runs on one thread.
+pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// Opens the Harold stream.
+pub(crate) trait RemoteSource {
+    type Stream: RemoteStream;
+    fn open(&self) -> LocalFuture<'_, Result<Self::Stream, SourceError>>;
+}
+
+/// The Harold stream and the two calls of the remote order.
+pub(crate) trait RemoteStream {
+    fn receive(&mut self) -> LocalFuture<'_, Option<Result<Snapshot, SourceError>>>;
+    fn remote_order(&self) -> LocalFuture<'_, Result<Vec<String>, SourceError>>;
+    fn save_remote_order<'a>(
+        &'a self,
+        products: &'a [String],
+    ) -> LocalFuture<'a, Result<(), SourceError>>;
+}
+
+/// The terminal keys. `None` means the input stopped.
+pub(crate) trait RemoteKeys {
+    fn next_input(&mut self) -> LocalFuture<'_, Option<Result<RuntimeInput, String>>>;
+}
+
+pub(crate) trait RemoteScreen {
+    fn show(&mut self, model: &Model) -> Result<(), TerminalError>;
+}
+
+impl RemoteSource for AgentStateSource {
+    type Stream = SourceStream;
+
+    fn open(&self) -> LocalFuture<'_, Result<SourceStream, SourceError>> {
+        AgentStateSource::open(self)
+    }
+}
+
+impl RemoteStream for SourceStream {
+    fn receive(&mut self) -> LocalFuture<'_, Option<Result<Snapshot, SourceError>>> {
+        Box::pin(self.recv())
+    }
+
+    fn remote_order(&self) -> LocalFuture<'_, Result<Vec<String>, SourceError>> {
+        Box::pin(self.get_remote_order())
+    }
+
+    fn save_remote_order<'a>(
+        &'a self,
+        products: &'a [String],
+    ) -> LocalFuture<'a, Result<(), SourceError>> {
+        Box::pin(self.set_remote_order(products))
+    }
+}
+
+impl RemoteKeys for InputPump {
+    fn next_input(&mut self) -> LocalFuture<'_, Option<Result<RuntimeInput, String>>> {
+        Box::pin(self.recv())
+    }
+}
+
+impl RemoteScreen for TerminalGuard {
+    fn show(&mut self, model: &Model) -> Result<(), TerminalError> {
+        self.draw_remote(model)
+    }
+}
+
+/// Run the remote control until a jump, Esc, a signal or an error.
+///
+/// Every exit closes the remote's own Rex layer once (the block in `REX_BLOCK`), then
+/// restores the terminal. A failed close is ignored.
 pub fn run(
     _options: Options,
-    _source: AgentStateSource,
-    _navigator: TmuxNavigator,
+    source: AgentStateSource,
+    navigator: TmuxNavigator,
 ) -> Result<(), AppError> {
-    Ok(())
+    let block = std::env::var("REX_BLOCK").ok();
+    let block = block.as_deref();
+    let started = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| AppError::Runtime(sanitize_error(&error.to_string())))
+        .and_then(|runtime| {
+            let shutdown = runtime.block_on(async { ShutdownSignals::new() })?;
+            let terminal = TerminalGuard::acquire()?;
+            Ok((runtime, shutdown, terminal))
+        });
+    let (runtime, mut shutdown, mut terminal) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            close_layer(&navigator, block);
+            return Err(error);
+        }
+    };
+
+    let mut keys = InputPump::start_with(CrosstermInput);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(run_with(
+            &source,
+            &mut keys,
+            &mut shutdown,
+            &mut terminal,
+            &navigator,
+            block,
+        ))
+    }));
+    drop(keys);
+    if outcome.is_err() {
+        // A panic left `run_with` before its own close.
+        close_layer(&navigator, block);
+    }
+    let restore_result = terminal.restore().map_err(AppError::from);
+
+    match outcome {
+        Ok(Ok(())) => restore_result,
+        Ok(Err(error)) => Err(merge_exit(error, restore_result)),
+        Err(payload) => Err(merge_exit(
+            AppError::Panic(panic_detail(payload)),
+            restore_result,
+        )),
+    }
+}
+
+/// The loop of the remote, then the close of its own layer (`block`), on every exit.
+pub(crate) async fn run_with(
+    source: &impl RemoteSource,
+    keys: &mut impl RemoteKeys,
+    shutdown: &mut impl ShutdownPort,
+    screen: &mut impl RemoteScreen,
+    navigator: &TmuxNavigator,
+    block: Option<&str>,
+) -> Result<(), AppError> {
+    let result = remote_loop(source, keys, shutdown, screen, navigator).await;
+    close_layer(navigator, block);
+    result
+}
+
+/// Closes the remote's own layer. A missing block or a failed close does nothing more:
+/// the remote exits in any case.
+fn close_layer(navigator: &TmuxNavigator, block: Option<&str>) {
+    if let Some(block) = block.filter(|block| !block.trim().is_empty()) {
+        let _ = navigator.close_own_layer(block);
+    }
+}
+
+fn notice(what: &str, detail: &str) -> String {
+    sanitize_display(&format!("{what}: {detail}"), NOTICE_LIMIT)
+}
+
+/// The next snapshot, or never when there is no stream.
+async fn next_snapshot<S: RemoteStream>(
+    stream: &mut Option<S>,
+) -> Option<Result<Snapshot, SourceError>> {
+    match stream {
+        Some(stream) => stream.receive().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn remote_loop<S: RemoteSource>(
+    source: &S,
+    keys: &mut impl RemoteKeys,
+    shutdown: &mut impl ShutdownPort,
+    screen: &mut impl RemoteScreen,
+    navigator: &TmuxNavigator,
+) -> Result<(), AppError> {
+    let mut model = Model::new(Vec::new());
+    let mut app = App::new(
+        ConnectionState::Connecting,
+        Snapshot {
+            through_event_version: 0,
+            server_time_ms: 0,
+            monitor_health: Vec::new(),
+            rows: Vec::new(),
+            tts_muted: false,
+            messaging_paused: false,
+            harold_version: None,
+        },
+        SearchState {
+            query: String::new(),
+            editing: false,
+        },
+        None,
+    );
+    let mut first_snapshot = true;
+    let mut order: Vec<String> = Vec::new();
+    let mut stream: Option<S::Stream> = None;
+    let mut opening = true;
+    let open = source.open();
+    tokio::pin!(open);
+    screen.show(&model)?;
+
+    loop {
+        tokio::select! {
+            opened = &mut open, if opening => {
+                opening = false;
+                match opened {
+                    Ok(opened) => {
+                        match opened.remote_order().await {
+                            Ok(products) => order = products,
+                            Err(error) => {
+                                model.notice =
+                                    Some(notice("could not read the remote order", error.detail()));
+                            }
+                        }
+                        stream = Some(opened);
+                    }
+                    Err(error) => {
+                        model.notice = Some(notice("Harold is not reachable", error.detail()));
+                    }
+                }
+            }
+            item = next_snapshot(&mut stream) => {
+                match item {
+                    Some(Ok(snapshot)) => {
+                        let applied = if first_snapshot {
+                            app.apply_first_snapshot(snapshot).map(|()| true)
+                        } else {
+                            app.apply_later_snapshot(snapshot)
+                        };
+                        match applied {
+                            Ok(_) => {
+                                first_snapshot = false;
+                                model.replace_entries(entries(&app.snapshot.rows, &order, |row| {
+                                    app.is_waiting(&row.incarnation)
+                                }));
+                            }
+                            Err(error) => {
+                                model.notice = Some(notice("Harold sent a bad snapshot", &error.to_string()));
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        model.notice = Some(notice("Harold stream failed", error.detail()));
+                        stream = None;
+                    }
+                    None => {
+                        model.notice = Some("Harold stream closed".to_string());
+                        stream = None;
+                    }
+                }
+            }
+            input = keys.next_input() => {
+                let key = match input {
+                    Some(Ok(RuntimeInput::Key(key))) => key,
+                    Some(Ok(RuntimeInput::Redraw | RuntimeInput::Focus(_))) => {
+                        screen.show(&model)?;
+                        continue;
+                    }
+                    Some(Err(detail)) => return Err(AppError::Input(detail)),
+                    None => return Err(AppError::Input("terminal input worker stopped".into())),
+                };
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    return Ok(());
+                }
+                match model.key(key) {
+                    Action::Close => return Ok(()),
+                    Action::Jump(index) => {
+                        if jump(&mut model, index, navigator) {
+                            return Ok(());
+                        }
+                    }
+                    Action::Move { order: moved } => {
+                        // The screen keeps the new order even when the save fails.
+                        order = moved;
+                        let saved = match &stream {
+                            Some(stream) => stream.save_remote_order(&order).await,
+                            None => Err(SourceError::Transport("Harold is not connected".into())),
+                        };
+                        if let Err(error) = saved {
+                            model.notice = Some(notice("could not save the remote order", error.detail()));
+                        }
+                    }
+                    Action::None => {}
+                }
+            }
+            () = shutdown.recv_shutdown() => return Ok(()),
+        }
+        screen.show(&model)?;
+    }
+}
+
+/// Jumps to the entry at `index`. True when the jump worked; otherwise the notice tells
+/// the failed step and the remote stays open.
+fn jump(model: &mut Model, index: usize, navigator: &TmuxNavigator) -> bool {
+    let Some(entry) = model.entries.get(index) else {
+        return false;
+    };
+    if entry.block_id.is_none() {
+        model.notice = Some("this agent is not in a Rex pane".to_string());
+        return false;
+    }
+    match navigator.focus_rex_block(&entry.session, &entry.pane_id) {
+        Ok(()) => true,
+        Err(error) => {
+            model.notice = Some(sanitize_display(&error.to_string(), NOTICE_LIMIT));
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -708,5 +1012,526 @@ mod tests {
         for (w, h) in [(20, 5), (1, 1), (3, 2), (40, 3), (0, 0)] {
             let _ = render(&sample(), w, h);
         }
+    }
+
+    // ---- The run loop, with a fake Harold, fake keys and a scripted `rex`. ----
+
+    use crate::api::SourceError;
+    use crate::app::Snapshot;
+    use crate::navigation::fake_rex::{self, VIEW, steps};
+    use crate::runtime::{BoxFuture, RuntimeInput, ShutdownPort};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    /// A run that has not ended after this time stays open: every fake answers at once.
+    const STAYS_OPEN: Duration = Duration::from_millis(300);
+    const OWN_BLOCK: &str = "block:01f9";
+    const CLOSE: Result<&str, &str> = Ok(r#"{"revision":216}"#);
+
+    struct FakeStream {
+        snapshots: VecDeque<Snapshot>,
+        /// Sent after the first save of the order, to check that the screen keeps its order.
+        after_save: VecDeque<Snapshot>,
+        order: Result<Vec<String>, SourceError>,
+        save: Result<(), SourceError>,
+        saved: Rc<RefCell<Vec<Vec<String>>>>,
+        drained: Rc<Notify>,
+    }
+
+    impl RemoteStream for FakeStream {
+        fn receive(&mut self) -> LocalFuture<'_, Option<Result<Snapshot, SourceError>>> {
+            Box::pin(async move {
+                if let Some(snapshot) = self.snapshots.pop_front() {
+                    return Some(Ok(snapshot));
+                }
+                if !self.saved.borrow().is_empty()
+                    && let Some(snapshot) = self.after_save.pop_front()
+                {
+                    return Some(Ok(snapshot));
+                }
+                self.drained.notify_one();
+                std::future::pending().await
+            })
+        }
+
+        fn remote_order(&self) -> LocalFuture<'_, Result<Vec<String>, SourceError>> {
+            let order = self.order.clone();
+            Box::pin(async move { order })
+        }
+
+        fn save_remote_order<'a>(
+            &'a self,
+            products: &'a [String],
+        ) -> LocalFuture<'a, Result<(), SourceError>> {
+            self.saved.borrow_mut().push(products.to_vec());
+            let save = self.save.clone();
+            Box::pin(async move { save })
+        }
+    }
+
+    struct FakeSource {
+        stream: RefCell<Option<FakeStream>>,
+    }
+
+    impl RemoteSource for FakeSource {
+        type Stream = FakeStream;
+
+        fn open(&self) -> LocalFuture<'_, Result<FakeStream, SourceError>> {
+            let stream = self.stream.borrow_mut().take();
+            Box::pin(async move {
+                stream.ok_or_else(|| SourceError::Transport("connection refused".into()))
+            })
+        }
+    }
+
+    struct FakeKeys {
+        keys: VecDeque<KeyEvent>,
+        /// When set, the keys wait until the stream has sent every snapshot.
+        gate: Option<Rc<Notify>>,
+        /// When true, the input ends after the last key; otherwise it waits.
+        ends: bool,
+    }
+
+    impl RemoteKeys for FakeKeys {
+        fn next_input(&mut self) -> LocalFuture<'_, Option<Result<RuntimeInput, String>>> {
+            Box::pin(async move {
+                if let Some(gate) = self.gate.clone() {
+                    gate.notified().await;
+                    self.gate = None;
+                }
+                match self.keys.pop_front() {
+                    Some(key) => Some(Ok(RuntimeInput::Key(key))),
+                    None if self.ends => None,
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    struct FakeShutdown {
+        fires: bool,
+    }
+
+    impl ShutdownPort for FakeShutdown {
+        fn recv_shutdown(&mut self) -> BoxFuture<'_, ()> {
+            let fires = self.fires;
+            Box::pin(async move {
+                if !fires {
+                    std::future::pending::<()>().await;
+                }
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeScreen {
+        shown: Vec<Model>,
+    }
+
+    impl RemoteScreen for FakeScreen {
+        fn show(&mut self, model: &Model) -> Result<(), crate::terminal::TerminalError> {
+            self.shown.push(model.clone());
+            Ok(())
+        }
+    }
+
+    struct Case {
+        snapshots: Vec<Snapshot>,
+        after_save: Vec<Snapshot>,
+        order: Result<Vec<String>, SourceError>,
+        save: Result<(), SourceError>,
+        harold_down: bool,
+        keys: Vec<KeyEvent>,
+        wait_for_snapshots: bool,
+        input_ends: bool,
+        shutdown: bool,
+        rex: Vec<Result<&'static str, &'static str>>,
+        session: Option<&'static str>,
+        block: Option<&'static str>,
+    }
+
+    impl Default for Case {
+        fn default() -> Self {
+            Case {
+                snapshots: vec![snapshot(1, vec![chief(), pnem("a"), pnem("b")])],
+                after_save: Vec::new(),
+                order: Ok(names(&["a", "b"])),
+                save: Ok(()),
+                harold_down: false,
+                keys: Vec::new(),
+                wait_for_snapshots: true,
+                input_ends: false,
+                shutdown: false,
+                rex: Vec::new(),
+                session: Some("session:01a1"),
+                block: Some(OWN_BLOCK),
+            }
+        }
+    }
+
+    struct Outcome {
+        /// `None` when the remote was still open at the end of the test.
+        result: Option<Result<(), AppError>>,
+        rex: fake_rex::Calls,
+        saved: Vec<Vec<String>>,
+        last: Model,
+    }
+
+    impl Outcome {
+        fn steps(&self) -> Vec<String> {
+            steps(&self.rex)
+        }
+    }
+
+    fn snapshot(version: u64, rows: Vec<AgentRow>) -> Snapshot {
+        Snapshot {
+            through_event_version: version,
+            server_time_ms: 0,
+            monitor_health: Vec::new(),
+            rows,
+            tts_muted: false,
+            messaging_paused: false,
+            harold_version: None,
+        }
+    }
+
+    fn sessions_named(name: &'static str) -> &'static str {
+        Box::leak(
+            format!(r#"{{"sessions":[{{"session_id":"session:s-{name}","label":"{name}"}}]}}"#)
+                .into_boxed_str(),
+        )
+    }
+
+    async fn run_case(case: Case) -> Outcome {
+        let drained = Rc::new(Notify::new());
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let stream = FakeStream {
+            snapshots: case.snapshots.into(),
+            after_save: case.after_save.into(),
+            order: case.order,
+            save: case.save,
+            saved: Rc::clone(&saved),
+            drained: Rc::clone(&drained),
+        };
+        let source = FakeSource {
+            stream: RefCell::new((!case.harold_down).then_some(stream)),
+        };
+        let mut keys = FakeKeys {
+            keys: case.keys.into(),
+            gate: case.wait_for_snapshots.then_some(drained),
+            ends: case.input_ends,
+        };
+        let mut shutdown = FakeShutdown {
+            fires: case.shutdown,
+        };
+        let mut screen = FakeScreen::default();
+        let (navigator, rex) = fake_rex::navigator(case.session, case.rex);
+        let result = tokio::time::timeout(
+            STAYS_OPEN,
+            run_with(
+                &source,
+                &mut keys,
+                &mut shutdown,
+                &mut screen,
+                &navigator,
+                case.block,
+            ),
+        )
+        .await
+        .ok();
+        let saved = saved.borrow().clone();
+        Outcome {
+            result,
+            rex,
+            saved,
+            last: screen.shown.last().cloned().expect("the remote draws"),
+        }
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[tokio::test]
+    async fn a_digit_jumps_and_closes_the_layer() {
+        let outcome = run_case(Case {
+            order: Ok(names(&["b", "a"])),
+            keys: vec![ch('1')],
+            rex: vec![Ok(""), Ok(sessions_named("b")), Ok(""), Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(
+            outcome.steps(),
+            ["focus", "ls", "do", "session.view", "session.close_layer"]
+        );
+        let calls = outcome.rex.borrow();
+        assert_eq!(calls[0][3..], ["--session=b", "block:b"]);
+        assert_eq!(
+            calls[4][5],
+            r#"{"session_id":"session:01a1","layer_id":"layer:01c3"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn esc_closes_without_a_jump() {
+        let outcome = run_case(Case {
+            keys: vec![press(KeyCode::Esc)],
+            rex: vec![Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_closes_without_a_jump() {
+        let outcome = run_case(Case {
+            keys: vec![ctrl('c')],
+            rex: vec![Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_jump_shows_the_step_and_stays_open() {
+        let outcome = run_case(Case {
+            keys: vec![ch('1')],
+            rex: vec![Err("no block has this id")],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none(), "the remote stays open");
+        assert_eq!(outcome.steps(), ["focus"]);
+        assert_eq!(
+            outcome.last.notice.as_deref(),
+            Some("could not focus Rex block: no block has this id")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_jump_notice_is_cleaned_for_the_screen() {
+        let outcome = run_case(Case {
+            keys: vec![ch('1')],
+            rex: vec![Err("bad\x1b[31m red")],
+            ..Case::default()
+        })
+        .await;
+
+        let notice = outcome.last.notice.expect("a notice");
+        assert!(!notice.contains('\x1b'), "{notice:?}");
+        assert!(notice.starts_with("could not focus Rex block: bad"));
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_is_not_in_a_rex_pane_is_not_jumped_to() {
+        let outcome = run_case(Case {
+            snapshots: vec![snapshot(1, vec![chief(), row("%3", "a", "pnem", "a", "")])],
+            order: Ok(names(&["a"])),
+            keys: vec![ch('1')],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none());
+        assert!(outcome.rex.borrow().is_empty());
+        assert_eq!(
+            outcome.last.notice.as_deref(),
+            Some("this agent is not in a Rex pane")
+        );
+    }
+
+    #[tokio::test]
+    async fn n_jumps_to_the_next_waiting_agent() {
+        let mut working = pnem("b");
+        working.state = AgentState::Working;
+        let outcome = run_case(Case {
+            snapshots: vec![
+                snapshot(1, vec![chief(), pnem("a"), working]),
+                snapshot(2, vec![chief(), pnem("a"), pnem("b")]),
+            ],
+            keys: vec![ch('n')],
+            rex: vec![Ok(""), Ok(sessions_named("b")), Ok(""), Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.rex.borrow()[0][3..], ["--session=b", "block:b"]);
+    }
+
+    #[tokio::test]
+    async fn shift_j_calls_set_remote_order_with_the_new_order() {
+        let outcome = run_case(Case {
+            snapshots: vec![snapshot(1, vec![chief(), pnem("a"), pnem("b"), pnem("c")])],
+            order: Ok(names(&["a", "b", "c"])),
+            keys: vec![ch('j'), ch('J')],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none());
+        assert_eq!(outcome.saved, [names(&["b", "a", "c"])]);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · b", "PnEM · a", "PnEM · c"]
+        );
+        assert_eq!(outcome.last.notice, None);
+        assert!(outcome.rex.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_set_keeps_the_screen_order_and_shows_a_notice() {
+        let rows = || vec![chief(), pnem("a"), pnem("b"), pnem("c")];
+        let outcome = run_case(Case {
+            snapshots: vec![snapshot(1, rows())],
+            // A later snapshot must not put the old order back.
+            after_save: vec![snapshot(2, rows())],
+            order: Ok(names(&["a", "b", "c"])),
+            save: Err(SourceError::Transport("status: Unavailable".into())),
+            keys: vec![ch('j'), ch('J')],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none());
+        assert_eq!(outcome.saved, [names(&["b", "a", "c"])]);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · b", "PnEM · a", "PnEM · c"]
+        );
+        assert_eq!(
+            outcome.last.notice.as_deref(),
+            Some("could not save the remote order: status: Unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_harold_without_the_order_lists_the_row_order_with_no_notice() {
+        // The api turns an `Unimplemented` answer into an empty order.
+        let outcome = run_case(Case {
+            order: Ok(Vec::new()),
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none());
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · a", "PnEM · b"]
+        );
+        assert_eq!(outcome.last.notice, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_order_read_shows_a_notice_and_still_lists_the_rows() {
+        let outcome = run_case(Case {
+            order: Err(SourceError::Transport("status: Unavailable".into())),
+            ..Case::default()
+        })
+        .await;
+
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · a", "PnEM · b"]
+        );
+        assert_eq!(
+            outcome.last.notice.as_deref(),
+            Some("could not read the remote order: status: Unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn harold_down_shows_a_notice_and_stays_open() {
+        let outcome = run_case(Case {
+            harold_down: true,
+            wait_for_snapshots: false,
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none());
+        assert_eq!(
+            outcome.last.notice.as_deref(),
+            Some("Harold is not reachable: connection refused")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_close_layer_exits_quietly() {
+        let outcome = run_case(Case {
+            keys: vec![press(KeyCode::Esc)],
+            rex: vec![Ok(VIEW), Err("not_found")],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_rex_block_variable_exits_quietly() {
+        let outcome = run_case(Case {
+            keys: vec![press(KeyCode::Esc)],
+            block: None,
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert!(outcome.rex.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_missing_rex_session_variable_exits_quietly() {
+        let outcome = run_case(Case {
+            keys: vec![press(KeyCode::Esc)],
+            session: None,
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert!(outcome.rex.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_signal_closes_the_layer_once() {
+        let outcome = run_case(Case {
+            wait_for_snapshots: false,
+            shutdown: true,
+            rex: vec![Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
+    }
+
+    #[tokio::test]
+    async fn a_fatal_input_error_closes_the_layer_and_returns_the_error() {
+        let outcome = run_case(Case {
+            input_ends: true,
+            rex: vec![Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Err(AppError::Input(_)))));
+        assert_eq!(outcome.steps(), ["session.view", "session.close_layer"]);
     }
 }

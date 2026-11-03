@@ -284,6 +284,17 @@ impl TerminalGuard {
             .map_err(|error| TerminalError::new("render control-tower", error))
     }
 
+    /// Draws the remote control.
+    pub(crate) fn draw_remote(
+        &mut self,
+        model: &crate::remote::Model,
+    ) -> Result<(), TerminalError> {
+        self.terminal
+            .draw(|frame| crate::remote::draw(frame, model))
+            .map(|_| ())
+            .map_err(|error| TerminalError::new("render remote control", error))
+    }
+
     /// Clears the screen and Ratatui's buffer, so the next draw repaints every cell.
     pub fn clear(&mut self) -> Result<(), TerminalError> {
         self.terminal

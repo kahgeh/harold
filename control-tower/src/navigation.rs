@@ -338,6 +338,46 @@ impl TmuxNavigator {
             .map(|block| sanitize_display(&block, ERROR_DETAIL_MAX_SCALARS)))
     }
 
+    /// Closes the floating Rex layer that holds `block`, in the session of `REX_SESSION`.
+    /// Without `REX_SESSION` it does nothing. It reads `session.view`, finds the layer
+    /// whose blocks hold `block`, and runs `session.close_layer` for it. A `tiled` layer
+    /// is never closed: Rex closes only a floating layer.
+    pub fn close_own_layer(&self, block: &str) -> Result<(), NavigationError> {
+        let Some(session) = self
+            .context
+            .var_os("REX_SESSION".as_ref())
+            .map(|value| value.to_string_lossy().into_owned())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let clean = |text: &str| !text.trim().is_empty() && !text.chars().any(char::is_control);
+        if !clean(&session) || !clean(block) || !block.starts_with(REX_BLOCK_PREFIX) {
+            return Err(NavigationError::BadRexTarget);
+        }
+        let request = session_view_request(&session);
+        let view = self.run_rex(
+            "read Rex session",
+            &["api", "call", "session.view", &request],
+        )?;
+        let view = String::from_utf8_lossy(&view.stdout);
+        let Some((layer, kind)) = rex_layer_of_block(&view, block) else {
+            return Err(NavigationError::CommandFailed {
+                operation: "read Rex session",
+                detail: "no layer of the session holds this block".into(),
+            });
+        };
+        if kind == "tiled" {
+            return Ok(());
+        }
+        let request = close_layer_request(&session, &layer);
+        self.run_rex(
+            "close Rex layer",
+            &["api", "call", "session.close_layer", &request],
+        )?;
+        Ok(())
+    }
+
     fn has_invoking_tmux_context(&self) -> bool {
         ["TMUX", "TMUX_PANE"]
             .into_iter()
@@ -544,8 +584,21 @@ impl PaneNavigator for TmuxNavigator {
 /// The JSON request of `session.view` for one session id. A quote, a backslash or a control
 /// character in the id is escaped, so the id can never break the request.
 fn session_view_request(session_id: &str) -> String {
+    format!("{{\"session_id\":\"{}\"}}", json_escape(session_id))
+}
+
+/// The JSON request of `session.close_layer`, escaped as `session_view_request` is.
+fn close_layer_request(session_id: &str, layer_id: &str) -> String {
+    format!(
+        "{{\"session_id\":\"{}\",\"layer_id\":\"{}\"}}",
+        json_escape(session_id),
+        json_escape(layer_id)
+    )
+}
+
+fn json_escape(text: &str) -> String {
     let mut escaped = String::new();
-    for character in session_id.chars() {
+    for character in text.chars() {
         match character {
             '"' => escaped.push_str("\\\""),
             '\\' => escaped.push_str("\\\\"),
@@ -555,7 +608,33 @@ fn session_view_request(session_id: &str) -> String {
             other => escaped.push(other),
         }
     }
-    format!("{{\"session_id\":\"{escaped}\"}}")
+    escaped
+}
+
+/// The layer of a `session.view` result whose blocks hold `block`: its id and its kind.
+/// A layer reaches from its `layer_id` to the next `layer_id` or `window_id`, so the next
+/// window's fields never count for it.
+fn rex_layer_of_block(view: &str, block: &str) -> Option<(String, String)> {
+    let mut at = 0;
+    while let Some((layer, after)) = json_string(view, "layer_id", at) {
+        let rest = view.get(after..).unwrap_or_default();
+        let end = ["\"layer_id\"", "\"window_id\""]
+            .iter()
+            .filter_map(|key| rest.find(key))
+            .min()
+            .map_or(view.len(), |offset| after + offset);
+        let part = view.get(after..end).unwrap_or_default();
+        let mut from = 0;
+        while let Some((candidate, next)) = json_string(part, "block_id", from) {
+            if candidate == block {
+                let kind = json_string(part, "kind", 0).map_or_else(String::new, |(kind, _)| kind);
+                return Some((layer, kind));
+            }
+            from = next;
+        }
+        at = after;
+    }
+    None
 }
 
 /// The string value of the first `"key"` at or after `from`: its text and the offset after it.
@@ -672,6 +751,241 @@ fn command_failure_detail(program: &str, stderr: &[u8]) -> String {
 
 fn sanitize_detail(detail: &str) -> String {
     sanitize_display(detail, ERROR_DETAIL_MAX_SCALARS)
+}
+
+/// A scripted `rex` for the tests of other modules. Each call takes the next output.
+#[cfg(test)]
+pub(crate) mod fake_rex {
+    use super::{CommandOutput, CommandRunner, ProcessContext, TmuxNavigator};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::ffi::{OsStr, OsString};
+    use std::io;
+    use std::path::Path;
+    use std::rc::Rc;
+
+    pub(crate) const REX: &str = "/opt/bin/rex";
+
+    /// The arguments of each call, in order.
+    pub(crate) type Calls = Rc<RefCell<Vec<Vec<String>>>>;
+
+    struct Runner {
+        outputs: RefCell<VecDeque<Result<String, String>>>,
+        calls: Calls,
+    }
+
+    impl CommandRunner for Runner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            assert_eq!(program, REX);
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            let output = self.outputs.borrow_mut().pop_front();
+            let output = output.expect("the script should have one output per call");
+            Ok(match output {
+                Ok(stdout) => CommandOutput {
+                    success: true,
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                },
+                Err(stderr) => CommandOutput {
+                    success: false,
+                    stdout: Vec::new(),
+                    stderr: stderr.into_bytes(),
+                },
+            })
+        }
+    }
+
+    struct Context {
+        session: Option<String>,
+    }
+
+    impl ProcessContext for Context {
+        fn var_os(&self, name: &OsStr) -> Option<OsString> {
+            match name.to_str() {
+                Some("PATH") => Some("/opt/bin".into()),
+                Some("REX_SESSION") => self.session.clone().map(Into::into),
+                _ => None,
+            }
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            path == Path::new(REX)
+        }
+
+        fn rex_app_bundles(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+    }
+
+    /// A navigator whose `rex` answers with `outputs` (`Err` is a failed call with that
+    /// stderr), and whose `REX_SESSION` is `session`.
+    pub(crate) fn navigator(
+        session: Option<&str>,
+        outputs: Vec<Result<&str, &str>>,
+    ) -> (TmuxNavigator, Calls) {
+        let calls = Calls::default();
+        let runner = Runner {
+            outputs: RefCell::new(
+                outputs
+                    .into_iter()
+                    .map(|output| output.map(str::to_owned).map_err(str::to_owned))
+                    .collect(),
+            ),
+            calls: Rc::clone(&calls),
+        };
+        let context = Context {
+            session: session.map(str::to_owned),
+        };
+        (TmuxNavigator::with_ports(runner, context), calls)
+    }
+
+    /// The method name of each `rex api call`, or the first argument of other calls.
+    pub(crate) fn steps(calls: &Calls) -> Vec<String> {
+        calls
+            .borrow()
+            .iter()
+            .map(|args| match args.first().map(String::as_str) {
+                Some("api") => args[4].clone(),
+                _ => args[0].clone(),
+            })
+            .collect()
+    }
+
+    /// A `session.view` result in the real shape (see
+    /// `docs/references/control-tower/remote-control-rex-calls.md`). `block:01f9` is in
+    /// the floating layer `layer:01c3`; `block:01b3` is in the tiled layer `layer:01c2`.
+    pub(crate) const VIEW: &str = r#"{"revision":215,"session_id":"session:01a1","label":"harold","active_window_id":"window:01a2","windows":[{"window_id":"window:01a1","label":"pod","focused_block_id":"block:01b1","layers":[{"layer_id":"layer:01c1","kind":"tiled","bounds":[0,0,1,1],"layout":{"rect":[0,0,1,1],"split":{"split_id":"split:01d1","direction":"horizontal","ratio":0.4,"before":{"rect":[0,0,0.4,1],"block_id":"block:01b1"},"after":{"rect":[0.4,0,0.6,1],"block_id":"block:01b2"}}},"blocks":[{"block_id":"block:01b1","label":"files","creator_name":"com.superlogical.terminal","flavor":"com.superlogical.terminal.shell","host_id":"9cc91d55","owner":"client:01e1"},{"block_id":"block:01b2","label":"pnem","creator_name":"com.superlogical.terminal","flavor":"com.superlogical.terminal.shell","host_id":"9cc91d55","owner":"client:01e1"}]}]},{"window_id":"window:01a2","label":"keymap","focused_block_id":"block:01f9","layers":[{"layer_id":"layer:01c2","kind":"tiled","bounds":[0,0,1,1],"layout":{"rect":[0,0,1,1],"block_id":"block:01b3"},"blocks":[{"block_id":"block:01b3","label":"agent","creator_name":"com.superlogical.terminal","flavor":"com.superlogical.terminal.shell","host_id":"9cc91d55","owner":"client:01e1"}]},{"layer_id":"layer:01c3","kind":"floating","bounds":[0.25,0.3,0.5,0.4],"layout":{"rect":[0.25,0.3,0.5,0.4],"block_id":"block:01f9"},"blocks":[{"block_id":"block:01f9","label":"remote","creator_name":"com.superlogical.terminal","flavor":"com.superlogical.terminal.shell","host_id":"9cc91d55","owner":"client:01e1"}]}]}]}"#;
+}
+
+#[cfg(test)]
+mod close_layer_tests {
+    use super::fake_rex::{VIEW, navigator, steps};
+    use super::{NavigationError, rex_layer_of_block};
+
+    #[test]
+    fn the_layer_is_found_from_the_own_block_in_session_view() {
+        assert_eq!(
+            rex_layer_of_block(VIEW, "block:01f9"),
+            Some(("layer:01c3".to_string(), "floating".to_string()))
+        );
+        assert_eq!(
+            rex_layer_of_block(VIEW, "block:01b3"),
+            Some(("layer:01c2".to_string(), "tiled".to_string()))
+        );
+        // A block in the layout tree of the first window.
+        assert_eq!(
+            rex_layer_of_block(VIEW, "block:01b2"),
+            Some(("layer:01c1".to_string(), "tiled".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_block_in_no_layer_or_a_focused_block_key_alone_is_not_found() {
+        assert_eq!(rex_layer_of_block(VIEW, "block:nowhere"), None);
+        let only_focused = r#"{"windows":[{"window_id":"window:1","focused_block_id":"block:x","layers":[{"layer_id":"layer:1","kind":"floating","blocks":[{"block_id":"block:y"}]}]}]}"#;
+        assert_eq!(rex_layer_of_block(only_focused, "block:x"), None);
+        // The next window's focused block does not count for the last layer before it.
+        let next_window = r#"{"windows":[{"window_id":"window:1","layers":[{"layer_id":"layer:1","kind":"floating","blocks":[]}]},{"window_id":"window:2","focused_block_id":"block:z","layers":[]}]}"#;
+        assert_eq!(rex_layer_of_block(next_window, "block:z"), None);
+    }
+
+    #[test]
+    fn close_own_layer_reads_the_view_then_closes_the_floating_layer() {
+        let (nav, calls) = navigator(
+            Some("session:01a1"),
+            vec![Ok(VIEW), Ok("{\"revision\":216}")],
+        );
+
+        nav.close_own_layer("block:01f9").unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            [
+                "api",
+                "--autostart=false",
+                "--timeout=3s",
+                "call",
+                "session.view",
+                r#"{"session_id":"session:01a1"}"#
+            ]
+        );
+        assert_eq!(
+            calls[1],
+            [
+                "api",
+                "--autostart=false",
+                "--timeout=3s",
+                "call",
+                "session.close_layer",
+                r#"{"session_id":"session:01a1","layer_id":"layer:01c3"}"#
+            ]
+        );
+    }
+
+    #[test]
+    fn close_own_layer_never_closes_a_tiled_layer() {
+        let (nav, calls) = navigator(Some("session:01a1"), vec![Ok(VIEW)]);
+        nav.close_own_layer("block:01b3").unwrap();
+        assert_eq!(steps(&calls), ["session.view"]);
+    }
+
+    #[test]
+    fn close_own_layer_without_rex_session_runs_nothing() {
+        for session in [None, Some(""), Some("  ")] {
+            let (nav, calls) = navigator(session, vec![]);
+            nav.close_own_layer("block:01f9").unwrap();
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn close_own_layer_refuses_a_bad_block_or_session() {
+        for block in ["", "01f9", "block:a\nb"] {
+            let (nav, calls) = navigator(Some("session:01a1"), vec![]);
+            assert_eq!(
+                nav.close_own_layer(block),
+                Err(NavigationError::BadRexTarget)
+            );
+            assert!(calls.borrow().is_empty());
+        }
+        let (nav, calls) = navigator(Some("session:a\u{7}"), vec![]);
+        assert_eq!(
+            nav.close_own_layer("block:01f9"),
+            Err(NavigationError::BadRexTarget)
+        );
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn close_own_layer_with_its_block_in_no_layer_runs_no_close() {
+        let (nav, calls) = navigator(Some("session:01a1"), vec![Ok(VIEW)]);
+        let error = nav.close_own_layer("block:gone").unwrap_err();
+        assert!(matches!(error, NavigationError::CommandFailed { .. }));
+        assert_eq!(steps(&calls), ["session.view"]);
+    }
+
+    #[test]
+    fn a_failed_close_is_an_error_with_its_step() {
+        let (nav, _) = navigator(Some("session:01a1"), vec![Ok(VIEW), Err("not_found")]);
+        let error = nav.close_own_layer("block:01f9").unwrap_err();
+        assert_eq!(error.to_string(), "could not close Rex layer: not_found");
+    }
+
+    #[test]
+    fn a_session_id_with_a_quote_is_escaped_in_both_requests() {
+        let (nav, calls) = navigator(Some("s\"1"), vec![Ok(VIEW), Ok("{}")]);
+        nav.close_own_layer("block:01f9").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls[0][5], r#"{"session_id":"s\"1"}"#);
+        assert_eq!(
+            calls[1][5],
+            r#"{"session_id":"s\"1","layer_id":"layer:01c3"}"#
+        );
+    }
 }
 
 #[cfg(test)]

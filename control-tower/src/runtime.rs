@@ -35,7 +35,7 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const CALL_POLL_DURING_CALL: Duration = Duration::from_millis(500);
 const CALL_POLL_OTHERWISE: Duration = Duration::from_secs(5);
 const QUESTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
 pub enum AppError {
@@ -115,7 +115,7 @@ pub fn run(
     }
 }
 
-fn merge_exit(primary: AppError, restore: Result<(), AppError>) -> AppError {
+pub(crate) fn merge_exit(primary: AppError, restore: Result<(), AppError>) -> AppError {
     match restore {
         Ok(()) => primary,
         Err(cleanup) => AppError::ExitAndRestore {
@@ -749,7 +749,7 @@ fn local_now_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
-fn sanitize_error(detail: &str) -> String {
+pub(crate) fn sanitize_error(detail: &str) -> String {
     sanitize_display(detail, ERROR_LIMIT)
 }
 
@@ -781,7 +781,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
     }
 }
 
-fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
     let detail = payload
         .downcast_ref::<&str>()
         .copied()
@@ -797,7 +797,7 @@ enum InputMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimeInput {
+pub(crate) enum RuntimeInput {
     Key(KeyEvent),
     Redraw,
     Focus(FocusReading),
@@ -805,7 +805,7 @@ enum RuntimeInput {
 
 type FocusReceiver = watch::Receiver<Option<FocusReading>>;
 
-struct InputPump {
+pub(crate) struct InputPump {
     receiver: mpsc::Receiver<InputMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -894,12 +894,12 @@ fn spawn_focus_worker(
     })
 }
 
-trait TerminalInput: Send + 'static {
+pub(crate) trait TerminalInput: Send + 'static {
     fn poll(&mut self, timeout: Duration) -> std::io::Result<bool>;
     fn read(&mut self) -> std::io::Result<Event>;
 }
 
-struct CrosstermInput;
+pub(crate) struct CrosstermInput;
 
 impl TerminalInput for CrosstermInput {
     fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
@@ -929,7 +929,7 @@ impl InputPump {
         pump
     }
 
-    fn start_with(mut input: impl TerminalInput) -> Self {
+    pub(crate) fn start_with(mut input: impl TerminalInput) -> Self {
         let (sender, receiver) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let redraw_pending = Arc::new(AtomicBool::new(false));
@@ -997,7 +997,7 @@ impl InputPump {
         )
     }
 
-    async fn recv(&mut self) -> Option<Result<RuntimeInput, String>> {
+    pub(crate) async fn recv(&mut self) -> Option<Result<RuntimeInput, String>> {
         // Input first: the main channel has one sender (the input worker), so it
         // closing means that worker died and ends the stream even while focus lives.
         let message = tokio::select! {
@@ -1053,17 +1053,17 @@ impl Drop for InputPump {
     }
 }
 
-struct ShutdownSignals {
+pub(crate) struct ShutdownSignals {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
 }
 
-trait ShutdownPort {
+pub(crate) trait ShutdownPort {
     fn recv_shutdown(&mut self) -> BoxFuture<'_, ()>;
 }
 
 impl ShutdownSignals {
-    fn new() -> Result<Self, AppError> {
+    pub(crate) fn new() -> Result<Self, AppError> {
         use tokio::signal::unix::{SignalKind, signal};
         let interrupt = signal(SignalKind::interrupt())
             .map_err(|error| AppError::Signal(sanitize_error(&error.to_string())))?;
