@@ -781,8 +781,6 @@ pub(crate) enum SpecSize {
 }
 
 impl SpecSize {
-    // A later task of the plan reads this. Only tests read it now.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Small => "small",
@@ -1510,6 +1508,18 @@ pub(crate) fn effort_measures(spec: &SpecFacts) -> [(&'static str, f64); 4] {
     ]
 }
 
+/// The `measure` and value pairs of one spec that follow `effort_measures` on the
+/// effort gauge: the redo time in hours and the revisions after the approval.
+pub(crate) fn extra_effort_measures(spec: &SpecFacts) -> [(&'static str, f64); 2] {
+    [
+        ("redo_hours", spec.redo_seconds as f64 / 3600.0),
+        (
+            "revised_after_approval",
+            f64::from(spec.revised_after_approval),
+        ),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Polls
 // ---------------------------------------------------------------------------
@@ -1787,6 +1797,7 @@ impl<G: Git> PodStats<G> {
         self.tips.save(&product.name, &history.tip)?;
         let changes = self.specs.observe(&product.name, &specs);
         self.log_notices(&product.name, &notices);
+        self.log_large_specs(&product.name, &specs);
         if let TipMove::Merges(merges) = &moved {
             let is_spec = |id: &str| specs.iter().any(|spec| spec.id == id);
             for merge in merges {
@@ -1871,6 +1882,26 @@ impl<G: Git> PodStats<G> {
             )
             .await
             .is_some_and(|output| output.success)
+    }
+
+    /// Logs each large spec of `product` that has an approval, once.
+    fn log_large_specs(&mut self, product: &str, specs: &[SpecFacts]) {
+        for spec in specs {
+            let approved = matches!(
+                spec.state,
+                SpecState::Approved | SpecState::InProgress | SpecState::Completed
+            ) && spec.approved_at.is_some();
+            if spec.size != SpecSize::Large || !approved {
+                continue;
+            }
+            if self.warned.insert(format!("{product}\0large\0{}", spec.id)) {
+                warn!(
+                    pod.product = %product,
+                    spec.id = %spec.id,
+                    "large spec approved"
+                );
+            }
+        }
     }
 
     /// Logs what the specs of `product` show about merges and unreadable files, once each.
@@ -2168,7 +2199,11 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                                     withdrawal.reached.as_str(),
                                 ));
                             }
-                            for (measure, value) in effort_measures(spec) {
+                            attributes.push(KeyValue::new("spec.size", spec.size.as_str()));
+                            for (measure, value) in effort_measures(spec)
+                                .into_iter()
+                                .chain(extra_effort_measures(spec))
+                            {
                                 let mut with_measure = attributes.clone();
                                 with_measure.push(KeyValue::new("measure", measure));
                                 observer.observe(value, &with_measure);

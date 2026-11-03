@@ -2950,6 +2950,87 @@ async fn the_pod_effort_and_agent_gauges_report_what_the_snapshot_holds() {
     *snapshot.lock().unwrap() = PodSnapshot::default();
 }
 
+#[tokio::test]
+async fn the_effort_gauge_reports_redo_hours_and_revised_after_approval_with_the_size() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let spec = SpecFacts {
+        id: "big".into(),
+        state: SpecState::InProgress,
+        state_at: OffsetDateTime::now_utc(),
+        redo_seconds: 5400,
+        revised_after_approval: 2,
+        size: SpecSize::Large,
+        ..SpecFacts::default()
+    };
+    assert_eq!(
+        extra_effort_measures(&spec),
+        [("redo_hours", 1.5), ("revised_after_approval", 2.0)]
+    );
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![spec])]),
+        ..PodSnapshot::default()
+    };
+
+    let effort = |measure: &str, size: &str| {
+        test_support::gauge_f64_value(
+            "pod.spec.effort",
+            &[
+                ("pod.product", product.as_str()),
+                ("spec.id", "big"),
+                ("measure", measure),
+                ("state", "in_progress"),
+                ("spec.size", size),
+            ],
+        )
+    };
+    assert_eq!(effort("redo_hours", "large"), Some(1.5));
+    assert_eq!(effort("revised_after_approval", "large"), Some(2.0));
+    assert_eq!(effort("revisions", "large"), Some(0.0));
+    assert_eq!(effort("redo_hours", "small"), None);
+
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
+#[tokio::test]
+async fn a_large_spec_that_is_approved_is_logged_once() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+    put_approval(&files, "big");
+    let logs = CapturedLogs::start();
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    stats.poll().await;
+    let text = logs.text();
+    let line = format!("large spec approved pod.product={} spec.id=big", pod.name);
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
+
+#[tokio::test]
+async fn a_large_spec_that_is_not_approved_is_not_logged() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+    write(
+        &files.join("specs/small.md"),
+        "# Small\n\n**Size.** small\n",
+    );
+    put_approval(&files, "small");
+    let logs = CapturedLogs::start();
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    stats.poll().await;
+    assert!(
+        !logs.text().contains("large spec approved"),
+        "{}",
+        logs.text()
+    );
+}
+
 // --- the counted-tip file ---
 
 fn merges_of(pod: &Pod, spec: &str) -> Option<u64> {

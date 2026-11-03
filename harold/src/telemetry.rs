@@ -142,6 +142,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "spec.id",
     "spec.state_at",
     "spec.words",
+    "spec.size",
+    "list",
     "spec.revisions",
     "spec.stage",
     "file",
