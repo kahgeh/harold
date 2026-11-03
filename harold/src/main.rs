@@ -964,6 +964,7 @@ fn map_agent_snapshot(
     };
     let pod_roles = roles.pod_roles();
     AgentStateSnapshot {
+        focus_known: None,
         watches_running: 0,
         watches_paused: 0,
         watches_capped: 0,
@@ -999,6 +1000,8 @@ fn map_agent_snapshot(
                 let (role, pod_product) =
                     pane_role(&pane.incarnation.pane_id, chief_pane.as_deref(), &pod_roles);
                 AgentPaneState {
+                    waiting: false,
+                    waiting_since_ms: 0,
                     pane_id: pane.incarnation.pane_id,
                     tmux_target: pane.tmux_target,
                     session_name: pane.session_name,
@@ -1076,6 +1079,8 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
         return None;
     }
     Some(AgentPaneState {
+        waiting: false,
+        waiting_since_ms: 0,
         pane_id: agent.host_pane_id,
         tmux_target: agent.session_name.clone(),
         session_name: agent.session_name,

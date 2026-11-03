@@ -617,6 +617,8 @@ mod tests {
 
     fn row(pane_id: &str, session: &str, role: &str, product: &str, host: &str) -> AgentRow {
         AgentRow {
+            waiting: false,
+            waiting_since_ms: 0,
             incarnation: AgentIncarnation {
                 pane_id: pane_id.into(),
                 pane_pid: 1,
@@ -1250,6 +1252,7 @@ mod tests {
 
     fn snapshot(version: u64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            focus_known: false,
             through_event_version: version,
             server_time_ms: 0,
             monitor_health: Vec::new(),

@@ -1418,6 +1418,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -1428,6 +1429,8 @@ mod tests {
                 server_time_ms: 1,
                 monitor_health: Vec::new(),
                 rows: vec![AgentRow {
+                    waiting: false,
+                    waiting_since_ms: 0,
                     host: String::new(),
                     host_icon: String::new(),
                     window_name: String::new(),

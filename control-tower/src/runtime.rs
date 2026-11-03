@@ -1218,6 +1218,7 @@ impl RuntimeCore {
             app: App::new(
                 ConnectionState::Connecting,
                 Snapshot {
+                    focus_known: false,
                     harold_version: None,
                     tts_muted: false,
                     messaging_paused: false,
@@ -4465,6 +4466,7 @@ mod tests {
 
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -4480,6 +4482,8 @@ mod tests {
                 observed_at_ms: 1,
             }],
             rows: vec![AgentRow {
+                waiting: false,
+                waiting_since_ms: 0,
                 host: String::new(),
                 host_icon: String::new(),
                 window_name: String::new(),

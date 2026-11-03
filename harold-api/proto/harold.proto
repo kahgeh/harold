@@ -162,6 +162,10 @@ message AgentPaneState {
   string role = 21;
   // The product that the pod of the pane works on. Empty when the pane has no pod.
   string pod_product = 22;
+  // True while the agent waits for a person: it stopped off focus and nobody has looked yet.
+  bool waiting = 23;
+  // When the wait began, in milliseconds. Zero when `waiting` is false.
+  int64 waiting_since_ms = 24;
 }
 
 // The request has no fields.
@@ -202,6 +206,8 @@ message AgentStateSnapshot {
   uint32 watches_paused = 9;
   // Watches that wait because the day budget is used up (`how` = `budget_day`).
   uint32 watches_capped = 10;
+  // Whether Harold knows which pane has focus. Absent means unknown (an older Harold).
+  optional bool focus_known = 11;
 }
 
 message SetTtsMutedRequest {

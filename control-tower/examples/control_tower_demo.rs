@@ -61,6 +61,7 @@ fn demo_app() -> App {
     App::new(
         ConnectionState::Live,
         Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -147,6 +148,8 @@ fn row(
     last_transition_at_ms: i64,
 ) -> AgentRow {
     AgentRow {
+        waiting: false,
+        waiting_since_ms: 0,
         host: String::new(),
         host_icon: String::new(),
         window_name: String::new(),

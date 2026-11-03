@@ -175,6 +175,8 @@ fn pane_summary_round_trip_preserves_presence_without_provenance() {
             ("window_name".to_string(), 20),
             ("role".to_string(), 21),
             ("pod_product".to_string(), 22),
+            ("waiting".to_string(), 23),
+            ("waiting_since_ms".to_string(), 24),
         ]
     );
 
@@ -407,7 +409,7 @@ fn set_tts_muted_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
-    assert_eq!(snapshot_fields.len(), 10);
+    assert_eq!(snapshot_fields.len(), 11);
 }
 
 #[test]
@@ -425,7 +427,7 @@ fn set_messaging_paused_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
-    assert_eq!(snapshot_fields.len(), 10);
+    assert_eq!(snapshot_fields.len(), 11);
 }
 
 #[test]
@@ -533,13 +535,14 @@ fn agent_state_snapshot_carries_harold_version_in_field_seven() {
         ("watches_running", 8),
         ("watches_paused", 9),
         ("watches_capped", 10),
+        ("focus_known", 11),
     ] {
         assert!(
             fields.contains(&(expected.0.to_string(), expected.1)),
             "{expected:?}"
         );
     }
-    assert_eq!(fields.len(), 10);
+    assert_eq!(fields.len(), 11);
 }
 
 #[test]
@@ -775,4 +778,63 @@ fn agent_state_numbers_are_stable() {
         AgentState::from_str_name("AGENT_STATE_ERROR"),
         Some(AgentState::Error)
     );
+}
+
+#[test]
+fn waiting_fields_have_numbers_23_and_24_and_focus_known_is_11() {
+    let pane_fields = message_fields("AgentPaneState");
+    assert!(pane_fields.contains(&("waiting".to_string(), 23)));
+    assert!(pane_fields.contains(&("waiting_since_ms".to_string(), 24)));
+    let snapshot_fields = message_fields("AgentStateSnapshot");
+    assert!(snapshot_fields.contains(&("focus_known".to_string(), 11)));
+}
+
+/// Golden bytes of a waiting pane: field 23 (tag b801) is true, field 24 (tag c001) is 1234.
+#[test]
+fn a_waiting_pane_has_the_golden_bytes() {
+    let pane = AgentPaneState {
+        waiting: true,
+        waiting_since_ms: 1234,
+        ..Default::default()
+    };
+    assert_eq!(
+        pane.encode_to_vec(),
+        [0xb8, 0x01, 0x01, 0xc0, 0x01, 0xd2, 0x09]
+    );
+    let decoded = AgentPaneState::decode([0xb8, 0x01, 0x01, 0xc0, 0x01, 0xd2, 0x09].as_slice())
+        .expect("a pane");
+    assert!(decoded.waiting);
+    assert_eq!(decoded.waiting_since_ms, 1234);
+}
+
+/// Golden bytes of a snapshot with `focus_known`: field 11 (tag 58). Absent stays `None`.
+#[test]
+fn focus_known_has_the_golden_bytes_and_absent_is_none() {
+    for (value, bytes) in [(true, [0x58, 0x01]), (false, [0x58, 0x00])] {
+        let snapshot = AgentStateSnapshot {
+            focus_known: Some(value),
+            ..Default::default()
+        };
+        assert_eq!(snapshot.encode_to_vec(), bytes);
+        assert_eq!(round_trip(&snapshot).focus_known, Some(value));
+    }
+    assert_eq!(
+        AgentStateSnapshot::default().encode_to_vec(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(round_trip(&AgentStateSnapshot::default()).focus_known, None);
+}
+
+/// An old Harold sends none of the new fields. The old golden row still decodes, and the
+/// new fields read as false and zero.
+#[test]
+fn the_old_golden_row_decodes_with_no_waiting() {
+    let hex = include_str!("fixtures/host_agent_row.hex").trim();
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("a hex pair"))
+        .collect();
+    let pane = AgentPaneState::decode(bytes.as_slice()).expect("the old row");
+    assert!(!pane.waiting);
+    assert_eq!(pane.waiting_since_ms, 0);
 }

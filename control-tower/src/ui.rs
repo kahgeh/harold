@@ -2279,6 +2279,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2416,6 +2417,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2462,6 +2464,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2834,6 +2837,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Stale,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2925,6 +2929,7 @@ mod tests {
         );
 
         app.apply_later_snapshot(Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2949,6 +2954,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -3164,6 +3170,7 @@ mod tests {
         let unknown = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
+                focus_known: false,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -4141,6 +4148,7 @@ mod tests {
 
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -4538,6 +4546,8 @@ mod tests {
         last_transition_at_ms: i64,
     ) -> AgentRow {
         AgentRow {
+            waiting: false,
+            waiting_since_ms: 0,
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
@@ -5185,6 +5195,7 @@ mod tests {
         let mut app = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
+                focus_known: false,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -6001,6 +6012,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,

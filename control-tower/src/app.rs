@@ -104,6 +104,10 @@ pub struct AgentRow {
     pub role: String,
     /// The product of the pod that the agent serves. Empty when Harold sends none.
     pub pod_product: String,
+    /// Whether Harold says the agent waits for a person.
+    pub waiting: bool,
+    /// When the wait began, in milliseconds. Zero when the agent does not wait.
+    pub waiting_since_ms: i64,
 }
 
 impl AgentRow {
@@ -206,6 +210,8 @@ pub struct Snapshot {
     pub watches_paused: u32,
     /// Watches that stopped because they reached the day budget.
     pub watches_capped: u32,
+    /// Whether Harold knows which pane has focus. False when Harold sends nothing.
+    pub focus_known: bool,
     /// The release Harold reports, `None` while disconnected or when it sent none.
     pub harold_version: Option<String>,
 }
@@ -1603,6 +1609,7 @@ mod tests {
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
         let empty = Snapshot {
+            focus_known: false,
             harold_version: None,
             through_event_version: 0,
             server_time_ms: 0,
@@ -1659,6 +1666,7 @@ mod tests {
         app.begin_connection();
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -1819,6 +1827,7 @@ mod tests {
         let pane = incarnation("%1", 1, 2, 3, "codex");
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -1843,6 +1852,7 @@ mod tests {
 
         assert!(
             !app.apply_later_snapshot(Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -1860,6 +1870,7 @@ mod tests {
 
         assert!(
             app.apply_later_snapshot(Snapshot {
+                focus_known: false,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2110,6 +2121,8 @@ mod tests {
     #[test]
     fn search_matches_each_supported_field_case_insensitively() {
         let matched = AgentRow {
+            waiting: false,
+            waiting_since_ms: 0,
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
@@ -2532,6 +2545,7 @@ mod tests {
 
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            focus_known: false,
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2627,6 +2641,8 @@ mod tests {
         pane_index: u32,
     ) -> AgentRow {
         AgentRow {
+            waiting: false,
+            waiting_since_ms: 0,
             host: String::new(),
             host_icon: String::new(),
             window_name: String::new(),
@@ -2650,6 +2666,7 @@ mod tests {
 
     fn live_voice_app(muted: bool) -> App {
         let snapshot = Snapshot {
+            focus_known: false,
             harold_version: None,
             through_event_version: 1,
             server_time_ms: 0,
@@ -2752,6 +2769,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -2841,6 +2859,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -3032,6 +3051,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
+                focus_known: false,
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,

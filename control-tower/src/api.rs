@@ -546,6 +546,7 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         watches_running: snapshot.watches_running,
         watches_paused: snapshot.watches_paused,
         watches_capped: snapshot.watches_capped,
+        focus_known: snapshot.focus_known.unwrap_or(false),
         harold_version: Some(sanitize_display(
             &snapshot.harold_version,
             HAROLD_VERSION_LIMIT,
@@ -844,6 +845,8 @@ fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
         window_name: sanitize_display(&pane.window_name, PANE_FIELD_LIMIT),
         role: sanitize_display(&pane.role, PANE_FIELD_LIMIT),
         pod_product: sanitize_display(&pane.pod_product, PANE_FIELD_LIMIT),
+        waiting: pane.waiting,
+        waiting_since_ms: pane.waiting_since_ms,
     })
 }
 
@@ -958,6 +961,36 @@ mod tests {
     }
 
     #[test]
+    fn maps_waiting_fields_from_the_pane() {
+        let mut pane = local_pane_for_waiting();
+        pane.waiting = true;
+        pane.waiting_since_ms = 1234;
+        let row = super::map_pane(pane).unwrap();
+        assert!(row.waiting);
+        assert_eq!(row.waiting_since_ms, 1234);
+    }
+
+    #[test]
+    fn focus_known_absent_maps_to_false() {
+        let mapped = map_snapshot(AgentStateSnapshot::default()).unwrap();
+        assert!(!mapped.focus_known);
+    }
+
+    #[test]
+    fn focus_known_true_maps_to_true() {
+        let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(mapped.focus_known);
+    }
+
+    fn local_pane_for_waiting() -> AgentPaneState {
+        super::golden::local_pane("%1")
+    }
+
+    #[test]
     fn proto_number_1_reads_as_working() {
         assert_eq!(super::map_agent_state(1), AgentState::Working);
         assert_eq!(AgentState::Working.label(), "WORKING");
@@ -991,6 +1024,8 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(index, (state, _))| AgentPaneState {
+            waiting: false,
+            waiting_since_ms: 0,
             pane_id: format!("%{index}"),
             tmux_target: format!("agents:3.{index}"),
             session_name: "agents".into(),
@@ -1017,6 +1052,7 @@ mod tests {
         .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1069,6 +1105,7 @@ mod tests {
     #[test]
     fn maps_every_monitor_health_state_and_unknown_enum_values_to_unknown() {
         let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1145,6 +1182,7 @@ mod tests {
             .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1191,6 +1229,7 @@ mod tests {
     #[test]
     fn a_recap_with_control_characters_is_shown_clean() {
         let row = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1219,6 +1258,7 @@ mod tests {
     #[test]
     fn a_long_recap_keeps_up_to_400_characters() {
         let row = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1244,6 +1284,7 @@ mod tests {
     fn api_maps_current_step() {
         let map = |step: Option<String>| {
             map_snapshot(AgentStateSnapshot {
+                focus_known: None,
                 watches_running: 0,
                 watches_paused: 0,
                 watches_capped: 0,
@@ -1295,6 +1336,7 @@ mod tests {
         };
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1388,6 +1430,7 @@ mod tests {
     #[tokio::test]
     async fn reader_maps_generated_snapshot_before_delivery_then_closes_at_eof() {
         let generated = AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1417,6 +1460,7 @@ mod tests {
         let mut invalid = proto_pane("%1");
         invalid.pane_pid = 0;
         let mut stream = spawn_reader(FakeReader::new([Ok(Some(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
@@ -1808,6 +1852,8 @@ mod tests {
 
     fn proto_pane(pane_id: &str) -> AgentPaneState {
         AgentPaneState {
+            waiting: false,
+            waiting_since_ms: 0,
             pane_id: pane_id.into(),
             tmux_target: "agents:1.2".into(),
             session_name: "agents".into(),
@@ -1898,6 +1944,7 @@ mod tests {
 
     fn mapping_error(panes: Vec<AgentPaneState>) -> ProtocolError {
         map_snapshot(AgentStateSnapshot {
+            focus_known: None,
             watches_running: 0,
             watches_paused: 0,
             watches_capped: 0,
