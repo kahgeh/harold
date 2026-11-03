@@ -326,7 +326,7 @@ fn title_of(text: &str) -> Option<String> {
 }
 
 /// Percent-encodes one path segment.
-fn encode_segment(text: &str) -> String {
+pub(crate) fn encode_segment(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {

@@ -60,6 +60,9 @@ mod browser_traces_tests;
 pub(crate) mod browser_traces;
 pub(crate) mod call;
 pub(crate) mod chief;
+// Used from Task 4 (routes and handlers); remove this allow there.
+#[allow(dead_code)]
+pub(crate) mod collections;
 #[cfg(feature = "calls")]
 pub(crate) mod echo_test;
 pub(crate) mod login;
