@@ -5839,3 +5839,44 @@ fn harold_turns_carries_role_and_product_and_no_model() {
             .all(|(key, _)| key != "pod.product" && key != "model")
     );
 }
+
+
+#[test]
+fn record_waiting_duration_writes_the_role() {
+    record_waiting_duration("waiting_probe_role", 42.0);
+    assert_eq!(
+        test_support::histogram_sum(
+            "harold.agent.waiting.duration",
+            &[("role", "waiting_probe_role")]
+        ),
+        Some(42.0)
+    );
+}
+
+#[test]
+fn waiting_counts_give_the_waiting_gauge_and_a_role_with_none_reports_zero() {
+    let row = |role: &str, count| WaitingCount {
+        role: role.to_owned(),
+        pod_product: "waiting_probe_product".to_owned(),
+        count,
+    };
+    note_agents_waiting_for(vec![row("waiting_probe_a", 2), row("waiting_probe_b", 0)]);
+    let read = |role| {
+        test_support::gauge_value(
+            "harold.agents.waiting",
+            &[("role", role), ("pod.product", "waiting_probe_product")],
+        )
+    };
+    assert_eq!(read("waiting_probe_a"), Some(2));
+    assert_eq!(read("waiting_probe_b"), Some(0));
+    note_agents_waiting_for(vec![row("waiting_probe_a", 1)]);
+    assert_eq!(read("waiting_probe_a"), Some(1));
+    assert_eq!(read("waiting_probe_b"), None);
+}
+
+#[test]
+fn role_and_waited_s_are_allowed_fields() {
+    for field in ["role", "waited_s"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}

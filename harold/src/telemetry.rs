@@ -136,6 +136,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "session_by",
     "alert",
     "pod.product",
+    "role",
+    "waited_s",
     "product",
     "products",
     "id",
@@ -377,6 +379,9 @@ pub(crate) struct Instruments {
     pub multiplexer_call_duration: Histogram<f64>,
     /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
     pub agent_state_duration: Histogram<f64>,
+    /// `harold.agent.waiting.duration`, seconds, by `role`.
+    #[allow(dead_code)] // Task 5 removes this.
+    pub agent_waiting_duration: Histogram<f64>,
     /// `harold.agent.state_observed`, `{observation}`, by `source`, `state`, `provider_id`, `multiplexer`.
     pub agent_state_observed: Counter<u64>,
     /// `harold.agent.recap_read`, `{read}`, by `result` and `provider_id`.
@@ -474,6 +479,12 @@ fn build_instruments(meter: &Meter) -> Instruments {
         ),
         agent_state_duration: seconds(
             "harold.agent.state.duration",
+            &[
+                10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
+            ],
+        ),
+        agent_waiting_duration: seconds(
+            "harold.agent.waiting.duration",
             &[
                 10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
             ],
@@ -848,7 +859,15 @@ pub(crate) struct AgentCount {
     pub(crate) count: u64,
 }
 
-/// What the three gauges read, by multiplexer name.
+/// One row of `harold.agents.waiting`: how many agents of `role` wait in `pod_product`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WaitingCount {
+    pub(crate) role: String,
+    pub(crate) pod_product: String,
+    pub(crate) count: u64,
+}
+
+/// What the four gauges read, by multiplexer name.
 #[derive(Default)]
 struct AgentGaugeState {
     counts: BTreeMap<String, Vec<AgentCount>>,
@@ -856,17 +875,20 @@ struct AgentGaugeState {
     host_counts: BTreeMap<String, Vec<AgentCount>>,
     /// The sessions and panes of the last listing that worked.
     listings: BTreeMap<String, (u64, u64)>,
+    /// The rows `harold.agents.waiting` reads.
+    waiting: Vec<WaitingCount>,
 }
 
 fn agent_gauge_state() -> &'static Arc<Mutex<AgentGaugeState>> {
     static STATE: OnceLock<Arc<Mutex<AgentGaugeState>>> = OnceLock::new();
-    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<u64>; 3]> = OnceLock::new();
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<u64>; 4]> = OnceLock::new();
     let state = STATE.get_or_init(|| Arc::new(Mutex::new(AgentGaugeState::default())));
     GAUGES.get_or_init(|| {
         let meter = meter();
         let counts = Arc::clone(state);
         let sessions = Arc::clone(state);
         let panes = Arc::clone(state);
+        let waiting = Arc::clone(state);
         [
             meter
                 .u64_observable_gauge("harold.agents")
@@ -909,6 +931,22 @@ fn agent_gauge_state() -> &'static Arc<Mutex<AgentGaugeState>> {
                 |l| l.0,
             ),
             listing_gauge(&meter, "harold.multiplexer.panes", "{pane}", panes, |l| l.1),
+            meter
+                .u64_observable_gauge("harold.agents.waiting")
+                .with_unit("{agent}")
+                .with_callback(move |observer| {
+                    let state = waiting.lock().unwrap_or_else(PoisonError::into_inner);
+                    for row in &state.waiting {
+                        observer.observe(
+                            row.count,
+                            &[
+                                KeyValue::new("role", row.role.clone()),
+                                KeyValue::new("pod.product", row.pod_product.clone()),
+                            ],
+                        );
+                    }
+                })
+                .build(),
         ]
     });
     state
@@ -945,6 +983,28 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
     #[cfg(test)]
     COUNTS_NOTED.with(|noted| noted.borrow_mut().push(counts.clone()));
     note_agent_counts_for(configured_multiplexer(), counts);
+}
+
+/// Replaces the rows `harold.agents.waiting` reads. A role with no waiting agent has a row
+/// with count 0.
+#[allow(dead_code)] // Task 5 removes this.
+pub(crate) fn note_agents_waiting(counts: Vec<WaitingCount>) {
+    note_agents_waiting_for(counts);
+}
+
+fn note_agents_waiting_for(counts: Vec<WaitingCount>) {
+    agent_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .waiting = counts;
+}
+
+/// Records the seconds an agent waited for you to look, on `harold.agent.waiting.duration`.
+#[allow(dead_code)] // Task 5 removes this.
+pub(crate) fn record_waiting_duration(role: &str, seconds: f64) {
+    instruments()
+        .agent_waiting_duration
+        .record(seconds, &[KeyValue::new("role", role.to_owned())]);
 }
 
 /// The multiplexer of every Rex host: hosts exist only with Rex.
