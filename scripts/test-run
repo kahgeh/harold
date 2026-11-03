@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Run a command and keep one log of the run in one format.
+
+    test-run <spec id> <name> -- <command...>
+    test-run show <spec id>
+
+The log is <base checkout>/.superpowers/pod/test-logs/<spec id>/<UTC time>-<name>.log.
+"""
+from datetime import datetime, timezone
+import os
+from pathlib import Path
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+KEBAB = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
+RESULT_LINE = re.compile(rb'test result:.*?(\d+) passed; (\d+) failed; (\d+) ignored')
+LOG_DIR = Path('.superpowers') / 'pod' / 'test-logs'
+
+
+def base_checkout(cwd):
+    """Return the worktree whose branch is refs/heads/main, or None."""
+    try:
+        out = subprocess.run(['git', 'worktree', 'list', '--porcelain'], cwd=cwd,
+                             capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    for block in out.split('\n\n'):
+        path = None
+        branch = None
+        for line in block.splitlines():
+            if line.startswith('worktree '):
+                path = line[len('worktree '):]
+            elif line.startswith('branch '):
+                branch = line[len('branch '):]
+        if path and branch == 'refs/heads/main':
+            return Path(path)
+    return None
+
+
+def stamp(now):
+    return now.strftime('%Y%m%dT%H%M%SZ')
+
+
+def log_path(base, spec_id, name, now):
+    """Return a log path that does not exist yet: add -2, -3 to the name."""
+    folder = Path(base) / LOG_DIR / spec_id
+    path = folder / f'{stamp(now)}-{name}.log'
+    count = 1
+    while path.exists():
+        count += 1
+        path = folder / f'{stamp(now)}-{name}-{count}.log'
+    return path
+
+
+def sum_results(text):
+    """Sum the `test result:` lines. Return None when there are none."""
+    data = text if isinstance(text, bytes) else text.encode()
+    totals = [0, 0, 0]
+    found = False
+    for line in data.splitlines():
+        match = RESULT_LINE.search(line)
+        if match:
+            found = True
+            for i in range(3):
+                totals[i] += int(match.group(i + 1))
+    if not found:
+        return None
+    return f'{totals[0]} passed, {totals[1]} failed, {totals[2]} ignored'
+
+
+def commit_of(cwd):
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True).stdout
+    commit = git('rev-parse', '--short', 'HEAD').strip()
+    # The kept logs are not a change of the tree.
+    if git('status', '--porcelain', '--', '.', ':(top,exclude).superpowers').strip():
+        commit += ' dirty'
+    return commit
+
+
+def rfc3339(moment):
+    return moment.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def open_log(base, spec_id, name, now):
+    while True:
+        path = log_path(base, spec_id, name, now)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            continue
+        return path, os.fdopen(fd, 'wb')
+
+
+def run(spec_id, name, command, cwd=None):
+    """Run the command, keep the log and return the exit code."""
+    cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    for label, value in (('id', spec_id), ('name', name)):
+        if not KEBAB.match(value):
+            print(f'test-run: bad {label} {value!r}: use kebab-case', file=sys.stderr)
+            return 2
+    if not command:
+        print('test-run: no command', file=sys.stderr)
+        return 2
+    base = base_checkout(cwd)
+    if base is None:
+        print('test-run: no worktree of main found: nothing written', file=sys.stderr)
+        return 2
+    commit = commit_of(cwd)
+    started = datetime.now(timezone.utc)
+    path, log = open_log(base, spec_id, name, started)
+    env = dict(os.environ, TEST_RUN_DIR=str(path.parent), TEST_RUN_STEM=path.stem)
+    header = [('test-run', '1'), ('id', spec_id), ('name', name),
+              ('command', shlex.join(command)), ('cwd', str(cwd)),
+              ('commit', commit), ('started', rfc3339(started))]
+    with log:
+        log.write(''.join(f'# {k}: {v}\n' for k, v in header).encode())
+        log.flush()
+        t0 = time.monotonic()
+        code, stopped, tail, matched = execute(command, cwd, env, log)
+        if tail not in (b'', b'\n'):
+            log.write(b'\n')
+        duration = time.monotonic() - t0
+        result = 'stopped' if stopped else ('passed' if code == 0 else 'failed')
+        sums = sum_results(b'\n'.join(matched))
+        if sums:
+            result += ', ' + sums
+        footer = [('finished', rfc3339(datetime.now(timezone.utc))),
+                  ('duration_s', f'{duration:.1f}'), ('exit', str(code)), ('result', result)]
+        log.write(''.join(f'# {k}: {v}\n' for k, v in footer).encode())
+    return code
+
+
+def execute(command, cwd, env, log):
+    """Run the command, copy its output. Return (exit code, stopped, last byte, result lines)."""
+    try:
+        proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    except OSError as err:
+        msg = f'test-run: cannot run {command[0]}: {err.strerror or err}\n'.encode()
+        log.write(msg)
+        sys.stdout.buffer.write(msg)
+        sys.stdout.buffer.flush()
+        return 127, False, b'\n', []
+    forwarded = []
+
+    def forward(signum, _frame):
+        forwarded.append(signum)
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    old = {}
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            old[signum] = signal.signal(signum, forward)
+    except ValueError:  # not the main thread
+        pass
+    last = b''
+    pending = b''
+    matched = []
+    try:
+        while True:
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            log.write(chunk)
+            log.flush()
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            last = chunk[-1:]
+            lines = (pending + chunk).split(b'\n')
+            pending = lines.pop()
+            matched += [l for l in lines if RESULT_LINE.search(l)]
+        proc.wait()
+        proc.stdout.close()
+        if RESULT_LINE.search(pending):
+            matched.append(pending)
+    finally:
+        for signum, handler in old.items():
+            signal.signal(signum, handler)
+    if proc.returncode < 0:
+        return 128 - proc.returncode, True, last, matched
+    return proc.returncode, bool(forwarded), last, matched
+
+
+def read_log(path):
+    """Return (header, footer) dicts from a log, or None when it is not a test-run log."""
+    header = {}
+    footer = {}
+    with open(path, 'rb') as handle:
+        first = handle.readline().decode('utf-8', 'replace').rstrip('\n')
+        if first != '# test-run: 1':
+            return None
+        for raw in handle:
+            line = raw.decode('utf-8', 'replace').rstrip('\n')
+            match = re.match(r'# (\w+): (.*)$', line)
+            if not match:
+                break
+            header[match.group(1)] = match.group(2)
+        size = path.stat().st_size
+        handle.seek(max(0, size - 4096))
+        for raw in handle.read().splitlines():
+            match = re.match(rb'# (finished|duration_s|exit|result): (.*)$', raw)
+            if match:
+                footer[match.group(1).decode()] = match.group(2).decode('utf-8', 'replace')
+    return header, footer
+
+
+def show(spec_id, base):
+    rows = []
+    folder = Path(base) / LOG_DIR / spec_id
+    if not folder.is_dir():
+        return rows
+    for path in sorted(folder.glob('*.log')):
+        parsed = read_log(path)
+        if parsed is None:
+            continue
+        header, footer = parsed
+        rows.append({
+            'time': path.name.split('-', 1)[0],
+            'name': header.get('name', ''),
+            'commit': header.get('commit', ''),
+            'seconds': footer.get('duration_s', ''),
+            'result': footer.get('result', 'unfinished') if 'exit' in footer else 'unfinished',
+            'features': 'timing' if 'timing-tests' in header.get('command', '') else '',
+        })
+    return rows
+
+
+def main(argv):
+    if len(argv) == 2 and argv[0] == 'show':
+        base = base_checkout(Path.cwd())
+        if base is None:
+            print('test-run: no worktree of main found', file=sys.stderr)
+            return 2
+        for row in show(argv[1], base):
+            print('  '.join(str(row[k]) for k in
+                            ('time', 'name', 'commit', 'seconds', 'result', 'features')).rstrip())
+        return 0
+    if len(argv) >= 4 and argv[2] == '--':
+        return run(argv[0], argv[1], argv[3:])
+    print('usage: test-run <spec id> <name> -- <command...>\n       test-run show <spec id>',
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
