@@ -1,4 +1,4 @@
-use super::focus::{read_focus, FocusPort, UnknownReason};
+use super::focus::{FocusPort, UnknownReason, read_focus};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -174,7 +174,8 @@ fn the_reason_names_are_stable() {
 
 #[test]
 fn rex_app_with_no_session_is_unknown_rex_unreachable() {
-    let clients = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"},"session_ids":[]}]}"#;
+    let clients =
+        r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"},"session_ids":[]}]}"#;
     let port = FakeFocusPort::new(vec![(REX_CLIENTS, Ok(clients))]);
     assert_eq!(read_focus(&port, true), Err(UnknownReason::RexUnreachable));
     let clients = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"}}]}"#;

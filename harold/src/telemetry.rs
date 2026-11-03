@@ -380,7 +380,6 @@ pub(crate) struct Instruments {
     /// `harold.agent.state.duration`, seconds, by `state`, `provider_id`, `multiplexer`, `host`.
     pub agent_state_duration: Histogram<f64>,
     /// `harold.agent.waiting.duration`, seconds, by `role`.
-    #[allow(dead_code)] // Task 5 removes this.
     pub agent_waiting_duration: Histogram<f64>,
     /// `harold.agent.state_observed`, `{observation}`, by `source`, `state`, `provider_id`, `multiplexer`.
     pub agent_state_observed: Counter<u64>,
@@ -988,9 +987,14 @@ pub(crate) fn note_agent_counts(counts: Vec<AgentCount>) {
 /// Replaces the rows `harold.agents.waiting` reads. The gauge reports only the rows the
 /// caller passes. Harold sends one row for each role it holds, with 0 for a role with no
 /// waiting agent.
-#[allow(dead_code)] // Task 5 removes this.
 pub(crate) fn note_agents_waiting(counts: Vec<WaitingCount>) {
+    // The rows are one value for the whole process. In a test build the waiting tasks of
+    // many tests run at once, so only the gauge test writes the rows, with
+    // `note_agents_waiting_for`.
+    #[cfg(not(test))]
     note_agents_waiting_for(counts);
+    #[cfg(test)]
+    drop(counts);
 }
 
 fn note_agents_waiting_for(counts: Vec<WaitingCount>) {
@@ -1001,7 +1005,6 @@ fn note_agents_waiting_for(counts: Vec<WaitingCount>) {
 }
 
 /// Records the seconds an agent waited for you to look, on `harold.agent.waiting.duration`.
-#[allow(dead_code)] // Task 5 removes this.
 pub(crate) fn record_waiting_duration(role: &str, seconds: f64) {
     instruments()
         .agent_waiting_duration

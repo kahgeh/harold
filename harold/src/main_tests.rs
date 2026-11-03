@@ -9,6 +9,7 @@ use super::agent::domain::{
     AgentPaneProjection, AgentSnapshot, CompletionSummaryUpdate, EffectiveAgentState,
     MonitorHealthProjection, ObservedAgentState, WorkSummaryUpdate,
 };
+use super::agent::focus::FocusPort;
 use super::agent::inventory::{AgentInventoryPort, InventoryError, WindowNames};
 use super::agent::recap::Recaps;
 use super::agent::rex::CurrentSteps;
@@ -17,6 +18,7 @@ use super::agent::rex_hosts::{HostAgentState, RexHostAgent};
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
+use super::agent::waiting::WaitingView;
 use super::harold::harold_server::Harold;
 use super::harold::{
     AgentState, GetHaroldStateRequest, GetRemoteOrderRequest, MonitorHealthState,
@@ -25,8 +27,9 @@ use super::harold::{
 };
 use super::{
     HAROLD_VERSION, HaroldService, HaroldStateView, Request, RoleSources, TurnCompleteRequest,
-    apply_setting, load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log,
-    restore_startup_state, store, version_or_source,
+    apply_setting, first_local_pane_in_rex, load_startup_agent_snapshot, map_agent_snapshot,
+    pane_id_for_log, restore_startup_state, spawn_waiting_task, store, version_or_source,
+    waiting_counts, with_waiting,
 };
 
 struct EmptyInventory;
@@ -104,6 +107,7 @@ where
             local_icon: String::new(),
             state_view: HaroldStateView::default(),
             watch_counts: watch::channel(crate::tools::WatchCounts::default()).1,
+            waiting: watch::channel(WaitingView::default()).1,
         },
         shutdown,
         task,
@@ -2773,6 +2777,7 @@ fn named_stream(
         String::new(),
         RoleSources::default(),
         watch::channel(crate::tools::WatchCounts::default()).1,
+        watch::channel(WaitingView::default()).1,
         sender,
         shutdown_rx,
     ));
@@ -2809,6 +2814,7 @@ fn counts_stream_from(
             String::new(),
             RoleSources::default(),
             counts_rx,
+            watch::channel(WaitingView::default()).1,
             sender,
             shutdown_rx,
         )
@@ -4027,4 +4033,310 @@ async fn a_failed_write_gives_an_internal_status() {
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
     assert_eq!(error.message(), "remote order write failed");
+}
+
+/// Runs `forward_agent_snapshots` with a waiting channel the test sends on.
+fn waiting_stream() -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    watch::Sender<WaitingView>,
+) {
+    let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
+    let (waiting, waiting_rx) = watch::channel(WaitingView::default());
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    tokio::spawn(async move {
+        super::forward_agent_snapshots(
+            hub.subscribe(),
+            CurrentSteps::default(),
+            Recaps::default(),
+            HostAgents::default(),
+            WindowNames::default(),
+            String::new(),
+            RoleSources::default(),
+            watch::channel(crate::tools::WatchCounts::default()).1,
+            waiting_rx,
+            sender,
+            shutdown_rx,
+        )
+        .await;
+        drop(hub);
+    });
+    (receiver, shutdown, waiting)
+}
+
+fn waiting_view(panes: &[(&str, i64)], focus_known: bool) -> WaitingView {
+    WaitingView {
+        since_ms: panes
+            .iter()
+            .map(|(pane_id, since)| ((*pane_id).to_owned(), *since))
+            .collect(),
+        focus_known,
+    }
+}
+
+#[test]
+fn snapshot_carries_waiting_since_ms_and_focus_known() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        &WindowNames::default(),
+        "",
+        &RoleSources::default(),
+    );
+    assert_eq!(mapped.focus_known, None);
+
+    let served = with_waiting(
+        mapped.clone(),
+        &waiting_view(&[(STEP_PANE, 12_345), ("%99", 7)], true),
+    );
+
+    assert!(served.panes[0].waiting);
+    assert_eq!(served.panes[0].waiting_since_ms, 12_345);
+    assert_eq!(served.focus_known, Some(true));
+    assert_eq!(
+        served.panes.len(),
+        1,
+        "a waiting pane id with no pane adds no row"
+    );
+
+    let not_waiting = with_waiting(mapped, &waiting_view(&[], true));
+    assert!(!not_waiting.panes[0].waiting);
+    assert_eq!(not_waiting.panes[0].waiting_since_ms, 0);
+}
+
+#[test]
+fn unknown_focus_serves_focus_known_false() {
+    let mapped = map_agent_snapshot(
+        populated_snapshot(1, None),
+        &CurrentSteps::default(),
+        &Recaps::default(),
+        &HostAgents::default(),
+        &WindowNames::default(),
+        "",
+        &RoleSources::default(),
+    );
+    let served = with_waiting(mapped, &waiting_view(&[], false));
+    assert_eq!(served.focus_known, Some(false));
+}
+
+#[tokio::test]
+async fn a_waiting_change_sends_a_snapshot_at_the_same_event_version() {
+    let (mut receiver, _shutdown, waiting) = waiting_stream();
+    let first = next_item(&mut receiver).await;
+    assert!(!first.panes[0].waiting);
+    assert_eq!(first.focus_known, Some(false));
+    let version = first.through_event_version;
+
+    waiting.send_replace(waiting_view(&[(STEP_PANE, 9_000)], true));
+    let second = next_item(&mut receiver).await;
+    assert!(second.panes[0].waiting);
+    assert_eq!(second.panes[0].waiting_since_ms, 9_000);
+    assert_eq!(second.focus_known, Some(true));
+    assert_eq!(
+        second.through_event_version, version,
+        "a waiting change does not raise the event version"
+    );
+    let mut unchanged = second.panes[0].clone();
+    unchanged.waiting = false;
+    unchanged.waiting_since_ms = 0;
+    assert_eq!(unchanged, first.panes[0], "the agent state stays the same");
+
+    waiting.send_replace(waiting_view(&[], true));
+    let third = next_item(&mut receiver).await;
+    assert!(!third.panes[0].waiting);
+    assert_eq!(third.through_event_version, version);
+    no_item(&mut receiver).await;
+}
+
+/// A focus port that answers `tmux list-clients` with the line the test sets.
+struct ScriptedFocus(std::sync::Mutex<Result<String, String>>);
+
+impl ScriptedFocus {
+    fn focused_on(pane_id: &str) -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(Ok(Self::line(pane_id)))))
+    }
+
+    fn line(pane_id: &str) -> String {
+        format!("100\tattached,focused\t{pane_id}\n")
+    }
+
+    fn set(&self, answer: Result<String, String>) {
+        *self.0.lock().expect("focus lock") = answer;
+    }
+}
+
+impl FocusPort for ScriptedFocus {
+    fn run(&self, program: &str, _args: &[&str]) -> Result<String, String> {
+        assert_eq!(program, "tmux", "a tmux pane id makes the reader ask tmux");
+        self.0.lock().expect("focus lock").clone()
+    }
+}
+
+/// The fake clock of the waiting task.
+const WAITING_CLOCK_MS: i64 = 42_000;
+
+/// Runs the waiting task and the stream over one hub. The task reads `port` every 20 ms.
+fn waiting_task_stream(
+    port: Arc<ScriptedFocus>,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+) {
+    let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
+    let (waiting, waiting_rx) = watch::channel(WaitingView::default());
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    spawn_waiting_task(
+        hub.subscribe(),
+        port,
+        RoleSources::default(),
+        std::time::Duration::from_millis(20),
+        || WAITING_CLOCK_MS,
+        waiting,
+        shutdown_rx.clone(),
+    );
+    tokio::spawn(super::forward_agent_snapshots(
+        hub.subscribe(),
+        CurrentSteps::default(),
+        Recaps::default(),
+        HostAgents::default(),
+        WindowNames::default(),
+        String::new(),
+        RoleSources::default(),
+        watch::channel(crate::tools::WatchCounts::default()).1,
+        waiting_rx,
+        sender,
+        shutdown_rx,
+    ));
+    (receiver, shutdown, hub)
+}
+
+/// The next stream item that `wanted` accepts.
+async fn item_where(
+    receiver: &mut tokio::sync::mpsc::Receiver<
+        Result<super::harold::AgentStateSnapshot, tonic::Status>,
+    >,
+    wanted: impl Fn(&super::harold::AgentStateSnapshot) -> bool,
+) -> super::harold::AgentStateSnapshot {
+    loop {
+        let item = next_item(receiver).await;
+        if wanted(&item) {
+            return item;
+        }
+    }
+}
+
+fn snapshot_in_state(revision: i64, state: EffectiveAgentState) -> AgentSnapshot {
+    let mut snapshot = populated_snapshot(revision, None);
+    snapshot.panes[0].effective_state = state;
+    snapshot
+}
+
+#[tokio::test]
+async fn the_waiting_task_serves_a_pane_that_rests_off_focus_until_the_focus_reaches_it() {
+    let port = ScriptedFocus::focused_on("%1");
+    let (mut receiver, _shutdown, hub) = waiting_task_stream(Arc::clone(&port));
+    item_where(&mut receiver, |item| item.focus_known == Some(true)).await;
+
+    hub.publish_committed(snapshot_in_state(2, EffectiveAgentState::Done));
+    let waiting = item_where(&mut receiver, |item| item.panes[0].waiting).await;
+    assert_eq!(waiting.panes[0].waiting_since_ms, WAITING_CLOCK_MS);
+    assert_eq!(waiting.focus_known, Some(true));
+    assert_eq!(waiting.through_event_version, 2);
+
+    port.set(Ok(ScriptedFocus::line(STEP_PANE)));
+    let seen = item_where(&mut receiver, |item| !item.panes[0].waiting).await;
+    assert_eq!(seen.panes[0].waiting_since_ms, 0);
+    assert_eq!(
+        seen.through_event_version, 2,
+        "a waiting change does not raise the event version"
+    );
+}
+
+#[tokio::test]
+async fn the_waiting_task_serves_focus_known_false_when_the_focus_cannot_be_read() {
+    let port = ScriptedFocus::focused_on("%1");
+    let (mut receiver, _shutdown, _hub) = waiting_task_stream(Arc::clone(&port));
+    item_where(&mut receiver, |item| item.focus_known == Some(true)).await;
+
+    port.set(Err("tmux: no server".into()));
+    let unknown = item_where(&mut receiver, |item| item.focus_known == Some(false)).await;
+    assert!(!unknown.panes[0].waiting);
+}
+
+#[tokio::test]
+async fn the_waiting_task_stops_at_shutdown() {
+    let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
+    let (waiting, _waiting_rx) = watch::channel(WaitingView::default());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let task = spawn_waiting_task(
+        hub.subscribe(),
+        ScriptedFocus::focused_on("%1"),
+        RoleSources::default(),
+        std::time::Duration::from_millis(20),
+        || WAITING_CLOCK_MS,
+        waiting,
+        shutdown_rx,
+    );
+    drop(shutdown);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the task stops in time")
+        .expect("the task does not panic");
+}
+
+#[test]
+fn waiting_counts_give_one_row_for_each_role_with_zero_when_none_waits() {
+    let mut snapshot = populated_snapshot(1, None);
+    let template = snapshot.panes[0].clone();
+    for pane_id in ["%9", "%10"] {
+        let mut pane = template.clone();
+        pane.pane.incarnation.pane_id = pane_id.to_owned();
+        snapshot.panes.push(pane);
+    }
+    let role_and_product = |pane_id: &str| match pane_id {
+        "%8" | "%9" => ("coordinator".to_owned(), "alpha".to_owned()),
+        _ => (String::new(), String::new()),
+    };
+    let row = |role: &str, pod_product: &str, count| crate::telemetry::WaitingCount {
+        role: role.to_owned(),
+        pod_product: pod_product.to_owned(),
+        count,
+    };
+
+    let none = waiting_counts(&snapshot, &waiting_view(&[], true), &role_and_product);
+    assert_eq!(none, vec![row("", "", 0), row("coordinator", "alpha", 0)]);
+
+    let view = waiting_view(&[("%8", 1), ("%9", 2), ("%gone", 3)], true);
+    let some = waiting_counts(&snapshot, &view, &role_and_product);
+    assert_eq!(some, vec![row("", "", 0), row("coordinator", "alpha", 2)]);
+}
+
+#[test]
+fn the_first_pane_of_this_machine_decides_rex_or_tmux_for_the_focus() {
+    let with_panes = |pane_ids: &[&str]| {
+        let mut snapshot = populated_snapshot(1, None);
+        let template = snapshot.panes[0].clone();
+        snapshot.panes = pane_ids
+            .iter()
+            .map(|pane_id| {
+                let mut pane = template.clone();
+                pane.pane.incarnation.pane_id = (*pane_id).to_owned();
+                pane
+            })
+            .collect();
+        snapshot
+    };
+    let in_rex = |pane_ids: &[&str]| first_local_pane_in_rex(&with_panes(pane_ids));
+    assert_eq!(in_rex(&["rex:host/block:1", "block:abc", "%1"]), Some(true));
+    assert_eq!(
+        in_rex(&["rex:host/block:1", "%1", "block:abc"]),
+        Some(false)
+    );
+    assert_eq!(in_rex(&["rex:host/block:1"]), None);
+    assert_eq!(in_rex(&[]), None);
 }

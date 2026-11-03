@@ -92,6 +92,8 @@ struct HaroldService {
     state_view: HaroldStateView,
     /// The watch counts the watch tool pushes. The stream puts the newest in each snapshot.
     watch_counts: watch::Receiver<tools::WatchCounts>,
+    /// The agents that wait for the user, and whether Harold knows the focused pane.
+    waiting: watch::Receiver<agent::waiting::WaitingView>,
 }
 
 /// The settings values that `GetHaroldState` reports. It holds no other setting, so a
@@ -211,6 +213,7 @@ fn harold_service(
     local_icon: String,
     state_view: HaroldStateView,
     watch_counts: watch::Receiver<tools::WatchCounts>,
+    waiting: watch::Receiver<agent::waiting::WaitingView>,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -227,6 +230,7 @@ fn harold_service(
         local_icon,
         state_view,
         watch_counts,
+        waiting,
     }
 }
 
@@ -613,6 +617,7 @@ impl Harold for HaroldService {
             self.local_icon.clone(),
             self.state_view.roles.clone(),
             self.watch_counts.clone(),
+            self.waiting.clone(),
             sender,
             shutdown,
         ));
@@ -815,6 +820,7 @@ async fn forward_agent_snapshots(
     local_icon: String,
     roles: RoleSources,
     mut counts: watch::Receiver<tools::WatchCounts>,
+    mut waiting: watch::Receiver<agent::waiting::WaitingView>,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -840,7 +846,9 @@ async fn forward_agent_snapshots(
         &roles,
     );
     let initial = with_watch_counts(initial, *counts.borrow_and_update());
+    let initial = with_waiting(initial, &waiting.borrow_and_update());
     let mut counts_open = true;
+    let mut waiting_open = true;
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }
@@ -857,6 +865,7 @@ async fn forward_agent_snapshots(
                 let snapshot =
                     map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -867,6 +876,7 @@ async fn forward_agent_snapshots(
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -877,6 +887,7 @@ async fn forward_agent_snapshots(
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -887,6 +898,7 @@ async fn forward_agent_snapshots(
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -901,6 +913,22 @@ async fn forward_agent_snapshots(
                 // at the same `through_event_version`.
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = waiting.changed(), if waiting_open => {
+                if changed.is_err() {
+                    // The waiting task is gone: the last view stays, and the stream goes on.
+                    waiting_open = false;
+                    continue;
+                }
+                // A waiting change sends the same agent state again with the new fields,
+                // at the same `through_event_version`.
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -911,6 +939,7 @@ async fn forward_agent_snapshots(
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -929,6 +958,183 @@ fn with_watch_counts(
     snapshot.watches_paused = counts.paused;
     snapshot.watches_capped = counts.capped;
     snapshot
+}
+
+/// Puts the waiting agents and `focus_known` in `snapshot`, by pane id. `map_agent_snapshot`
+/// leaves them empty: the agent state does not hold them.
+fn with_waiting(
+    mut snapshot: AgentStateSnapshot,
+    view: &agent::waiting::WaitingView,
+) -> AgentStateSnapshot {
+    for pane in &mut snapshot.panes {
+        let since = view.since_ms.get(&pane.pane_id).copied();
+        pane.waiting = since.is_some();
+        pane.waiting_since_ms = since.unwrap_or(0);
+    }
+    snapshot.focus_known = Some(view.focus_known);
+    snapshot
+}
+
+/// Starts the task that decides the agents that wait for the user. It reads the focused
+/// pane at each `interval` off the async threads, and applies each agent snapshot change
+/// with the last focus reading. It sends a new view on `views` only when the view changed.
+fn spawn_waiting_task(
+    mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
+    port: Arc<dyn agent::focus::FocusPort>,
+    roles: RoleSources,
+    interval: Duration,
+    clock: fn() -> i64,
+    views: watch::Sender<agent::waiting::WaitingView>,
+    mut shutdown: watch::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    use agent::waiting::{Focus, WaitingTracker};
+    tokio::spawn(async move {
+        if shutdown.has_changed().unwrap_or(true) {
+            return;
+        }
+        let mut tracker = WaitingTracker::new();
+        let mut focus = Focus::Unknown;
+        let mut in_rex = false;
+        // Whether the last focus reading failed. No reading yet is not a failed reading.
+        let mut read_unknown = false;
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                _ = ticker.tick() => {
+                    in_rex = first_local_pane_in_rex(&snapshots.borrow()).unwrap_or(in_rex);
+                    let reader = Arc::clone(&port);
+                    let reading = tokio::task::spawn_blocking(move || {
+                        agent::focus::read_focus(reader.as_ref(), in_rex)
+                    })
+                    .await;
+                    // A reader that panicked keeps the last reading.
+                    let Ok(reading) = reading else { continue };
+                    focus = match reading {
+                        Ok(pane) => {
+                            read_unknown = false;
+                            Focus::Pane(pane)
+                        }
+                        Err(reason) => {
+                            // One line each time the focus becomes unknown, not one each tick.
+                            if !read_unknown {
+                                info!(reason = reason.as_str(), "focus unknown");
+                            }
+                            read_unknown = true;
+                            Focus::Unknown
+                        }
+                    };
+                }
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            let snapshot = snapshots.borrow_and_update().clone();
+            observe_waiting(&mut tracker, &snapshot, &focus, clock(), &roles, &views);
+        }
+    })
+}
+
+/// The wall clock in milliseconds since the Unix epoch.
+fn wall_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Whether the first pane of this machine is a Rex block, as the old control-tower read it.
+/// `None` when the snapshot has no pane of this machine.
+fn first_local_pane_in_rex(snapshot: &agent::domain::AgentSnapshot) -> Option<bool> {
+    snapshot
+        .panes
+        .iter()
+        .map(|projection| projection.pane.incarnation.pane_id.as_str())
+        .find(|pane_id| !pane_id.starts_with("rex:"))
+        .map(|pane_id| pane_id.starts_with(agent::rex::BLOCK_PREFIX))
+}
+
+/// Applies one snapshot and the focus to `tracker`. It logs each agent that begins to wait
+/// and each agent the user sees, notes the waiting counts, and sends the view when it changed.
+fn observe_waiting(
+    tracker: &mut agent::waiting::WaitingTracker,
+    snapshot: &agent::domain::AgentSnapshot,
+    focus: &agent::waiting::Focus,
+    now_ms: i64,
+    roles: &RoleSources,
+    views: &watch::Sender<agent::waiting::WaitingView>,
+) {
+    use agent::waiting::WaitingEvent;
+    let chief = web_app::chief::find_chief(
+        snapshot,
+        roles.chief_folder.as_deref(),
+        roles.chief_session.as_deref(),
+    );
+    let chief_pane = match chief {
+        web_app::chief::ChiefPane::One { pane_id, .. } => Some(pane_id),
+        _ => None,
+    };
+    let pod_roles = roles.pod_roles();
+    let role_and_product = |pane_id: &str| pane_role(pane_id, chief_pane.as_deref(), &pod_roles);
+    let role_of = |pane_id: &str| role_and_product(pane_id).0;
+
+    for event in tracker.observe(snapshot, focus, now_ms, &role_of) {
+        match event {
+            WaitingEvent::Began { pane_id, role } => {
+                info!(pane_id = %pane_id, role = %role, "agent waiting");
+            }
+            WaitingEvent::Seen {
+                pane_id,
+                role,
+                waited_s,
+            } => {
+                info!(pane_id = %pane_id, role = %role, waited_s, "agent seen");
+                telemetry::record_waiting_duration(&role, waited_s);
+            }
+            WaitingEvent::Ended { .. } => {}
+        }
+    }
+
+    let view = tracker.view();
+    telemetry::note_agents_waiting(waiting_counts(snapshot, &view, &role_and_product));
+
+    views.send_if_modified(|current| {
+        if *current == view {
+            return false;
+        }
+        *current = view;
+        true
+    });
+}
+
+/// The rows of `harold.agents.waiting`: one row for each role and product in the snapshot,
+/// with 0 when no agent of it waits. `role_and_product` maps a pane id to its role and product.
+fn waiting_counts(
+    snapshot: &agent::domain::AgentSnapshot,
+    view: &agent::waiting::WaitingView,
+    role_and_product: &dyn Fn(&str) -> (String, String),
+) -> Vec<telemetry::WaitingCount> {
+    let mut counts = std::collections::BTreeMap::<(String, String), u64>::new();
+    for projection in &snapshot.panes {
+        let pane_id = projection.pane.incarnation.pane_id.as_str();
+        let count = counts.entry(role_and_product(pane_id)).or_default();
+        if view.since_ms.contains_key(pane_id) {
+            *count += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((role, pod_product), count)| telemetry::WaitingCount {
+            role,
+            pod_product,
+            count,
+        })
+        .collect()
 }
 
 async fn send_agent_snapshot(
@@ -1838,6 +2044,19 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(10),
         shutdown_rx.clone(),
     );
+    // One channel: the waiting task sends the waiting agents, the snapshot stream reads them.
+    let (waiting_tx, waiting_rx) = watch::channel(agent::waiting::WaitingView::default());
+    spawn_waiting_task(
+        snapshots.subscribe(),
+        Arc::new(agent::focus::CommandFocusPort::new(
+            cfg.agent_monitor.rex.clone(),
+        )),
+        RoleSources::from_settings(cfg),
+        Duration::from_secs(1),
+        wall_clock_ms,
+        waiting_tx,
+        shutdown_rx.clone(),
+    );
     let service = harold_service(
         monitor,
         Arc::clone(&store),
@@ -1854,6 +2073,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             .to_owned(),
         HaroldStateView::from_settings(cfg),
         watch_counts_rx,
+        waiting_rx,
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())

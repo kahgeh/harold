@@ -1,8 +1,5 @@
 //! Decides which agents wait for the user, from the agent snapshot and the focus.
 
-// Task 3 wires this module in. Remove this mark then.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use super::domain::{AgentSnapshot, EffectiveAgentState};

@@ -1,12 +1,10 @@
 //! Reads which pane the user looks at, from Rex or from tmux.
 //!
 //! The logic comes from the control-tower navigation code. Harold cannot depend on that crate.
-// Task 5 wires this module in and removes the next line.
-#![allow(dead_code)]
 
-use super::rex::{run_program, SystemRex};
+use super::rex::{SystemRex, run_program};
 use super::summary::sanitize_bounded_metadata;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
