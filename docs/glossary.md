@@ -331,6 +331,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | projector | The part of Harold that reads the event stream and updates the state database and the outbox | — |
 | reducer | The rules the projector applies to an agent's observations to work out its state | — |
 | checkpoint | The projector's saved position in the event stream | "cursor" for the saved position |
+| agent view | The control-tower's list of agents, the view it opens with | "dashboard", "main view" |
+| work view | The control-tower's list of open work records at `focus` and `next`, switched with `view` | "board", "queue view" (the queue is another thing) |
 | state database | The Turso database `harold-state.db` that holds the current agent view, the outbox and the checkpoint | "SQLite" for it |
 | outbox | The stored list of delivery work, such as a turn-end update to send or a phone reply to route | "queue" for it |
 | try | One time the delivery handler works on an outbox row. The code keeps `attempt_count` | "attempt" in text, "retry" for a single try |

@@ -165,7 +165,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `gg` / `G` | First / last row | First / last todo | Same | Same | Same | Types |
 | `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected, when Harold serves the knowledge tool) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
-| `m` / `p` / `C` / `W` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call · `W`: pause or resume every watch (it never resumes a watch that the daily budget paused). Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
+| `m` / `p` / `C` / `W` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call · `W`: pause or resume every watch (it never resumes a watch that the daily budget paused) · `V`: switch to the work view, or back to the agent view. Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -185,8 +185,28 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 - **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
   The watch row reads `Watches: pause all` or `Watches: resume all`. Each row shows its key at the right: `m` voice, `p` messaging, `C` call, `W` watches. These keys
-  also run the command from the list with the palette closed. The keys `v` and `w`
+  also run the command from the list with the palette closed. The first row is
+  `View: work` (`View: agents` in the work view), with the key `V`. The keys `v` and `w`
   are kept for later and no command uses them.
+- **The work view:** `V`, or the palette command `view`, switches the list to the work
+  view. The same key switches back. The work view lists the open work records at
+  `focus` and `next`. Its columns are PRIORITY, WORK, STATUS and NEXT STEP. Its title
+  is `WORK · FOCUS AND NEXT` and counts the open records and the hidden `later`
+  records. The control-tower reads the work tool's list every 2 seconds while the view
+  is open. A failed read shows `work list unavailable` and keeps the last rows.
+
+  | Key | Action in the work view |
+  | --- | --- |
+  | `j` / `k` | Select the next or the previous record. In one record, scroll. |
+  | `l` / Enter | Open the selected record with its decisions and links. |
+  | `h` / Esc | Go back from the record to its row. |
+  | `/` | Open the palette. |
+  | `V` | Switch to the agent view. |
+  | `q` | Quit. |
+  | `m` / `p` / `C` / `W` | Run the command key, when the command shows now. |
+
+  The other agent keys (`c`, `t`, `n`, `N`, `f`) do nothing there. The work view only
+  reads. It never writes a record.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). After
   them it adds `m voice  p pause  C call  W watches` for the commands that show now, where they fit;
