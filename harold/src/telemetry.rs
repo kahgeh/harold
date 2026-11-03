@@ -7,14 +7,14 @@
 //! missing collector never slows Harold down. An unreachable collector is reported in
 //! `harold.log` once when exports start failing and once when they recover.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
 use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
     Link, SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
@@ -264,6 +264,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "open_records",
     "decisions",
     "links",
+    "agent.name",
+    "prefix",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -278,8 +280,26 @@ const METRIC_INTERVAL: Duration = Duration::from_secs(30);
 /// The instrumentation scope of Harold's spans, logs and metrics.
 const SCOPE: &str = "harold";
 
+/// The key prefix of an agent signal's attributes. A declared attribute key `result` is
+/// exported as `agent.attr.result`.
+const AGENT_ATTR_PREFIX: &str = "agent.attr.";
+
+/// Whether `key` may leave Harold: a field on `ALLOWED_FIELDS`, or an agent signal's
+/// attribute. The one rule for the attributes: `agent.attr.` and then a key of one or more
+/// of `a-z`, `0-9` and `_`. The telemetry tool declares those keys, so this table cannot
+/// list them.
 fn is_allowed(key: &str) -> bool {
-    ALLOWED_FIELDS.contains(&key)
+    ALLOWED_FIELDS.contains(&key) || is_agent_attr_key(key)
+}
+
+/// Whether `key` is `agent.attr.` and then a key of one or more of `a-z`, `0-9` and `_`.
+fn is_agent_attr_key(key: &str) -> bool {
+    key.strip_prefix(AGENT_ATTR_PREFIX).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    })
 }
 
 /// Whether a log event with `target` is exported. Only Harold's and the `events`
@@ -399,6 +419,8 @@ pub(crate) struct Instruments {
     pub work_lead_time: Histogram<f64>,
     /// `harold.work.slices`, `{slice}`.
     pub work_slices: Histogram<u64>,
+    /// `harold.telemetry.calls`, `{call}`, by `prefix`, `kind` and `outcome`.
+    pub telemetry_calls: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -511,6 +533,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .with_unit("{slice}")
             .with_boundaries(vec![1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0])
             .build(),
+        telemetry_calls: counter("harold.telemetry.calls", "{call}"),
     }
 }
 
@@ -2510,6 +2533,8 @@ pub(crate) struct Pipeline {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
     meter_provider: SdkMeterProvider,
+    /// Makes the agent signals' meter provider, which sends through the same exporter.
+    signals: Arc<SignalProviderFactory>,
 }
 
 impl Pipeline {
@@ -2529,7 +2554,7 @@ impl Pipeline {
     {
         let spans = FieldFilter(HealthWatch::new(spans, health));
         let logs = FieldFilter(HealthWatch::new(logs, health));
-        let metrics = HealthWatch::new(metrics, health);
+        let metrics = Arc::new(HealthWatch::new(metrics, health));
 
         let tracer_provider = SdkTracerProvider::builder().with_resource(resource.clone());
         let logger_provider = SdkLoggerProvider::builder().with_resource(resource.clone());
@@ -2544,17 +2569,36 @@ impl Pipeline {
             ),
         };
         let meter_provider = SdkMeterProvider::builder()
-            .with_resource(resource)
+            .with_resource(resource.clone())
             .with_reader(
-                PeriodicReader::builder(metrics)
-                    .with_interval(METRIC_INTERVAL)
-                    .build(),
+                PeriodicReader::builder(SharedMetricExporter {
+                    inner: Arc::clone(&metrics),
+                    stopped: None,
+                })
+                .with_interval(METRIC_INTERVAL)
+                .build(),
             )
             .build();
+        let signals: Arc<SignalProviderFactory> = Arc::new(Box::new(move || {
+            let stopped = Arc::new(AtomicBool::new(false));
+            let provider = SdkMeterProvider::builder()
+                .with_resource(resource.clone())
+                .with_reader(
+                    PeriodicReader::builder(SharedMetricExporter {
+                        inner: Arc::clone(&metrics),
+                        stopped: Some(Arc::clone(&stopped)),
+                    })
+                    .with_interval(METRIC_INTERVAL)
+                    .build(),
+                )
+                .build();
+            (provider, stopped)
+        }));
         Self {
             tracer_provider: tracer_provider.build(),
             logger_provider: logger_provider.build(),
             meter_provider,
+            signals,
         }
     }
 
@@ -2627,6 +2671,7 @@ impl Pipeline {
     fn install_global_providers(&self) {
         global::set_tracer_provider(self.tracer_provider.clone());
         global::set_meter_provider(self.meter_provider.clone());
+        install_signals(&self.signals, self.logger_provider.logger(SCOPE));
     }
 
     /// Stops the three providers together, each sending what it has queued, and returns
@@ -2637,6 +2682,7 @@ impl Pipeline {
         let tracer_provider = self.tracer_provider.clone();
         let logger_provider = self.logger_provider.clone();
         let meter_provider = self.meter_provider.clone();
+        let signal_provider = signal_provider_of(&self.signals);
         let stops: [(&str, ProviderStop); 3] = [
             (
                 "spans",
@@ -2648,7 +2694,14 @@ impl Pipeline {
             ),
             (
                 "metrics",
-                Box::new(move || drop(meter_provider.shutdown_with_timeout(budget))),
+                Box::new(move || {
+                    // The agent signals' provider sends its last values before the shared
+                    // exporter stops with the main provider.
+                    if let Some(signals) = signal_provider {
+                        drop(signals.shutdown_with_timeout(budget));
+                    }
+                    drop(meter_provider.shutdown_with_timeout(budget));
+                }),
             ),
         ];
         let (stopped, stopped_signals) = mpsc::channel::<()>();
@@ -2957,6 +3010,400 @@ impl<E: PushMetricExporter> PushMetricExporter for HealthWatch<E> {
 
     fn shutdown(&self) -> OTelSdkResult {
         self.inner.shutdown()
+    }
+
+    fn temporality(&self) -> Temporality {
+        self.inner.temporality()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent signals
+// ---------------------------------------------------------------------------
+
+/// Every `kind` of `harold.telemetry.calls`: the calls of the telemetry tool that write.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) const TELEMETRY_KINDS: [&str; 5] = ["declare", "count", "gauge", "event", "remove"];
+
+/// Every `outcome` of `harold.telemetry.calls`: `ok`, or the reason word of a refusal.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) const TELEMETRY_OUTCOMES: [&str; 12] = [
+    "ok",
+    "no_pane",
+    "wrong_prefix",
+    "unknown_prefix",
+    "too_many_names",
+    "too_many_series",
+    "undeclared_value",
+    "wrong_kind",
+    "undeclared",
+    "rate_limited",
+    "meaning_too_long",
+    "declaration_differs",
+];
+
+/// The prefix of the chief's signals, seeded with the products' prefixes.
+const CHIEF_PREFIX: &str = "chief";
+
+/// Counts one call of the telemetry tool.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn count_telemetry_call(prefix: &str, kind: &str, outcome: &str) {
+    instruments()
+        .telemetry_calls
+        .add(1, &telemetry_call_attributes(prefix, kind, outcome));
+}
+
+fn telemetry_call_attributes(prefix: &str, kind: &str, outcome: &str) -> [KeyValue; 3] {
+    [
+        KeyValue::new("prefix", prefix.to_owned()),
+        KeyValue::new("kind", kind.to_owned()),
+        KeyValue::new("outcome", outcome.to_owned()),
+    ]
+}
+
+/// Records 0 once on `harold.telemetry.calls` for each prefix in `prefixes` and `chief`, each
+/// kind and each outcome, so the first refusal after a start shows as a rise. The telemetry
+/// tool calls it at its start.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn register_telemetry_counters(prefixes: &[String]) {
+    let calls = &instruments().telemetry_calls;
+    let chief = (!prefixes.iter().any(|p| p == CHIEF_PREFIX)).then_some(CHIEF_PREFIX);
+    for prefix in prefixes.iter().map(String::as_str).chain(chief) {
+        for kind in TELEMETRY_KINDS {
+            for outcome in TELEMETRY_OUTCOMES {
+                calls.add(0, &telemetry_call_attributes(prefix, kind, outcome));
+            }
+        }
+    }
+}
+
+/// The exported name of the agent signal `name`.
+fn agent_metric_name(name: &str) -> String {
+    format!("agent.{name}")
+}
+
+/// `attrs` as exported attributes: each key becomes `agent.attr.<key>`.
+fn agent_attributes(attrs: &[(String, String)]) -> Vec<KeyValue> {
+    attrs
+        .iter()
+        .map(|(key, value)| KeyValue::new(format!("{AGENT_ATTR_PREFIX}{key}"), value.clone()))
+        .collect()
+}
+
+/// The values of an agent signal, by attribute set.
+type SignalSeries<T> = BTreeMap<Vec<(String, String)>, T>;
+
+/// What Harold keeps of an agent counter or gauge: a counter's totals since the start or a
+/// gauge's last values. The observable instruments read these at each export.
+enum SignalValues {
+    Counter(SignalSeries<u64>),
+    Gauge(SignalSeries<f64>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SignalKind {
+    Counter,
+    Gauge,
+}
+
+/// The values of every agent counter and gauge, by name. A forgotten name has no entry, so
+/// its instrument reports nothing.
+fn signal_values() -> &'static Mutex<HashMap<String, SignalValues>> {
+    static VALUES: OnceLock<Mutex<HashMap<String, SignalValues>>> = OnceLock::new();
+    VALUES.get_or_init(Default::default)
+}
+
+/// Makes a meter provider for the agent signals that sends through Harold's metric exporter,
+/// and the switch that stops its sends.
+type SignalProviderFactory = Box<dyn Fn() -> (SdkMeterProvider, Arc<AtomicBool>) + Send + Sync>;
+
+/// The agent signals' own meter provider. A cumulative sum in the SDK keeps every series it
+/// has seen until its provider stops, so a forgotten counter would be sent again at each
+/// export. To forget a name, Harold stops this provider's sends, stops the provider, and
+/// makes the instruments of the other names again on a new one. Their values stay in
+/// `signal_values`, so no total is lost.
+struct SignalMeters {
+    factory: Arc<SignalProviderFactory>,
+    current: Option<(SdkMeterProvider, Arc<AtomicBool>)>,
+    registered: HashSet<(String, SignalKind)>,
+}
+
+/// Lock order: `SIGNAL_METERS`, then the SDK's own locks, then `signal_values`. An export
+/// takes the SDK's locks and then `signal_values`, and never `SIGNAL_METERS`.
+static SIGNAL_METERS: Mutex<Option<SignalMeters>> = Mutex::new(None);
+
+/// The logger of `agent event` lines. It is set only when export is on.
+static AGENT_LOGGER: OnceLock<SdkLogger> = OnceLock::new();
+
+/// Makes the observable instrument of `name` on `provider`. It reads `signal_values` at each
+/// export and reports nothing when `name` has no values of its kind.
+fn register_signal(provider: &SdkMeterProvider, name: &str, kind: SignalKind) {
+    let meter = provider.meter(SCOPE);
+    let read = name.to_owned();
+    match kind {
+        SignalKind::Counter => {
+            meter
+                .u64_observable_counter(agent_metric_name(name))
+                .with_callback(move |observer| {
+                    let values = locked(signal_values());
+                    if let Some(SignalValues::Counter(series)) = values.get(&read) {
+                        for (attrs, total) in series {
+                            observer.observe(*total, &agent_attributes(attrs));
+                        }
+                    }
+                })
+                .build();
+        }
+        SignalKind::Gauge => {
+            meter
+                .f64_observable_gauge(agent_metric_name(name))
+                .with_callback(move |observer| {
+                    let values = locked(signal_values());
+                    if let Some(SignalValues::Gauge(series)) = values.get(&read) {
+                        for (attrs, value) in series {
+                            observer.observe(*value, &agent_attributes(attrs));
+                        }
+                    }
+                })
+                .build();
+        }
+    }
+}
+
+/// Makes the instrument of `name` on first use. It does nothing when export is off.
+fn ensure_signal_instrument(name: &str, kind: SignalKind) {
+    let mut guard = locked(&SIGNAL_METERS);
+    let Some(meters) = guard.as_mut() else {
+        return;
+    };
+    let key = (name.to_owned(), kind);
+    if meters.registered.contains(&key) {
+        return;
+    }
+    let factory = Arc::clone(&meters.factory);
+    let (provider, _) = meters.current.get_or_insert_with(|| factory());
+    register_signal(provider, name, kind);
+    meters.registered.insert(key);
+}
+
+/// Adds `n` to the agent counter `name`, exported as `agent.<name>` with each attribute key
+/// as `agent.attr.<key>`. The counter is made on first use.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn signal_counter_add(name: &str, n: u64, attrs: &[(String, String)]) {
+    #[cfg(test)]
+    test_support::install();
+    {
+        let mut values = locked(signal_values());
+        let entry = values
+            .entry(name.to_owned())
+            .or_insert_with(|| SignalValues::Counter(SignalSeries::new()));
+        if !matches!(entry, SignalValues::Counter(_)) {
+            *entry = SignalValues::Counter(SignalSeries::new());
+        }
+        if let SignalValues::Counter(series) = entry {
+            let total = series.entry(attrs.to_vec()).or_default();
+            *total = total.saturating_add(n);
+        }
+    }
+    ensure_signal_instrument(name, SignalKind::Counter);
+}
+
+/// Sets the agent gauge `name` to `value`, exported as `agent.<name>` with each attribute key
+/// as `agent.attr.<key>`. The gauge is made on first use and reports the last value.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn signal_gauge_set(name: &str, value: f64, attrs: &[(String, String)]) {
+    #[cfg(test)]
+    test_support::install();
+    {
+        let mut values = locked(signal_values());
+        let entry = values
+            .entry(name.to_owned())
+            .or_insert_with(|| SignalValues::Gauge(SignalSeries::new()));
+        if !matches!(entry, SignalValues::Gauge(_)) {
+            *entry = SignalValues::Gauge(SignalSeries::new());
+        }
+        if let SignalValues::Gauge(series) = entry {
+            series.insert(attrs.to_vec(), value);
+        }
+    }
+    ensure_signal_instrument(name, SignalKind::Gauge);
+}
+
+/// Writes the log line `agent event` (`info`) with `agent.name` (the signal's name, such as
+/// `harold.release.attempts`) and each attribute as `agent.attr.<key>`. The line goes to the
+/// collector only: `tracing` cannot name a field at run time.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn signal_event(name: &str, attrs: &[(String, String)]) {
+    #[cfg(test)]
+    test_support::install();
+    let Some(logger) = AGENT_LOGGER.get() else {
+        return;
+    };
+    let mut record = logger.create_log_record();
+    let now = std::time::SystemTime::now();
+    record.set_timestamp(now);
+    record.set_observed_timestamp(now);
+    record.set_target("harold::telemetry");
+    record.set_severity_number(opentelemetry::logs::Severity::Info);
+    record.set_severity_text("INFO");
+    record.set_body("agent event".into());
+    record.add_attribute("agent.name", name.to_owned());
+    for (key, value) in attrs {
+        record.add_attribute(format!("{AGENT_ATTR_PREFIX}{key}"), value.clone());
+    }
+    logger.emit(record);
+}
+
+/// Forgets the agent signal `name`: no export after this call holds it. A later write makes
+/// it again from 0.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the telemetry tool calls it; it comes in a later task"
+    )
+)]
+pub(crate) fn signal_forget(name: &str) {
+    #[cfg(test)]
+    test_support::install();
+    let old = {
+        let mut guard = locked(&SIGNAL_METERS);
+        locked(signal_values()).remove(name);
+        let Some(meters) = guard.as_mut() else {
+            return;
+        };
+        // A name whose kind changed has an instrument of each kind: both go.
+        let registered = meters.registered.len();
+        meters
+            .registered
+            .retain(|(registered, _)| registered != name);
+        if meters.registered.len() == registered {
+            return;
+        }
+        let old = meters.current.take();
+        if !meters.registered.is_empty() {
+            let (provider, stop) = (meters.factory)();
+            for (rest, kind) in &meters.registered {
+                register_signal(&provider, rest, *kind);
+            }
+            meters.current = Some((provider, stop));
+        }
+        old
+    };
+    if let Some((provider, stop)) = old {
+        stop.store(true, Ordering::SeqCst);
+        // The provider's last collection runs in its stop, without any lock held here.
+        let _ = std::thread::Builder::new()
+            .name("telemetry-signals-stop".to_owned())
+            .spawn(move || drop(provider.shutdown_with_timeout(SHUTDOWN_BUDGET)));
+    }
+}
+
+/// Sets the agent signals' provider factory and logger, once.
+fn install_signals(factory: &Arc<SignalProviderFactory>, logger: SdkLogger) {
+    let mut guard = locked(&SIGNAL_METERS);
+    if guard.is_none() {
+        *guard = Some(SignalMeters {
+            factory: Arc::clone(factory),
+            current: None,
+            registered: HashSet::new(),
+        });
+    }
+    let _ = AGENT_LOGGER.set(logger);
+}
+
+/// The agent signals' current provider when `factory` made it.
+fn signal_provider_of(factory: &Arc<SignalProviderFactory>) -> Option<SdkMeterProvider> {
+    let guard = locked(&SIGNAL_METERS);
+    let meters = guard.as_ref()?;
+    if !Arc::ptr_eq(&meters.factory, factory) {
+        return None;
+    }
+    meters
+        .current
+        .as_ref()
+        .map(|(provider, _)| provider.clone())
+}
+
+/// Passes metric exports to Harold's one metric exporter, which the main meter provider and
+/// the agent signals' provider share. Only the owner stops the exporter. A signals copy sends
+/// nothing once its switch is on.
+pub(crate) struct SharedMetricExporter<E> {
+    inner: Arc<E>,
+    /// `None` for the owner; the stop switch for an agent signals provider.
+    stopped: Option<Arc<AtomicBool>>,
+}
+
+impl<E: PushMetricExporter> PushMetricExporter for SharedMetricExporter<E> {
+    async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
+        if self
+            .stopped
+            .as_ref()
+            .is_some_and(|stopped| stopped.load(Ordering::SeqCst))
+        {
+            return Ok(());
+        }
+        self.inner.export(metrics).await
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        match self.stopped {
+            None => self.inner.shutdown_with_timeout(timeout),
+            Some(_) => Ok(()),
+        }
+    }
+
+    fn shutdown(&self) -> OTelSdkResult {
+        match self.stopped {
+            None => self.inner.shutdown(),
+            Some(_) => Ok(()),
+        }
     }
 
     fn temporality(&self) -> Temporality {
@@ -3322,6 +3769,9 @@ pub(crate) mod test_support {
     pub(crate) fn metrics() -> Vec<ResourceMetrics> {
         let installed = installed();
         let _ = installed.pipeline.meter_provider.force_flush();
+        if let Some(signals) = super::signal_provider_of(&installed.pipeline.signals) {
+            let _ = signals.force_flush();
+        }
         installed.metrics.get_finished_metrics().unwrap()
     }
 
@@ -3371,6 +3821,27 @@ pub(crate) mod test_support {
                 })
                 .map(|point| point.value())
         })
+    }
+
+    /// How many metric exports the test exporter holds, without collecting.
+    pub(crate) fn export_count() -> usize {
+        installed().metrics.get_finished_metrics().unwrap().len()
+    }
+
+    /// The names of every metric in the exports from index `start` on, after collecting
+    /// the current values.
+    pub(crate) fn metric_names_since(start: usize) -> Vec<String> {
+        metrics()
+            .iter()
+            .skip(start)
+            .flat_map(|resource| {
+                resource
+                    .scope_metrics()
+                    .flat_map(|scope| scope.metrics())
+                    .map(|metric| metric.name().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The attribute pairs of the first data point of counter `name` that carries every

@@ -5962,3 +5962,198 @@ fn the_waiting_duration_has_unit_s_and_the_state_duration_buckets() {
         "the waiting buckets are the state-duration buckets"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// Agent signals
+// ---------------------------------------------------------------------------
+
+/// A signal name that no other test uses: `test.<what>_<hex>`.
+fn unique_signal(what: &str) -> String {
+    format!("test.{what}_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn result_attr(value: &str) -> Vec<(String, String)> {
+    vec![("result".to_owned(), value.to_owned())]
+}
+
+#[test]
+fn agent_name_and_prefix_are_allowed_fields() {
+    for field in ["agent.name", "prefix"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn the_agent_attr_prefix_rule_passes_a_declared_key_and_nothing_else() {
+    for key in ["agent.attr.result", "agent.attr.ok_2", "agent.attr.x"] {
+        assert!(is_allowed(key), "{key}");
+    }
+    for key in [
+        "agent.attrx",
+        "agent.attr.",
+        "agent.attr.A",
+        "agent.attr.a.b",
+        "agent.attr.a-b",
+        "agent.attr.a b",
+        "agent.other",
+        "agent.attr",
+    ] {
+        assert!(!is_allowed(key), "{key}");
+    }
+}
+
+#[test]
+fn an_agent_event_is_exported_with_its_name_and_declared_attributes_only() {
+    test_support::install();
+    let name = unique_signal("event");
+    signal_event(&name, &result_attr("ok"));
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| {
+            l.record
+                .attributes_iter()
+                .any(|(k, v)| k.as_str() == "agent.name" && format!("{v:?}").contains(&name))
+        })
+        .expect("the agent event is exported");
+    let attributes: Vec<(String, String)> = record
+        .record
+        .attributes_iter()
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
+        .collect();
+    let keys: Vec<&str> = attributes.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["agent.name", "agent.attr.result"]);
+    assert!(attributes[1].1.contains("ok"), "{attributes:?}");
+    assert_eq!(
+        record.record.body(),
+        Some(&opentelemetry::logs::AnyValue::from("agent event"))
+    );
+    assert_eq!(
+        record.record.severity_number(),
+        Some(opentelemetry::logs::Severity::Info)
+    );
+}
+
+#[test]
+fn the_telemetry_calls_counter_is_seeded_for_every_prefix_kind_and_outcome() {
+    test_support::install();
+    let product = format!("seed{}", uuid::Uuid::new_v4().simple());
+    register_telemetry_counters(&[product.clone(), "harold".to_owned()]);
+    assert_eq!(TELEMETRY_OUTCOMES[0], "ok");
+    assert_eq!(TELEMETRY_OUTCOMES.len(), 12);
+    for prefix in [product.as_str(), "harold", "chief"] {
+        for kind in TELEMETRY_KINDS {
+            for outcome in TELEMETRY_OUTCOMES {
+                let point = test_support::exact_counter_value(
+                    "harold.telemetry.calls",
+                    &[("prefix", prefix), ("kind", kind), ("outcome", outcome)],
+                );
+                assert!(point.is_some(), "{prefix} {kind} {outcome}");
+            }
+        }
+    }
+    let wanted = [
+        ("prefix", product.as_str()),
+        ("kind", "count"),
+        ("outcome", "rate_limited"),
+    ];
+    assert_eq!(
+        test_support::exact_counter_value("harold.telemetry.calls", &wanted),
+        Some(0)
+    );
+    count_telemetry_call(&product, "count", "rate_limited");
+    assert_eq!(
+        test_support::exact_counter_value("harold.telemetry.calls", &wanted),
+        Some(1)
+    );
+}
+
+#[test]
+fn an_agent_counter_adds_up_under_its_agent_name_and_attributes() {
+    test_support::install();
+    let name = unique_signal("counter");
+    let metric = format!("agent.{name}");
+    signal_counter_add(&name, 2, &result_attr("ok"));
+    signal_counter_add(&name, 3, &result_attr("ok"));
+    signal_counter_add(&name, 0, &result_attr("failed"));
+    assert_eq!(
+        test_support::exact_counter_value(&metric, &[("agent.attr.result", "ok")]),
+        Some(5)
+    );
+    assert_eq!(
+        test_support::exact_counter_value(&metric, &[("agent.attr.result", "failed")]),
+        Some(0)
+    );
+}
+
+#[test]
+fn an_agent_gauge_reports_its_last_value() {
+    test_support::install();
+    let name = unique_signal("gauge");
+    let metric = format!("agent.{name}");
+    signal_gauge_set(&name, 3.5, &result_attr("ok"));
+    signal_gauge_set(&name, 4.25, &result_attr("ok"));
+    assert_eq!(
+        test_support::gauge_f64_value(&metric, &[("agent.attr.result", "ok")]),
+        Some(4.25)
+    );
+}
+
+#[test]
+fn a_forgotten_agent_counter_is_absent_from_the_next_export() {
+    test_support::install();
+    let gone = unique_signal("gone_counter");
+    let kept = unique_signal("kept_counter");
+    signal_counter_add(&gone, 2, &result_attr("ok"));
+    signal_counter_add(&kept, 1, &result_attr("ok"));
+    assert_eq!(
+        test_support::exact_counter_value(&format!("agent.{gone}"), &[("agent.attr.result", "ok")]),
+        Some(2)
+    );
+    signal_forget(&gone);
+    let start = test_support::export_count();
+    let names = test_support::metric_names_since(start);
+    assert!(!names.contains(&format!("agent.{gone}")), "{names:?}");
+    assert!(names.contains(&format!("agent.{kept}")), "{names:?}");
+    // A name that is used again starts over.
+    signal_counter_add(&gone, 1, &result_attr("ok"));
+    assert_eq!(
+        test_support::exact_counter_value(&format!("agent.{gone}"), &[("agent.attr.result", "ok")]),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_forgotten_agent_gauge_is_absent_from_the_next_export() {
+    test_support::install();
+    let gone = unique_signal("gone_gauge");
+    let kept = unique_signal("kept_gauge");
+    signal_gauge_set(&gone, 7.0, &result_attr("ok"));
+    signal_gauge_set(&kept, 1.0, &result_attr("ok"));
+    assert_eq!(
+        test_support::gauge_f64_value(&format!("agent.{gone}"), &[("agent.attr.result", "ok")]),
+        Some(7.0)
+    );
+    signal_forget(&gone);
+    let start = test_support::export_count();
+    let names = test_support::metric_names_since(start);
+    assert!(!names.contains(&format!("agent.{gone}")), "{names:?}");
+    assert!(names.contains(&format!("agent.{kept}")), "{names:?}");
+}
+
+#[test]
+fn a_forgotten_name_that_changed_kind_is_absent_from_the_next_export() {
+    test_support::install();
+    let gone = unique_signal("changed_kind");
+    signal_counter_add(&gone, 1, &result_attr("ok"));
+    signal_gauge_set(&gone, 2.0, &result_attr("ok"));
+    assert_eq!(
+        test_support::gauge_f64_value(&format!("agent.{gone}"), &[("agent.attr.result", "ok")]),
+        Some(2.0)
+    );
+    signal_forget(&gone);
+    let start = test_support::export_count();
+    let names = test_support::metric_names_since(start);
+    assert!(!names.contains(&format!("agent.{gone}")), "{names:?}");
+}

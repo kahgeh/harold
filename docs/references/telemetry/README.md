@@ -419,6 +419,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.checked` | counter, `{record}` | `priority` (`focus`, `next`, `later`). One count when a work record reaches `checked by the user` |
 | `harold.work.lead_time` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `phase` (`whole`, `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check`). Recorded at closing |
 | `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
+| `harold.telemetry.calls` | counter, `{call}` | `prefix` (`chief` or a product), `kind` (`declare`, `count`, `gauge`, `event`, `remove`), `outcome` (`ok` or the reason word of a refusal). Seeded at 0 for each prefix, kind and outcome |
+| `agent.<name>` | counter or gauge, no unit | `agent.attr.<key>` for each declared attribute. See [Agent signals](#what-leaves-harold) |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product in all six states, 0 included.
@@ -454,6 +456,13 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 | Line | Fields |
 |---|---|
 | `chief pane changed` | `state` (`found` or `none`), `count`, `pane_id`, `session_by` (`setting` or `longest`) |
+
+**Agent signals.** A pane records a counter, a gauge or an event with the telemetry tool. Harold exports a counter or a gauge as the metric `agent.<name>`. Each declared attribute key goes out as `agent.attr.<key>`. Users declare these keys, so `ALLOWED_FIELDS` cannot list them. One rule in `is_allowed` lets them out: `agent.attr.` and then a key of `a-z`, `0-9` and `_` only. An event carries no free text.
+
+| Line | Fields |
+|---|---|
+| `agent event` (`info`) | `agent.name` (the signal's name, such as `harold.release.attempts`), `agent.attr.<key>` for each declared attribute |
+| `telemetry call refused` (`info`) | `prefix`, `kind`, `reason` |
 
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
 
