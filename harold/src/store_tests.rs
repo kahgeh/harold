@@ -3296,3 +3296,102 @@ async fn blocked_done_and_error_events_project_to_the_same_effective_state() {
         );
     }
 }
+
+#[tokio::test]
+async fn checked_local_round_trips() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(
+        store
+            .timed_prompt_checked_locals()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-03 09:30")
+        .await
+        .unwrap();
+    store
+        .set_timed_prompt_checked_local("stand-up", "2026-11-03 09:31")
+        .await
+        .unwrap();
+
+    let minutes = store.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(minutes.len(), 2, "{minutes:?}");
+    assert_eq!(minutes["digest"], "2026-11-03 09:30");
+    assert_eq!(minutes["stand-up"], "2026-11-03 09:31");
+}
+
+#[tokio::test]
+async fn checked_local_survives_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-03 09:30")
+        .await
+        .unwrap();
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let minutes = reopened.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(minutes["digest"], "2026-11-03 09:30");
+}
+
+#[tokio::test]
+async fn last_days_ignores_checked_local_keys() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))
+        .await
+        .unwrap();
+    // A prompt name that ends like a key suffix must not clash with the other key.
+    append_timed_prompt_handled(
+        &store,
+        &timed_prompt_typed("odd.checked_local", "2026-10-15"),
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-03 09:30")
+        .await
+        .unwrap();
+    store
+        .set_timed_prompt_checked_local("odd.last_day", "2026-11-03 09:31")
+        .await
+        .unwrap();
+
+    let days = store.timed_prompt_last_days().await.unwrap();
+    assert_eq!(days.len(), 2, "{days:?}");
+    assert_eq!(days["digest"], "2026-10-14");
+    assert_eq!(days["odd.checked_local"], "2026-10-15");
+    let minutes = store.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(minutes.len(), 2, "{minutes:?}");
+    assert_eq!(minutes["digest"], "2026-11-03 09:30");
+    assert_eq!(minutes["odd.last_day"], "2026-11-03 09:31");
+}
+
+#[tokio::test]
+async fn checked_local_moves_forward_only() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-03 09:30")
+        .await
+        .unwrap();
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-03 09:29")
+        .await
+        .unwrap();
+    let minutes = store.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(minutes["digest"], "2026-11-03 09:30");
+
+    store
+        .set_timed_prompt_checked_local("digest", "2026-11-04 00:00")
+        .await
+        .unwrap();
+    let minutes = store.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(minutes["digest"], "2026-11-04 00:00");
+}

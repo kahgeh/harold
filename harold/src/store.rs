@@ -244,6 +244,7 @@ pub(crate) struct AppPhoto {
 
 const TIMED_PROMPT_KEY_PREFIX: &str = "timed_prompt.";
 const TIMED_PROMPT_KEY_SUFFIX: &str = ".last_day";
+const TIMED_PROMPT_CHECKED_SUFFIX: &str = ".checked_local";
 
 #[derive(Debug)]
 pub struct PendingDelivery {
@@ -824,6 +825,53 @@ impl HaroldStore {
             days.insert(name.to_string(), required_text(&row, 1)?);
         }
         Ok(days)
+    }
+
+    /// The newest local minute (`YYYY-MM-DD HH:MM`) checked for each cron schedule, by
+    /// prompt name.
+    // Task 4 uses this.
+    #[allow(dead_code)]
+    pub(crate) async fn timed_prompt_checked_locals(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn.query("SELECT key, value FROM settings", ()).await?;
+        let mut minutes = std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let key = required_text(&row, 0)?;
+            let Some(name) = key
+                .strip_prefix(TIMED_PROMPT_KEY_PREFIX)
+                .and_then(|rest| rest.strip_suffix(TIMED_PROMPT_CHECKED_SUFFIX))
+            else {
+                continue;
+            };
+            minutes.insert(name.to_string(), required_text(&row, 1)?);
+        }
+        Ok(minutes)
+    }
+
+    /// Keep `value` (`YYYY-MM-DD HH:MM`) as the checked minute of the prompt `name`.
+    /// An older value does not replace a newer one. The text order is the time order.
+    // Task 4 uses this.
+    #[allow(dead_code)]
+    pub(crate) async fn set_timed_prompt_checked_local(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let conn = self.state.connect()?;
+        let key = format!("{TIMED_PROMPT_KEY_PREFIX}{name}{TIMED_PROMPT_CHECKED_SUFFIX}");
+        conn.execute(
+            r#"
+            INSERT INTO settings (key, value, last_event_version)
+            VALUES (?1, ?2, 0)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            WHERE excluded.value > settings.value
+            "#,
+            (key.as_str(), value),
+        )
+        .await?;
+        Ok(())
     }
 
     #[cfg(test)]
