@@ -122,7 +122,7 @@ pub(super) fn next_on_grid(started_ms: i64, every_minutes: u32, now_ms: i64) -> 
 /// How many runs the watch's time holds: `--for` over `--every`, rounded up.
 pub(super) fn total_runs(row: &WatchRow) -> u32 {
     let every = i64::from(row.every_minutes) * MINUTE_MS;
-    let span = row.ends_at_ms - row.started_at_ms;
+    let span = row.ends_at_ms.unwrap_or(row.started_at_ms) - row.started_at_ms;
     ((span + every - 1) / every).max(1) as u32
 }
 
@@ -215,7 +215,7 @@ impl Scheduler {
             run_budget_usd_micros: checked.run_budget_usd_micros,
             run_limit_secs: checked.run_limit_secs,
             started_at_ms: now,
-            ends_at_ms,
+            ends_at_ms: Some(ends_at_ms),
             next_run_at_ms: now,
         };
         store
@@ -276,7 +276,7 @@ impl Scheduler {
             return;
         };
         for row in running {
-            if clock_ms() >= row.ends_at_ms {
+            if clock_ms() >= row.ends_at_ms.unwrap_or(i64::MAX) {
                 self.end(&row, EndReason::Ended, None).await;
             } else {
                 self.spawn_watch(&row, How::Resumed).await;
@@ -297,7 +297,7 @@ impl Scheduler {
     }
 
     async fn spawn_watch(self: &Arc<Self>, row: &WatchRow, how: How) {
-        let ends_at = local_text(row.ends_at_ms, self.offset().await);
+        let ends_at = local_text(row.ends_at_ms.unwrap_or(0), self.offset().await);
         let (cancel, cancelled) = signal::channel(false);
         let slot = ReportSlot::new(Arc::clone(&self.typist), Self::target(row), self.retry);
         let old = self.state().live.insert(
@@ -346,12 +346,12 @@ impl Scheduler {
                 return;
             }
             let now = clock_ms();
-            if now >= row.ends_at_ms {
+            if now >= row.ends_at_ms.unwrap_or(i64::MAX) {
                 self.end(&row, EndReason::Ended, None).await;
                 return;
             }
             if now < row.next_run_at_ms {
-                let until = row.next_run_at_ms.min(row.ends_at_ms);
+                let until = row.next_run_at_ms.min(row.ends_at_ms.unwrap_or(i64::MAX));
                 let wait = Duration::from_millis((until - now) as u64);
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}

@@ -92,7 +92,7 @@ impl WatchService for WatchToolService {
                 report_to: row.report_to,
                 every_run: row.every_run,
                 running: row.running,
-                ends_at_ms: row.ends_at_ms,
+                ends_at_ms: row.ends_at_ms.unwrap_or(0),
                 every_minutes: row.every_minutes,
                 runs: row.runs,
                 reports: row.reports,

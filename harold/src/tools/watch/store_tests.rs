@@ -27,7 +27,7 @@ fn new_watch(name: &str) -> NewWatch {
         run_budget_usd_micros: None,
         run_limit_secs: 300,
         started_at_ms: 1_000,
-        ends_at_ms: 1_000 + 120 * 60_000,
+        ends_at_ms: Some(1_000 + 120 * 60_000),
         next_run_at_ms: 1_000,
     }
 }
@@ -332,4 +332,184 @@ async fn a_database_with_rows_from_before_migration_002_is_upgraded_and_reads_ba
     // The upgraded database takes a new watch with its own limit.
     store.put_watch(&new_watch("new")).await.unwrap();
     assert_eq!(store.get("new").await.unwrap().unwrap().run_limit_secs, 300);
+}
+
+/// Opens a database as an older Harold did: only migrations 001 and 002.
+async fn open_at_v002(folder: &std::path::Path) -> (turso::Database, Connection) {
+    let path = folder.join(DATABASE);
+    let database = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, sql) in &MIGRATIONS[..2] {
+        conn.execute_batch(sql).await.unwrap();
+        let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, checksum),
+        )
+        .await
+        .unwrap();
+    }
+    (database, conn)
+}
+
+#[tokio::test]
+async fn migration_003_keeps_every_row_of_a_v002_database() {
+    let temp = Temp::new();
+    {
+        let (_database, conn) = open_at_v002(&temp.0).await;
+        for (index, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let index = index as i64;
+            conn.execute(
+                "INSERT INTO watches (name, folder, skill, report_to, every_minutes, every_run, \
+                 state, started_at_ms, ends_at_ms, next_run_at_ms, runs, cost_usd_micros, \
+                 run_limit_secs) \
+                 VALUES (?1, '/work', 'pod-watch', 'chief', 10, 0, 'running', ?2, ?3, ?2, 1, 5, 77)",
+                (name, 1_000 + index, 9_000 + index),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (watch, folder, run, started_at_ms, outcome, cost_usd_micros) \
+                 VALUES (?1, '/work', 1, ?2, 'quiet', 5)",
+                (name, 1_000 + index),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let rows = store.running().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    for (index, row) in rows.iter().enumerate() {
+        let index = index as i64;
+        assert_eq!(row.started_at_ms, 1_000 + index);
+        assert_eq!(row.ends_at_ms, Some(9_000 + index));
+        assert_eq!(
+            (row.runs, row.cost_usd_micros, row.run_limit_secs),
+            (1, 5, 77)
+        );
+        assert_eq!(row.state, WatchState::Running);
+        assert_eq!((row.paused_until_ms, row.pause_how.clone()), (None, None));
+    }
+    assert_eq!(store.spent_micros(0, 10_000).await.unwrap(), 15);
+    assert_eq!(store.skipped_runs("a", 0).await.unwrap(), 0);
+    // The runs index survives the rebuild.
+    let conn = store.conn.lock().await;
+    let mut found = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'runs_by_start'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        integer(&found.next().await.unwrap().unwrap(), 0).unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_open_ended_watch_stores_no_end() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let mut watch = new_watch("open");
+    watch.ends_at_ms = None;
+    store.put_watch(&watch).await.unwrap();
+    let row = store.get("open").await.unwrap().unwrap();
+    assert_eq!(row.ends_at_ms, None);
+    assert!(row.is_live());
+    assert_eq!(store.running().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pause_and_resume_round_trip() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    store.put_watch(&new_watch("a")).await.unwrap();
+    store.put_watch(&new_watch("b")).await.unwrap();
+
+    let row = store
+        .pause("a", 1_000, Some(5_000), "cli")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, WatchState::Paused);
+    assert!(!row.running);
+    assert!(row.is_live());
+    assert_eq!(row.paused_until_ms, Some(5_000));
+    assert_eq!(row.pause_how.as_deref(), Some("cli"));
+    assert_eq!(store.running().await.unwrap().len(), 1);
+    assert_eq!(store.live().await.unwrap().len(), 2);
+    assert!(store.ended_since(0).await.unwrap().is_empty());
+    assert_eq!(store.pause("a", 1_000, None, "cli").await.unwrap(), None);
+    assert_eq!(store.pause("a", 9, None, "cli").await.unwrap(), None);
+
+    let row = store.resume("a", 1_000, 4_000).await.unwrap().unwrap();
+    assert_eq!(row.state, WatchState::Running);
+    assert!(row.running);
+    assert_eq!(row.next_run_at_ms, 4_000);
+    assert_eq!((row.paused_until_ms, row.pause_how), (None, None));
+    assert_eq!(store.resume("a", 1_000, 4_000).await.unwrap(), None);
+
+    // A watch paused with no end time ends from the paused state.
+    store.pause("b", 1_000, None, "budget_day").await.unwrap();
+    let row = store
+        .end("b", 1_000, "stopped", 6_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, WatchState::Stopped);
+}
+
+fn new_reminder(name: &str) -> NewReminder {
+    NewReminder {
+        name: name.into(),
+        folder: "/work/chief".into(),
+        report_to: "chief".into(),
+        text: "call back".into(),
+        due_at_ms: Some(9_000),
+        due_local: Some("2026-11-03 09:00".into()),
+    }
+}
+
+#[tokio::test]
+async fn finish_reminder_is_once_only() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    store.put_reminder(&new_reminder("r"), 1_000).await.unwrap();
+    let row = store.reminder("r").await.unwrap().unwrap();
+    assert_eq!(row.state, ReminderState::Waiting);
+    assert_eq!(row.due_at_ms, Some(9_000));
+    assert_eq!(row.text, "call back");
+    assert_eq!(store.waiting_reminders().await.unwrap().len(), 1);
+
+    let done = store
+        .finish_reminder("r", 1_000, ReminderState::Typed, 9_001)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.state, ReminderState::Typed);
+    assert_eq!(done.ended_at_ms, Some(9_001));
+    assert_eq!(
+        store
+            .finish_reminder("r", 1_000, ReminderState::Dropped, 9_002)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.reminder("r").await.unwrap().unwrap().state,
+        ReminderState::Typed
+    );
+    assert!(store.waiting_reminders().await.unwrap().is_empty());
 }

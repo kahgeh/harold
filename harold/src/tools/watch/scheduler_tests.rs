@@ -331,7 +331,10 @@ async fn start_with_a_running_name_replaces_it_and_runs_start_over() {
 
     pass(Duration::from_secs(2)).await;
     let row = h.row("w").await;
-    assert_eq!((row.runs, row.every_minutes, row.ends_at_ms), (1, 5, ends));
+    assert_eq!(
+        (row.runs, row.every_minutes, row.ends_at_ms),
+        (1, 5, Some(ends))
+    );
     assert!(row.running);
     assert_eq!(h.store.running().await.unwrap().len(), 1);
     // The replaced watch's task is gone: only the new schedule runs.
@@ -1138,7 +1141,7 @@ async fn day_bounds_and_end_time_follow_a_changed_offset() {
     h.scheduler.list().await.unwrap();
     let (old_start, old_end) = h.scheduler.today().await;
     assert_eq!((old_start, old_end), day_bounds(clock_ms(), plus_eleven));
-    let ends_at = h.row("w").await.ends_at_ms;
+    let ends_at = h.row("w").await.ends_at_ms.unwrap();
     let old_end_text = local_text(ends_at, plus_eleven);
 
     // 23:30 at +10:00 on the new day is 00:30 at +11:00 on the next day.

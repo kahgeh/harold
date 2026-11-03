@@ -11,12 +11,13 @@ use super::runner::RUN_LIMIT;
 
 const DATABASE: &str = "watch.db";
 
-const MIGRATIONS: [(&str, &str); 2] = [
+const MIGRATIONS: [(&str, &str); 3] = [
     ("001_watches", include_str!("migrations/001_watches.sql")),
     (
         "002_run_limit",
         include_str!("migrations/002_run_limit.sql"),
     ),
+    ("003_controls", include_str!("migrations/003_controls.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -42,8 +43,17 @@ pub(super) struct NewWatch {
     /// The most seconds one run may take.
     pub run_limit_secs: u32,
     pub started_at_ms: i64,
-    pub ends_at_ms: i64,
+    /// `None` for a watch with no end.
+    pub ends_at_ms: Option<i64>,
     pub next_run_at_ms: i64,
+}
+
+/// Where a watch is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatchState {
+    Running,
+    Paused,
+    Stopped,
 }
 
 /// A stored watch.
@@ -59,9 +69,12 @@ pub(super) struct WatchRow {
     /// The most seconds one run may take. A watch stored before migration 002 has the
     /// default, 120.
     pub run_limit_secs: u32,
+    /// True when `state` is `Running`.
     pub running: bool,
+    pub state: WatchState,
     pub started_at_ms: i64,
-    pub ends_at_ms: i64,
+    /// `None` for a watch with no end.
+    pub ends_at_ms: Option<i64>,
     pub next_run_at_ms: i64,
     pub runs: u32,
     pub reports: u32,
@@ -69,6 +82,62 @@ pub(super) struct WatchRow {
     pub cost_usd_micros: i64,
     pub last_outcome: Option<String>,
     pub stop_reason: Option<String>,
+    pub ended_at_ms: Option<i64>,
+    /// When a timed pause ends. `None` for no pause, or a pause with no end time.
+    pub paused_until_ms: Option<i64>,
+    /// Who paused the watch: `cli`, `control_tower` or `budget_day`.
+    pub pause_how: Option<String>,
+}
+
+impl WatchRow {
+    /// True when the watch is running or paused.
+    pub(super) fn is_live(&self) -> bool {
+        self.state != WatchState::Stopped
+    }
+}
+
+/// A reminder to store.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct NewReminder {
+    pub name: String,
+    pub folder: String,
+    pub report_to: String,
+    pub text: String,
+    pub due_at_ms: Option<i64>,
+    pub due_local: Option<String>,
+}
+
+/// Where a reminder is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReminderState {
+    Waiting,
+    Typed,
+    Dropped,
+    Cancelled,
+}
+
+impl ReminderState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Typed => "typed",
+            Self::Dropped => "dropped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A stored reminder.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ReminderRow {
+    pub name: String,
+    pub folder: String,
+    pub report_to: String,
+    pub text: String,
+    pub due_at_ms: Option<i64>,
+    pub due_local: Option<String>,
+    pub state: ReminderState,
+    pub created_at_ms: i64,
     pub ended_at_ms: Option<i64>,
 }
 
@@ -98,7 +167,8 @@ pub(super) struct RunRecord {
 
 const COLUMNS: &str = "name, folder, skill, report_to, every_minutes, every_run, \
     run_budget_usd_micros, state, started_at_ms, ends_at_ms, next_run_at_ms, runs, reports, \
-    failed_in_a_row, cost_usd_micros, last_outcome, stop_reason, ended_at_ms, run_limit_secs";
+    failed_in_a_row, cost_usd_micros, last_outcome, stop_reason, ended_at_ms, run_limit_secs, \
+    paused_until_ms, pause_how";
 
 pub(super) struct WatchStore {
     conn: Mutex<Connection>,
@@ -145,7 +215,7 @@ impl WatchStore {
                     Value::from(i64::from(watch.every_run)),
                     optional(watch.run_budget_usd_micros),
                     Value::from(watch.started_at_ms),
-                    Value::from(watch.ends_at_ms),
+                    optional(watch.ends_at_ms),
                     Value::from(watch.next_run_at_ms),
                     Value::from(i64::from(watch.run_limit_secs)),
                 ]),
@@ -168,6 +238,165 @@ impl WatchStore {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
         fetch_many(&conn, "state = 'running'").await
+    }
+
+    /// Every running or paused watch, oldest first.
+    pub(super) async fn live(&self) -> Result<Vec<WatchRow>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        fetch_many(&conn, "state IN ('running','paused')").await
+    }
+
+    /// Pauses a running watch. `until_ms` is `None` for a pause with no end time.
+    /// Returns the paused watch, or `None` when the watch is not running.
+    pub(super) async fn pause(
+        &self,
+        name: &str,
+        started_at_ms: i64,
+        until_ms: Option<i64>,
+        how: &str,
+    ) -> Result<Option<WatchRow>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            let changed = conn
+                .execute(
+                    "UPDATE watches SET state = 'paused', paused_until_ms = ?2, pause_how = ?3 \
+                     WHERE name = ?1 AND state = 'running' AND started_at_ms = ?4",
+                    turso::params_from_iter(vec![
+                        Value::from(name),
+                        optional(until_ms),
+                        Value::from(how),
+                        Value::from(started_at_ms),
+                    ]),
+                )
+                .await?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            fetch_one(&conn, name).await
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    /// Resumes a paused watch: it runs at `now_ms`. Returns the watch, or `None` when
+    /// the watch is not paused.
+    pub(super) async fn resume(
+        &self,
+        name: &str,
+        started_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<WatchRow>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            let changed = conn
+                .execute(
+                    "UPDATE watches SET state = 'running', next_run_at_ms = ?2, \
+                     paused_until_ms = NULL, pause_how = NULL \
+                     WHERE name = ?1 AND state = 'paused' AND started_at_ms = ?3",
+                    turso::params_from_iter(vec![
+                        Value::from(name),
+                        Value::from(now_ms),
+                        Value::from(started_at_ms),
+                    ]),
+                )
+                .await?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            fetch_one(&conn, name).await
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    /// Stores a reminder as waiting, replacing any reminder of the same name.
+    pub(super) async fn put_reminder(&self, reminder: &NewReminder, now_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            conn.execute(
+                "INSERT OR REPLACE INTO reminders (name, folder, report_to, text, due_at_ms, \
+                 due_local, state, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'waiting', ?7)",
+                turso::params_from_iter(vec![
+                    Value::from(reminder.name.as_str()),
+                    Value::from(reminder.folder.as_str()),
+                    Value::from(reminder.report_to.as_str()),
+                    Value::from(reminder.text.as_str()),
+                    optional(reminder.due_at_ms),
+                    reminder
+                        .due_local
+                        .as_deref()
+                        .map_or(Value::Null, Value::from),
+                    Value::from(now_ms),
+                ]),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    pub(super) async fn reminder(&self, name: &str) -> Result<Option<ReminderRow>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        fetch_reminder(&conn, name).await
+    }
+
+    /// Every waiting reminder, oldest first.
+    pub(super) async fn waiting_reminders(&self) -> Result<Vec<ReminderRow>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {REMINDER_COLUMNS} FROM reminders WHERE state = 'waiting' \
+                     ORDER BY created_at_ms, name"
+                ),
+                (),
+            )
+            .await?;
+        let mut reminders = Vec::new();
+        while let Some(row) = rows.next().await? {
+            reminders.push(to_reminder(&row)?);
+        }
+        Ok(reminders)
+    }
+
+    /// Ends a waiting reminder with `state`. Returns the reminder, or `None` when it is
+    /// not waiting or was replaced since `created_at_ms`.
+    pub(super) async fn finish_reminder(
+        &self,
+        name: &str,
+        created_at_ms: i64,
+        state: ReminderState,
+        now_ms: i64,
+    ) -> Result<Option<ReminderRow>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            let changed = conn
+                .execute(
+                    "UPDATE reminders SET state = ?2, ended_at_ms = ?3 \
+                     WHERE name = ?1 AND state = 'waiting' AND created_at_ms = ?4",
+                    turso::params_from_iter(vec![
+                        Value::from(name),
+                        Value::from(state.as_str()),
+                        Value::from(now_ms),
+                        Value::from(created_at_ms),
+                    ]),
+                )
+                .await?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            fetch_reminder(&conn, name).await
+        }
+        .await;
+        finish(&conn, work).await
     }
 
     /// Every watch that ended at or after `since_ms`.
@@ -286,7 +515,7 @@ impl WatchStore {
             let changed = conn
                 .execute(
                     "UPDATE watches SET state = 'stopped', stop_reason = ?2, ended_at_ms = ?3 \
-                     WHERE name = ?1 AND state = 'running' AND started_at_ms = ?4",
+                     WHERE name = ?1 AND state IN ('running','paused') AND started_at_ms = ?4",
                     turso::params_from_iter(vec![
                         Value::from(name),
                         Value::from(reason),
@@ -389,6 +618,11 @@ async fn fetch_many(conn: &Connection, condition: &str) -> Result<Vec<WatchRow>>
 }
 
 fn to_watch(row: &turso::Row) -> Result<WatchRow> {
+    let state = match text(row, 7)?.as_str() {
+        "running" => WatchState::Running,
+        "paused" => WatchState::Paused,
+        _ => WatchState::Stopped,
+    };
     let count = |index| {
         u32::try_from(integer(row, index)?)
             .map_err(|_| StoreError::Data(format!("column {index} out of range")))
@@ -406,9 +640,10 @@ fn to_watch(row: &turso::Row) -> Result<WatchRow> {
                 .map_err(|_| StoreError::Data("column 18 out of range".into()))?,
             None => RUN_LIMIT.as_secs() as u32,
         },
-        running: text(row, 7)? == "running",
+        running: state == WatchState::Running,
+        state,
         started_at_ms: integer(row, 8)?,
-        ends_at_ms: integer(row, 9)?,
+        ends_at_ms: optional_integer(row, 9)?,
         next_run_at_ms: integer(row, 10)?,
         runs: count(11)?,
         reports: count(12)?,
@@ -417,7 +652,52 @@ fn to_watch(row: &turso::Row) -> Result<WatchRow> {
         last_outcome: optional_text(row, 15)?,
         stop_reason: optional_text(row, 16)?,
         ended_at_ms: optional_integer(row, 17)?,
+        paused_until_ms: optional_integer(row, 19)?,
+        pause_how: optional_text(row, 20)?,
     })
+}
+
+fn to_reminder(row: &turso::Row) -> Result<ReminderRow> {
+    let state = match text(row, 6)?.as_str() {
+        "waiting" => ReminderState::Waiting,
+        "typed" => ReminderState::Typed,
+        "dropped" => ReminderState::Dropped,
+        "cancelled" => ReminderState::Cancelled,
+        other => return Err(StoreError::Data(format!("unknown reminder state {other}"))),
+    };
+    Ok(ReminderRow {
+        name: text(row, 0)?,
+        folder: text(row, 1)?,
+        report_to: text(row, 2)?,
+        text: text(row, 3)?,
+        due_at_ms: optional_integer(row, 4)?,
+        due_local: optional_text(row, 5)?,
+        state,
+        created_at_ms: integer(row, 7)?,
+        ended_at_ms: optional_integer(row, 8)?,
+    })
+}
+
+const REMINDER_COLUMNS: &str =
+    "name, folder, report_to, text, due_at_ms, due_local, state, created_at_ms, ended_at_ms";
+
+async fn fetch_reminder(conn: &Connection, name: &str) -> Result<Option<ReminderRow>> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT {REMINDER_COLUMNS} FROM reminders WHERE name = ?1"),
+            [name],
+        )
+        .await?;
+    rows.next().await?.map(|row| to_reminder(&row)).transpose()
+}
+
+/// The number of rows in `watches`.
+async fn watch_count(conn: &Connection) -> Result<i64> {
+    let mut rows = conn.query("SELECT COUNT(*) FROM watches", ()).await?;
+    let Some(row) = rows.next().await? else {
+        return Err(StoreError::Data("watch count is missing".into()));
+    };
+    integer(&row, 0)
 }
 
 async fn configure(conn: &Connection) -> Result<()> {
@@ -500,7 +780,18 @@ async fn apply_migrations(conn: &Connection) -> Result<()> {
                 )));
             }
             None => {
+                // The rebuild of `watches` must keep every row.
+                let before = if name == "003_controls" {
+                    Some(watch_count(conn).await?)
+                } else {
+                    None
+                };
                 conn.execute_batch(sql).await?;
+                if let Some(before) = before
+                    && watch_count(conn).await? != before
+                {
+                    return Err(StoreError::Data("watch rebuild lost rows".into()));
+                }
                 conn.execute(
                     "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
                     (name, checksum, wall_clock_ms()),
