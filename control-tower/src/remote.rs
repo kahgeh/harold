@@ -552,7 +552,7 @@ async fn remote_loop<S: RemoteSource>(
             input = keys.next_input() => {
                 let key = match input {
                     Some(Ok(RuntimeInput::Key(key))) => key,
-                    Some(Ok(RuntimeInput::Redraw | RuntimeInput::Focus(_))) => {
+                    Some(Ok(RuntimeInput::Redraw)) => {
                         screen.show(&model)?;
                         continue;
                     }

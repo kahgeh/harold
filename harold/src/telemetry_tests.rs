@@ -5877,7 +5877,6 @@ fn harold_turns_carries_role_and_product_and_no_model() {
     );
 }
 
-
 #[test]
 fn record_waiting_duration_writes_the_role() {
     record_waiting_duration("waiting_probe_role", 42.0);

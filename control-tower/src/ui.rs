@@ -1600,8 +1600,8 @@ fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> 
     format!("{}{suffix}", fit(&head, width - suffix_width))
 }
 
-/// The list's right-hand title: `(focus tracking off)` while the focus probe sees no
-/// usable pane, and nothing otherwise. Waiting agents show by their ◆ marks instead.
+/// The list's right-hand title: `(focus tracking off)` while Harold does not know the
+/// focused pane (`focus_known`), and nothing otherwise. Waiting agents show by their ◆ marks instead.
 fn focus_tracking_title(app: &App) -> Line<'static> {
     if app.focus_tracking() {
         return Line::default();
@@ -5426,13 +5426,14 @@ mod tests {
     fn waiting_app() -> App {
         use AgentState::{Idle, Working};
         let mut app = live_app(Vec::new(), None);
-        app.observe_focus(crate::app::FocusReading::Active("%99".into()));
-        app.apply_later_snapshot(layout_with_states([Working, Working, Working], 43))
-            .unwrap();
-        app.apply_later_snapshot(layout_with_states([Working, Working, Idle], 44))
-            .unwrap();
-        app.apply_later_snapshot(layout_with_states([Working, Idle, Idle], 45))
-            .unwrap();
+        // Harold serves %3 and %2 as waiting, and knows the focus.
+        let mut served = layout_with_states([Working, Idle, Idle], 43);
+        served.focus_known = true;
+        for (row, since) in served.rows.iter_mut().skip(1).zip([2, 1]) {
+            row.waiting = true;
+            row.waiting_since_ms = since;
+        }
+        app.apply_later_snapshot(served).unwrap();
         app
     }
 
