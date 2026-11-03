@@ -6,7 +6,8 @@ TMPDIR and TMUX_TMPDIR, free ports, a private tmux server, no iMessage listener)
 otel_test.py's browser set-up (a headless Chrome over the DevTools protocol, with the login header
 that Tailscale Serve adds). The test Harold has two collections (one with a very long title), a
 scratch product registry with one spec, and the web app listener only. The web app is paired off.
-The test needs a Harold built with the default features (cargo build --locked).
+The web app runs with require_pairing = false, because the test browser is not a paired device and
+pairing would send every page to the pairing screen. The test needs a Harold built with the default features (cargo build --locked).
 
 The Notes page and a note page are not checked: they need the knowledge tool, which needs a vault,
 an embedding model and a bucket that a scratch config cannot give. The test says so with `SKIP`.
@@ -223,8 +224,19 @@ try {
 
   // 5. A qualified swipe has defaultPrevented on its touchmove (from the first trial of each page).
   // 6. A mostly vertical edge drag, and a touchcancel.
-  result.vertical = await trial(md, 8, 300, 30, 560);
-  result.cancel = await trial(md, 8, 400, 140, 410, "touchCancel");
+  // The vertical drag is 92 px across, past the 80 px distance, so only the direction test stops it.
+  result.vertical = await trial(md, 8, 200, 100, 600);
+  // A qualified swipe (past 80 px) is cancelled; a touchend then follows. Chrome drops a real
+  // touchend after a cancel, so the page gets a synthetic one. A script that does not reset on
+  // touchcancel would navigate on it.
+  await goto(args.base + md);
+  await watch();
+  await drag(8, 400, 140, 410, "touchCancel");
+  await evaluate(`document.dispatchEvent(new TouchEvent("touchend", { bubbles: true, cancelable: true,
+    changedTouches: [new Touch({ identifier: 1, target: document.body, clientX: 140, clientY: 410 })] }))`);
+  await sleep(900);
+  result.cancel = { stayed: (await evaluate("window.__marker === true").catch(() => false)) && (await evaluate("location.pathname")) === md,
+    moves: await evaluate("window.__moves").catch(() => []) };
   result.short = await trial(md, 8, 400, 60, 405);
 
   // 7. Regression: on the thread the todos swipe still works and the page has no back-swipe.js.
@@ -345,7 +357,7 @@ def main(argv=None):
         config = json.dumps({
             'chrome': ot.CHROME, 'base': base, 'login': ct.LOGIN, 'name': NAME, 'longName': LONG_NAME,
             'shots': str(args.shots) if args.shots else '', 'out': str(out), 'debugPort': ct.free_port(),
-            'pages': [{'key': k, 'path': p, 'back': b, 'harold': h} for k, p, b, h in PAGES]})
+            'pages': [{'key': k, 'path': p, 'harold': h} for k, p, b, h in PAGES]})
         node = subprocess.Popen(['node', str(script), config], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, start_new_session=True)
         try:
@@ -390,11 +402,13 @@ def verify(results, data):
             check('no Harold control on ' + path, h['harold'] is None, h)
         check('no horizontal scroll at 390 px on ' + path, h['scrollWidth'] <= h['innerWidth'], h)
 
-    def nothing(name, t, prevented=False):
-        check(name, t['stayed'] and (not any(t['moves']) if not prevented else True), t)
+    def nothing(name, t, framed=False):
+        # In a frame the touch goes to the frame, so the page gets no touchmove: only then may moves be empty.
+        delivered = framed or len(t['moves']) > 0
+        check(name, t['stayed'] and delivered and not any(t['moves']), t)
 
-    nothing('a touch from 18 px on a collection .html page does nothing', data['from18'])
-    nothing('a touch from 40 px on a collection .html page does nothing', data['from40'])
+    nothing('a touch from 18 px on a collection .html page does nothing', data['from18'], framed=True)
+    nothing('a touch from 40 px on a collection .html page does nothing', data['from40'], framed=True)
     nothing('a touch from 18 px on a markdown page does nothing', data['from18md'])
     nothing('a touch from 40 px on a list does nothing', data['from40list'])
     check('the table was scrolled by 50 px and reaches the edge', data['tableFound'] and data['tableState']['scrollLeft'] >= 49
@@ -408,9 +422,9 @@ def verify(results, data):
     check('touchmove of a qualified swipe is prevented',
           len(data['cancel']['moves']) > 3 and all(data['cancel']['moves']), data['cancel'])
     # On the .html pages the touch lands in the frame, so the page sees no touchmove at all.
-    check('touchmove of every skipped swipe is not prevented',
-          all(not any(data[k]['moves']) for k in ('from18', 'from40', 'from18md', 'from40list', 'table', 'selection', 'vertical')),
-          {k: data[k]['moves'] for k in ('from18', 'from40', 'from18md', 'from40list', 'table', 'selection', 'vertical')})
+    check('touchmove of every skipped swipe arrives and is not prevented',
+          all(data[k]['moves'] and not any(data[k]['moves']) for k in ('from18md', 'from40list', 'table', 'selection', 'vertical')),
+          {k: data[k]['moves'] for k in ('from18md', 'from40list', 'table', 'selection', 'vertical')})
     t = data['thread']
     check('the thread has no back-swipe.js and no data-back', t['hasPages'] and not t['script'], t)
     check('the thread header links Pages', t['toPages'] == '/c', t)
@@ -421,6 +435,8 @@ def verify(results, data):
         check('at 320 px Harold stays visible, 44 px or more, with a long title: ' + key,
               k is not None and h['visible'] and k['width'] >= 44 and k['height'] >= 44
               and h['scrollWidth'] <= h['innerWidth'], h)
+        check('at 320 px the back control is 44 x 44 px or more: ' + key,
+              h['back']['width'] >= 44 and h['back']['height'] >= 44, h)
         if key == 'long-list':
             b = h['back']
             check('at 320 px the list back control is 44 x 44 px or more and shows its whole label',
