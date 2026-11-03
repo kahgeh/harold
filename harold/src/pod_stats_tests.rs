@@ -4180,12 +4180,13 @@ async fn a_read_only_data_folder_still_warns_once_in_memory() {
     // Root can write the folder, and then the save does not fail.
     if !notices_path(&pod).exists() {
         assert_eq!(
-            text.matches("pod notices unreadable reason=\"save\"")
+            text.matches("pod notices not saved reason=\"permission\"")
                 .count(),
             1,
             "{text}"
         );
     }
+    assert!(!text.contains("pod notices unreadable"), "{text}");
 }
 
 #[test]
@@ -4205,12 +4206,12 @@ fn a_missing_data_folder_fails_the_save_once_and_keeps_the_keys() {
     assert!(!file.exists());
     let text = logs.text();
     assert_eq!(
-        text.matches("pod notices unreadable reason=\"save\"")
-            .count(),
+        text.matches("pod notices not saved reason=\"io\"").count(),
         1,
         "{text}"
     );
-    assert_eq!(text.matches("pod notices unreadable").count(), 1, "{text}");
+    assert_eq!(text.matches("pod notices not saved").count(), 1, "{text}");
+    assert!(!text.contains("pod notices unreadable"), "{text}");
 }
 
 #[test]

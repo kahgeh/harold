@@ -494,8 +494,8 @@ impl PodNotices {
     }
 
     /// Writes the notices to the file when they differ from it: a temporary file with
-    /// mode 0600, then a rename. A failure logs one `warn` line until a save works, and
-    /// the next call tries again.
+    /// mode 0600, then a rename. A failure logs one `pod notices not saved` line, with
+    /// `reason` `permission` or `io`, until a save works. The next call tries again.
     pub(crate) fn save(&mut self) {
         if !self.dirty {
             return;
@@ -508,7 +508,12 @@ impl PodNotices {
             Err(error) => {
                 if !self.save_failed {
                     self.save_failed = true;
-                    warn!(reason = "save", error = %error, "pod notices unreadable");
+                    let reason = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        "permission"
+                    } else {
+                        "io"
+                    };
+                    warn!(reason, error = %error, "pod notices not saved");
                 }
             }
         }
