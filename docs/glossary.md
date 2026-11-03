@@ -54,6 +54,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | withdrawn file | The file `withdrawn/<id>.md` in a pod folder, which the PnEM writes when it withdraws or replaces a spec | — |
 | started file | The file `started/<id>.md` in a pod folder, which baton's `spawn.sh` writes at the first spawn for a spec | — |
 | merged file | The file `merged/<id>.md` in a pod folder, which pod coordination writes when it sends `MERGED` for a spec's last stage | — |
+| pod notices | The pod-file faults Harold has warned about once, such as a spec completed without its merged file, kept in `pod-notices.json` so a restart does not warn again | "alerts" (an alert is HyperDX's), "warnings file" |
 | approval file | The file `approvals/<id>.md` in a pod folder, which the chief writes when you approve a spec, or when it starts one under a waiver. It sits beside the withdrawn, started and merged files | "approved file" |
 | next release (of a product) | What `harold tool release next` lists for a product: merged since the release, in progress, approved, not started, parked, awaiting approval and not clear | "changelog" (it lists specs, not changes) |
 | merged since the release | The completed specs whose merge commit is not in the product's newest `v*` tag. A completed spec that is in the tag is not listed. Here "merged" names the merge commit, as in merged file, not the state | "unreleased" |

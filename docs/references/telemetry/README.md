@@ -123,15 +123,58 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 | `large spec approved` | `pod.product`, `spec.id`. Level warn. Logged once for each large spec in the approved state, with an approval on or after the cutoff of ADR 0021 (the `**Size.** large` line). A started or completed spec is not logged |
 | `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
 | `spec completed without merged file` | `pod.product`, `spec.id`, `merged_at` (RFC 3339 time of the newest merge) |
+| `pod notices unreadable` | `reason` (`parse`, `permission` or `io`) |
+| `pod notices not saved` | `reason` (`permission` or `io`), `error` |
 
 **A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
 
 **A missing merged file.** Harold does not know how many stages a spec has, so it completes a spec without `merged/<id>.md` only when the merge cannot be an early stage. The 7 days run from the latest merge in the reflog or worktree source, not from `started:`.
 
-- A merge without a stage (`merge <id>:`, or a worktree named `<id>` that went with its commit merged): when the latest such merge is over 7 days old, no worktree for the spec is busy and no stage merge is later, the spec becomes `completed` at that merge's time. Harold logs `spec completed without merged file` once, with `pod.product` and `spec.id`, and records no lead time, because the time is a guess.
+- A merge without a stage (`merge <id>:`, or a worktree named `<id>` that went with its commit merged): when the latest such merge is over 7 days old, no worktree for the spec is busy and no stage merge is later, the spec becomes `completed` at that merge's time. Harold logs `spec completed without merged file` once ever, with `pod.product`, `spec.id`, `merged_at` and `commit`, and records no lead time, because the time is a guess.
 - A stage merge (`merge <id>-<stage>:`, such as `<id>-1b`) never completes the spec. When the latest stage merge is over 7 days old and no worktree for the spec is busy, the spec stays `in_progress` and Harold logs `spec stage merged without merged file` once, with `pod.product`, `spec.id` and `spec.stage`. A later stage that waits over 7 days for the user or a slot logs this line too, and the chief decides.
 
 **Revision marks.** `specs/<id>.revisions.md`, written by the PnEM, has one `## ` heading for each entry. The last parenthesis of a heading holds its tags: `first` (the first draft, not a revision), `direction`, `defect` or `wording`, and `architect` when the architect asked for it, such as `## 2026-10-26, rev 2 (defect, architect)`. A heading with no tags counts as a revision of unknown class. The tags are in [Revision tags](revision-tags.md). The count of revisions is carried as `spec.revisions`. It replaces the count of `## Revision <n>` headings in `requests/<id>.md`, which stopped on 2026-10-19.
+**Pod notices.** Harold keeps the keys of the faults it has warned about in `pod-notices.json`, in its data folder (file mode 0600). Each key has the time of its warning. At start Harold reads the file, so a restart does not warn again about a known key. `merged_at` is an allowed field. `commit` is not an allowed field, so it stays in `harold.log`, where the merged file is written from it. A key leaves the file at the next poll when its spec gets a merged file or goes. The warning then comes again if the gap comes back.
+
+- `pod notices unreadable` (warn) is logged once at start when the file cannot be read. `reason` is `parse` (not valid JSON), `permission` (the file cannot be opened) or `io` (another read error). Harold replaces the file, and the warnings come once more.
+- `pod notices not saved` (warn) is logged when Harold cannot write the file. `reason` is `permission` or `io`. Harold logs the line once until a save works.
+
+The release watch runs these queries on `otel.otel_logs`:
+
+- A second `spec completed without merged file` line for one `spec.id` in 24 hours is a fault. The expected rate is one line for each spec, ever.
+
+```
+SELECT LogAttributes['spec.id'], count()
+FROM otel.otel_logs
+WHERE ServiceName = 'harold'
+  AND Body = 'spec completed without merged file'
+  AND Timestamp > now() - INTERVAL 1 DAY
+GROUP BY 1
+```
+
+- More than 0 `pod notices unreadable` lines in 24 hours is a fault. The expected rate is zero, except one line at the first start after a hand edit breaks the file. Check `reason`, then the file's mode and contents.
+
+```
+SELECT LogAttributes['reason'], count()
+FROM otel.otel_logs
+WHERE ServiceName = 'harold'
+  AND Body = 'pod notices unreadable'
+  AND Timestamp > now() - INTERVAL 1 DAY
+GROUP BY 1
+```
+
+- More than 0 `pod notices not saved` lines in 24 hours is a fault. The expected rate is zero. Check `reason`, then the mode and owner of the data folder and of `pod-notices.json`.
+
+```
+SELECT LogAttributes['reason'], count()
+FROM otel.otel_logs
+WHERE ServiceName = 'harold'
+  AND Body = 'pod notices not saved'
+  AND Timestamp > now() - INTERVAL 1 DAY
+GROUP BY 1
+```
+
+**Revision marks.** `specs/<id>.revisions.md`, written by the PnEM, has one `## ` heading for each entry. The last parenthesis of a heading holds its tags: `first` (the first draft, not a revision), `direction` or `defect`, and `architect` when the architect asked for it, such as `## 2026-10-26, rev 2 (defect, architect)`. A heading with no tags counts as a revision of unknown class. The count of revisions is carried as `spec.revisions`. It replaces the count of `## Revision <n>` headings in `requests/<id>.md`, which stopped on 2026-10-19.
 
 **Repositories with no reflog**, such as `turso-object-store` today, cannot show `merge <id>`. There a spec counts as merged when its busy worktree goes and the commit that worktree last had checked out is in the base branch. Harold asks `git merge-base --is-ancestor` for up to an hour after the worktree goes. This has limits:
 
