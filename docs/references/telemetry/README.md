@@ -429,13 +429,13 @@ A `screen_read` call also has the attribute `purpose`, which tells why Harold re
 
 `harold.agents` is read at each export from the agent snapshot. For each provider in the snapshot, it reports all six states, with 0 for a state that has no agents. `harold.agent.state.duration` is recorded when an agent's state changes, with the time the agent spent in the state it left. `harold.multiplexer.sessions` and `harold.multiplexer.panes` are read at each export from the last inventory listing that worked. They count every pane the multiplexer holds, with or without an agent. No multiplexer metric carries a `pane_id`, so the number of series does not grow with the panes.
 
-`harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
+`harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by`, `role` and `pod.product` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2,000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
 
 **Where a turn gets its role, product and spec id.** Harold looks up the turn's pane in the last pod poll, which runs every 60 s. The first turn of a new build worker, and a turn after its worktree stops being busy, count as `other` with no product and no spec id. A spec with no `started/<id>.md` file (the ADR 0021 fallback) has no spec id. Its tokens count in `harold.turn.tokens` but not in `harold.turn.tokens.by_spec`. The `worktree:` line of the started file holds the name of the worktree folder, and Harold matches it to the busy worktree that claimed the pane. No log line carries the folder.
 
 **Turn tokens.** `harold.turn.tokens` adds a count for each of the four kinds on each turn that has tokens. A kind with the value 0 adds 0, so every kind has a series for a real model. A turn with no token fields adds nothing. `model` is the turn's last model if it is `claude-` followed by 1 to 40 of `a-z`, `0-9` and `-`. Any other string counts as `other`, so a caller cannot add series. A turn that sends no model uses `none`. The counter has about 150 series: 4 kinds, a few models, 5 roles and the products.
 
-`harold.turn.tokens.by_spec` has 2 series for each build-worker spec (`input` and `output`). The 2000-series limit of an instrument then holds about 1,000 specs. Past the limit, new series fall into the overflow series, and the counts stay in the total. The card "Tokens and turns" shows a note when the overflow series appears.
+`harold.turn.tokens.by_spec` has 2 series for each build-worker spec (`input` and `output`). The 2,000-series limit of an instrument then holds about 1,000 specs. Past the limit, new series fall into the overflow series (`otel.metric.overflow = true`), and the counts stay in the total. The card "Tokens and turns" shows a note when the overflow series appears.
 
 ## What leaves Harold
 
@@ -806,7 +806,7 @@ The notes of the card:
 
 - The Opus share of the tokens for each `role`. This is the model-mix reading: build workers belong on Sonnet.
 - A `build_worker` turn on an Opus model.
-- The share of tokens with `role = other` above a fifth of a day: turns do not reach their pod. The first turn of a worker is one known cause.
+- The share of tokens with `role = other` above a fifth of the day's tokens: turns do not reach their pod. The first turn of a worker is one known cause.
 - The overflow series (`otel.metric.overflow`) on `harold.turn.tokens.by_spec`. Check the series limit and the attribute.
 - Tokens per merged spec up by over a half against last week, when both weeks have at least 3 merged specs.
 - Subagent tokens are not counted.
