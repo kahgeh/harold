@@ -5134,6 +5134,22 @@ fn the_work_cards_read_their_metrics_with_the_right_rule() {
             assert!(sql.contains("argMax(Value, TimeUnix)"), "{name}: {sql}");
         }
     }
+    // No two cards of the group overlap.
+    let boxes: Vec<(i64, i64, i64, i64)> = WORK_CARDS
+        .iter()
+        .map(|name| {
+            let t = card(name);
+            let n = |key: &str| t[key].as_i64().unwrap();
+            (n("x"), n("y"), n("w"), n("h"))
+        })
+        .collect();
+    for (i, a) in boxes.iter().enumerate() {
+        for b in &boxes[i + 1..] {
+            let apart =
+                a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+            assert!(apart, "work cards overlap: {a:?} and {b:?}");
+        }
+    }
     let by_week = card(WORK_CARDS[1])["config"]["sqlTemplate"]
         .as_str()
         .unwrap();

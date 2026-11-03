@@ -79,7 +79,7 @@ harold tool work history work-records
 harold tool work search rotation
 ```
 
-`put` accepts the keys `title`, `priority`, `status`, `waits_for`, `next_step`, `decisions` (a list of objects with `who`, `mark`, `text` and an optional `at`) and `links` (a list of strings). The key `name`, if present, must equal the argument. A decision with no `at` gets today's date. A replacement of an open work record keeps its stored decisions, its links and its times, and ignores the `decisions` and `links` in the JSON. Use `decide` and `link` to change those.
+`put` accepts these keys: `title`, `priority`, `status`, `waits_for`, `next_step`, `decisions` and `links`. `decisions` is a list of objects with `who`, `mark`, `text` and an optional `at`. `links` is a list of strings. The key `name`, if present, must equal the argument. A decision with no `at` gets today's date. A replacement keeps the stored decisions, links and times. It ignores the `decisions` and `links` in the JSON. Use `decide` and `link` to change those.
 
 ### Refusals
 
@@ -144,11 +144,11 @@ Links:
 The heading gives the name and the title. `:`, `-`, `–` or `—` may separate them. A decision line is `- <mark>, <who>, <date>: <text>`. A link line is `- <link>`. Blank lines are skipped.
 
 - **Without `--apply`:** the command prints what it would store, and each line that it cannot place, with its file and line. It stores nothing.
-- **With `--apply`:** the command stores all the work records in one transaction, or none. It refuses while any line is unplaced (`unplaced_lines <count>`). It refuses a name that the current file holds already (`name_in_use <name>`), and a work record that would be a third in `focus` (`focus_full <name>`). Nothing is lost silently.
+- **With `--apply`:** the command stores all the work records in one transaction, or none. It refuses while any line is unplaced (`unplaced_lines <count>`). It also refuses a name that the current file holds (`name_in_use <name>`). It refuses a work record that would be a third in `focus` (`focus_full <name>`). Nothing is lost silently.
 - **Import is for the chief's files only.** No queue item comes in unless you name it.
-- **`--queue N12,N34`:** imports only the named queue items. Each becomes a work record with the name `queue-<id>` (in lower case), the status `idea`, the priority `later`, and the first line of its text as the next step. An id that is not an open queue item (the Now item or a parked item) is refused with `not_open_queue_item <id>`. The queue keeps every item.
+- **`--queue N12,N34`:** imports only the named queue items. Each becomes a work record named `queue-<id>` in lower case. Its status is `idea` and its priority is `later`. The first line of its text is the next step. The command refuses an id that is not an open queue item (the Now item or a parked item) with `not_open_queue_item <id>`. The queue keeps every item.
 
-An unplaced line with the number 0 is a whole-file problem: a file that cannot be read, a file with no heading, or a name that two files use.
+An unplaced line with the number 0 is a whole-file problem. It means a file that cannot be read, a file with no heading, or a name that two files use.
 
 ```sh
 harold tool work import ./work --queue N12,N34       # a dry run: prints what it would store
@@ -166,7 +166,7 @@ Harold moves the open work records to a new file by itself. The chief and the us
 rotation_days = 14
 ```
 
-Harold reads the setting at start and at each daily check, so a change needs no restart. A change never rewrites, renames or moves a file by itself:
+Harold reads the setting at start and at each daily check, so a change needs no restart. A change never rewrites, renames or moves a file by itself. The cases are:
 
 - A smaller value: a current file already older than the new value rotates at the next check.
 - A larger value: the current file stays until it reaches the new age.
@@ -217,7 +217,7 @@ The work tool sends five metrics. The [telemetry reference](../telemetry/README.
 | `harold.work.check.mismatches` | counter, by `record` and `kind` | Do the work records agree with the specs and the questions? It is added to at each check |
 | `harold.work.rotations` | counter, by `outcome` (`done`, `failed`) | Does the rotation run by itself? `failed` counts each failed try, retries too |
 
-Harold records 0 at start for each `outcome` and for each priority and status. The dashboard "Harold" has three info cards in the group "Work records": "Work by priority and status, and long waits", "Time at each status, p50 and p95, by week" and "Work check mismatches by day". A count above 0 of `harold.work.check.mismatches` at two digests in a row means: look at those work records.
+Harold records 0 at start for each `outcome` and for each priority and status. The dashboard "Harold" has three info cards in the group "Work records". They are "Work by priority and status, and long waits", "Time at each status, p50 and p95, by week" and "Work check mismatches by day". A count above 0 of `harold.work.check.mismatches` at two digests in a row means that you must look at those work records.
 
 ## Log lines
 
