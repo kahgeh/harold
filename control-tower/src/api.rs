@@ -443,9 +443,6 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
     })
 }
 
-/// What `AnswerQuestion`'s answer means for the block. Only the two refusals the tool
-/// names are told apart; anything else, an older Harold or a failed write included,
-/// means the answer was not saved.
 /// The answer to `GetRemoteOrder`. `Unimplemented` (an older Harold) is an empty order.
 fn remote_order_result(
     result: Result<Vec<String>, tonic::Status>,
@@ -457,6 +454,9 @@ fn remote_order_result(
     }
 }
 
+/// What `AnswerQuestion`'s answer means for the block. Only the two refusals the tool
+/// names are told apart; anything else, an older Harold or a failed write included,
+/// means the answer was not saved.
 pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResult {
     let Err(status) = result else {
         return SendResult::Recorded;

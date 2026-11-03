@@ -12,7 +12,7 @@ The names and parameters come from `rex api describe session.view` and `rex api 
 4. When that layer has the kind `tiled`, skip the close. Rex closes only a floating layer.
 5. Run `rex api call session.close_layer '{"session_id":"<REX_SESSION>","layer_id":"<layer>"}'`.
 
-Each call also gets `--autostart=false` and `--timeout=3s`, as every other control-tower call to `rex` does. A failure of any step is ignored, and the remote exits with code 0.
+Each call also gets `--autostart=false` and `--timeout=3s`, as every other control-tower call to `rex` does. A failure of any step of the close is ignored. When only the close failed, the remote exits with code 0. When something else failed (the terminal, the keys, the signals or a panic), the remote still closes its layer first, then restores the terminal, prints the error and exits with code 1.
 
 ## `session.view`
 

@@ -338,6 +338,15 @@ impl TmuxNavigator {
             .map(|block| sanitize_display(&block, ERROR_DETAIL_MAX_SCALARS)))
     }
 
+    /// The block of this program in Rex: `REX_BLOCK`, read from the same context as
+    /// `REX_SESSION`. `None` when it is missing or blank.
+    pub fn own_rex_block(&self) -> Option<String> {
+        self.context
+            .var_os("REX_BLOCK".as_ref())
+            .map(|value| value.to_string_lossy().into_owned())
+            .filter(|value| !value.trim().is_empty())
+    }
+
     /// Closes the floating Rex layer that holds `block`, in the session of `REX_SESSION`.
     /// Without `REX_SESSION` it does nothing. It reads `session.view`, finds the layer
     /// whose blocks hold `block`, and runs `session.close_layer` for it. A `tiled` layer
@@ -799,6 +808,7 @@ pub(crate) mod fake_rex {
 
     struct Context {
         session: Option<String>,
+        block: Option<String>,
     }
 
     impl ProcessContext for Context {
@@ -806,6 +816,7 @@ pub(crate) mod fake_rex {
             match name.to_str() {
                 Some("PATH") => Some("/opt/bin".into()),
                 Some("REX_SESSION") => self.session.clone().map(Into::into),
+                Some("REX_BLOCK") => self.block.clone().map(Into::into),
                 _ => None,
             }
         }
@@ -820,9 +831,18 @@ pub(crate) mod fake_rex {
     }
 
     /// A navigator whose `rex` answers with `outputs` (`Err` is a failed call with that
-    /// stderr), and whose `REX_SESSION` is `session`.
+    /// stderr), and whose `REX_SESSION` is `session`. It has no `REX_BLOCK`.
     pub(crate) fn navigator(
         session: Option<&str>,
+        outputs: Vec<Result<&str, &str>>,
+    ) -> (TmuxNavigator, Calls) {
+        navigator_in(session, None, outputs)
+    }
+
+    /// As `navigator`, with `REX_BLOCK` set to `block`.
+    pub(crate) fn navigator_in(
+        session: Option<&str>,
+        block: Option<&str>,
         outputs: Vec<Result<&str, &str>>,
     ) -> (TmuxNavigator, Calls) {
         let calls = Calls::default();
@@ -837,6 +857,7 @@ pub(crate) mod fake_rex {
         };
         let context = Context {
             session: session.map(str::to_owned),
+            block: block.map(str::to_owned),
         };
         (TmuxNavigator::with_ports(runner, context), calls)
     }
@@ -861,7 +882,7 @@ pub(crate) mod fake_rex {
 
 #[cfg(test)]
 mod close_layer_tests {
-    use super::fake_rex::{VIEW, navigator, steps};
+    use super::fake_rex::{VIEW, navigator, navigator_in, steps};
     use super::{NavigationError, rex_layer_of_block};
 
     #[test]
@@ -966,6 +987,17 @@ mod close_layer_tests {
         let error = nav.close_own_layer("block:gone").unwrap_err();
         assert!(matches!(error, NavigationError::CommandFailed { .. }));
         assert_eq!(steps(&calls), ["session.view"]);
+    }
+
+    #[test]
+    fn own_rex_block_comes_from_the_same_context_as_rex_session() {
+        let (nav, calls) = navigator_in(Some("session:01a1"), Some("block:01f9"), vec![]);
+        assert_eq!(nav.own_rex_block().as_deref(), Some("block:01f9"));
+        for block in [None, Some(""), Some("  ")] {
+            let (nav, _) = navigator_in(Some("session:01a1"), block, vec![]);
+            assert_eq!(nav.own_rex_block(), None, "{block:?}");
+        }
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

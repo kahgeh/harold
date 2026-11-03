@@ -168,12 +168,19 @@ impl Model {
         }
     }
 
-    fn next_waiting(&self) -> Action {
+    /// Jump to the next waiting entry. With none, the last line shows "no waiting agent".
+    fn next_waiting(&mut self) -> Action {
         let len = self.entries.len();
-        (1..=len)
+        let next = (1..=len)
             .map(|step| (self.selected + step) % len)
-            .find(|&index| self.entries[index].waiting)
-            .map_or(Action::None, Action::Jump)
+            .find(|&index| self.entries[index].waiting);
+        match next {
+            Some(index) => Action::Jump(index),
+            None => {
+                self.notice = Some("no waiting agent".to_string());
+                Action::None
+            }
+        }
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
@@ -208,7 +215,6 @@ impl Model {
             }
             KeyCode::Char('J') => self.move_selected(false),
             KeyCode::Char('K') => self.move_selected(true),
-            KeyCode::Char('n') if self.entries.is_empty() => Action::None,
             KeyCode::Char('n') => self.next_waiting(),
             _ => Action::None,
         }
@@ -356,7 +362,8 @@ pub fn run(
     source: AgentStateSource,
     navigator: TmuxNavigator,
 ) -> Result<(), AppError> {
-    let block = std::env::var("REX_BLOCK").ok();
+    // REX_BLOCK comes from the navigator's context, as REX_SESSION does.
+    let block = navigator.own_rex_block();
     let block = block.as_deref();
     let started = Builder::new_current_thread()
         .enable_all()
@@ -1178,6 +1185,8 @@ mod tests {
         rex: fake_rex::Calls,
         saved: Vec<Vec<String>>,
         last: Model,
+        /// Every model the screen showed, in order.
+        shown: Vec<Model>,
     }
 
     impl Outcome {
@@ -1248,6 +1257,7 @@ mod tests {
             rex,
             saved,
             last: screen.shown.last().cloned().expect("the remote draws"),
+            shown: screen.shown,
         }
     }
 
@@ -1370,6 +1380,33 @@ mod tests {
 
         assert!(matches!(outcome.result, Some(Ok(()))));
         assert_eq!(outcome.rex.borrow()[0][3..], ["--session=b", "block:b"]);
+    }
+
+    #[tokio::test]
+    async fn n_with_no_waiting_agent_shows_a_line_and_the_next_key_clears_it() {
+        let outcome = run_case(Case {
+            keys: vec![ch('n'), ch('j')],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none(), "the remote stays open");
+        assert!(outcome.rex.borrow().is_empty(), "no focus call");
+        let with_notice: Vec<&Model> = outcome
+            .shown
+            .iter()
+            .filter(|model| model.notice.is_some())
+            .collect();
+        assert_eq!(with_notice.len(), 1);
+        assert_eq!(with_notice[0].notice.as_deref(), Some("no waiting agent"));
+        assert_eq!(with_notice[0].selected, 0);
+        let rows = render(with_notice[0], 60, 10);
+        assert_eq!(
+            rows[8],
+            format!("\u{2502}{:<58}\u{2502}", "  no waiting agent")
+        );
+        assert_eq!(outcome.last.notice, None);
+        assert_eq!(outcome.last.selected, 1);
     }
 
     #[tokio::test]
