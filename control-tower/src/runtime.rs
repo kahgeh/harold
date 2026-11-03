@@ -261,6 +261,9 @@ trait StreamPort: Sized {
     fn set_messaging_paused(&mut self, _paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(async { Ok(()) })
     }
+    fn set_watches_paused(&mut self, _paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(async { Ok(()) })
+    }
     fn call(&mut self, _action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("call control unavailable".into())) })
     }
@@ -319,6 +322,10 @@ impl StreamPort for SourceStream {
 
     fn set_messaging_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(self.request_messaging_paused(paused))
+    }
+
+    fn set_watches_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(self.request_watches_paused(paused))
     }
 
     fn call(&mut self, action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
@@ -607,6 +614,12 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if let Control::SetWatchesPaused(paused) = control {
+                    let result = stream.set_watches_paused(paused).await;
+                    core.watches_result(result);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 if let Control::Call(action) = control {
                     let result = stream.call(action).await;
                     core.call_result(action, result);
@@ -779,6 +792,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
         | RuntimeStatus::OnHost(detail)
         | RuntimeStatus::VoiceFailed(detail)
         | RuntimeStatus::MessagingFailed(detail)
+        | RuntimeStatus::WatchesFailed(detail)
         | RuntimeStatus::CallFailed(detail)
         | RuntimeStatus::SourceError(detail) => detail.clone(),
         RuntimeStatus::NavigationUnavailable => "navigation unavailable".into(),
@@ -1221,6 +1235,10 @@ impl RuntimeCore {
 
     fn messaging_result(&mut self, result: Result<(), SourceError>) {
         self.request_result(result, RuntimeStatus::MessagingFailed);
+    }
+
+    fn watches_result(&mut self, result: Result<(), SourceError>) {
+        self.request_result(result, RuntimeStatus::WatchesFailed);
     }
 
     /// Takes a poll's answer, and reports whether the call's view changed. A failed
@@ -2489,6 +2507,87 @@ mod tests {
             core.app.runtime_status(),
             Some(RuntimeStatus::MessagingFailed(detail)) if detail.contains("pause refused")
         ));
+    }
+
+    async fn run_key_w(
+        running: u32,
+        paused: u32,
+        fail: bool,
+    ) -> (RuntimeCore, Vec<bool>, Option<crate::app::RuntimeStatus>) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.watches = Some(MuteProbe {
+            calls: Arc::clone(&calls),
+            fail,
+        });
+        let (input_sender, mut input) = InputPump::channel();
+        for key in [KeyCode::Char('W'), KeyCode::Char('q')] {
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let mut core = RuntimeCore::new(None);
+        let mut live = snapshot(1, MonitorHealthState::Healthy);
+        live.watches_running = running;
+        live.watches_paused = paused;
+        core.accept_snapshot(live, 1_000);
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let recorded = calls.lock().unwrap().clone();
+        let status = core.app.runtime_status().cloned();
+        (core, recorded, status)
+    }
+
+    #[tokio::test]
+    async fn key_w_with_a_running_watch_sends_pause_all() {
+        let (_core, calls, status) = run_key_w(2, 0, false).await;
+        assert_eq!(calls, vec![true]);
+        assert!(!matches!(status, Some(RuntimeStatus::WatchesFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn key_w_with_all_paused_sends_resume_all() {
+        let (_core, calls, status) = run_key_w(0, 2, false).await;
+        assert_eq!(calls, vec![false]);
+        assert!(!matches!(status, Some(RuntimeStatus::WatchesFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn key_w_reports_watches_failed_when_the_request_is_refused() {
+        let (core, calls, status) = run_key_w(2, 0, true).await;
+        assert_eq!(calls, vec![true]);
+        assert!(matches!(
+            &status,
+            Some(RuntimeStatus::WatchesFailed(detail)) if detail.contains("watches refused")
+        ));
+        // The counts come from the next snapshot, not from the request.
+        assert_eq!(core.app.snapshot.watches_running, 2);
+    }
+
+    #[test]
+    fn watches_result_failure_sets_status_and_success_clears_it() {
+        let mut core = live_core(false);
+        core.watches_result(Err(SourceError::Transport("boom".into())));
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::WatchesFailed(detail)) if detail.contains("boom")
+        ));
+        core.watches_result(Ok(()));
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
     }
 
     #[test]
@@ -4496,6 +4595,7 @@ mod tests {
         receive: FakeReceive,
         mute: Option<MuteProbe>,
         pause: Option<MuteProbe>,
+        watches: Option<MuteProbe>,
         call: Option<CallProbe>,
         questions: Option<QuestionProbe>,
         now: Option<NowProbe>,
@@ -4556,6 +4656,7 @@ mod tests {
                 receive: FakeReceive::Pending,
                 mute: None,
                 pause: None,
+                watches: None,
                 call: None,
                 questions: None,
                 now: None,
@@ -4568,6 +4669,7 @@ mod tests {
                 receive: FakeReceive::Item(Some(Ok(snapshot))),
                 mute: None,
                 pause: None,
+                watches: None,
                 call: None,
                 questions: None,
                 now: None,
@@ -4607,6 +4709,21 @@ mod tests {
             Box::pin(async move {
                 if fail {
                     Err(SourceError::Transport("pause refused".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn set_watches_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+            let Some(probe) = &self.watches else {
+                return Box::pin(async { Ok(()) });
+            };
+            probe.calls.lock().unwrap().push(paused);
+            let fail = probe.fail;
+            Box::pin(async move {
+                if fail {
+                    Err(SourceError::Transport("watches refused".into()))
                 } else {
                     Ok(())
                 }

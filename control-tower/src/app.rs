@@ -301,6 +301,7 @@ pub(crate) enum RuntimeStatus {
     OnHost(String),
     VoiceFailed(String),
     MessagingFailed(String),
+    WatchesFailed(String),
     CallFailed(String),
     SourceError(String),
 }

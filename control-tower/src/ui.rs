@@ -328,6 +328,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             RuntimeStatus::OnHost(label) => format!("on {label}"),
             RuntimeStatus::VoiceFailed(detail) => format!("VOICE ERROR: {detail}"),
             RuntimeStatus::MessagingFailed(detail) => format!("MESSAGING ERROR: {detail}"),
+            RuntimeStatus::WatchesFailed(detail) => format!("watches: {detail}"),
             RuntimeStatus::CallFailed(detail) => format!("CALL ERROR: {detail}"),
             RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
         };

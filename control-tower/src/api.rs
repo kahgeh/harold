@@ -25,6 +25,9 @@ use harold_api::tools::questions::v1::{
     ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick, SavePicksRequest, Step,
     TickStepRequest, question_service_client::QuestionServiceClient,
 };
+use harold_api::tools::watch::v1::{
+    PauseRequest, ResumeRequest, watch_service_client::WatchServiceClient,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tonic::transport::{Channel, Endpoint};
@@ -158,6 +161,7 @@ pub struct SourceStream {
     questions: Option<QuestionServiceClient<Channel>>,
     backlog: Option<BacklogServiceClient<Channel>>,
     knowledge: Option<KnowledgeServiceClient<Channel>>,
+    watch: Option<WatchServiceClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -201,6 +205,7 @@ where
         questions: None,
         backlog: None,
         knowledge: None,
+        watch: None,
     }
 }
 
@@ -235,6 +240,41 @@ impl SourceStream {
         .map_err(|_| SourceError::transport("messaging request timed out"))?
         .map(|_| ())
         .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
+    /// Pauses every watch (`true`) or resumes every watch (`false`) through the watch
+    /// tool. A capped watch stays capped, as the watch tool decides.
+    pub async fn request_watches_paused(&self, paused: bool) -> Result<(), SourceError> {
+        let Some(mut client) = self.watch.clone() else {
+            return Err(SourceError::transport("watch control unavailable"));
+        };
+        let caller = "control_tower".to_owned();
+        let call = async {
+            if paused {
+                client
+                    .pause(PauseRequest {
+                        name: String::new(),
+                        all: true,
+                        for_minutes: None,
+                        caller,
+                    })
+                    .await
+                    .map(|_| ())
+            } else {
+                client
+                    .resume(ResumeRequest {
+                        name: String::new(),
+                        all: true,
+                        caller,
+                    })
+                    .await
+                    .map(|_| ())
+            }
+        };
+        tokio::time::timeout(VOICE_REQUEST_TIMEOUT, call)
+            .await
+            .map_err(|_| SourceError::transport("watch request timed out"))?
+            .map_err(|error| SourceError::transport(error.message()))
     }
 
     /// The PnEM products in the remote order. An older Harold answers `Unimplemented`,
@@ -405,7 +445,8 @@ impl AgentStateSource {
             source.voice = Some(client);
             source.questions = Some(QuestionServiceClient::new(channel.clone()));
             source.backlog = Some(BacklogServiceClient::new(channel.clone()));
-            source.knowledge = Some(KnowledgeServiceClient::new(channel));
+            source.knowledge = Some(KnowledgeServiceClient::new(channel.clone()));
+            source.watch = Some(WatchServiceClient::new(channel));
             Ok(source)
         })
     }
@@ -1465,6 +1506,13 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_messaging_paused(true).await.unwrap_err();
         assert!(error.detail().contains("messaging control unavailable"));
+    }
+
+    #[tokio::test]
+    async fn request_watches_paused_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.request_watches_paused(true).await.unwrap_err();
+        assert!(error.detail().contains("watch control unavailable"));
     }
 
     #[test]
