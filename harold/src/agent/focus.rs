@@ -173,7 +173,7 @@ fn rex_focus(port: &dyn FocusPort) -> Result<Option<String>, UnknownReason> {
     }
     let [session] = sessions.as_slice() else {
         return if sessions.is_empty() {
-            Ok(None)
+            Err(UnknownReason::RexUnreachable)
         } else {
             Err(UnknownReason::ManySessions)
         };
@@ -183,7 +183,11 @@ fn rex_focus(port: &dyn FocusPort) -> Result<Option<String>, UnknownReason> {
         .run("rex", &["api", "call", "session.view", &request])
         .map_err(|_| UnknownReason::RexUnreachable)?;
     let view: Value = serde_json::from_str(&view).map_err(|_| UnknownReason::RexUnreachable)?;
-    Ok(rex_focused_block_of(&view).map(|block| display(&block)))
+    rex_focused_block_of(&view)
+        .map(|block| display(&block))
+        .filter(|block| !block.is_empty())
+        .map(Some)
+        .ok_or(UnknownReason::RexUnreachable)
 }
 
 /// Whether the listing has a Rex app client, and the sessions that the app clients show.

@@ -171,3 +171,35 @@ fn the_reason_names_are_stable() {
     assert_eq!(UnknownReason::RexUnreachable.as_str(), "rex_unreachable");
     assert_eq!(UnknownReason::TmuxNoClient.as_str(), "tmux_no_client");
 }
+
+#[test]
+fn rex_app_with_no_session_is_unknown_rex_unreachable() {
+    let clients = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"},"session_ids":[]}]}"#;
+    let port = FakeFocusPort::new(vec![(REX_CLIENTS, Ok(clients))]);
+    assert_eq!(read_focus(&port, true), Err(UnknownReason::RexUnreachable));
+    let clients = r#"{"clients":[{"client_id":"client:app","info":{"kind":"app"}}]}"#;
+    let port = FakeFocusPort::new(vec![(REX_CLIENTS, Ok(clients))]);
+    assert_eq!(read_focus(&port, true), Err(UnknownReason::RexUnreachable));
+}
+
+#[test]
+fn rex_view_without_a_focused_block_is_unknown_rex_unreachable() {
+    for view in [
+        r#"{"windows":[{"window_id":"window:1","focused_block_id":"b"}]}"#,
+        r#"{"active_window_id":"window:9","windows":[{"window_id":"window:1","focused_block_id":"b"}]}"#,
+        r#"{"active_window_id":"window:1","windows":[{"window_id":"window:1"}]}"#,
+        r#"{"active_window_id":"window:1","windows":[{"window_id":"window:1","focused_block_id":7}]}"#,
+        r#"{"active_window_id":"window:1","windows":[{"window_id":"window:1","focused_block_id":"  "}]}"#,
+        r#"{"active_window_id":"window:1","windows":[{"window_id":"window:1","focused_block_id":"\u0007"}]}"#,
+    ] {
+        let port = FakeFocusPort::new(vec![
+            (REX_CLIENTS, Ok(CLIENTS_ONE_SESSION)),
+            (REX_VIEW, Ok(view)),
+        ]);
+        assert_eq!(
+            read_focus(&port, true),
+            Err(UnknownReason::RexUnreachable),
+            "{view}"
+        );
+    }
+}
