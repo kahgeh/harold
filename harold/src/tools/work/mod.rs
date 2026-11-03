@@ -12,6 +12,7 @@ use crate::tools::{ToolContext, ToolError, ToolHandle};
 mod check;
 mod files;
 mod import;
+mod lead_time;
 mod metrics;
 mod rotation;
 mod schema;

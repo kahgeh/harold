@@ -2911,8 +2911,6 @@ pub(crate) fn count_work_rotation(outcome: &'static str) {
 }
 
 /// Counts one work record that a check looked at, by its `priority`.
-// Task 5 calls this; until then it has no caller.
-#[allow(dead_code)]
 pub(crate) fn count_work_checked(priority: &'static str) {
     #[cfg(test)]
     note_work(WorkNoted::Checked(priority));
@@ -2922,8 +2920,6 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 }
 
 /// Records the seconds a work record took in `phase`.
-// Task 5 calls this; until then it has no caller.
-#[allow(dead_code)]
 pub(crate) fn record_work_lead_time(phase: &'static str, seconds: f64) {
     #[cfg(test)]
     note_work(WorkNoted::LeadTime { phase, seconds });
@@ -2933,8 +2929,6 @@ pub(crate) fn record_work_lead_time(phase: &'static str, seconds: f64) {
 }
 
 /// Records how many slices a finished work record had.
-// Task 5 calls this; until then it has no caller.
-#[allow(dead_code)]
 pub(crate) fn record_work_slices(slices: u64) {
     #[cfg(test)]
     note_work(WorkNoted::Slices(slices));

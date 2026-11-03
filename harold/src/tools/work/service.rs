@@ -242,9 +242,11 @@ impl WorkToolService {
 }
 
 /// After a write to `file`: records the time at the old status when the status
-/// of `name` changed, then sets the gauges. Call it while the guard is held.
+/// of `name` changed, records the closing figures when the record is checked,
+/// then sets the gauges. Call it while the guard is held.
 async fn after_write(file: &WorkFile, name: &str, outcome: PutOutcome, now_ms: i64) {
     metrics::status_left(file, name, outcome, now_ms).await;
+    metrics::closed(file, name, outcome, now_ms).await;
     metrics::refresh(file, now_ms).await;
 }
 

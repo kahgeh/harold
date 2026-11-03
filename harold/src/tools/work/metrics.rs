@@ -3,9 +3,12 @@
 
 use std::collections::BTreeMap;
 
+use tracing::info;
+
 use crate::telemetry::{self, WorkCount};
 
 use super::check::Mismatch;
+use super::lead_time;
 use super::schema::{Record, Status};
 use super::store::{PutOutcome, WorkFile};
 
@@ -59,6 +62,47 @@ pub(super) async fn status_left(file: &WorkFile, name: &str, outcome: PutOutcome
     };
     let seconds = (now_ms - since_ms).max(0) as f64 / 1000.0;
     telemetry::record_work_status_duration(from.as_str(), record.priority.as_str(), seconds);
+}
+
+/// Records the closing figures when a write moved the record `name` to
+/// `checked by the user`: one count of value, the lead time, the four phase
+/// times and the slices. A closed record cannot be written to the same status
+/// again, so the figures are recorded once.
+pub(super) async fn closed(file: &WorkFile, name: &str, outcome: PutOutcome, now_ms: i64) {
+    if !matches!(outcome, PutOutcome::StatusChanged { .. }) {
+        return;
+    }
+    let Ok(Some(record)) = file.get(name).await else {
+        return;
+    };
+    if record.status != Status::CheckedByTheUser {
+        return;
+    }
+    let Ok(moves) = file.moves(name).await else {
+        return;
+    };
+    let phases = lead_time::phases(&moves);
+    let slices = lead_time::slices(&record.links);
+    let lead_s = (now_ms - record.created_at_ms).max(0) / 1000;
+    telemetry::count_work_checked(record.priority.as_str());
+    telemetry::record_work_lead_time("whole", lead_s as f64);
+    let parts = [
+        ("discovery", phases.discovery),
+        ("spec_and_approval", phases.spec_and_approval),
+        ("build_and_merge", phases.build_and_merge),
+        ("release_and_check", phases.release_and_check),
+    ];
+    for (phase, ms) in parts {
+        telemetry::record_work_lead_time(phase, ms as f64 / 1000.0);
+    }
+    telemetry::record_work_slices(slices);
+    info!(
+        record = name,
+        lead_s,
+        slices,
+        imported = lead_time::is_imported(&moves),
+        "work record closed"
+    );
 }
 
 /// Counts each mismatch of one check by record and kind.

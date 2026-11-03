@@ -1212,6 +1212,119 @@ mod metrics {
         );
     }
 
+    #[derive(Clone, Default)]
+    struct LogText(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogText {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogText {
+        type Writer = LogText;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn checking_a_record_records_the_closing_figures_once() {
+        let log = LogText::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let setup = Setup::new();
+        let start = noon_ms("2026-11-01");
+        let clock = SetClock::at(start);
+        let service = setup.service_at(clock.clone());
+        put(&service, CHIEF, record("a")).await.unwrap();
+        link(&service, "a", "spec:p/s1").await.unwrap();
+        link(&service, "a", "spec:p/s2").await.unwrap();
+        link(&service, "a", "question:Q9").await.unwrap();
+        clock.set(start + HOUR_MS);
+        set_status(&service, "a", "building").await;
+        take_noted_work();
+
+        clock.set(start + 3 * HOUR_MS);
+        set_status(&service, "a", "checked by the user").await;
+        let noted = take_noted_work();
+        let checked: Vec<_> = noted
+            .iter()
+            .filter(|n| matches!(n, WorkNoted::Checked(_)))
+            .collect();
+        assert!(
+            matches!(checked[..], [WorkNoted::Checked("later")]),
+            "{noted:?}"
+        );
+        let lead: Vec<(&str, f64)> = noted
+            .iter()
+            .filter_map(|n| match n {
+                WorkNoted::LeadTime { phase, seconds } => Some((*phase, *seconds)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lead,
+            [
+                ("whole", 3.0 * 3600.0),
+                ("discovery", 3600.0),
+                ("spec_and_approval", 0.0),
+                ("build_and_merge", 7200.0),
+                ("release_and_check", 0.0),
+            ]
+        );
+        let slices: Vec<_> = noted
+            .iter()
+            .filter(|n| matches!(n, WorkNoted::Slices(_)))
+            .collect();
+        assert!(matches!(slices[..], [WorkNoted::Slices(2)]), "{noted:?}");
+
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("work record closed"), "{text}");
+        assert!(text.contains("record=\"a\""), "{text}");
+        assert!(text.contains("lead_s=10800"), "{text}");
+        assert!(text.contains("slices=2"), "{text}");
+        assert!(text.contains("imported=false"), "{text}");
+
+        // A write that keeps the status records no second set of figures.
+        set_status(&service, "a", "checked by the user").await;
+        let again = take_noted_work();
+        assert!(
+            !again.iter().any(|n| matches!(
+                n,
+                WorkNoted::Checked(_) | WorkNoted::LeadTime { .. } | WorkNoted::Slices(_)
+            )),
+            "{again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_other_than_checked_records_no_closing_figures() {
+        let setup = Setup::new();
+        let service = setup.service();
+        put(&service, CHIEF, record("a")).await.unwrap();
+        take_noted_work();
+        set_status(&service, "a", "released").await;
+        let noted = take_noted_work();
+        assert!(
+            !noted.iter().any(|n| matches!(
+                n,
+                WorkNoted::Checked(_) | WorkNoted::LeadTime { .. } | WorkNoted::Slices(_)
+            )),
+            "{noted:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_check_counts_each_mismatch_by_record_and_kind() {
         let setup = Setup::new();
