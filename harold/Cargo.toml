@@ -10,6 +10,8 @@ default = ["mac-defaults"]
 # Both parts below need macOS, so `linux-defaults` has no feature yet.
 mac-defaults = ["imessage", "calls"]
 linux-defaults = []
+# Timing tests that need a quiet machine are ignored unless this feature is on.
+timing-tests = []
 # The iMessage channel: reading chat.db and sending through osascript. macOS only.
 imessage = []
 # Calls at the desk and in the web app: voice input, the call answerer, the call models and

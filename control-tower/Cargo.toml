@@ -6,6 +6,8 @@ license.workspace = true
 
 [features]
 terminal-fault-harness = []
+# Timing tests that need a quiet machine are ignored unless this feature is on.
+timing-tests = []
 
 [dependencies]
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"] }

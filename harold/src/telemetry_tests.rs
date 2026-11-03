@@ -797,6 +797,10 @@ async fn a_collector_that_never_answers_does_not_hold_up_shutdown() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "timing-tests"),
+    ignore = "timing: run with --features timing-tests"
+)]
 async fn telemetry_off_shuts_down_at_once() {
     let started = std::time::Instant::now();
     TelemetryGuard::off().shutdown().await;
