@@ -3483,3 +3483,245 @@ fn defaults_for_size_and_awaiting() {
     assert_eq!(facts.size, SpecSize::Unsized);
     assert!(!facts.awaiting);
 }
+
+// --- free slots with work waiting, and work waiting ---
+
+/// Writes a spec with an approval, and no other file, in the pod folder of `repo`.
+fn approve(repo: &Path, id: &str) {
+    put_spec(&pod_files(repo), id);
+    put_approval(&pod_files(repo), id);
+}
+
+#[tokio::test]
+async fn free_slots_with_an_approved_spec_count_as_idle_with_work() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approve(&repo, "spec-a");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let snapshot = snapshot.lock().unwrap();
+    assert_eq!(snapshot.idle_with_work.get(&pod.name), Some(&3));
+    assert_eq!(
+        snapshot.inventory[&pod.name]["approved_not_started"].items,
+        1
+    );
+}
+
+#[tokio::test]
+async fn free_slots_with_no_approved_spec_count_0() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    put_spec(&pod_files(&repo), "spec-a");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    assert_eq!(
+        snapshot.lock().unwrap().idle_with_work.get(&pod.name),
+        Some(&0)
+    );
+}
+
+#[tokio::test]
+async fn an_approval_before_the_first_merged_file_does_not_count() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approve(&repo, "spec-a");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write(&pod_files(&repo).join("merged/old.md"), "merged\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let snapshot = snapshot.lock().unwrap();
+    assert_eq!(snapshot.idle_with_work.get(&pod.name), Some(&0));
+    assert_eq!(
+        snapshot.inventory[&pod.name]["approved_not_started"].items,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_product_with_no_merged_folder_counts_every_approval() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approve(&repo, "spec-a");
+    approve(&repo, "spec-b");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    assert_eq!(
+        snapshot.lock().unwrap().inventory[&pod.name]["approved_not_started"].items,
+        2
+    );
+}
+
+#[test]
+fn list_stats_of_no_ages_is_all_0() {
+    assert_eq!(list_stats(&[]), ListStats::default());
+}
+
+#[test]
+fn list_stats_gives_the_count_the_oldest_hours_and_the_item_days() {
+    let stats = list_stats(&[time::Duration::days(2), time::Duration::days(4)]);
+    assert_eq!(
+        stats,
+        ListStats {
+            items: 2,
+            oldest_hours: 96.0,
+            item_days: 6.0
+        }
+    );
+}
+
+fn spec_in(id: &str, state: SpecState, state_at: OffsetDateTime) -> SpecFacts {
+    SpecFacts {
+        id: id.into(),
+        state,
+        state_at,
+        ..SpecFacts::default()
+    }
+}
+
+#[test]
+fn the_three_lists_come_from_fake_pod_folders_with_item_days_and_oldest_age() {
+    let now = at("2026-11-03T00:00:00Z");
+    let waiting = |id: &str, days: i64| SpecFacts {
+        open_at: Some(now - time::Duration::days(days)),
+        awaiting: true,
+        ..spec_in(id, SpecState::Open, now)
+    };
+    let approved = |id: &str, days: i64| SpecFacts {
+        approved_at: Some(now - time::Duration::days(days)),
+        ..spec_in(id, SpecState::Approved, now)
+    };
+    let specs = vec![
+        waiting("w1", 2),
+        waiting("w2", 4),
+        // An open spec that does not wait for approval is in no list.
+        SpecFacts {
+            open_at: Some(now - time::Duration::days(9)),
+            ..spec_in("draft", SpecState::Open, now)
+        },
+        approved("a1", 3),
+        // Approved before the first merged file.
+        approved("a0", 30),
+        spec_in("p1", SpecState::InProgress, now - time::Duration::days(1)),
+        spec_in("done", SpecState::Completed, now - time::Duration::days(1)),
+    ];
+    let cutoff = Some(now - time::Duration::days(10));
+    let (idle, lists) = work_waiting(&specs, 2, cutoff, now);
+    assert_eq!(idle, 2);
+    assert_eq!(
+        lists["awaiting_approval"],
+        ListStats {
+            items: 2,
+            oldest_hours: 96.0,
+            item_days: 6.0
+        }
+    );
+    assert_eq!(
+        lists["approved_not_started"],
+        ListStats {
+            items: 1,
+            oldest_hours: 72.0,
+            item_days: 3.0
+        }
+    );
+    assert_eq!(
+        lists["in_progress"],
+        ListStats {
+            items: 1,
+            oldest_hours: 24.0,
+            item_days: 1.0
+        }
+    );
+}
+
+#[test]
+fn an_empty_list_reports_0() {
+    let now = at("2026-11-03T00:00:00Z");
+    let (idle, lists) = work_waiting(&[], 3, None, now);
+    assert_eq!(idle, 0);
+    assert_eq!(lists.len(), 3);
+    for name in ["awaiting_approval", "approved_not_started", "in_progress"] {
+        assert_eq!(lists[name], ListStats::default(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn the_work_waiting_gauges_report_every_list_and_a_product_that_was_not_read_has_none() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let read = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let unread = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let now = at("2026-11-03T00:00:00Z");
+    let (idle, lists) = work_waiting(&[], 3, None, now);
+    let mut lists = lists;
+    lists.insert(
+        "awaiting_approval",
+        ListStats {
+            items: 2,
+            oldest_hours: 96.0,
+            item_days: 6.0,
+        },
+    );
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        idle_with_work: BTreeMap::from([(read.clone(), idle)]),
+        inventory: BTreeMap::from([(read.clone(), lists)]),
+        slots: BTreeMap::from([(unread.clone(), SlotCounts { busy: 0, free: 3 })]),
+        ..PodSnapshot::default()
+    };
+    assert_eq!(
+        test_support::gauge_value(
+            "pod.slots.idle_with_work",
+            &[("pod.product", read.as_str())]
+        ),
+        Some(0)
+    );
+    let attrs = |list: &'static str| [("pod.product", read.as_str()), ("list", list)];
+    assert_eq!(
+        test_support::gauge_value("pod.inventory.items", &attrs("awaiting_approval")),
+        Some(2)
+    );
+    assert_eq!(
+        test_support::gauge_f64_value("pod.inventory.oldest_hours", &attrs("awaiting_approval")),
+        Some(96.0)
+    );
+    assert_eq!(
+        test_support::gauge_f64_value("pod.inventory.item_days", &attrs("awaiting_approval")),
+        Some(6.0)
+    );
+    for list in ["approved_not_started", "in_progress"] {
+        assert_eq!(
+            test_support::gauge_value("pod.inventory.items", &attrs(list)),
+            Some(0),
+            "{list}"
+        );
+    }
+    assert_eq!(
+        test_support::gauge_value(
+            "pod.slots.idle_with_work",
+            &[("pod.product", unread.as_str())]
+        ),
+        None
+    );
+    assert_eq!(
+        test_support::gauge_value("pod.inventory.items", &[("pod.product", unread.as_str())]),
+        None
+    );
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
+#[test]
+fn the_inventory_constants_name_the_signals() {
+    assert_eq!(INVENTORY_ITEMS, ("pod.inventory.items", "{spec}"));
+    assert_eq!(INVENTORY_OLDEST_HOURS, ("pod.inventory.oldest_hours", "h"));
+    assert_eq!(INVENTORY_ITEM_DAYS, ("pod.inventory.item_days", "d"));
+}
+
+#[test]
+fn the_first_merged_file_is_the_earliest_md_file() {
+    let pod = Pod::new();
+    let dir = pod.repo("main");
+    assert_eq!(first_merged_file(&dir, UtcOffset::UTC), None);
+    write(&dir.join("merged/a.md"), "x\n");
+    write(&dir.join("merged/b.txt"), "x\n");
+    let found = first_merged_file(&dir, UtcOffset::UTC).unwrap();
+    assert_eq!(found, created(&dir.join("merged/a.md")));
+}

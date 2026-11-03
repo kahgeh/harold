@@ -1520,6 +1520,86 @@ pub(crate) fn extra_effort_measures(spec: &SpecFacts) -> [(&'static str, f64); 2
     ]
 }
 
+/// The earliest time of the files in `merged/`.
+pub(crate) fn first_merged_file(pod: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
+    std::fs::read_dir(pod.join("merged"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .filter_map(|path| file_time(&path, offset))
+        .min()
+}
+
+/// The gauge of the specs in a list of work waiting, and its unit.
+pub(crate) const INVENTORY_ITEMS: (&str, &str) = ("pod.inventory.items", "{spec}");
+/// The gauge of the age of the oldest spec in a list of work waiting, and its unit.
+pub(crate) const INVENTORY_OLDEST_HOURS: (&str, &str) = ("pod.inventory.oldest_hours", "h");
+/// The gauge of the sum of the ages of the specs in a list of work waiting, and its unit.
+pub(crate) const INVENTORY_ITEM_DAYS: (&str, &str) = ("pod.inventory.item_days", "d");
+
+/// The lists of work waiting, in the order the gauges report them.
+const WORK_LISTS: [&str; 3] = ["awaiting_approval", "approved_not_started", "in_progress"];
+
+/// What one list of work waiting holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ListStats {
+    /// The specs in the list.
+    pub items: u64,
+    /// The age of the oldest spec, in hours.
+    pub oldest_hours: f64,
+    /// The sum of the ages of the specs, in days.
+    pub item_days: f64,
+}
+
+/// The count, the oldest age and the summed age of the specs whose ages are `ages`.
+/// An age below 0 counts as 0.
+pub(crate) fn list_stats(ages: &[time::Duration]) -> ListStats {
+    let seconds = |age: &time::Duration| age.whole_seconds().max(0) as f64;
+    ListStats {
+        items: ages.len() as u64,
+        oldest_hours: ages.iter().map(seconds).fold(0.0, f64::max) / 3600.0,
+        item_days: ages.iter().map(seconds).sum::<f64>() / 86400.0,
+    }
+}
+
+/// The free slots with work waiting, and the three lists of work waiting, at `now`.
+/// The free slots count only when an approved spec that is not started exists. An approval
+/// before `cutoff` (the earliest merged file) is history and counts in neither; with no
+/// `cutoff`, every approval counts.
+pub(crate) fn work_waiting(
+    specs: &[SpecFacts],
+    free_slots: u32,
+    cutoff: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> (u32, BTreeMap<&'static str, ListStats>) {
+    let ages = |keep: &dyn Fn(&SpecFacts) -> Option<OffsetDateTime>| -> Vec<time::Duration> {
+        specs
+            .iter()
+            .filter_map(keep)
+            .map(|since| now - since)
+            .collect()
+    };
+    let awaiting = ages(&|spec| {
+        (spec.state == SpecState::Open && spec.awaiting)
+            .then_some(spec.open_at)
+            .flatten()
+    });
+    let approved = ages(&|spec| {
+        let approved_at = spec.approved_at?;
+        (spec.state == SpecState::Approved && cutoff.is_none_or(|cutoff| approved_at >= cutoff))
+            .then_some(approved_at)
+    });
+    let in_progress = ages(&|spec| (spec.state == SpecState::InProgress).then_some(spec.state_at));
+    let idle = if approved.is_empty() { 0 } else { free_slots };
+    let lists = BTreeMap::from([
+        (WORK_LISTS[0], list_stats(&awaiting)),
+        (WORK_LISTS[1], list_stats(&approved)),
+        (WORK_LISTS[2], list_stats(&in_progress)),
+    ]);
+    (idle, lists)
+}
+
 // ---------------------------------------------------------------------------
 // Polls
 // ---------------------------------------------------------------------------
@@ -1568,7 +1648,7 @@ pub(crate) type AgentSource = Arc<dyn Fn() -> Vec<LivePane> + Send + Sync>;
 
 /// What the latest poll read, for the gauges. A product the poll could not read is left
 /// out, so no gauge reports an old count.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct PodSnapshot {
     /// Slot counts by product.
     pub slots: BTreeMap<String, SlotCounts>,
@@ -1578,6 +1658,12 @@ pub(crate) struct PodSnapshot {
     pub pods: BTreeMap<String, bool>,
     /// The live agents by role and, for a pod's roles, product.
     pub agents: BTreeMap<(Role, Option<String>), u64>,
+    /// The free slots with work waiting by product: the free slots when a spec is approved
+    /// and not started, else 0.
+    pub idle_with_work: BTreeMap<String, u32>,
+    /// The work waiting by product and list: `awaiting_approval`, `approved_not_started`
+    /// and `in_progress`.
+    pub inventory: BTreeMap<String, BTreeMap<&'static str, ListStats>>,
 }
 
 pub(crate) struct PodStats<G: Git> {
@@ -1708,6 +1794,11 @@ impl<G: Git> PodStats<G> {
             match self.poll_history(product, &slots).await {
                 Ok(specs) => {
                     self.history_unavailable.remove(&product.name);
+                    let cutoff = first_merged_file(&product.repo.join(POD_FOLDER), self.offset);
+                    let (idle, lists) =
+                        work_waiting(&specs, slots.free, cutoff, OffsetDateTime::now_utc());
+                    snapshot.idle_with_work.insert(product.name.clone(), idle);
+                    snapshot.inventory.insert(product.name.clone(), lists);
                     snapshot.specs.insert(product.name.clone(), specs);
                 }
                 Err(reason) => {
@@ -2109,12 +2200,19 @@ struct Gauges {
     _effort: ObservableGauge<f64>,
     _pods: ObservableGauge<u64>,
     _agents: ObservableGauge<u64>,
+    _idle_with_work: ObservableGauge<u64>,
+    _inventory_items: ObservableGauge<u64>,
+    _inventory_oldest_hours: ObservableGauge<f64>,
+    _inventory_item_days: ObservableGauge<f64>,
 }
 
 static GAUGES: OnceLock<Gauges> = OnceLock::new();
 
 /// The snapshot the `pod.slots.busy`, `pod.slots.free`, `pod.specs`, `pod.spec.words`,
-/// `pod.spec.effort`, `pod.pods` and `pod.agents` gauges read. The first call registers the gauges.
+/// `pod.spec.effort`, `pod.pods`, `pod.agents`, `pod.slots.idle_with_work` (the free slots
+/// with work waiting) and `pod.inventory.items`, `pod.inventory.oldest_hours` and
+/// `pod.inventory.item_days` (the work waiting, by list) gauges read. The first call
+/// registers the gauges.
 pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
     let gauges = GAUGES.get_or_init(|| {
         let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
@@ -2139,6 +2237,26 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
         let effort = Arc::clone(&snapshot);
         let pods = Arc::clone(&snapshot);
         let agents = Arc::clone(&snapshot);
+        let idle = Arc::clone(&snapshot);
+        let work_waiting_snapshot = |pick: fn(&ListStats) -> f64| {
+            let snapshot = Arc::clone(&snapshot);
+            move |observer: &dyn Fn(f64, &[KeyValue])| {
+                for (product, lists) in &lock(&snapshot).inventory {
+                    for (list, stats) in lists {
+                        observer(
+                            pick(stats),
+                            &[
+                                KeyValue::new("pod.product", product.clone()),
+                                KeyValue::new("list", *list),
+                            ],
+                        );
+                    }
+                }
+            }
+        };
+        let items = work_waiting_snapshot(|stats| stats.items as f64);
+        let oldest = work_waiting_snapshot(|stats| stats.oldest_hours);
+        let item_days = work_waiting_snapshot(|stats| stats.item_days);
         Gauges {
             _busy: gauge("pod.slots.busy", |counts| counts.busy),
             _free: gauge("pod.slots.free", |counts| counts.free),
@@ -2241,6 +2359,41 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                         }
                         observer.observe(*count, &attributes);
                     }
+                })
+                .build(),
+            // The free slots with work waiting, for every product with a read.
+            _idle_with_work: meter
+                .u64_observable_gauge("pod.slots.idle_with_work")
+                .with_unit("{slot}")
+                .with_callback(move |observer| {
+                    for (product, count) in &lock(&idle).idle_with_work {
+                        observer.observe(
+                            u64::from(*count),
+                            &[KeyValue::new("pod.product", product.clone())],
+                        );
+                    }
+                })
+                .build(),
+            // All three lists of every product with a read, 0 included.
+            _inventory_items: meter
+                .u64_observable_gauge(INVENTORY_ITEMS.0)
+                .with_unit(INVENTORY_ITEMS.1)
+                .with_callback(move |observer| {
+                    items(&|value, attributes| observer.observe(value as u64, attributes));
+                })
+                .build(),
+            _inventory_oldest_hours: meter
+                .f64_observable_gauge(INVENTORY_OLDEST_HOURS.0)
+                .with_unit(INVENTORY_OLDEST_HOURS.1)
+                .with_callback(move |observer| {
+                    oldest(&|value, attributes| observer.observe(value, attributes));
+                })
+                .build(),
+            _inventory_item_days: meter
+                .f64_observable_gauge(INVENTORY_ITEM_DAYS.0)
+                .with_unit(INVENTORY_ITEM_DAYS.1)
+                .with_callback(move |observer| {
+                    item_days(&|value, attributes| observer.observe(value, attributes));
                 })
                 .build(),
             snapshot: Arc::clone(&snapshot),

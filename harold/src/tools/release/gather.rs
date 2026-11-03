@@ -11,7 +11,7 @@ use super::model::ProductNext;
 use super::title::spec_title;
 use crate::pod_stats::{
     AGENT_PANE, Git, NO_ANSWER, POD_FOLDER, Product, Sources, SpecRead, SpecState, file_time,
-    read_history, read_specs, slots,
+    first_merged_file, read_history, read_specs, slots,
 };
 
 /// The first line of a spec that waits for the approval of the user.
@@ -288,17 +288,6 @@ fn parked_ids(pod: &Path) -> HashSet<String> {
             name.strip_suffix("-handoff.md").map(str::to_string)
         })
         .collect()
-}
-
-/// The earliest time of the files in `merged/`.
-fn first_merged_file(pod: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
-    std::fs::read_dir(pod.join("merged"))
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .filter_map(|path| file_time(&path, offset))
-        .min()
 }
 
 #[cfg(test)]
