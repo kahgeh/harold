@@ -30,6 +30,7 @@ pub(crate) mod backlog;
 pub(crate) mod knowledge;
 pub(crate) mod questions;
 pub(crate) mod watch;
+pub(crate) mod work;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
