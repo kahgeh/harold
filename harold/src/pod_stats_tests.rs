@@ -10,7 +10,7 @@ use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
 use super::*;
-use crate::agent::domain::AgentSnapshot;
+use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::outbound::fake::CapturedLogs;
 use crate::store::EventVersion;
 use crate::telemetry::test_support;
@@ -2678,6 +2678,7 @@ fn live(pane_id: &str, folder: &str) -> LivePane {
     LivePane {
         pane_id: pane_id.into(),
         folder: folder.into(),
+        state: EffectiveAgentState::Working,
     }
 }
 
@@ -2840,6 +2841,66 @@ async fn a_pod_runs_when_a_pane_of_its_agent_panes_file_is_live_and_agents_count
     assert_eq!(count(Role::Other, None), Some(1));
 }
 
+const ALL_STATES: [EffectiveAgentState; 6] = [
+    EffectiveAgentState::Working,
+    EffectiveAgentState::Blocked,
+    EffectiveAgentState::Done,
+    EffectiveAgentState::Idle,
+    EffectiveAgentState::Error,
+    EffectiveAgentState::Unknown,
+];
+
+#[tokio::test]
+async fn pod_agents_report_each_of_the_six_states() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let ids = ["%1", "%2", "%3", "%4", "%5", "%6"];
+    for (n, id) in ids.iter().enumerate() {
+        let path = pod.worktree(&repo, &format!("w{n}"), false);
+        write(
+            &path.join(".superpowers/baton/agent-pane"),
+            &format!("{id}\n"),
+        );
+    }
+    let panes: Vec<LivePane> = ids
+        .iter()
+        .zip(ALL_STATES)
+        .map(|(id, state)| LivePane {
+            state,
+            ..live(id, "/pods/elsewhere")
+        })
+        .collect();
+    let agents: AgentSource = Arc::new(move || panes.clone());
+    let (mut stats, snapshot) = stats_with_agents(one_product(&pod, &repo), agents, None);
+
+    stats.poll().await;
+
+    let snapshot = snapshot.lock().unwrap().clone();
+    let product = Some(pod.name.clone());
+    for state in ALL_STATES {
+        assert_eq!(
+            snapshot.agent_states[&(Role::BuildWorker, product.clone(), state)],
+            1,
+            "{state:?}"
+        );
+        assert_eq!(
+            snapshot.agent_states[&(Role::Pnem, product.clone(), state)],
+            0
+        );
+    }
+    for state in ALL_STATES {
+        assert_eq!(snapshot.agent_states[&(Role::Chief, None, state)], 0);
+        assert_eq!(snapshot.agent_states[&(Role::Other, None, state)], 0);
+    }
+}
+
+#[test]
+fn an_unknown_state_word_is_reported_as_unknown() {
+    let state: EffectiveAgentState = serde_json::from_str("\"Mystery\"").unwrap();
+    assert_eq!(state, EffectiveAgentState::Unknown);
+    assert_eq!(state.as_str(), "unknown");
+}
+
 #[tokio::test]
 async fn a_pod_with_no_live_pane_is_stopped() {
     let pod = Pod::new();
@@ -2901,6 +2962,17 @@ async fn the_pod_effort_and_agent_gauges_report_what_the_snapshot_holds() {
             ((Role::BuildWorker, Some(product.clone())), 2),
             ((Role::Chief, None), 1),
         ]),
+        agent_states: BTreeMap::from([
+            (
+                (
+                    Role::BuildWorker,
+                    Some(product.clone()),
+                    EffectiveAgentState::Working,
+                ),
+                2,
+            ),
+            ((Role::Chief, None, EffectiveAgentState::Working), 1),
+        ]),
         ..PodSnapshot::default()
     };
 
@@ -2938,7 +3010,11 @@ async fn the_pod_effort_and_agent_gauges_report_what_the_snapshot_holds() {
     assert_eq!(
         test_support::gauge_value(
             "pod.agents",
-            &[("pod.product", product.as_str()), ("role", "build_worker")]
+            &[
+                ("pod.product", product.as_str()),
+                ("role", "build_worker"),
+                ("state", "working")
+            ]
         ),
         Some(2)
     );

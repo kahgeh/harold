@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
+use crate::agent::domain::EffectiveAgentState;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::same_folder;
 use crate::settings::expand_tilde;
@@ -1610,6 +1611,22 @@ pub(crate) struct SlotCounts {
     pub free: u32,
 }
 
+/// Live agents by role and, for a pod's roles, product.
+pub(crate) type AgentCounts = BTreeMap<(Role, Option<String>), u64>;
+
+/// Live agents by role, product and state.
+pub(crate) type AgentStateCounts = BTreeMap<(Role, Option<String>, EffectiveAgentState), u64>;
+
+/// The six states of an agent, in the order of ADR 0024.
+const ALL_AGENT_STATES: [EffectiveAgentState; 6] = [
+    EffectiveAgentState::Working,
+    EffectiveAgentState::Blocked,
+    EffectiveAgentState::Done,
+    EffectiveAgentState::Idle,
+    EffectiveAgentState::Error,
+    EffectiveAgentState::Unknown,
+];
+
 /// The part an agent plays, as the `role` attribute of `pod.agents` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Role {
@@ -1641,6 +1658,8 @@ impl Role {
 pub(crate) struct LivePane {
     pub pane_id: String,
     pub folder: String,
+    /// The agent's effective state.
+    pub state: EffectiveAgentState,
 }
 
 /// Lists the live agent panes.
@@ -1657,7 +1676,10 @@ pub(crate) struct PodSnapshot {
     /// Whether each registered product's pod runs.
     pub pods: BTreeMap<String, bool>,
     /// The live agents by role and, for a pod's roles, product.
-    pub agents: BTreeMap<(Role, Option<String>), u64>,
+    pub agents: AgentCounts,
+    /// The live agents by role, product (for a pod's roles) and state. Every pod role of
+    /// every product, the chief and `other` have a count for all six states, 0 included.
+    pub agent_states: AgentStateCounts,
     /// The free slots with work waiting by product: the free slots when a spec is approved
     /// and not started, else 0.
     pub idle_with_work: BTreeMap<String, u32>,
@@ -1808,7 +1830,7 @@ impl<G: Git> PodStats<G> {
                 }
             }
         }
-        snapshot.agents = self.tally(&products, &live, claimed);
+        (snapshot.agents, snapshot.agent_states) = self.tally(&products, &live, claimed);
         *lock(&self.snapshot) = snapshot;
     }
 
@@ -1819,7 +1841,7 @@ impl<G: Git> PodStats<G> {
         products: &[Product],
         live: &[LivePane],
         mut claimed: HashMap<String, (Role, Option<String>)>,
-    ) -> BTreeMap<(Role, Option<String>), u64> {
+    ) -> (AgentCounts, AgentStateCounts) {
         for pane in live {
             let role = match &self.chief {
                 Some(chief) if same_folder(&pane.folder, chief) => Role::Chief,
@@ -1835,10 +1857,20 @@ impl<G: Git> PodStats<G> {
         }
         counts.insert((Role::Chief, None), 0);
         counts.insert((Role::Other, None), 0);
-        for key in claimed.into_values() {
+        let mut by_state = BTreeMap::new();
+        for (role, product) in counts.keys() {
+            for state in ALL_AGENT_STATES {
+                by_state.insert((*role, product.clone(), state), 0);
+            }
+        }
+        for (pane_id, key) in claimed {
+            if let Some(pane) = live.iter().find(|pane| pane.pane_id == pane_id) {
+                let (role, product) = key.clone();
+                *by_state.entry((role, product, pane.state)).or_insert(0) += 1;
+            }
             *counts.entry(key).or_insert(0) += 1;
         }
-        counts
+        (counts, by_state)
     }
 
     /// Reads the product's specs and records its merges, each under the spec it names
@@ -2352,8 +2384,11 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                 .u64_observable_gauge("pod.agents")
                 .with_unit("{agent}")
                 .with_callback(move |observer| {
-                    for ((role, product), count) in &lock(&agents).agents {
-                        let mut attributes = vec![KeyValue::new("role", role.as_str())];
+                    for ((role, product, state), count) in &lock(&agents).agent_states {
+                        let mut attributes = vec![
+                            KeyValue::new("role", role.as_str()),
+                            KeyValue::new("state", state.as_str()),
+                        ];
                         if let Some(product) = product {
                             attributes.push(KeyValue::new("pod.product", product.clone()));
                         }
@@ -2440,6 +2475,7 @@ pub(crate) fn start(
             .map(|pane| LivePane {
                 pane_id: pane.pane.incarnation.pane_id.clone(),
                 folder: pane.pane.working_directory.clone(),
+                state: pane.effective_state,
             })
             .collect()
     });

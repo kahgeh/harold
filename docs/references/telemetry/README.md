@@ -157,7 +157,7 @@ A product with no counted tip, at its first poll, records no lead time: specs al
 **Pods and agents** come from Harold's agent snapshot, which `pod_stats` reads once a poll for pane ids and folders only ([ADR 0021](../../adr/0021-the-pod-records-a-specs-withdrawal-start-and-merge-in-small-files-that-harold-reads.md)).
 
 - `pod.pods` has `state` = `running` or `stopped` for each registered product. A pod runs when a pane id in its `agent-panes` file (pod coordination first, then the PnEM) is a live agent.
-- `pod.agents` has `role` = `chief`, `pnem`, `pod_coordination`, `build_worker` or `other`, and `pod.product` for the pod roles. The chief is a pane whose folder is `[notify] chief`. A build worker is a pane named in a busy worktree's `.superpowers/baton/agent-pane`. `other` is any live agent that no pod file names.
+- `pod.agents` has `role` = `chief`, `pnem`, `pod_coordination`, `build_worker` or `other`, `state` = the agent's effective state (`working`, `blocked`, `done`, `idle`, `error` or `unknown`), and `pod.product` for the pod roles. The chief is a pane whose folder is `[notify] chief`. A build worker is a pane named in a busy worktree's `.superpowers/baton/agent-pane`. `other` is any live agent that no pod file names.
 
 ## Phone requests
 
@@ -321,7 +321,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
-| `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
+| `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`). `missed` is a cron match that did not run because it was older than 120 minutes |
 | `watch.cost_usd` | counter, `USD` | `folder` |
 | `harold.multiplexer.calls` | counter, `{call}` | `multiplexer` (`rex` or `tmux`), `host` (the empty string for Harold's own machine, or the label of a Rex host in `rex_hosts`), `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`, `other`), `outcome` (`ok`, `failed`, `timeout`, `absent`, `malformed`), `purpose` (`state`, `prompt`, `writer`; on `screen_read` only). `malformed` means the multiplexer ran and gave output that Harold could not read: a tmux pane listing with a wrong field, or a Rex reply that is not JSON |
@@ -343,7 +343,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 
-`pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product, 0 included.
+`pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product in all six states, 0 included.
 
 A multiplexer call is one request that Harold makes to its multiplexer. Harold records each one at its end, with its operation, its outcome and its time. Each call has one operation, the same word for Rex and tmux. A call that has no operation word is recorded as `other`, so a new call does not go unseen. The calls of the control-tower are not Harold's and are not recorded.
 

@@ -82,7 +82,7 @@ where
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum EffectiveAgentState {
     #[serde(alias = "Busy")]
     Working,
