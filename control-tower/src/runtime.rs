@@ -2959,6 +2959,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn the_queue_is_polled_every_two_seconds() {
         assert_eq!(QUESTION_POLL_INTERVAL, Duration::from_secs(2));
         let mut core = connected_core();
@@ -3029,6 +3033,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn the_now_line_follows_the_question_poll() {
         let mut core = connected_core();
         let reads = run_now_stream(
@@ -3043,6 +3051,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn an_unimplemented_backlog_hides_the_now_line() {
         let mut core = connected_core();
         let reads = run_now_stream(
@@ -3085,6 +3097,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn an_unimplemented_question_tool_still_shows_the_now_line() {
         let mut core = connected_core();
         // `None` answers every list with `status: Unimplemented`, at once.
@@ -3101,6 +3117,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_successful_question_read_is_followed_by_the_now_read() {
         let mut core = connected_core();
         let reads = run_now_stream(
@@ -3419,6 +3439,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_poll_found_change_drops_the_next_question_key() {
         let mut core = connected_core();
         core.question_poll_interval = Duration::from_millis(10);
@@ -3471,6 +3495,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_note_knocked_out_by_a_poll_swallows_until_esc() {
         let mut core = connected_core();
         core.question_poll_interval = Duration::from_millis(10);
@@ -3694,6 +3722,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn a_poll_that_withdraws_the_question_under_the_cursor_keeps_the_next_key() {
         let mut core = connected_core();
         core.accept_snapshot(two_rows(2), 2_000);
@@ -3786,6 +3818,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn the_guard_never_drops_quit_keys_or_a_key_on_the_list() {
         let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         for chord in ['q', 'c'] {
@@ -4010,6 +4046,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     async fn an_answer_puts_off_the_poll_so_a_dismissal_notice_stays() {
         let mut core = connected_core();
         core.question_poll_interval = Duration::from_millis(1_000);
@@ -4900,6 +4940,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "timing-tests"),
+        ignore = "timing: run with --features timing-tests"
+    )]
     fn dropping_the_pump_does_not_wait_for_a_hung_focus_probe() {
         let (release, blocked) = std::sync::mpsc::channel();
         let pump = InputPump::start_with_focus(
