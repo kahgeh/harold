@@ -222,7 +222,10 @@ message Unplaced {
   // From 1. 0 is the whole file: a file that is not read, has no heading, or
   // has a name that another file or queue item uses.
   uint32 line = 2;
+  // The text of the line. Empty for a whole file, except a name in use.
   string text = 3;
+  // Why the line is not placed: one fixed word, such as "bad_status".
+  string reason = 4;
 }
 
 message ImportResponse {

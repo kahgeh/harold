@@ -32,6 +32,10 @@ pub(super) struct Unplaced {
     pub(super) file: String,
     /// From 1. 0 is the whole file.
     pub(super) line: u32,
+    /// Why the line is not placed: one fixed snake_case word, such as
+    /// `bad_status`. The parser sets it where it decides.
+    pub(super) reason: &'static str,
+    /// The text of the line. Empty for a whole file, except a name in use.
     pub(super) text: String,
 }
 
@@ -210,7 +214,8 @@ pub(super) async fn import(
                 report.unplaced.push(Unplaced {
                     file,
                     line: 0,
-                    text: problem.into(),
+                    reason: problem,
+                    text: String::new(),
                 });
                 continue;
             }
@@ -221,7 +226,8 @@ pub(super) async fn import(
             match names.insert(record.name.clone()) {
                 true => report.records.push(record),
                 false => report.unplaced.push(Unplaced {
-                    text: format!("the name {} is used by another file", record.name),
+                    reason: "name_used_by_another_file",
+                    text: record.name,
                     file,
                     line: 0,
                 }),
@@ -247,7 +253,8 @@ pub(super) async fn import(
             match names.insert(record.name.clone()) {
                 true => report.records.push(record),
                 false => report.unplaced.push(Unplaced {
-                    text: format!("the name {} is used by a file", record.name),
+                    reason: "name_used_by_another_file",
+                    text: record.name,
                     file: format!("queue {}", item.id),
                     line: 0,
                 }),
@@ -349,7 +356,7 @@ fn read_folder(folder: &Path) -> Result<FolderFiles, ImportError> {
     files.extend(
         hidden_or_upper
             .into_iter()
-            .map(|name| (name, Err("a hidden or upper-case .md file is not read"))),
+            .map(|name| (name, Err("hidden_or_upper_case_name"))),
     );
     Ok(files)
 }
@@ -357,19 +364,19 @@ fn read_folder(folder: &Path) -> Result<FolderFiles, ImportError> {
 /// A plain file of at most `FILE_MAX` bytes of UTF-8 text. A link is not
 /// followed.
 fn read_file(path: &Path) -> Result<String, &'static str> {
-    let meta = std::fs::symlink_metadata(path).map_err(|_| "the file cannot be read")?;
+    let meta = std::fs::symlink_metadata(path).map_err(|_| "unreadable_file")?;
     if !meta.is_file() {
-        return Err("not a plain file");
+        return Err("not_a_file");
     }
-    let file = std::fs::File::open(path).map_err(|_| "the file cannot be read")?;
+    let file = std::fs::File::open(path).map_err(|_| "unreadable_file")?;
     let mut bytes = Vec::new();
     file.take(FILE_MAX + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "the file cannot be read")?;
+        .map_err(|_| "unreadable_file")?;
     if bytes.len() as u64 > FILE_MAX {
-        return Err("the file is larger than 64 KB");
+        return Err("file_too_large");
     }
-    String::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text")
+    String::from_utf8(bytes).map_err(|_| "not_utf8")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -381,7 +388,8 @@ enum Section {
 
 struct Parser<'a> {
     file: &'a str,
-    heading: Option<(u32, String, String)>,
+    /// The line number, the name, the title and the line's text.
+    heading: Option<(u32, String, String, String)>,
     priority: Option<Priority>,
     status: Option<Status>,
     waits_for: Option<String>,
@@ -412,10 +420,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn unplaced(&mut self, line: u32, text: &str) {
+    fn unplaced(&mut self, line: u32, reason: &'static str, text: &str) {
         self.unplaced.push(Unplaced {
             file: self.file.to_string(),
             line,
+            reason,
             text: text.to_string(),
         });
     }
@@ -426,9 +435,14 @@ impl<'a> Parser<'a> {
             return;
         }
         if self.heading.is_none() {
-            match line.strip_prefix("# ").and_then(heading) {
-                Some((name, title)) => self.heading = Some((number, name, title)),
-                None => self.unplaced(number, raw),
+            match line.strip_prefix("# ") {
+                Some(rest) => match heading(rest) {
+                    Some((name, title)) => {
+                        self.heading = Some((number, name, title, raw.to_string()))
+                    }
+                    None => self.unplaced(number, "bad_heading", raw),
+                },
+                None => self.unplaced(number, "no_heading", raw),
             }
             return;
         }
@@ -436,33 +450,41 @@ impl<'a> Parser<'a> {
             Some(placed) => placed,
             None => self.item(line),
         };
-        if !placed {
-            self.unplaced(number, raw);
+        if let Err(reason) = placed {
+            self.unplaced(number, reason, raw);
         }
     }
 
-    /// `None` when the line is not a field line. `Some(false)` when it is a
-    /// field line that cannot be placed: a bad value or a second one.
-    fn field(&mut self, line: &str) -> Option<bool> {
+    /// `None` when the line is not a field line. `Some(Err(reason))` when it
+    /// is a field line that cannot be placed: a bad value or a second one.
+    fn field(&mut self, line: &str) -> Option<Result<(), &'static str>> {
+        if line.starts_with("# ") {
+            return Some(Err("second_heading"));
+        }
         let (key, value) = line.split_once(':')?;
         let value = value.trim();
         let placed = match key {
             "Priority" => set_once(
                 &mut self.priority,
                 Priority::parse(&value.to_ascii_lowercase()),
+                "bad_priority",
             ),
-            "Status" => set_once(&mut self.status, Status::parse(&value.to_ascii_lowercase())),
-            "Waits for" => set_once(&mut self.waits_for, Some(value.to_string())),
-            "Next step" => set_once(&mut self.next_step, Some(value.to_string())),
+            "Status" => set_once(
+                &mut self.status,
+                Status::parse(&value.to_ascii_lowercase()),
+                "bad_status",
+            ),
+            "Waits for" => set_once(&mut self.waits_for, Some(value.to_string()), ""),
+            "Next step" => set_once(&mut self.next_step, Some(value.to_string()), ""),
             "Decisions" => {
                 let first = !std::mem::replace(&mut self.decisions_seen, true);
                 self.section = Section::Decisions;
-                first && value.is_empty()
+                section_head(first, value)
             }
             "Links" => {
                 let first = !std::mem::replace(&mut self.links_seen, true);
                 self.section = Section::Links;
-                first && value.is_empty()
+                section_head(first, value)
             }
             _ => return None,
         };
@@ -473,42 +495,39 @@ impl<'a> Parser<'a> {
     }
 
     /// A `- ` line of the decisions or the links.
-    fn item(&mut self, line: &str) -> bool {
+    fn item(&mut self, line: &str) -> Result<(), &'static str> {
         let Some(item) = line.strip_prefix("- ").map(str::trim) else {
-            return false;
+            return Err("unknown_line");
         };
         match self.section {
-            Section::Fields => false,
-            Section::Decisions => match decision(item) {
-                Some(decision) => {
-                    self.decisions.push(decision);
-                    true
-                }
-                None => false,
-            },
+            Section::Fields => Err("item_outside_section"),
+            Section::Decisions => {
+                self.decisions.push(decision(item).ok_or("bad_decision")?);
+                Ok(())
+            }
             Section::Links => match valid_link(item) {
                 true => {
                     self.links.push(item.to_string());
-                    true
+                    Ok(())
                 }
-                false => false,
+                false => Err("bad_link"),
             },
         }
     }
 
     fn finish(mut self) -> ParsedFile {
-        let Some((line, name, title)) = self.heading.take() else {
-            self.unplaced(0, "no heading `# <name>: <title>`");
+        let Some((line, name, title, heading_text)) = self.heading.take() else {
+            self.unplaced(0, "no_heading", "");
             return ParsedFile {
                 record: None,
                 unplaced: self.unplaced,
             };
         };
         if self.priority.is_none() {
-            self.unplaced(line, "no `Priority:` line");
+            self.unplaced(line, "missing_priority", &heading_text);
         }
         if self.status.is_none() {
-            self.unplaced(line, "no `Status:` line");
+            self.unplaced(line, "missing_status", &heading_text);
         }
         let record = match (self.priority, self.status) {
             (Some(priority), Some(status)) => Some(Record {
@@ -534,14 +553,29 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Sets `slot` once. A second value or a bad one is not placed.
-fn set_once<T>(slot: &mut Option<T>, value: Option<T>) -> bool {
+/// Sets `slot` once. A second value gives `second_value`, a bad one gives
+/// `bad_value`.
+fn set_once<T>(
+    slot: &mut Option<T>,
+    value: Option<T>,
+    bad_value: &'static str,
+) -> Result<(), &'static str> {
     match (slot.is_some(), value) {
+        (true, _) => Err("second_value"),
+        (false, None) => Err(bad_value),
         (false, Some(value)) => {
             *slot = Some(value);
-            true
+            Ok(())
         }
-        _ => false,
+    }
+}
+
+/// The `Decisions:` or `Links:` line: it has no value, and it is the first.
+fn section_head(first: bool, value: &str) -> Result<(), &'static str> {
+    match (first, value.is_empty()) {
+        (_, false) => Err("inline_value_after_section"),
+        (false, true) => Err("second_value"),
+        (true, true) => Ok(()),
     }
 }
 

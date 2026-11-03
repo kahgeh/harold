@@ -3081,7 +3081,8 @@ fn work_record_text(record: &work_api::WorkRecord) -> String {
     lines.join("\n")
 }
 
-fn work_import_text(imported: &work_api::ImportResponse, apply: bool) -> String {
+/// The import's text. A dry run with an unplaced line exits 1, as `check` does.
+fn work_import_output(imported: &work_api::ImportResponse, apply: bool) -> WorkOutput {
     let verb = match apply {
         true => "stored",
         false => "would store",
@@ -3091,15 +3092,16 @@ fn work_import_text(imported: &work_api::ImportResponse, apply: bool) -> String 
         .iter()
         .map(|record| format!("{verb} {}", work_line(record)))
         .collect();
-    lines.extend(
-        imported
-            .unplaced
-            .iter()
-            .map(|unplaced| match unplaced.line {
-                0 => format!("unplaced {}: {}", unplaced.file, unplaced.text),
-                line => format!("unplaced {}:{line}: {}", unplaced.file, unplaced.text),
-            }),
-    );
+    lines.extend(imported.unplaced.iter().map(|unplaced| {
+        let place = match unplaced.line {
+            0 => unplaced.file.clone(),
+            line => format!("{}:{line}", unplaced.file),
+        };
+        match unplaced.text.is_empty() {
+            true => format!("unplaced {place}: {}", unplaced.reason),
+            false => format!("unplaced {place}: {}: {}", unplaced.reason, unplaced.text),
+        }
+    }));
     if !imported.in_use.is_empty() {
         lines.push(format!("in use: {}", imported.in_use.join(", ")));
     }
@@ -3112,7 +3114,10 @@ fn work_import_text(imported: &work_api::ImportResponse, apply: bool) -> String 
     if !apply {
         lines.push("dry run: nothing is stored; run again with --apply to store".into());
     }
-    lines.join("\n")
+    WorkOutput {
+        text: lines.join("\n"),
+        exit_code: i32::from(!apply && !imported.unplaced.is_empty()),
+    }
 }
 
 /// Run a `harold tool work` command as the caller's pane, now, with its own deadline.
@@ -3307,7 +3312,7 @@ async fn work_call(
                 .await
                 .map_err(refused)?
                 .into_inner();
-            work_import_text(&imported, *apply)
+            return Ok(work_import_output(&imported, *apply));
         }
         C::RotateDryRun => {
             let rotation = client
@@ -7291,6 +7296,47 @@ mod tests {
             ] {
                 assert_eq!(work_parse(&words), work_mode(command), "{words:?}");
             }
+        }
+
+        #[test]
+        fn a_dry_run_import_prints_a_reason_and_exits_1_with_an_unplaced_line() {
+            let unplaced = |file: &str, line: u32, reason: &str, text: &str| work_api::Unplaced {
+                file: file.into(),
+                line,
+                reason: reason.into(),
+                text: text.into(),
+            };
+            let imported = work_api::ImportResponse {
+                records: Vec::new(),
+                unplaced: vec![
+                    unplaced("a.md", 7, "unknown_line", "Owner: the chief"),
+                    unplaced("b.md", 0, "not_utf8", ""),
+                ],
+                in_use: Vec::new(),
+            };
+            let dry = work_import_output(&imported, false);
+            assert_eq!(dry.exit_code, 1);
+            assert!(
+                dry.text
+                    .contains("unplaced a.md:7: unknown_line: Owner: the chief\n"),
+                "{}",
+                dry.text
+            );
+            assert!(
+                dry.text.contains("unplaced b.md: not_utf8\n"),
+                "{}",
+                dry.text
+            );
+            // With apply, the service refuses first, so the exit code is not set here.
+            assert_eq!(work_import_output(&imported, true).exit_code, 0);
+        }
+
+        #[test]
+        fn a_clean_dry_run_import_exits_0() {
+            let imported = work_api::ImportResponse::default();
+            let dry = work_import_output(&imported, false);
+            assert_eq!(dry.exit_code, 0);
+            assert!(dry.text.contains("dry run: nothing is stored"));
         }
 
         #[test]

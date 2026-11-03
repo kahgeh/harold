@@ -808,3 +808,144 @@ async fn the_queue_keeps_every_item() {
         "{result:?}"
     );
 }
+
+/// The (line, reason) pairs of a parsed file.
+fn reasons(text: &str) -> Vec<(u32, &'static str)> {
+    parse_chief_file("a.md", text)
+        .unplaced
+        .iter()
+        .map(|u| (u.line, u.reason))
+        .collect()
+}
+
+const HEAD: &str = "# a: A\nPriority: next\nStatus: idea\n";
+
+#[test]
+fn the_parser_gives_one_reason_word_for_each_unplaced_line() {
+    let cases: [(&str, String, (u32, &str)); 13] = [
+        ("no_heading", "Priority: next\n".into(), (1, "no_heading")),
+        ("bad_heading", "# Bad Name: x\n".into(), (1, "bad_heading")),
+        (
+            "second_heading",
+            format!("{HEAD}# b: B\n"),
+            (4, "second_heading"),
+        ),
+        (
+            "unknown_line",
+            format!("{HEAD}Owner: me\n"),
+            (4, "unknown_line"),
+        ),
+        (
+            "bad_priority",
+            "# a: A\nPriority: soon\nStatus: idea\n".into(),
+            (2, "bad_priority"),
+        ),
+        (
+            "bad_status",
+            "# a: A\nPriority: next\nStatus: odd\n".into(),
+            (3, "bad_status"),
+        ),
+        (
+            "second_value",
+            format!("{HEAD}Status: idea\n"),
+            (4, "second_value"),
+        ),
+        (
+            "bad_decision",
+            format!("{HEAD}Decisions:\n- agreed, me, 2026-13-45: x\n"),
+            (5, "bad_decision"),
+        ),
+        (
+            "bad_link",
+            format!("{HEAD}Links:\n- web:a b\n"),
+            (5, "bad_link"),
+        ),
+        (
+            "item_outside_section",
+            format!("{HEAD}- loose\n"),
+            (4, "item_outside_section"),
+        ),
+        (
+            "inline_value_after_section",
+            format!("{HEAD}Links: none\n"),
+            (4, "inline_value_after_section"),
+        ),
+        (
+            "missing_priority",
+            "# a: A\nStatus: idea\n".into(),
+            (1, "missing_priority"),
+        ),
+        (
+            "missing_status",
+            "# a: A\nPriority: next\n".into(),
+            (1, "missing_status"),
+        ),
+    ];
+    for (name, text, expected) in cases {
+        let got = reasons(&text);
+        assert!(got.contains(&expected), "{name}: {got:?}");
+    }
+    // A second Decisions: heading is a second value.
+    assert_eq!(
+        reasons(&format!("{HEAD}Decisions:\nDecisions:\n")),
+        [(5, "second_value")]
+    );
+    // A clean file has none.
+    assert!(reasons(HEAD).is_empty());
+    // The text of a placed-wrong line is the line, and of a missing field the heading.
+    let parsed = parse_chief_file("a.md", "# a: A\nStatus: idea\n");
+    assert_eq!(parsed.unplaced[0].text, "# a: A");
+}
+
+#[tokio::test]
+async fn the_folder_gives_a_reason_for_each_unreadable_file() {
+    let setup = Setup::new();
+    setup.write("Upper.MD", HEAD);
+    setup.write(".hidden.md", HEAD);
+    std::fs::write(setup.chief().join("binary.md"), [0xffu8, 0xfe, 0x00]).unwrap();
+    std::fs::write(
+        setup.chief().join("big.md"),
+        vec![b'a'; (FILE_MAX + 1) as usize],
+    )
+    .unwrap();
+    std::fs::create_dir(setup.chief().join("dir.md")).unwrap();
+    setup.write("one.md", HEAD);
+    setup.write("two.md", HEAD);
+    let report = setup
+        .run(&setup.chief(), &[], false, &FakeQueue::default())
+        .await
+        .unwrap();
+    let mut got: Vec<(String, u32, &str)> = report
+        .unplaced
+        .iter()
+        .map(|u| (u.file.clone(), u.line, u.reason))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (".hidden.md".to_string(), 0, "hidden_or_upper_case_name"),
+            ("Upper.MD".to_string(), 0, "hidden_or_upper_case_name"),
+            ("big.md".to_string(), 0, "file_too_large"),
+            ("binary.md".to_string(), 0, "not_utf8"),
+            ("dir.md".to_string(), 0, "not_a_file"),
+            ("two.md".to_string(), 0, "name_used_by_another_file"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_dry_run_leaves_the_work_file_unchanged() {
+    let setup = Setup::new();
+    setup.write("good.md", HEAD);
+    setup.write("odd.md", &file_with("Owner: the chief\n"));
+    let before = setup.stored().await;
+    let report = setup
+        .run(&setup.chief(), &[], false, &FakeQueue::default())
+        .await
+        .unwrap();
+    assert_eq!(report.records.len(), 2);
+    assert_eq!(report.unplaced.len(), 1);
+    assert_eq!(setup.stored().await, before, "the work file is unchanged");
+    assert!(setup.stored().await.is_empty());
+}

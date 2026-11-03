@@ -303,6 +303,7 @@ fn unplaced_to_proto(unplaced: import::Unplaced) -> pb::Unplaced {
         file: unplaced.file,
         line: unplaced.line,
         text: unplaced.text,
+        reason: unplaced.reason.to_string(),
     }
 }
 

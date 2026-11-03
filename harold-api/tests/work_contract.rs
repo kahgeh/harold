@@ -156,7 +156,7 @@ fn record_decision_and_mismatch_fields_keep_their_numbers() {
     );
     assert_eq!(
         message_fields("Unplaced"),
-        fields(&[("file", 1), ("line", 2), ("text", 3)])
+        fields(&[("file", 1), ("line", 2), ("text", 3), ("reason", 4)])
     );
     assert_eq!(
         message_fields("RotateResponse"),
