@@ -658,25 +658,21 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 .iter()
                 .any(|agent| !host_mark(&agent.host_icon, app.host_marker, &agent.host).is_empty())
         });
-    let where_width = if wide {
-        let longest = groups
-            .iter()
-            .flat_map(|(_, agents)| agents.iter())
-            .map(|agent| {
-                let (name, suffix) = app.label_parts(agent);
-                Line::raw(format!(
-                    "{}{}{suffix}",
-                    host_prefix(agent, app.host_marker, pad),
-                    where_text(agent, name)
-                ))
-                .width()
-            })
-            .max()
-            .unwrap_or(0);
-        wide_where_width(longest)
-    } else {
-        NARROW_WHERE_WIDTH
-    };
+    let longest = groups
+        .iter()
+        .flat_map(|(_, agents)| agents.iter())
+        .map(|agent| {
+            let (name, suffix) = app.label_parts(agent);
+            Line::raw(format!(
+                "{}{}{suffix}",
+                host_prefix(agent, app.host_marker, pad),
+                where_text(agent, name)
+            ))
+            .width()
+        })
+        .max()
+        .unwrap_or(0);
+    let where_width = where_column_width(wide, area.width.saturating_sub(2), longest);
     let widths = inventory_widths(wide, where_width);
     let work_width = work_cell_width(area, &widths);
     for (group, agents) in groups {
@@ -1302,15 +1298,24 @@ fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
     Some(format!("{label} {text}█"))
 }
 
-/// The WHERE column's narrow width, and the least and most it takes when wide.
-const NARROW_WHERE_WIDTH: u16 = 20;
-const WIDE_WHERE_MIN: u16 = 20;
-const WIDE_WHERE_MAX: u16 = 36;
+/// The least and most the WHERE column takes, in both layouts.
+const WHERE_MIN: u16 = 20;
+const WHERE_MAX: u16 = 36;
 
-/// The wide WHERE column: its longest text plus the 2-column indent, from 20 to 36.
-fn wide_where_width(longest_text: usize) -> u16 {
+/// The WHERE column: its longest text plus the 2-column indent, from 20 to 36
+/// columns. The work column keeps its minimum, so the column gives up what that needs.
+fn where_column_width(wide: bool, inner_width: u16, longest_text: usize) -> u16 {
     let wanted = u16::try_from(longest_text + 2).unwrap_or(u16::MAX);
-    wanted.clamp(WIDE_WHERE_MIN, WIDE_WHERE_MAX)
+    // The other columns, the gaps between the columns and the work column's minimum.
+    let others: u16 = if wide {
+        13 + 1 + 2 + 7 + 12
+    } else {
+        11 + 1 + 2 + 8
+    };
+    let columns: u16 = if wide { 6 } else { 5 };
+    let gaps = (columns - 1) * COLUMN_SPACING;
+    let room = inner_width.saturating_sub(others + gaps);
+    wanted.clamp(WHERE_MIN, WHERE_MAX).min(room).max(WHERE_MIN)
 }
 
 /// The column widths. A call never changes them: the chief's buttons share its
@@ -3392,12 +3397,20 @@ mod tests {
     }
 
     #[test]
-    fn the_wide_where_width_follows_the_longest_text_from_20_to_36() {
-        assert_eq!(super::wide_where_width(0), 20);
-        assert_eq!(super::wide_where_width(18), 20);
-        assert_eq!(super::wide_where_width(24), 26);
-        assert_eq!(super::wide_where_width(34), 36);
-        assert_eq!(super::wide_where_width(50), 36);
+    fn the_where_width_follows_the_longest_text_from_20_to_36_in_both_layouts() {
+        for wide in [true, false] {
+            assert_eq!(super::where_column_width(wide, 200, 0), 20);
+            assert_eq!(super::where_column_width(wide, 200, 18), 20);
+            assert_eq!(super::where_column_width(wide, 200, 24), 26);
+            assert_eq!(super::where_column_width(wide, 200, 34), 36);
+            assert_eq!(super::where_column_width(wide, 200, 50), 36);
+        }
+    }
+
+    #[test]
+    fn the_where_width_leaves_the_work_column_its_minimum() {
+        assert_eq!(super::where_column_width(false, 58, 50), 32);
+        assert_eq!(super::where_column_width(true, 82, 50), 36);
     }
 
     #[test]
@@ -3410,22 +3423,53 @@ mod tests {
     #[test]
     fn a_long_window_name_is_cut_with_an_ellipsis_at_the_36_column_limit() {
         let name = "w".repeat(50);
-        let worker = plain_row(&name, "/w/harold", "", "harold:0.1", 1);
-        let content = rendered_lines(&live_app(vec![worker], None), 140, 29, 100_000);
-        let cut = format!("{}…", "w".repeat(33));
-        assert!(content.contains(&cut), "{content}");
-        assert!(!content.contains(&"w".repeat(34)), "{content}");
+        // 140 columns: the wide layout. 120 columns: the inventory is under 84.
+        for width in [140, 120] {
+            let worker = plain_row(&name, "/w/harold", "", "harold:0.1", 1);
+            let content = rendered_lines(&live_app(vec![worker], None), width, 29, 100_000);
+            let cut = format!("{}…", "w".repeat(33));
+            assert!(content.contains(&cut), "{width}: {content}");
+            assert!(!content.contains(&"w".repeat(34)), "{width}: {content}");
+        }
     }
 
     #[test]
-    fn a_window_name_wider_than_the_narrow_column_is_cut_at_60_columns() {
+    fn a_window_name_of_22_characters_shows_in_full_in_the_narrow_layout() {
         let worker = plain_row("timing-tests-local-two", "/w/harold", "", "harold:0.1", 1);
-        let content = rendered_lines(&live_app(vec![worker], None), 60, 29, 100_000);
-        assert!(
-            content.contains("timing-tests-local…") || content.contains("timing-tests-loca…"),
-            "{content}"
+        let content = rendered_lines(&live_app(vec![worker], None), 120, 29, 100_000);
+        assert!(content.contains("timing-tests-local-two"), "{content}");
+    }
+
+    #[test]
+    fn timing_tests_local_shows_in_full_after_a_host_icon_with_the_detail_panel() {
+        let mut remote = located(
+            "rex:omarchy/block:abc",
+            AgentState::Working,
+            "Claude",
+            "harold",
+            "/w/timing",
+            "SUMMARYX",
         );
-        assert!(!content.contains("timing-tests-local-two"), "{content}");
+        remote.host = "omarchy".into();
+        remote.host_icon = "arch".into();
+        remote.window_name = "timing-tests-local".into();
+        let selected = remote.incarnation.clone();
+        let mut app = live_app(vec![remote], Some(selected));
+        app.host_marker = HostMarker::Glyph;
+        let content = rendered_lines(&app, 120, 29, 100_000);
+        assert!(content.contains("timing-tests-local"), "{content}");
+    }
+
+    #[test]
+    fn very_narrow_widths_keep_the_work_minimum_and_do_not_panic() {
+        let name = "w".repeat(50);
+        for width in [40, 50, 60, 70] {
+            let worker = plain_row(&name, "/w/harold", "", "harold:0.1", 1);
+            let content = rendered_lines(&live_app(vec![worker], None), width, 29, 100_000);
+            if width >= 60 {
+                assert!(content.contains("SUMMARYX"), "{width}: {content}");
+            }
+        }
     }
 
     fn plain_row(window: &str, dir: &str, role: &str, target: &str, n: u32) -> AgentRow {
@@ -4464,16 +4508,24 @@ mod tests {
         let app = host_app(HostMarker::Text, "", "/w/harold", None);
         let rows = buffer_rows(&rendered_buffer(&app, 80, 24, 100_000));
         assert!(text_row_with(&rows, "omarchy \u{b7} harold").contains("SUMMARYX"));
-        let app = host_app(HostMarker::Text, "", "/w/brave-summit-session", None);
+        let app = host_app(
+            HostMarker::Text,
+            "",
+            "/w/brave-summit-session-of-the-day",
+            None,
+        );
         let rows = buffer_rows(&rendered_buffer(&app, 60, 20, 100_000));
         let host = text_row_with(&rows, "omarchy \u{b7} brave");
-        assert!(host.contains("omarchy \u{b7} brave-s\u{2026}"), "{host:?}");
+        assert!(
+            host.contains("omarchy \u{b7} brave-summit-sessio\u{2026}"),
+            "{host:?}"
+        );
     }
 
     #[test]
     fn a_long_host_label_in_text_mode_keeps_the_where_column_width_and_ends_in_an_ellipsis() {
-        let label = "a-host-label-of-exactly-32-chars";
-        assert_eq!(label.chars().count(), 32);
+        let label = "a-host-label-of-exactly-40-characters-ok";
+        assert_eq!(label.chars().count(), 40);
         for (width, height) in [(60, 20), (80, 24), (120, 30)] {
             let app = host_app_labeled(HostMarker::Text, "", "/w/harold", None, label);
             let rows = buffer_rows(&rendered_buffer(&app, width, height, 100_000));
