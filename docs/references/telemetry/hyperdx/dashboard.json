@@ -1055,6 +1055,38 @@
       }
     },
     {
+      "id": "watches-paused-over-24-hours",
+      "name": "Watches paused over 24 hours",
+      "x": 0,
+      "y": 9,
+      "w": 12,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT LogAttributes['watch'] AS watch, max(Timestamp) AS paused_since FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body IN ('watch started', 'watch paused', 'watch resumed', 'watch stopped') AND Timestamp >= now() - INTERVAL 30 DAY AND Timestamp < now() GROUP BY watch HAVING argMax(Body, Timestamp) = 'watch paused' AND argMax(mapContains(LogAttributes, 'paused_until'), Timestamp) = 0 AND paused_since < now() - INTERVAL 24 HOUR ORDER BY paused_since"
+      }
+    },
+    {
+      "id": "reminders-dropped-today",
+      "name": "Reminders dropped today",
+      "x": 12,
+      "y": 9,
+      "w": 12,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT LogAttributes['reminder'] AS reminder, Timestamp AS dropped_at FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'reminder ended' AND LogAttributes['reason'] = 'dropped' AND Timestamp >= toStartOfDay(now()) AND Timestamp < now() ORDER BY dropped_at DESC"
+      }
+    },
+    {
       "id": "agents-by-state",
       "name": "Agents by state",
       "x": 0,

@@ -507,6 +507,44 @@ The [knowledge tool](../tools/knowledge.md#graph-logs-and-spans) logs and traces
 
 The dashboard group "Knowledge index" holds the six cards. They read `otel.otel_logs` and the span table directly, so they are tables and numbers without an earlier tile, and the product filter does not reach them.
 
+## Watch pauses and reminders
+
+The watch tool logs the pause and resume of a watch and the life of each reminder. A reminder runs no model. No line holds a reminder's text or a report's text.
+
+| Line | Fields |
+|---|---|
+| `watch started` (`info`) | `watch`, `folder`, `skill`, `ends_at`, `every_minutes`, `every_run`, `how`, `model`. `ends_at` is a local time, or the word `none` for an open-ended watch. `ends_at` stays in `harold.log`: it is not on `ALLOWED_FIELDS`, so it does not leave Harold |
+| `watch paused` (`info`) | `watch`, `how` (`cli`, `control_tower`, `timed` or `budget_day`), `paused_until` (the local time the pause ends; absent for a pause with no end) |
+| `watch resumed` (`info`) | `watch`, `how` (the same values: who ended the pause, or `timed` when the time ran out, or `budget_day` when the next day started) |
+| `reminder set` (`info`) | `reminder`. The due time, `due_at`, stays in `harold.log` |
+| `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder) |
+| `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it) |
+
+A reminder also writes the lines of its report slot: `watch report waiting`, `watch report typed` and `watch report replaced`. They carry `watch=<reminder name>` and `run=0`. Read them for the reasons a reminder waited, for example `agent_busy`.
+
+| Field | Meaning |
+|---|---|
+| `reminder` | The name of a reminder. A short name the user or an agent chose, never the text |
+| `paused_until` | The local time a pause ends, as `YYYY-MM-DD HH:MM` |
+| `how` | On `watch paused` and `watch resumed`: `cli`, `control_tower`, `timed` or `budget_day`. On `watch started`: `started`, `replaced` or `resumed` |
+| `late_s` | Seconds. On `reminder typed`: how late the line came |
+
+| Metric | Kind | Attributes |
+|---|---|---|
+| `watch.reminders` | counter, `{reminder}` | `outcome` (`typed`, `dropped`, `cancelled`) |
+
+Harold counts `watch.reminders` from 0 for each of the three outcomes when the watch tool starts.
+
+**Questions these lines answer.** Does the pods watch keep running at a cost I accept? Did my reminder reach me?
+
+- **Cost of the pods watch.** Optimisation: the day's spend against the cap. Use `watch.cost_usd` and the `watch-cost-high` alert, which stay as they are. Detection: the `watch-cost-high` alert, and the typed `paused: daily budget … spent` line. Diagnosis: the `watch run finished` lines, by `watch`.
+- **Pauses.** Optimisation: none, because a pause costs nothing. Detection: the card "Watches paused over 24 hours" (info). Diagnosis: `how` names who paused the watch. `budget_day` points at the daily budget.
+- **Reminders.** Optimisation: `late_s` on `reminder typed` shows how late reminders arrive. Detection: the card "Reminders dropped today" (info, not an alert). A dropped reminder means a missed job. Diagnosis: `reason` on `reminder ended`, and the `watch report waiting` reasons of that reminder.
+
+**Watches paused over 24 hours.** The card in the Pods group lists each watch whose newest line, of `watch started`, `watch paused`, `watch resumed` and `watch stopped`, is a `watch paused` with no `paused_until`, older than 24 hours. The window is the last 30 days. A forgotten pause shows here. A pause with an end, such as `budget_day`, ends by itself and is not listed. The exported lines do not hold `ends_at`, so the card cannot tell an open-ended watch from a watch with an end. A watch with an end that has a pause with no end shows too, and that is also a forgotten pause. The card is info only.
+
+**Reminders dropped today.** The card in the Pods group lists each `reminder ended` line with `reason = dropped` since the start of the day, with the reminder name and the time. It is a card, not an alert. A row means a reminder that no one received.
+
 ## The dashboards
 
 The definition files are in [`hyperdx/`](hyperdx/), in the shape HyperDX 2.40's external API takes. [Creating the definitions](#creating-the-definitions) gives the commands.
@@ -524,6 +562,8 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Pods | Merges to main, last 24 h | `pod.merges` in the period | SQL: the counter rule |
 | Pods | Lines merged | `pod.merged_lines` in the period | SQL: the counter rule |
 | Pods | Lines merged, last hour | `pod.merged_lines` in the last hour | SQL: the counter rule over the last hour |
+| Pods | Watches paused over 24 hours | each watch whose newest line is a `watch paused` with no `paused_until`, older than 24 hours | SQL table over `otel.otel_logs`, the last 30 days. Info only. No earlier tile |
+| Pods | Reminders dropped today | the `reminder ended` lines with `reason = dropped` since the start of the day | SQL table over `otel.otel_logs`. Info only, not an alert. No earlier tile |
 | Phone requests | Requests | `harold.phone_requests` in the period | SQL: the counter rule |
 | Phone requests | Availability | typed divided by all requests | SQL: the counter rule, typed rises over all rises |
 | Phone requests | Right agent | typed minus wrong, divided by all requests, on every channel but `web_app` (no number if there are none) | SQL: the counter rule, over both counters |

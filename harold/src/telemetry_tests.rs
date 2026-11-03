@@ -2024,6 +2024,8 @@ const ATTRIBUTES: &[&str] = &[
     "route",
     "hidden_reported",
     "metric",
+    "watch",
+    "reminder",
     "exception.type",
     "code.filepath",
     "harold.opened_at",
@@ -2444,6 +2446,8 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             INVENTORY_FULL_READS_CARD.to_string(),
             REX_READS_SLOW_CARD.to_string(),
             REMOTE_ORDER_UNREADABLE_CARD.to_string(),
+            WATCHES_PAUSED_CARD.to_string(),
+            REMINDERS_DROPPED_CARD.to_string(),
         ])
         .chain(AGENT_CARDS.map(str::to_string))
         .chain(WORK_CARDS.map(str::to_string))
@@ -2627,6 +2631,8 @@ const UNREADABLE_BLOCKS_CARD: &str = "Unreadable blocks, last 24 h, by pane";
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
 const REMOTE_ORDER_UNREADABLE_CARD: &str = "Remote order unreadable, by day";
+const WATCHES_PAUSED_CARD: &str = "Watches paused over 24 hours";
+const REMINDERS_DROPPED_CARD: &str = "Reminders dropped today";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
@@ -2799,7 +2805,9 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
             && name != SPOKEN_LINES_DROPPED_CARD
             && name != INVENTORY_FULL_READS_CARD
             && name != REX_READS_SLOW_CARD
-            && name != REMOTE_ORDER_UNREADABLE_CARD;
+            && name != REMOTE_ORDER_UNREADABLE_CARD
+            && name != WATCHES_PAUSED_CARD
+            && name != REMINDERS_DROPPED_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.
@@ -5245,6 +5253,63 @@ static WORK_GAUGES: Mutex<()> = Mutex::new(());
 
 fn hold_work_gauges() -> std::sync::MutexGuard<'static, ()> {
     WORK_GAUGES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn the_watch_and_reminder_cards_read_the_log_lines_in_the_pods_group() {
+    let dashboard = definition("dashboard.json");
+    let sql_of = |name: &str| -> String {
+        let tile = tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap_or_else(|| panic!("no card {name}"));
+        assert_eq!(tile["containerId"], "pods", "{name}");
+        assert_eq!(tile["config"]["displayType"], "table", "{name}");
+        tile["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+    };
+    let paused = sql_of(WATCHES_PAUSED_CARD);
+    for phrase in [
+        "otel.otel_logs",
+        "'watch paused'",
+        "'watch resumed'",
+        "'watch stopped'",
+        "argMax(Body, Timestamp) = 'watch paused'",
+        "INTERVAL 24 HOUR",
+    ] {
+        assert!(paused.contains(phrase), "{phrase}: {paused}");
+    }
+    let dropped = sql_of(REMINDERS_DROPPED_CARD);
+    for phrase in [
+        "Body = 'reminder ended'",
+        "LogAttributes['reason'] = 'dropped'",
+        "toStartOfDay(now())",
+    ] {
+        assert!(dropped.contains(phrase), "{phrase}: {dropped}");
+    }
+    // Neither card is an alert.
+    assert!(!dashboard.to_string().contains("watch-paused-alert"));
+}
+
+#[test]
+fn the_watch_pause_and_reminder_fields_are_allowed() {
+    for field in ["reminder", "paused_until", "how", "late_s"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    // The end of a watch and the time a reminder is due stay in `harold.log`.
+    for field in ["ends_at", "due_at"] {
+        assert!(!ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn the_reminders_counter_is_registered_for_each_outcome_with_only_that_attribute() {
+    test_support::install();
+    register_reminder_counters();
+    assert_eq!(REMINDER_OUTCOMES, ["typed", "dropped", "cancelled"]);
+    for outcome in REMINDER_OUTCOMES {
+        let point = test_support::exact_counter_value("watch.reminders", &[("outcome", outcome)]);
+        assert!(point.is_some(), "{outcome}");
+    }
 }
 
 #[test]

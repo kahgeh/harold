@@ -572,7 +572,7 @@ async fn a_typing_call_in_progress_at_shutdown_ends_typed_and_is_not_typed_again
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_reminders_counter_starts_at_0_and_counts_each_outcome() {
+async fn the_reminders_counter_is_registered_for_each_outcome_and_goes_up_with_each() {
     let count = |outcome: &str| {
         telemetry_test::exact_counter_value("watch.reminders", &[("outcome", outcome)])
     };

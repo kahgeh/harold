@@ -1742,3 +1742,68 @@ async fn stop_ends_a_paused_watch() {
     assert_eq!(h.runner.calls(), 1);
     assert!(h.typing.typed().is_empty());
 }
+
+/// The lines of `message` in `text` for the watch `name`.
+fn log_lines<'a>(text: &'a str, message: &str, name: &str) -> Vec<&'a str> {
+    text.lines()
+        .filter(|line| line.contains(message) && line.contains(&format!("watch=\"{name}\"")))
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_watch_logs_budget_day_when_it_pauses_and_when_it_resumes_by_itself() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    h.start_capped("pods").await;
+    let first_day_end = next_day_start();
+
+    pass(Duration::from_millis((first_day_end - clock_ms()) as u64) + MINUTE).await;
+
+    let text = logs.text();
+    let paused = log_lines(&text, "watch paused", "pods");
+    assert_eq!(
+        paused.len(),
+        2,
+        "paused at the start and again the next day: {text}"
+    );
+    for line in &paused {
+        assert!(line.contains("how=\"budget_day\""), "{line}");
+        assert!(line.contains("paused_until=\""), "{line}");
+    }
+    let resumed = log_lines(&text, "watch resumed", "pods");
+    assert_eq!(resumed.len(), 1, "{text}");
+    assert!(resumed[0].contains("how=\"budget_day\""), "{}", resumed[0]);
+    assert!(!resumed[0].contains("paused_until"), "{}", resumed[0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_watch_stays_paused_over_a_restart_and_resumes_at_the_next_day_start() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_capped("pods").await;
+    let day_end = next_day_start();
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let (scheduler, runner, _stop) = restarted(&h);
+    scheduler.resume().await;
+    pass(Duration::from_secs(5)).await;
+    let pods = h.row("pods").await;
+    assert_eq!(pods.state, WatchState::Paused);
+    assert_eq!(pods.pause_how.as_deref(), Some("budget_day"));
+    assert_eq!(pods.paused_until_ms, Some(day_end));
+
+    pass(Duration::from_millis((day_end - clock_ms()) as u64) - Duration::from_secs(1)).await;
+    assert_eq!(h.row("pods").await.state, WatchState::Paused);
+    assert_eq!(runner.calls(), 0);
+    assert!(log_lines(&logs.text(), "watch resumed", "pods").is_empty());
+
+    pass(Duration::from_secs(5)).await;
+    let text = logs.text();
+    let resumed = log_lines(&text, "watch resumed", "pods");
+    assert_eq!(resumed.len(), 1, "{text}");
+    assert!(resumed[0].contains("how=\"budget_day\""), "{}", resumed[0]);
+    assert_eq!(h.row("pods").await.pause_how.as_deref(), None);
+}

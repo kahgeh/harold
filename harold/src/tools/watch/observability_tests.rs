@@ -700,3 +700,71 @@ async fn pause_and_resume_are_logged_with_who_and_until_when() {
     assert_eq!(resumed.len(), 1, "{text}");
     assert!(resumed[0].contains("how=\"timed\""), "{}", resumed[0]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ended_watch_is_logged_with_ends_at_none() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(
+        crate::settings::WatchSettings {
+            daily_budget_usd: Some(100.0),
+            ..settings()
+        },
+        vec![answer("QUIET", 0.01)],
+    )
+    .await;
+    let name = unique("open");
+    let mut checked = h.checked(&name, 10, 1);
+    checked.for_minutes = None;
+    h.scheduler.start(checked).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+
+    let text = logs.text();
+    let started = lines(&text, "watch started", &name);
+    assert_eq!(started.len(), 1, "{text}");
+    assert!(started[0].contains("ends_at=\"none\""), "{}", started[0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_pause_and_resume_lines_carry_only_their_fields_and_no_text() {
+    use crate::tools::watch::validate::{Caller, CheckedPause, CheckedResume, Target as Aim};
+
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    let name = unique("fields");
+    h.start(&name, 10, 600).await;
+    pass(Duration::from_secs(5)).await;
+    h.scheduler
+        .pause(CheckedPause {
+            target: Aim::Name(name.clone()),
+            for_minutes: Some(30),
+            caller: Caller::Cli,
+        })
+        .await
+        .unwrap();
+    h.scheduler
+        .resume_watches(CheckedResume {
+            target: Aim::Name(name.clone()),
+            caller: Caller::Cli,
+        })
+        .await
+        .unwrap();
+
+    let text = logs.text();
+    let paused = lines(&text, "watch paused", &name);
+    let resumed = lines(&text, "watch resumed", &name);
+    assert_eq!((paused.len(), resumed.len()), (1, 1), "{text}");
+    for field in ["watch=", "how=\"cli\"", "paused_until=\""] {
+        assert!(paused[0].contains(field), "{field}: {}", paused[0]);
+    }
+    for field in ["watch=", "how=\"cli\""] {
+        assert!(resumed[0].contains(field), "{field}: {}", resumed[0]);
+    }
+    assert!(!resumed[0].contains("paused_until"), "{}", resumed[0]);
+    for line in [paused[0], resumed[0]] {
+        for word in ["text=", "msg=", "error="] {
+            assert!(!line.contains(word), "{word} in {line}");
+        }
+    }
+}

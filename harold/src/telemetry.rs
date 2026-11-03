@@ -152,6 +152,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "cost_usd",
     "how",
     "late_s",
+    "reminder",
+    "paused_until",
     "agent",
     "seconds",
     "event_id",
