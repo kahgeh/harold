@@ -77,10 +77,8 @@ fn snapshot(folder: &TempFolder) -> BTreeMap<String, Vec<u8>> {
         .unwrap()
         .map(|entry| {
             let entry = entry.unwrap();
-            (
-                entry.file_name().into_string().unwrap(),
-                std::fs::read(entry.path()).unwrap(),
-            )
+            let bytes = std::fs::read(entry.path()).unwrap_or_default();
+            (entry.file_name().into_string().unwrap(), bytes)
         })
         .collect()
 }
@@ -342,8 +340,124 @@ async fn old_file_refuses_write_after_rotation() {
     assert_eq!(current.file_name(), name_of("2026-11-15"));
     current.put(record("d"), 2).await.unwrap().unwrap();
     assert!(current.get("c").await.unwrap().is_some());
-    let new = rotator.read_file(&name_of("2026-11-15")).await;
-    assert!(new.is_ok());
+    drop(current);
+    drop(old);
+    drop(rotator);
+
+    // After a restart, a new Rotator writes only to the newest file, and the
+    // old file name opens read-only.
+    let restarted = Rotator::new(WorkFiles::new(folder.0.clone()), clock.clone());
+    let current = restarted.current().await.unwrap();
+    assert_eq!(current.file_name(), name_of("2026-11-15"));
+    drop(current);
+    let old = restarted.read_file(&name_of(START)).await.unwrap();
+    assert_eq!(
+        old.put(record("e"), 3).await.unwrap(),
+        Err(Refusal::ReadOnly)
+    );
+    assert_eq!(old.get("e").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn two_ticks_at_the_same_time_give_one_done_and_one_not_due() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    let clock = FakeClock::at("2026-11-15");
+    let rotator = rotator(&folder, &clock);
+    let (one, two) = tokio::join!(rotator.tick(14), rotator.tick(14));
+    let done = [&one, &two]
+        .iter()
+        .filter(|o| matches!(o, Outcome::Done { .. }))
+        .count();
+    assert_eq!(done, 1, "{one:?} {two:?}");
+    assert!([&one, &two].contains(&&Outcome::NotDue), "{one:?} {two:?}");
+    assert_eq!(*rotator.failure.lock().unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_rotation_from_a_stale_current_name_is_not_due() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    let clock = FakeClock::at("2026-11-15");
+    let rotator = rotator(&folder, &clock);
+    assert!(matches!(rotator.tick(14).await, Outcome::Done { .. }));
+    clock.set("2026-11-16");
+    // A tick that read the old name before the first rotation ended.
+    assert_eq!(
+        rotator.rotate(&name_of(START), "2026-11-16").await,
+        Outcome::NotDue
+    );
+    assert_eq!(*rotator.failure.lock().unwrap(), None);
+    assert_eq!(
+        WorkFiles::new(folder.0.clone()).current_name(),
+        Some(name_of("2026-11-15"))
+    );
+}
+
+#[tokio::test]
+async fn a_tmp_path_that_cannot_be_written_is_write_failed() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    // A folder in the place of the `.tmp` file: the remove and the open fail.
+    std::fs::create_dir(folder.file("work-2026-11-15.db.tmp")).unwrap();
+    let clock = FakeClock::at("2026-11-15");
+    let rotator = rotator(&folder, &clock);
+    assert_eq!(
+        rotator.tick(14).await,
+        Outcome::Failed {
+            file: name_of(START),
+            reason: FailReason::WriteFailed,
+            first: true,
+            since_ms: ms_of("2026-11-15"),
+        }
+    );
+    assert_eq!(
+        WorkFiles::new(folder.0.clone()).current_name(),
+        Some(name_of(START))
+    );
+}
+
+#[tokio::test]
+async fn a_target_that_exists_is_rename_failed() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    // A folder with the target name. It is not a work file, so the old file
+    // stays current, but the rename must not replace it.
+    std::fs::create_dir(folder.file(&name_of("2026-11-15"))).unwrap();
+    let clock = FakeClock::at("2026-11-15");
+    let rotator = rotator(&folder, &clock);
+    assert_eq!(
+        rotator.tick(14).await,
+        Outcome::Failed {
+            file: name_of(START),
+            reason: FailReason::RenameFailed,
+            first: true,
+            since_ms: ms_of("2026-11-15"),
+        }
+    );
+    assert!(folder.file(&name_of("2026-11-15")).is_dir());
+    assert!(!names(&folder).iter().any(|n| n.contains(".tmp")));
+    assert_eq!(
+        WorkFiles::new(folder.0.clone()).current_name(),
+        Some(name_of(START))
+    );
+}
+
+#[tokio::test]
+async fn rotation_days_0_clears_the_failure() {
+    let folder = TempFolder::new();
+    seed(&folder).await;
+    let clock = FakeClock::at("2026-11-15");
+    let rotator = rotator(&folder, &clock);
+    rotator.set_copy_hook(drop_a());
+    assert!(matches!(rotator.tick(14).await, Outcome::Failed { .. }));
+    assert_eq!(rotator.tick(0).await, Outcome::Off);
+    assert_eq!(*rotator.failure.lock().unwrap(), None);
+    clock.set("2026-11-16");
+    assert!(matches!(
+        rotator.tick(14).await,
+        Outcome::Failed { first: true, .. }
+    ));
 }
 
 #[tokio::test]

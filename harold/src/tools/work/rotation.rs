@@ -144,6 +144,8 @@ impl Rotator {
     /// `0` turns the rotation off.
     pub(super) async fn tick(&self, rotation_days: u32) -> Outcome {
         if rotation_days == 0 {
+            // No more retries, so a failure that began before ends here.
+            *self.lock_failure() = None;
             return Outcome::Off;
         }
         let Some(file) = self.files.current_name() else {
@@ -201,6 +203,11 @@ impl Rotator {
             return Outcome::NotDue;
         }
         let mut held = self.current.write().await;
+        // A rotation that ended while this one waited for the lock made a new
+        // current file. Then `file` is old, and there is nothing to do.
+        if self.files.current_name().as_deref() != Some(file) {
+            return Outcome::NotDue;
+        }
         if held.as_ref().is_some_and(|f| f.file_name() != file) {
             *held = None;
         }
