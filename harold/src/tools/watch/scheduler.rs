@@ -17,9 +17,12 @@ use super::answer::{self, Answer, Cause, Failure};
 use super::clock::{LocalOffset, clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
 use super::obs::{self, EndReason, How, RunObs, Timing};
+use super::reminders::{ReminderInfo, Reminders};
 use super::report::{ReportSlot, Target, Typist};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
-use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchState, WatchStore};
+use super::store::{
+    NewWatch, ReminderState, RunRecord, StoreError, Streak, WatchRow, WatchState, WatchStore,
+};
 use super::validate::{
     Caller, Checked, CheckedPause, CheckedRemind, CheckedResume, ReportTo, Target as Aim,
     read_skill, to_micros,
@@ -71,6 +74,8 @@ pub(super) enum StartRefusal {
     TooManyWatches,
     DailyBudgetSpent,
     DailyBudgetUnset,
+    /// A waiting reminder has the name.
+    NameInUse,
     Unavailable,
 }
 
@@ -115,6 +120,8 @@ pub(super) enum StopRefusal {
 pub(super) struct Listing {
     pub watches: Vec<WatchRow>,
     pub spent_usd_micros: i64,
+    /// Every waiting reminder.
+    pub reminders: Vec<ReminderInfo>,
 }
 
 struct Live {
@@ -131,6 +138,7 @@ struct State {
 pub(super) struct Scheduler {
     deps: Deps,
     typist: Arc<Typist>,
+    reminders: Arc<Reminders>,
     /// One model at a time across all watches.
     model: tokio::sync::Mutex<()>,
     state: Mutex<State>,
@@ -194,9 +202,17 @@ impl Scheduler {
             chief: Arc::clone(&deps.chief_pane),
             agents: Arc::clone(&deps.agents),
         });
+        let reminders = Reminders::new(
+            Arc::clone(&deps.store),
+            Arc::clone(&typist),
+            Arc::clone(&deps.local),
+            RETRY,
+            deps.shutdown.clone(),
+        );
         Arc::new(Self {
             deps,
             typist,
+            reminders,
             model: tokio::sync::Mutex::new(()),
             state: Mutex::default(),
             start_lock: tokio::sync::Mutex::new(()),
@@ -255,6 +271,13 @@ impl Scheduler {
         }
         let _one_start = self.start_lock.lock().await;
         let store = &self.deps.store;
+        let reminder = store
+            .reminder(&checked.name)
+            .await
+            .map_err(|_| StartRefusal::Unavailable)?;
+        if reminder.is_some_and(|row| row.state == ReminderState::Waiting) {
+            return Err(StartRefusal::NameInUse);
+        }
         let live = store.live().await.map_err(|_| StartRefusal::Unavailable)?;
         let replaced = live.iter().any(|row| row.name == checked.name);
         let others = live.iter().filter(|row| row.name != checked.name).count();
@@ -411,33 +434,42 @@ impl Scheduler {
         Ok(changed)
     }
 
-    /// Stores a reminder. Returns the time it is due, in milliseconds.
+    /// Stores a reminder. Returns the time it is due, in milliseconds. A live watch or a
+    /// waiting reminder with the name refuses it.
     pub(super) async fn remind(
         self: &Arc<Self>,
-        _checked: CheckedRemind,
+        checked: CheckedRemind,
     ) -> Result<i64, RemindRefusal> {
-        // Task 5 replaces this stub.
-        Err(RemindRefusal::Unavailable)
+        // The start lock keeps a start and a reminder from taking one name together.
+        let _one_command = self.start_lock.lock().await;
+        self.reminders.set(checked, clock_ms()).await
     }
 
     /// Ends a running or paused watch at once. A run in progress is stopped, its report is
-    /// not typed, and no closing line is typed.
+    /// not typed, and no closing line is typed. With no live watch of that name, it
+    /// cancels a waiting reminder of that name.
     pub(super) async fn stop(self: &Arc<Self>, name: &str) -> Result<(), StopRefusal> {
         let row = self
             .deps
             .store
             .get(name)
             .await
-            .map_err(|_| StopRefusal::Unavailable)?
-            .ok_or(StopRefusal::UnknownWatch)?;
-        if !row.is_live() {
-            return Err(StopRefusal::NotRunning);
+            .map_err(|_| StopRefusal::Unavailable)?;
+        if let Some(row) = row.as_ref().filter(|row| row.is_live()) {
+            self.end(row, EndReason::Stopped, None).await;
+            return Ok(());
         }
-        self.end(&row, EndReason::Stopped, None).await;
-        Ok(())
+        if self.reminders.cancel(name).await {
+            return Ok(());
+        }
+        match row {
+            Some(_) => Err(StopRefusal::NotRunning),
+            None => Err(StopRefusal::UnknownWatch),
+        }
     }
 
-    /// Every running or paused watch, and every watch that ended today.
+    /// Every running or paused watch, every watch that ended today, and every waiting
+    /// reminder.
     pub(super) async fn list(&self) -> Result<Listing, StoreError> {
         let (day_start, day_end) = self.today().await;
         let mut watches = self.deps.store.live().await?;
@@ -446,22 +478,24 @@ impl Scheduler {
         Ok(Listing {
             watches,
             spent_usd_micros,
+            reminders: self.reminders.listed().await?,
         })
     }
 
     /// Resumes every watch that was running or paused when Harold stopped. A paused watch
-    /// stays paused until its pause ends. One whose time ran out meanwhile ends now.
+    /// stays paused until its pause ends. One whose time ran out meanwhile ends now. Each
+    /// waiting reminder gets its task again.
     pub(super) async fn resume(self: &Arc<Self>) {
-        let Ok(live) = self.deps.store.live().await else {
-            return;
-        };
-        for row in live {
-            if row.ends_at_ms.is_some_and(|end| clock_ms() >= end) {
-                self.end(&row, EndReason::Ended, None).await;
-            } else {
-                self.spawn_watch(&row, How::Resumed).await;
+        if let Ok(live) = self.deps.store.live().await {
+            for row in live {
+                if row.ends_at_ms.is_some_and(|end| clock_ms() >= end) {
+                    self.end(&row, EndReason::Ended, None).await;
+                } else {
+                    self.spawn_watch(&row, How::Resumed).await;
+                }
             }
         }
+        self.reminders.resume_all().await;
     }
 
     // -----------------------------------------------------------------------
@@ -994,8 +1028,11 @@ fn report_line(name: &str, run: u32, total: Option<u32>, text: &str) -> String {
     }
 }
 
-/// Completes when the watch is cancelled or Harold shuts down.
-async fn interrupted(cancelled: &mut signal::Receiver<bool>, shutdown: &mut signal::Receiver<()>) {
+/// Completes when the watch or reminder is cancelled or Harold shuts down.
+pub(super) async fn interrupted(
+    cancelled: &mut signal::Receiver<bool>,
+    shutdown: &mut signal::Receiver<()>,
+) {
     tokio::select! {
         _ = cancelled.wait_for(|cancelled| *cancelled) => {}
         // A change or a dropped sender both mean shutdown.

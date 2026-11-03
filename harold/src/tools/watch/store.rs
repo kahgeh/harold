@@ -313,7 +313,11 @@ impl WatchStore {
     }
 
     /// Stores a reminder as waiting, replacing any reminder of the same name.
+    /// A reminder needs `due_at_ms` or `due_local`; one with neither is refused.
     pub(super) async fn put_reminder(&self, reminder: &NewReminder, now_ms: i64) -> Result<()> {
+        if reminder.due_at_ms.is_none() && reminder.due_local.is_none() {
+            return Err(StoreError::Data("a reminder has no time".into()));
+        }
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         let work = async {

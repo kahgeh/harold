@@ -15,6 +15,7 @@ mod answer;
 mod clock;
 mod facts;
 mod obs;
+mod reminders;
 mod report;
 mod runner;
 mod scheduler;

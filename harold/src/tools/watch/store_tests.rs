@@ -513,3 +513,23 @@ async fn finish_reminder_is_once_only() {
     );
     assert!(store.waiting_reminders().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_reminder_with_no_time_is_refused() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    let mut reminder = new_reminder("r");
+    reminder.due_at_ms = None;
+    reminder.due_local = None;
+    assert!(matches!(
+        store.put_reminder(&reminder, 1_000).await,
+        Err(StoreError::Data(_))
+    ));
+    assert!(store.reminder("r").await.unwrap().is_none());
+
+    reminder.due_local = Some("2026-11-03 09:00".into());
+    store.put_reminder(&reminder, 1_000).await.unwrap();
+    reminder.due_local = None;
+    reminder.due_at_ms = Some(9_000);
+    store.put_reminder(&reminder, 2_000).await.unwrap();
+}

@@ -128,6 +128,53 @@ pub(super) fn watch_resumed(watch: &str, how: How) {
     info!(watch, how = how.as_str(), "watch resumed");
 }
 
+/// Why a reminder ended without being typed: the `reason` of `reminder ended`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReminderEnd {
+    /// Not typed within 120 minutes of its time.
+    Dropped,
+    /// `watch stop` cancelled it.
+    Cancelled,
+}
+
+impl ReminderEnd {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReminderEnd::Dropped => "dropped",
+            ReminderEnd::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// The counters' zero for the reminders' outcomes.
+pub(super) fn reminder_counters() {
+    telemetry::register_reminder_counters();
+}
+
+fn count_reminder(outcome: &'static str) {
+    telemetry::instruments()
+        .watch_reminders
+        .add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
+/// `reminder set`. `due_at` is the local time it is due. The text is not logged.
+pub(super) fn reminder_set(reminder: &str, due_at: &str) {
+    info!(reminder, due_at, "reminder set");
+}
+
+/// `reminder typed`, with the seconds after its time.
+pub(super) fn reminder_typed(reminder: &str, late_s: i64) {
+    info!(reminder, late_s, "reminder typed");
+    count_reminder("typed");
+}
+
+/// `reminder ended`: dropped or cancelled.
+pub(super) fn reminder_ended(reminder: &str, reason: ReminderEnd) {
+    let reason = reason.as_str();
+    info!(reminder, reason, "reminder ended");
+    count_reminder(reason);
+}
+
 /// Where a run's time went, in whole milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Timing {

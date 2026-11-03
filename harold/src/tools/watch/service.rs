@@ -48,6 +48,7 @@ fn start_status(refusal: StartRefusal) -> Status {
         StartRefusal::TooManyWatches => Status::failed_precondition("too_many_watches"),
         StartRefusal::DailyBudgetSpent => Status::failed_precondition("daily_budget_spent"),
         StartRefusal::DailyBudgetUnset => Status::failed_precondition("daily_budget_unset"),
+        StartRefusal::NameInUse => Status::failed_precondition("name_in_use"),
         StartRefusal::Unavailable => unavailable(),
     }
 }
@@ -141,8 +142,15 @@ impl WatchService for WatchToolService {
         Ok(Response::new(pb::ListWatchesResponse {
             watches,
             spent_usd: micros_to_usd(listing.spent_usd_micros),
-            // Task 5 fills the reminders.
-            reminders: Vec::new(),
+            reminders: listing
+                .reminders
+                .into_iter()
+                .map(|reminder| pb::Reminder {
+                    name: reminder.name,
+                    report_to: reminder.report_to,
+                    due_at_ms: reminder.due_at_ms,
+                })
+                .collect(),
         }))
     }
 

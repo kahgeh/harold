@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use super::obs::{ReportObs, Why};
@@ -87,6 +88,9 @@ struct Waiting {
     generation: u64,
     /// A closing line gives up at this time; a report waits as long as its watch runs.
     give_up_at: Option<Instant>,
+    /// Told `true` when the line is typed and `false` when it is given up. A line that
+    /// is dropped drops it, with no value.
+    done: Option<oneshot::Sender<bool>>,
 }
 
 #[derive(Default)]
@@ -121,7 +125,21 @@ impl ReportSlot {
 
     /// Offers a run's report. It replaces a waiting one, which is never typed.
     pub(super) fn offer(self: &Arc<Self>, line: String, obs: ReportObs) {
-        self.put(line, obs, None, false);
+        self.put(line, obs, None, false, None);
+    }
+
+    /// One last line, tried until `give_up_at`, as for a reminder. The slot takes nothing
+    /// after it. The answer is `true` when the line is typed and `false` when it is
+    /// given up. It has no value when the line is dropped, for example by `close(None)`.
+    pub(super) fn last_line(
+        self: &Arc<Self>,
+        line: String,
+        obs: ReportObs,
+        give_up_at: Instant,
+    ) -> oneshot::Receiver<bool> {
+        let (done, answer) = oneshot::channel();
+        self.put(line, obs, Some(give_up_at), true, Some(done));
+        answer
     }
 
     /// The watch is over. A waiting report is dropped. With a closing line, that line
@@ -129,7 +147,7 @@ impl ReportSlot {
     pub(super) fn close(self: &Arc<Self>, closing: Option<(String, ReportObs)>) {
         let give_up_at = Some(Instant::now() + CLOSING_LINE_PATIENCE);
         match closing {
-            Some((line, obs)) => self.put(line, obs, give_up_at, true),
+            Some((line, obs)) => self.put(line, obs, give_up_at, true, None),
             None => {
                 let mut inner = self.lock();
                 inner.closed = true;
@@ -146,6 +164,7 @@ impl ReportSlot {
         obs: ReportObs,
         give_up_at: Option<Instant>,
         closing: bool,
+        done: Option<oneshot::Sender<bool>>,
     ) {
         let mut inner = self.lock();
         if inner.closed {
@@ -166,6 +185,7 @@ impl ReportSlot {
             obs,
             generation,
             give_up_at,
+            done,
         });
         if !inner.delivering {
             inner.delivering = true;
@@ -197,6 +217,9 @@ impl ReportSlot {
                     (Ok((pane, insert_pressed)), true) => {
                         if let Some(waiting) = inner.waiting.take() {
                             waiting.obs.typed(&pane, insert_pressed);
+                            if let Some(done) = waiting.done {
+                                let _ = done.send(true);
+                            }
                         }
                         continue;
                     }
@@ -210,6 +233,9 @@ impl ReportSlot {
                         if expired {
                             if let Some(waiting) = inner.waiting.take() {
                                 waiting.obs.left(Why::WatchEnded);
+                                if let Some(done) = waiting.done {
+                                    let _ = done.send(false);
+                                }
                             }
                             inner.delivering = false;
                             return;

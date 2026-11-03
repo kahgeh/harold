@@ -1,0 +1,485 @@
+//! One-time reminders, under paused time: when each is typed, dropped or cancelled, and
+//! that a reminder and a watch never share a name.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use harold_api::tools::watch::v1::RemindRequest;
+use harold_api::tools::watch::v1::remind_request::When;
+use time::UtcOffset;
+use tokio::sync::watch as signal;
+
+use super::*;
+use crate::agent::domain::EffectiveAgentState;
+use crate::outbound::fake::CapturedLogs;
+use crate::settings::WatchSettings;
+use crate::tools::watch::clock::{self, clock_ms, day_bounds};
+use crate::tools::watch::scheduler::tests::{Harness, build_on, harness_on, pass, settings};
+use crate::tools::watch::scheduler::{RemindRefusal, Scheduler, StartRefusal, StopRefusal};
+use crate::tools::watch::store::ReminderState;
+use crate::tools::watch::test_support::{FakeRunner, ScriptedOffset, agent};
+use crate::tools::watch::validate::{CheckedRemind, ReportTo, check_remind};
+
+const CHIEF_PANE: &str = "%1";
+const SELF_PANE: &str = "%2";
+const MINUTE: Duration = Duration::from_secs(60);
+const MINUTE_MS: i64 = 60_000;
+
+fn offset(hours: i8) -> UtcOffset {
+    UtcOffset::from_hms(hours, 0, 0).unwrap()
+}
+
+async fn harness_at(local: &Arc<ScriptedOffset>) -> Harness {
+    harness_on(settings(), vec![], local).await
+}
+
+async fn harness_utc() -> (Harness, Arc<ScriptedOffset>) {
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    (harness_at(&local).await, local)
+}
+
+fn remind_in(h: &Harness, name: &str, minutes: u32, text: &str) -> CheckedRemind {
+    CheckedRemind {
+        name: name.into(),
+        folder: h.folder.0.clone(),
+        report_to: ReportTo::Chief,
+        in_minutes: Some(minutes),
+        due_local: None,
+        text: text.into(),
+    }
+}
+
+/// A `--at` reminder, checked as the service checks it, against the harness's clock.
+async fn remind_at(h: &Harness, name: &str, at: &str) -> CheckedRemind {
+    let now = h.scheduler.local_now().await;
+    check_remind(
+        &RemindRequest {
+            name: name.into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: Some(When::AtLocal(at.into())),
+            report_to: "chief".into(),
+            text: "x".into(),
+        },
+        &now,
+    )
+    .unwrap()
+}
+
+/// Moves the test clock to 00:01 local time at `offset` of the next day. Returns the
+/// start of that local day.
+async fn to_one_past_midnight(offset: UtcOffset) -> i64 {
+    let (_, next_midnight) = day_bounds(clock_ms(), offset);
+    pass(Duration::from_millis(
+        (next_midnight + MINUTE_MS - clock_ms()) as u64,
+    ))
+    .await;
+    next_midnight
+}
+
+async fn state_of(h: &Harness, name: &str) -> ReminderState {
+    h.store.reminder(name).await.unwrap().unwrap().state
+}
+
+/// A second scheduler on the first one's store, as after a Harold restart.
+fn restarted(h: &Harness, local: &Arc<ScriptedOffset>) -> (Arc<Scheduler>, signal::Sender<()>) {
+    let runner = FakeRunner::new(vec![]);
+    let (stop, shutdown) = signal::channel(());
+    let scheduler = build_on(
+        local,
+        &h.store,
+        &runner,
+        &h.typing,
+        &h.agents,
+        &h.chief,
+        &h.pods,
+        settings(),
+        shutdown,
+    );
+    (scheduler, stop)
+}
+
+/// Harold stops: every task ends, and the store keeps the reminders.
+async fn shut_down(h: &Harness) {
+    let _ = h.stop.send(());
+    pass(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn typed_once_at_in_time() {
+    let (h, _local) = harness_utc().await;
+    let self_folder = h.folder.0.to_string_lossy().into_owned();
+    h.agents
+        .agents
+        .lock()
+        .unwrap()
+        .push(agent(SELF_PANE, &self_folder, EffectiveAgentState::Idle));
+    let before = clock_ms();
+    let due = h
+        .scheduler
+        .remind(remind_in(
+            &h,
+            "release-check",
+            45,
+            "check the v0.75.0 release",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(due - before, 45 * MINUTE_MS);
+    let mut to_self = remind_in(&h, "own", 45, "look at the logs");
+    to_self.report_to = ReportTo::SelfPane;
+    h.scheduler.remind(to_self).await.unwrap();
+
+    pass(44 * MINUTE + Duration::from_secs(59)).await;
+    assert!(h.typing.typed().is_empty(), "{:?}", h.typing.typed());
+
+    pass(Duration::from_secs(2)).await;
+    let lines = h.typing.lines.lock().unwrap().clone();
+    assert_eq!(
+        lines,
+        [
+            (
+                CHIEF_PANE.to_string(),
+                "REMIND release-check: check the v0.75.0 release".to_string()
+            ),
+            (
+                SELF_PANE.to_string(),
+                "REMIND own: look at the logs".to_string()
+            ),
+        ]
+    );
+
+    pass(3 * 60 * MINUTE).await;
+    assert_eq!(h.typing.typed().len(), 2, "each reminder is typed once");
+    assert_eq!(state_of(&h, "release-check").await, ReminderState::Typed);
+    assert_eq!(state_of(&h, "own").await, ReminderState::Typed);
+    assert!(h.scheduler.list().await.unwrap().reminders.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn at_today_and_at_tomorrow() {
+    let local = ScriptedOffset::at(offset(11));
+    let h = harness_at(&local).await;
+    let day_start = to_one_past_midnight(offset(11)).await;
+
+    // 00:31 is still ahead today; 00:00 has passed, so it is tomorrow.
+    let today = h
+        .scheduler
+        .remind(remind_at(&h, "today", "00:31").await)
+        .await
+        .unwrap();
+    let tomorrow = h
+        .scheduler
+        .remind(remind_at(&h, "tomorrow", "00:00").await)
+        .await
+        .unwrap();
+    assert_eq!(today, day_start + 31 * MINUTE_MS);
+    assert_eq!(tomorrow, day_start + 24 * 60 * MINUTE_MS);
+    assert_eq!(
+        h.store.reminder("today").await.unwrap().unwrap().due_local,
+        Some(clock::local_text(today, offset(11))[..16].to_owned())
+    );
+
+    pass(29 * MINUTE).await;
+    assert!(h.typing.typed().is_empty());
+    pass(2 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND today: x"]);
+
+    // From 00:32 to 23:58.
+    pass(23 * 60 * MINUTE + 26 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND today: x"], "not yet 00:00");
+    pass(3 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND today: x", "REMIND tomorrow: x"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn waits_while_the_pane_is_busy_then_types() {
+    let (h, _local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+
+    pass(40 * MINUTE).await;
+    assert!(h.typing.typed().is_empty());
+    assert_eq!(state_of(&h, "r").await, ReminderState::Waiting);
+
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Idle);
+    pass(Duration::from_secs(6)).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: look"]);
+    assert_eq!(state_of(&h, "r").await, ReminderState::Typed);
+    pass(60 * MINUTE).await;
+    assert_eq!(h.typing.typed().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_after_120_minutes() {
+    let (h, local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+
+    pass(10 * MINUTE + 119 * MINUTE).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Waiting);
+    pass(2 * MINUTE).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Dropped);
+    assert!(h.scheduler.list().await.unwrap().reminders.is_empty());
+
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Idle);
+    pass(10 * MINUTE).await;
+    assert!(
+        h.typing.typed().is_empty(),
+        "a dropped reminder is never typed"
+    );
+
+    // A restart after the 120 minutes drops a waiting reminder at once.
+    h.scheduler
+        .remind(remind_in(&h, "late", 10, "look"))
+        .await
+        .unwrap();
+    shut_down(&h).await;
+    pass(10 * MINUTE + 121 * MINUTE).await;
+    let (scheduler, _stop) = restarted(&h, &local);
+    scheduler.resume().await;
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(state_of(&h, "late").await, ReminderState::Dropped);
+    assert!(h.typing.typed().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn typed_late_after_a_restart_inside_the_window_and_only_once() {
+    let (h, local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    pass(5 * MINUTE).await;
+    shut_down(&h).await;
+    // Harold is down from 5 to 45 minutes: the reminder was due at 10.
+    pass(40 * MINUTE).await;
+    assert!(h.typing.typed().is_empty());
+
+    let (scheduler, stop) = restarted(&h, &local);
+    scheduler.resume().await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: look"]);
+    assert_eq!(state_of(&h, "r").await, ReminderState::Typed);
+
+    // A second restart types nothing more.
+    let _ = stop.send(());
+    pass(Duration::from_secs(1)).await;
+    let (again, _stop) = restarted(&h, &local);
+    again.resume().await;
+    pass(30 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: look"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_cancels_a_waiting_reminder_and_types_nothing() {
+    let (h, _local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    pass(MINUTE).await;
+
+    h.scheduler.stop("r").await.unwrap();
+    assert_eq!(state_of(&h, "r").await, ReminderState::Cancelled);
+    assert!(h.scheduler.list().await.unwrap().reminders.is_empty());
+    pass(30 * MINUTE).await;
+    assert!(h.typing.typed().is_empty());
+
+    assert_eq!(
+        h.scheduler.stop("r").await,
+        Err(StopRefusal::UnknownWatch),
+        "nothing waits under that name now"
+    );
+    // A cancelled reminder frees its name.
+    h.scheduler
+        .remind(remind_in(&h, "r", 5, "again"))
+        .await
+        .unwrap();
+    pass(6 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: again"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_name_in_use_is_refused_both_ways() {
+    let budget = WatchSettings {
+        daily_budget_usd: Some(1.0),
+        ..settings()
+    };
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    let h = harness_on(budget, vec![], &local).await;
+
+    // A running watch holds its name.
+    h.start("w", 10, 120).await;
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "w", 10, "x")).await,
+        Err(RemindRefusal::NameInUse)
+    );
+    // A paused watch holds it too.
+    h.scheduler
+        .pause(crate::tools::watch::validate::CheckedPause {
+            target: crate::tools::watch::validate::Target::Name("w".into()),
+            for_minutes: None,
+            caller: crate::tools::watch::validate::Caller::Cli,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "w", 10, "x")).await,
+        Err(RemindRefusal::NameInUse)
+    );
+
+    // A waiting reminder holds its name against a watch and another reminder.
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "x"))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.scheduler.start(h.checked("r", 10, 120)).await,
+        Err(StartRefusal::NameInUse)
+    );
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "r", 20, "y")).await,
+        Err(RemindRefusal::NameInUse)
+    );
+    assert!(h.store.get("r").await.unwrap().is_none(), "no watch stored");
+
+    // A stopped watch and a typed reminder free their names.
+    h.scheduler.stop("w").await.unwrap();
+    h.scheduler
+        .remind(remind_in(&h, "w", 30, "x"))
+        .await
+        .unwrap();
+    pass(11 * MINUTE).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Typed);
+    h.start("r", 10, 120).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn list_shows_each_waiting_reminder_with_its_time() {
+    let (h, _local) = harness_utc().await;
+    let now = clock_ms();
+    h.scheduler
+        .remind(remind_in(&h, "first", 10, "x"))
+        .await
+        .unwrap();
+    let mut second = remind_in(&h, "second", 30, "y");
+    second.report_to = ReportTo::SelfPane;
+    h.scheduler.remind(second).await.unwrap();
+
+    let listed = h.scheduler.list().await.unwrap().reminders;
+    assert_eq!(
+        listed,
+        [
+            ReminderInfo {
+                name: "first".into(),
+                report_to: "chief".into(),
+                due_at_ms: now + 10 * MINUTE_MS,
+            },
+            ReminderInfo {
+                name: "second".into(),
+                report_to: "self".into(),
+                due_at_ms: now + 30 * MINUTE_MS,
+            },
+        ]
+    );
+
+    pass(11 * MINUTE).await;
+    let listed = h.scheduler.list().await.unwrap().reminders;
+    assert_eq!(
+        listed.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        ["second"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn at_follows_a_changed_offset() {
+    let local = ScriptedOffset::at(offset(11));
+    let h = harness_at(&local).await;
+    let day_start = to_one_past_midnight(offset(11)).await;
+    let due = h
+        .scheduler
+        .remind(remind_at(&h, "r", "02:00").await)
+        .await
+        .unwrap();
+    assert_eq!(due, day_start + 120 * MINUTE_MS);
+
+    // One hour later the clock goes back an hour (+11:00 to +10:00): 01:01 reads 00:01.
+    pass(60 * MINUTE).await;
+    local.set(offset(10));
+    let listed = h.scheduler.list().await.unwrap().reminders;
+    assert_eq!(listed[0].due_at_ms, due + 60 * MINUTE_MS);
+
+    // 02:00 at +10:00 is 119 minutes away now, not 59.
+    pass(118 * MINUTE).await;
+    assert!(h.typing.typed().is_empty(), "{:?}", h.typing.typed());
+    pass(2 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: x"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn at_in_a_daylight_saving_gap_is_due_at_the_end_of_the_gap() {
+    let local = ScriptedOffset::at(offset(10));
+    let h = harness_at(&local).await;
+    to_one_past_midnight(offset(10)).await;
+    h.scheduler
+        .remind(remind_at(&h, "gap", "02:30").await)
+        .await
+        .unwrap();
+
+    // At 02:00 +10:00 the clock goes forward to 03:00 +11:00: 02:30 never comes.
+    pass(119 * MINUTE).await;
+    local.set(offset(11));
+    assert!(h.typing.typed().is_empty());
+    pass(2 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND gap: x"]);
+    assert_eq!(state_of(&h, "gap").await, ReminderState::Typed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_text_in_the_log_lines() {
+    let logs = CapturedLogs::start();
+    let (h, _local) = harness_utc().await;
+    let secret = format!("SECRET-{}", uuid::Uuid::new_v4().simple());
+    let name = |what: &str| format!("{what}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let (typed, dropped, cancelled) = (name("typed"), name("dropped"), name("cancelled"));
+
+    h.scheduler
+        .remind(remind_in(&h, &typed, 1, &secret))
+        .await
+        .unwrap();
+    pass(2 * MINUTE).await;
+    h.scheduler
+        .remind(remind_in(&h, &cancelled, 10, &secret))
+        .await
+        .unwrap();
+    h.scheduler.stop(&cancelled).await.unwrap();
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+    h.scheduler
+        .remind(remind_in(&h, &dropped, 1, &secret))
+        .await
+        .unwrap();
+    pass(125 * MINUTE).await;
+
+    let text = logs.text();
+    assert!(!text.contains(&secret), "{text}");
+    let line = |message: &str, reminder: &str| -> String {
+        text.lines()
+            .find(|line| {
+                line.contains(message) && line.contains(&format!("reminder=\"{reminder}\""))
+            })
+            .unwrap_or_else(|| panic!("no {message} for {reminder}:\n{text}"))
+            .to_owned()
+    };
+    for reminder in [&typed, &dropped, &cancelled] {
+        assert!(line("reminder set", reminder).contains("due_at="));
+    }
+    assert!(line("reminder typed", &typed).contains("late_s=0"));
+    assert!(line("reminder ended", &dropped).contains("reason=\"dropped\""));
+    assert!(line("reminder ended", &cancelled).contains("reason=\"cancelled\""));
+}

@@ -421,3 +421,64 @@ async fn an_open_ended_watch_pauses_and_resumes_through_the_service() {
         (tonic::Code::FailedPrecondition, "not_paused")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn remind_answers_its_time_list_shows_it_and_a_name_in_use_is_refused() {
+    let h = harness(settings(), vec![]).await;
+    let service = service(&h);
+    let remind = |name: &str| pb::RemindRequest {
+        name: name.into(),
+        folder: h.folder.0.to_string_lossy().into_owned(),
+        when: Some(pb::remind_request::When::InMinutes(45)),
+        report_to: "chief".into(),
+        text: "check the release".into(),
+    };
+    let before = crate::tools::watch::clock::clock_ms();
+
+    let answered = service
+        .remind(Request::new(remind("release-check")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(answered.due_at_ms - before, 45 * 60_000);
+
+    let listed = service
+        .list_watches(Request::new(pb::ListWatchesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        listed.reminders,
+        [pb::Reminder {
+            name: "release-check".into(),
+            report_to: "chief".into(),
+            due_at_ms: answered.due_at_ms,
+        }]
+    );
+
+    let name_in_use = (tonic::Code::FailedPrecondition, "name_in_use".to_string());
+    let status = service
+        .remind(Request::new(remind("release-check")))
+        .await
+        .expect_err("refused");
+    assert_eq!((status.code(), status.message().to_string()), name_in_use);
+    assert_eq!(
+        refusal(&service, request(&h, "release-check")).await,
+        name_in_use
+    );
+
+    service
+        .stop_watch(Request::new(pb::StopWatchRequest {
+            name: "release-check".into(),
+        }))
+        .await
+        .unwrap();
+    let listed = service
+        .list_watches(Request::new(pb::ListWatchesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(listed.reminders.is_empty());
+    pass(Duration::from_secs(60 * 60)).await;
+    assert!(h.typing.typed().is_empty());
+}

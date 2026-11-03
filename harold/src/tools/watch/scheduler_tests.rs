@@ -40,7 +40,7 @@ async fn harness_with_offset(local: &Arc<ScriptedOffset>) -> Harness {
     harness_on(settings(), vec![answer("QUIET", 0.01)], local).await
 }
 
-async fn harness_on(
+pub(in crate::tools::watch) async fn harness_on(
     settings: WatchSettings,
     steps: Vec<Step>,
     local: &Arc<ScriptedOffset>,
@@ -96,7 +96,7 @@ fn build(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_on(
+pub(in crate::tools::watch) fn build_on(
     local: &Arc<ScriptedOffset>,
     store: &Arc<WatchStore>,
     runner: &Arc<FakeRunner>,

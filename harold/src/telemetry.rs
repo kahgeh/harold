@@ -150,6 +150,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "watch",
     "run",
     "cost_usd",
+    "how",
+    "late_s",
     "agent",
     "seconds",
     "event_id",
@@ -341,6 +343,8 @@ pub(crate) struct Instruments {
     pub watch_runs: Counter<u64>,
     /// `watch.cost_usd`, `USD`, by `folder`.
     pub watch_cost_usd: Counter<f64>,
+    /// `watch.reminders`, `{reminder}`, by `outcome`.
+    pub watch_reminders: Counter<u64>,
     /// `harold.notifications`, `{notification}`, by `agent`, `channel` and `outcome`.
     pub notifications: Counter<u64>,
     /// `harold.web_app.pushes`, `{push}`, by `outcome`.
@@ -428,6 +432,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         ),
         watch_runs: counter("watch.runs", "{run}"),
         watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
+        watch_reminders: counter("watch.reminders", "{reminder}"),
         notifications: counter("harold.notifications", "{notification}"),
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
         app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
@@ -1166,6 +1171,18 @@ pub(crate) fn register_watch_counters(folder: &str) {
     instruments
         .watch_cost_usd
         .add(0.0, std::slice::from_ref(&folder));
+}
+
+/// Every `outcome` of `watch.reminders`.
+pub(crate) const REMINDER_OUTCOMES: [&str; 3] = ["typed", "dropped", "cancelled"];
+
+/// Records 0 once for each outcome of `watch.reminders`. The watch tool calls it at its
+/// start.
+pub(crate) fn register_reminder_counters() {
+    let reminders = &instruments().watch_reminders;
+    for outcome in REMINDER_OUTCOMES {
+        reminders.add(0, &[KeyValue::new("outcome", outcome)]);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -94,6 +94,40 @@ pub(super) fn day_bounds(now_ms: i64, offset: UtcOffset) -> (i64, i64) {
     (start_ms, start_ms + MS_PER_DAY)
 }
 
+/// The instant, in milliseconds, when the local clock at `offset` reads `text`
+/// (`YYYY-MM-DD HH:MM`). `None` when the text is not such a time.
+///
+/// The caller passes the offset in force now and asks again at each wake-up, so a
+/// change of daylight saving time moves the instant. The rule that follows: a local time
+/// in a spring-forward gap (02:30 when 02:00 becomes 03:00) is already past after the
+/// change, so it is due at the first instant after the gap. A local time that occurs
+/// twice (fall-back) is due at its first occurrence, because the old offset is still in
+/// force then.
+pub(super) fn local_ms(text: &str, offset: UtcOffset) -> Option<i64> {
+    let (date, clock) = text.split_once(' ')?;
+    let number = |part: &str, len: usize| {
+        (part.len() == len && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<i32>().ok())
+            .flatten()
+    };
+    let mut date_parts = date.split('-');
+    let (year, month, day) = (
+        number(date_parts.next()?, 4)?,
+        number(date_parts.next()?, 2)?,
+        number(date_parts.next()?, 2)?,
+    );
+    let (hour, minute) = clock.split_once(':')?;
+    let (hour, minute) = (number(hour, 2)?, number(minute, 2)?);
+    if date_parts.next().is_some() {
+        return None;
+    }
+    let month = time::Month::try_from(u8::try_from(month).ok()?).ok()?;
+    let date = Date::from_calendar_date(year, month, u8::try_from(day).ok()?).ok()?;
+    let time = Time::from_hms(u8::try_from(hour).ok()?, u8::try_from(minute).ok()?, 0).ok()?;
+    let moment = OffsetDateTime::new_in_offset(date, time, offset);
+    Some((moment.unix_timestamp_nanos() / 1_000_000) as i64)
+}
+
 /// `YYYY-MM-DD HH:MM:SS` local time.
 pub(super) fn local_text(ms: i64, offset: UtcOffset) -> String {
     let moment = at(ms, offset);
@@ -153,5 +187,38 @@ mod offset_tests {
         assert_eq!(clock.offset().await, plus_eleven);
         assert_eq!(clock.offset().await, plus_eleven);
         assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[cfg(test)]
+mod local_ms_tests {
+    use super::*;
+
+    #[test]
+    fn a_local_time_moves_one_hour_later_when_the_offset_drops_an_hour() {
+        let plus_eleven = UtcOffset::from_hms(11, 0, 0).unwrap();
+        let plus_ten = UtcOffset::from_hms(10, 0, 0).unwrap();
+        let at_eleven = local_ms("2026-04-05 02:30", plus_eleven).unwrap();
+        let at_ten = local_ms("2026-04-05 02:30", plus_ten).unwrap();
+        assert_eq!(at_ten - at_eleven, 3_600_000);
+        assert_eq!(local_text(at_eleven, plus_eleven), "2026-04-05 02:30:00");
+        assert_eq!(local_text(at_ten, plus_ten), "2026-04-05 02:30:00");
+    }
+
+    #[test]
+    fn a_garbled_local_time_has_no_instant() {
+        let utc = UtcOffset::UTC;
+        for text in [
+            "",
+            "2026-04-05",
+            "2026-04-05 2:30",
+            "2026-13-05 02:30",
+            "2026-02-30 02:30",
+            "2026-04-05 24:00",
+            "2026-04-05 02:60",
+            "x026-04-05 02:30",
+        ] {
+            assert_eq!(local_ms(text, utc), None, "{text}");
+        }
     }
 }
