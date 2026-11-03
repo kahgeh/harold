@@ -737,6 +737,10 @@ pub(crate) struct SpecFacts {
     pub redo_seconds: i64,
     /// The revisions, with any tag but `first`, dated after the approval.
     pub revised_after_approval: u32,
+    /// The size from the `**Size.**` line of the spec.
+    pub size: SpecSize,
+    /// True when the first line of the spec is `Waiting for your approval.`.
+    pub awaiting: bool,
 }
 
 impl Default for SpecFacts {
@@ -760,8 +764,63 @@ impl Default for SpecFacts {
             build_worker_seconds: 0,
             redo_seconds: 0,
             revised_after_approval: 0,
+            size: SpecSize::Unsized,
+            awaiting: false,
         }
     }
+}
+
+/// The size a spec states on its `**Size.**` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpecSize {
+    Small,
+    Medium,
+    Large,
+    /// The spec has no size line, or the word is not a size.
+    Unsized,
+}
+
+impl SpecSize {
+    // A later task of the plan reads this. Only tests read it now.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+            Self::Unsized => "unsized",
+        }
+    }
+}
+
+/// The size from the first line that starts with `**Size.**`. The word is compared in
+/// lower case. Text after the word is ignored.
+pub(crate) fn spec_size(markdown: &str) -> SpecSize {
+    let Some(rest) = markdown
+        .lines()
+        .find_map(|line| line.strip_prefix("**Size.**"))
+    else {
+        return SpecSize::Unsized;
+    };
+    let word = rest
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|part| !part.is_empty())
+        .unwrap_or_default()
+        .to_lowercase();
+    match word.as_str() {
+        "small" => SpecSize::Small,
+        "medium" => SpecSize::Medium,
+        "large" => SpecSize::Large,
+        _ => SpecSize::Unsized,
+    }
+}
+
+/// True when the first line of the spec, trimmed, is `Waiting for your approval.`.
+pub(crate) fn spec_awaiting(markdown: &str) -> bool {
+    markdown
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "Waiting for your approval.")
 }
 
 /// A fact about a spec that Harold logs once.
@@ -1115,7 +1174,10 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         .as_deref()
         .map(|text| revision_entries(text, offset))
         .unwrap_or_default();
-    let words = read_text(&spec).map_or(0, |text| spec_words(&text));
+    let spec_text = read_text(&spec);
+    let words = spec_text.as_deref().map_or(0, spec_words);
+    let size = spec_text.as_deref().map_or(SpecSize::Unsized, spec_size);
+    let awaiting = spec_text.as_deref().is_some_and(spec_awaiting);
     let facts = SpecFacts {
         id: id.to_owned(),
         state,
@@ -1133,6 +1195,8 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         build_worker_seconds,
         redo_seconds: redo_seconds(&entries, started, worked_to),
         revised_after_approval: revised_after_approval(&entries, approved_at),
+        size,
+        awaiting,
     };
     Some((facts, notices))
 }

@@ -3355,3 +3355,50 @@ fn revised_after_approval_counts_any_tag_dated_after_the_approval() {
     assert_eq!(revised_after_approval(&entries, Some(approved)), 2);
     assert_eq!(revised_after_approval(&entries, None), 0);
 }
+
+// --- spec size and waiting line ---
+
+#[test]
+fn size_line_in_each_form() {
+    assert_eq!(spec_size("# T\n\n**Size.** small\n"), SpecSize::Small);
+    assert_eq!(spec_size("# T\n**Size.** medium\n"), SpecSize::Medium);
+    assert_eq!(spec_size("**Size.** large"), SpecSize::Large);
+    assert_eq!(spec_size("# T\n**Size.** Medium\n"), SpecSize::Medium);
+    assert_eq!(
+        spec_size("# T\n**Size.** large, because it moves the store.\n"),
+        SpecSize::Large
+    );
+    assert_eq!(SpecSize::Small.as_str(), "small");
+    assert_eq!(SpecSize::Medium.as_str(), "medium");
+    assert_eq!(SpecSize::Large.as_str(), "large");
+    assert_eq!(SpecSize::Unsized.as_str(), "unsized");
+}
+
+#[test]
+fn no_size_line_is_unsized() {
+    assert_eq!(spec_size("# T\n\nSome text.\n"), SpecSize::Unsized);
+    assert_eq!(spec_size(""), SpecSize::Unsized);
+}
+
+#[test]
+fn an_unknown_size_word_is_unsized() {
+    assert_eq!(spec_size("**Size.** huge\n"), SpecSize::Unsized);
+    assert_eq!(spec_size("**Size.**\n"), SpecSize::Unsized);
+}
+
+#[test]
+fn awaiting_is_true_only_for_the_exact_first_line() {
+    assert!(spec_awaiting("Waiting for your approval.\n\nText"));
+    assert!(spec_awaiting("  Waiting for your approval.  \nText"));
+    assert!(!spec_awaiting("# T\nWaiting for your approval.\n"));
+    assert!(!spec_awaiting("Waiting for your approval\n"));
+    assert!(!spec_awaiting("Starts under the small-fix waiver.\n"));
+    assert!(!spec_awaiting(""));
+}
+
+#[test]
+fn defaults_for_size_and_awaiting() {
+    let facts = SpecFacts::default();
+    assert_eq!(facts.size, SpecSize::Unsized);
+    assert!(!facts.awaiting);
+}
