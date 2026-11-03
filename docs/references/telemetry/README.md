@@ -122,6 +122,7 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 | `pod file unreadable` | `pod.product`, `spec.id`, `file` (the file's name inside the pod folder) |
 | `large spec approved` | `pod.product`, `spec.id`. Level warn. Logged once for each large spec in the approved state, with an approval on or after the cutoff of ADR 0021 (the `**Size.** large` line). A started or completed spec is not logged |
 | `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
+| `spec completed without merged file` | `pod.product`, `spec.id`, `merged_at` (RFC 3339 time of the newest merge) |
 
 **A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
 
