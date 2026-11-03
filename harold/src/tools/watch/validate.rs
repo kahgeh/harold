@@ -4,14 +4,20 @@
 
 use std::path::{Path, PathBuf};
 
-use harold_api::tools::watch::v1::StartWatchRequest;
+use harold_api::tools::watch::v1::remind_request::When;
+use harold_api::tools::watch::v1::{PauseRequest, RemindRequest, ResumeRequest, StartWatchRequest};
 
 use super::runner::RUN_LIMIT;
+use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::WatchSettings;
+use crate::timed_prompts::LocalNow;
 
 const MAX_NAME_LEN: usize = 64;
 const EVERY_MINUTES: std::ops::RangeInclusive<u32> = 2..=240;
 const FOR_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
+/// The most characters of a reminder's text.
+const MAX_TEXT_CHARS: usize = 300;
+const IN_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
 const MIN_RUN_BUDGET_MICROS: i64 = 10_000;
 /// A `SKILL.md` larger than this is treated as missing: it would not fit a model prompt.
 const MAX_SKILL_BYTES: u64 = 256 * 1024;
@@ -41,7 +47,8 @@ pub(super) struct Checked {
     pub skill: String,
     pub report_to: ReportTo,
     pub every_minutes: u32,
-    pub for_minutes: u32,
+    /// `None` when `start` gave none: the watch has no end.
+    pub for_minutes: Option<u32>,
     pub every_run: bool,
     /// `None` when `start` gave none and `[watch] run_budget_usd` is not set.
     pub run_budget_usd_micros: Option<i64>,
@@ -99,14 +106,13 @@ pub(super) fn check_start(
     if !EVERY_MINUTES.contains(&request.every_minutes) {
         return Err(Refusal::Invalid("every_minutes"));
     }
-    if !FOR_MINUTES.contains(&request.for_minutes) {
+    if request
+        .for_minutes
+        .is_some_and(|minutes| !FOR_MINUTES.contains(&minutes))
+    {
         return Err(Refusal::Invalid("for_minutes"));
     }
-    let report_to = match request.report_to.as_str() {
-        "chief" => ReportTo::Chief,
-        "" | "self" => ReportTo::SelfPane,
-        _ => return Err(Refusal::Invalid("report_to")),
-    };
+    let report_to = report_to(&request.report_to)?;
     let run_budget_usd_micros = run_budget(request.run_budget_usd, cfg)?;
     let run_limit_secs = run_limit(request.run_limit_secs, cfg)?;
     skill_path(&folder, &request.skill, &cfg.skill_folders).ok_or(Refusal::UnknownSkill)?;
@@ -121,6 +127,181 @@ pub(super) fn check_start(
         run_budget_usd_micros,
         run_limit_secs,
     })
+}
+
+/// What a pause or a resume acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Target {
+    Name(String),
+    All,
+}
+
+/// Who asked for a pause or a resume. It is for the log only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Caller {
+    Cli,
+    ControlTower,
+}
+
+impl Caller {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Caller::Cli => "cli",
+            Caller::ControlTower => "control_tower",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckedPause {
+    pub target: Target,
+    /// `None`: the pause waits for a resume.
+    pub for_minutes: Option<u32>,
+    pub caller: Caller,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckedResume {
+    pub target: Target,
+    pub caller: Caller,
+}
+
+/// A reminder request that passed every check. Exactly one of `in_minutes` and
+/// `due_local` is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckedRemind {
+    pub name: String,
+    pub folder: PathBuf,
+    pub report_to: ReportTo,
+    pub in_minutes: Option<u32>,
+    /// The next time the local clock reads the asked time: `YYYY-MM-DD HH:MM`.
+    pub due_local: Option<String>,
+    pub text: String,
+}
+
+fn target(name: &str, all: bool) -> Result<Target, Refusal> {
+    match (name.is_empty(), all) {
+        (true, true) => Ok(Target::All),
+        (false, false) if is_token(name) => Ok(Target::Name(name.to_owned())),
+        _ => Err(Refusal::Invalid("name")),
+    }
+}
+
+fn caller(text: &str) -> Result<Caller, Refusal> {
+    match text {
+        "" | "cli" => Ok(Caller::Cli),
+        "control_tower" => Ok(Caller::ControlTower),
+        _ => Err(Refusal::Invalid("caller")),
+    }
+}
+
+pub(super) fn check_pause(request: &PauseRequest) -> Result<CheckedPause, Refusal> {
+    let target = target(&request.name, request.all)?;
+    if request
+        .for_minutes
+        .is_some_and(|minutes| !FOR_MINUTES.contains(&minutes))
+    {
+        return Err(Refusal::Invalid("for_minutes"));
+    }
+    Ok(CheckedPause {
+        target,
+        for_minutes: request.for_minutes,
+        caller: caller(&request.caller)?,
+    })
+}
+
+pub(super) fn check_resume(request: &ResumeRequest) -> Result<CheckedResume, Refusal> {
+    Ok(CheckedResume {
+        target: target(&request.name, request.all)?,
+        caller: caller(&request.caller)?,
+    })
+}
+
+/// Checks a reminder request. `now` is the local clock, so `at_local` gives the same
+/// answer in a test.
+pub(super) fn check_remind(
+    request: &RemindRequest,
+    now: &LocalNow,
+) -> Result<CheckedRemind, Refusal> {
+    if !is_token(&request.name) {
+        return Err(Refusal::Invalid("name"));
+    }
+    let folder = canonical_folder(&request.folder).ok_or(Refusal::Invalid("folder"))?;
+    let (in_minutes, due_local) = match &request.when {
+        Some(When::InMinutes(minutes)) if IN_MINUTES.contains(minutes) => (Some(*minutes), None),
+        Some(When::InMinutes(_)) => return Err(Refusal::Invalid("in_minutes")),
+        Some(When::AtLocal(text)) => (None, Some(next_local(text, now)?)),
+        None => return Err(Refusal::Invalid("when")),
+    };
+    let report_to = report_to(&request.report_to)?;
+    let text = clean_text(&request.text);
+    if text.is_empty() {
+        return Err(Refusal::Invalid("text"));
+    }
+    Ok(CheckedRemind {
+        name: request.name.clone(),
+        folder,
+        report_to,
+        in_minutes,
+        due_local,
+        text,
+    })
+}
+
+/// `HH:MM`, 24 hours, as seconds since midnight.
+fn parse_clock(text: &str) -> Option<u32> {
+    let (hours, minutes) = text.split_once(':')?;
+    let digits = |part: &str| {
+        (part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    };
+    let (hours, minutes) = (digits(hours)?, digits(minutes)?);
+    (hours < 24 && minutes < 60).then_some(hours * 3600 + minutes * 60)
+}
+
+/// The next time the local clock reads `at`: today when it is still ahead, else tomorrow.
+fn next_local(at: &str, now: &LocalNow) -> Result<String, Refusal> {
+    const INVALID: Refusal = Refusal::Invalid("at_local");
+    let seconds = parse_clock(at).ok_or(INVALID)?;
+    let mut parts = now.day.split('-').map(str::parse::<i32>);
+    let (Some(Ok(year)), Some(Ok(month)), Some(Ok(day))) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(INVALID);
+    };
+    let month =
+        time::Month::try_from(u8::try_from(month).map_err(|_| INVALID)?).map_err(|_| INVALID)?;
+    let today =
+        time::Date::from_calendar_date(year, month, u8::try_from(day).map_err(|_| INVALID)?)
+            .map_err(|_| INVALID)?;
+    let date = if seconds > now.seconds_of_day {
+        today
+    } else {
+        today.next_day().ok_or(INVALID)?
+    };
+    Ok(format!(
+        "{:04}-{:02}-{:02} {at}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    ))
+}
+
+/// A reminder's text without control characters or escape sequences, cut to 300
+/// characters. It uses the same cleaning as a watch report.
+pub(super) fn clean_text(text: &str) -> String {
+    sanitize_bounded_metadata(text, MAX_TEXT_CHARS)
+        .trim()
+        .to_owned()
+}
+
+fn report_to(text: &str) -> Result<ReportTo, Refusal> {
+    match text {
+        "chief" => Ok(ReportTo::Chief),
+        "" | "self" => Ok(ReportTo::SelfPane),
+        _ => Err(Refusal::Invalid("report_to")),
+    }
 }
 
 /// The run limit in seconds. 0 means none given, so the default applies.

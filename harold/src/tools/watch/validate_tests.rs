@@ -33,7 +33,7 @@ fn request(folder: &Path) -> StartWatchRequest {
         folder: folder.to_str().unwrap().into(),
         skill: "pod-watch".into(),
         every_minutes: 10,
-        for_minutes: 120,
+        for_minutes: Some(120),
         report_to: String::new(),
         run_budget_usd: 0.0,
         every_run: false,
@@ -84,7 +84,7 @@ fn every_for_and_report_to_outside_the_table_are_refused() {
     }
     for (minutes, ok) in [(0, false), (1, true), (1440, true), (1441, false)] {
         let mut asked = request(&temp.0);
-        asked.for_minutes = minutes;
+        asked.for_minutes = Some(minutes);
         assert_eq!(check(&asked).is_ok(), ok, "for {minutes}");
     }
     for (report_to, expected) in [
@@ -492,4 +492,236 @@ fn read_skill_reads_add_dirs() {
     let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
     assert_eq!(skill.add_dirs, ["/x"]);
     assert_eq!(skill.allowed_tools.as_deref(), Some("Write"));
+}
+
+// ---------------------------------------------------------------------------
+// Start with no end, pause, resume, remind
+// ---------------------------------------------------------------------------
+
+use harold_api::tools::watch::v1::remind_request::When;
+use harold_api::tools::watch::v1::{PauseRequest, RemindRequest, ResumeRequest};
+
+use crate::timed_prompts::LocalNow;
+
+#[test]
+fn a_start_with_no_for_minutes_is_valid_and_has_no_end() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let mut asked = request(&temp.0);
+    asked.for_minutes = None;
+    assert_eq!(check(&asked).unwrap().for_minutes, None);
+}
+
+fn pause(name: &str, all: bool, for_minutes: Option<u32>, caller: &str) -> PauseRequest {
+    PauseRequest {
+        name: name.into(),
+        all,
+        for_minutes,
+        caller: caller.into(),
+    }
+}
+
+#[test]
+fn pause_takes_a_name_or_all_but_not_both_or_neither() {
+    let one = check_pause(&pause("pods", false, None, "")).unwrap();
+    assert_eq!(one.target, Target::Name("pods".into()));
+    assert_eq!(one.caller, Caller::Cli);
+    assert_eq!(one.for_minutes, None);
+    let all = check_pause(&pause("", true, Some(30), "control_tower")).unwrap();
+    assert_eq!(all.target, Target::All);
+    assert_eq!(all.caller, Caller::ControlTower);
+    assert_eq!(all.for_minutes, Some(30));
+    for (name, all) in [("pods", true), ("", false), ("a b", false)] {
+        assert_eq!(
+            check_pause(&pause(name, all, None, "")),
+            Err(Refusal::Invalid("name")),
+            "{name:?} {all}"
+        );
+    }
+}
+
+#[test]
+fn pause_for_minutes_runs_from_1_to_1440() {
+    for (minutes, ok) in [(0, false), (1, true), (1440, true), (1441, false)] {
+        let result = check_pause(&pause("pods", false, Some(minutes), "cli"));
+        assert_eq!(result.is_ok(), ok, "for {minutes}");
+        if !ok {
+            assert_eq!(result, Err(Refusal::Invalid("for_minutes")));
+        }
+    }
+}
+
+#[test]
+fn a_caller_is_cli_control_tower_or_empty() {
+    for (caller, expected) in [
+        ("cli", Ok(Caller::Cli)),
+        ("", Ok(Caller::Cli)),
+        ("control_tower", Ok(Caller::ControlTower)),
+        ("chief", Err(Refusal::Invalid("caller"))),
+        ("CLI", Err(Refusal::Invalid("caller"))),
+    ] {
+        let paused = check_pause(&pause("pods", false, None, caller)).map(|c| c.caller);
+        assert_eq!(paused, expected, "{caller:?}");
+        let resumed = check_resume(&ResumeRequest {
+            name: "pods".into(),
+            all: false,
+            caller: caller.into(),
+        })
+        .map(|c| c.caller);
+        assert_eq!(resumed, expected, "{caller:?}");
+    }
+}
+
+#[test]
+fn resume_takes_a_name_or_all_but_not_both_or_neither() {
+    let resume = |name: &str, all| {
+        check_resume(&ResumeRequest {
+            name: name.into(),
+            all,
+            caller: String::new(),
+        })
+    };
+    assert_eq!(
+        resume("pods", false).unwrap().target,
+        Target::Name("pods".into())
+    );
+    assert_eq!(resume("", true).unwrap().target, Target::All);
+    assert_eq!(resume("pods", true), Err(Refusal::Invalid("name")));
+    assert_eq!(resume("", false), Err(Refusal::Invalid("name")));
+}
+
+fn at_ten() -> LocalNow {
+    LocalNow {
+        day: "2026-11-03".into(),
+        seconds_of_day: 10 * 3600,
+    }
+}
+
+fn remind(folder: &Path, when: Option<When>) -> RemindRequest {
+    RemindRequest {
+        name: "stand-up".into(),
+        folder: folder.to_str().unwrap().into(),
+        when,
+        report_to: "chief".into(),
+        text: "check the release".into(),
+    }
+}
+
+fn remind_check(folder: &Path, when: Option<When>) -> Result<CheckedRemind, Refusal> {
+    check_remind(&remind(folder, when), &at_ten())
+}
+
+#[test]
+fn a_reminder_takes_in_minutes_or_at_local() {
+    let temp = Temp::new();
+    let soon = remind_check(&temp.0, Some(When::InMinutes(45))).unwrap();
+    assert_eq!((soon.in_minutes, soon.due_local), (Some(45), None));
+    assert_eq!(soon.name, "stand-up");
+    assert_eq!(soon.folder, temp.0);
+    assert_eq!(soon.report_to, ReportTo::Chief);
+    assert_eq!(soon.text, "check the release");
+    let later = remind_check(&temp.0, Some(When::AtLocal("16:30".into()))).unwrap();
+    assert_eq!(
+        (later.in_minutes, later.due_local.as_deref()),
+        (None, Some("2026-11-03 16:30"))
+    );
+}
+
+/// The proto's `oneof` cannot hold both times, so "both set" cannot reach the check.
+#[test]
+fn a_reminder_with_no_time_is_refused() {
+    let temp = Temp::new();
+    assert_eq!(remind_check(&temp.0, None), Err(Refusal::Invalid("when")));
+}
+
+#[test]
+fn bad_times_are_refused() {
+    let temp = Temp::new();
+    for minutes in [0, 1441] {
+        assert_eq!(
+            remind_check(&temp.0, Some(When::InMinutes(minutes))),
+            Err(Refusal::Invalid("in_minutes")),
+            "{minutes}"
+        );
+    }
+    for at in [
+        "25:00", "16:3", "1630", "16:60", "4:30", "ab:cd", "", "16:30:00", "-1:30",
+    ] {
+        assert_eq!(
+            remind_check(&temp.0, Some(When::AtLocal(at.into()))),
+            Err(Refusal::Invalid("at_local")),
+            "{at:?}"
+        );
+    }
+    for at in ["00:00", "23:59"] {
+        assert!(remind_check(&temp.0, Some(When::AtLocal(at.into()))).is_ok());
+    }
+}
+
+#[test]
+fn a_time_that_passed_today_is_due_the_next_day() {
+    let temp = Temp::new();
+    let due = |day: &str, seconds_of_day, at: &str| {
+        let now = LocalNow {
+            day: day.into(),
+            seconds_of_day,
+        };
+        let asked = remind(&temp.0, Some(When::AtLocal(at.into())));
+        check_remind(&asked, &now).unwrap().due_local.unwrap()
+    };
+    assert_eq!(due("2026-11-03", 36_000, "09:00"), "2026-11-04 09:00");
+    assert_eq!(due("2026-11-03", 36_000, "10:00"), "2026-11-04 10:00");
+    assert_eq!(due("2026-11-03", 36_000, "10:01"), "2026-11-03 10:01");
+    assert_eq!(due("2026-12-31", 80_000, "01:00"), "2027-01-01 01:00");
+    assert_eq!(due("2028-02-28", 80_000, "01:00"), "2028-02-29 01:00");
+}
+
+#[test]
+fn a_reminder_checks_its_name_folder_and_report_to() {
+    let temp = Temp::new();
+    let when = Some(When::InMinutes(5));
+    let mut asked = remind(&temp.0, when.clone());
+    asked.name = "a b".into();
+    assert_eq!(
+        check_remind(&asked, &at_ten()),
+        Err(Refusal::Invalid("name"))
+    );
+    let mut asked = remind(&temp.0, when.clone());
+    asked.folder = "relative".into();
+    assert_eq!(
+        check_remind(&asked, &at_ten()),
+        Err(Refusal::Invalid("folder"))
+    );
+    let mut asked = remind(&temp.0, when.clone());
+    asked.report_to = "/x".into();
+    assert_eq!(
+        check_remind(&asked, &at_ten()),
+        Err(Refusal::Invalid("report_to"))
+    );
+    let mut asked = remind(&temp.0, when);
+    asked.report_to = String::new();
+    assert_eq!(
+        check_remind(&asked, &at_ten()).unwrap().report_to,
+        ReportTo::SelfPane
+    );
+}
+
+#[test]
+fn reminder_text_is_cleaned_cut_and_never_empty() {
+    let temp = Temp::new();
+    let with_text = |text: &str| {
+        let mut asked = remind(&temp.0, Some(When::InMinutes(5)));
+        asked.text = text.into();
+        check_remind(&asked, &at_ten()).map(|checked| checked.text)
+    };
+    assert_eq!(with_text("\x1b[31mhi\x07"), Ok("hi".into()));
+    assert_eq!(with_text("\x1b[31m\x07\n"), Err(Refusal::Invalid("text")));
+    assert_eq!(with_text(""), Err(Refusal::Invalid("text")));
+    assert_eq!(with_text(&"x".repeat(400)).unwrap().chars().count(), 300);
+}
+
+#[test]
+fn clean_text_drops_control_characters_and_cuts_to_300() {
+    assert_eq!(clean_text(&"x".repeat(400)).chars().count(), 300);
+    assert_eq!(clean_text("\x1b[31mhi\x07"), "hi");
+    assert_eq!(clean_text("é".repeat(301).as_str()).chars().count(), 300);
 }

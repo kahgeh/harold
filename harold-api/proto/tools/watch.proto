@@ -6,14 +6,30 @@
 //                `report_to` is "chief" or "self"; empty means "self".
 //                `run_budget_usd` 0 means none given. `run_limit_secs` 0 means none given:
 //                the run limit is then 120 seconds.
+//                `for_minutes` absent means the watch has no end. Such a watch needs
+//                `[watch] daily_budget_usd` to be set. The response has no `ends_at_ms`.
 //   StopWatch    ends a running watch at once.
-//   ListWatches  every watch running, and every watch that ended today.
+//   Pause        holds a running watch. `name` or `all` (not both). `for_minutes` (1 to 1440)
+//                resumes it by itself; absent means it waits for Resume. `caller` is "cli",
+//                "control_tower" or empty (meaning "cli"). `paused` names the watches held.
+//                `skipped` names the watches that were not running.
+//   Resume       releases a paused watch. `name` or `all` (not both). `resumed` names the
+//                watches released. `skipped` names the capped watches, which stay paused.
+//   Remind       types one line to `report_to` when it is due. Give `in_minutes` (1 to 1440)
+//                or `at_local` ("HH:MM", 24 hours, the next time the local clock reads it).
+//                The line is "REMIND <name>: <text>", cut to 300 characters.
+//                The response holds the due time.
+//   ListWatches  every watch running or paused, every watch that ended today, and every
+//                reminder that waits.
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" (including "invalid folder").
-//   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch).
-//   FailedPrecondition   "too_many_watches", "daily_budget_spent" (StartWatch),
-//                        "not_running" (StopWatch).
+//   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch, Pause,
+//                        Resume).
+//   FailedPrecondition   "too_many_watches", "daily_budget_spent", "daily_budget_unset"
+//                        (StartWatch with no end), "not_running" (StopWatch, Pause),
+//                        "not_paused" (Resume), "budget_day" (Pause, Resume: the watch
+//                        waits for the budget day), "name_in_use" (Remind).
 //   Unavailable          the database write failed.
 //
 // The server trusts local callers: there is no token (ADR 0002).
@@ -25,6 +41,9 @@ service WatchService {
   rpc StartWatch(StartWatchRequest) returns (StartWatchResponse);
   rpc StopWatch(StopWatchRequest) returns (StopWatchResponse);
   rpc ListWatches(ListWatchesRequest) returns (ListWatchesResponse);
+  rpc Pause(PauseRequest) returns (PauseResponse);
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
+  rpc Remind(RemindRequest) returns (RemindResponse);
 }
 
 message StartWatchRequest {
@@ -32,7 +51,8 @@ message StartWatchRequest {
   string folder = 2;
   string skill = 3;
   uint32 every_minutes = 4;
-  uint32 for_minutes = 5;
+  // Absent means the watch has no end.
+  optional uint32 for_minutes = 5;
   string report_to = 6;
   double run_budget_usd = 7;
   bool every_run = 8;
@@ -41,7 +61,8 @@ message StartWatchRequest {
 
 message StartWatchResponse {
   string name = 1;
-  int64 ends_at_ms = 2;
+  // Absent when the watch has no end.
+  optional int64 ends_at_ms = 2;
 }
 
 message StopWatchRequest {
@@ -59,7 +80,8 @@ message Watch {
   string report_to = 4;
   bool every_run = 5;
   bool running = 6;
-  int64 ends_at_ms = 7;
+  // Absent when the watch has no end.
+  optional int64 ends_at_ms = 7;
   uint32 every_minutes = 8;
   uint32 runs = 9;
   uint32 reports = 10;
@@ -68,10 +90,62 @@ message Watch {
   string stop_reason = 13;
   // The most seconds one run may take before Harold stops it.
   uint32 run_limit_secs = 14;
+  bool paused = 15;
+  // Absent when the pause has no end, or the watch is not paused.
+  optional int64 paused_until_ms = 16;
+  // Who paused the watch: "cli", "control_tower" or "budget_day". Empty when not paused.
+  string pause_how = 17;
 }
 
 message ListWatchesResponse {
   repeated Watch watches = 1;
   // What every watch together has spent today, in US dollars.
   double spent_usd = 2;
+  // The reminders that wait, soonest first.
+  repeated Reminder reminders = 3;
+}
+
+message Reminder {
+  string name = 1;
+  string report_to = 2;
+  int64 due_at_ms = 3;
+}
+
+message PauseRequest {
+  string name = 1;
+  bool all = 2;
+  optional uint32 for_minutes = 3;
+  string caller = 4;
+}
+
+message PauseResponse {
+  repeated string paused = 1;
+  repeated string skipped = 2;
+}
+
+message ResumeRequest {
+  string name = 1;
+  bool all = 2;
+  string caller = 3;
+}
+
+message ResumeResponse {
+  repeated string resumed = 1;
+  // The capped watches. They stay paused.
+  repeated string skipped = 2;
+}
+
+message RemindRequest {
+  string name = 1;
+  string folder = 2;
+  oneof when {
+    uint32 in_minutes = 3;
+    string at_local = 4;
+  }
+  string report_to = 5;
+  string text = 6;
+}
+
+message RemindResponse {
+  int64 due_at_ms = 1;
 }

@@ -16,7 +16,7 @@ fn request(h: &Harness, name: &str) -> StartWatchRequest {
         folder: h.folder.0.to_string_lossy().into_owned(),
         skill: "pod-watch".into(),
         every_minutes: 10,
-        for_minutes: 120,
+        for_minutes: Some(120),
         report_to: "chief".into(),
         run_budget_usd: 0.0,
         every_run: false,
@@ -43,7 +43,7 @@ async fn start_stop_and_list_answer_with_the_fields_the_proto_names() {
         .unwrap()
         .into_inner();
     assert_eq!(started.name, "after-release");
-    assert!(started.ends_at_ms > 0);
+    assert!(started.ends_at_ms.unwrap() > 0);
     pass(Duration::from_secs(10)).await;
 
     let listed = service
@@ -113,7 +113,7 @@ async fn start_refuses_with_the_codes_and_messages_the_proto_names() {
         (invalid, "invalid every_minutes".into())
     );
     let mut asked = request(&h, "w");
-    asked.for_minutes = 1441;
+    asked.for_minutes = Some(1441);
     assert_eq!(
         refusal(&service, asked).await,
         (invalid, "invalid for_minutes".into())
@@ -221,4 +221,135 @@ async fn a_run_limit_above_the_setting_is_refused_with_the_setting_and_its_value
     let mut asked = request(&h, "w");
     asked.run_limit_secs = 300;
     service.start_watch(Request::new(asked)).await.unwrap();
+}
+
+#[test]
+fn every_scheduler_refusal_maps_to_its_code_and_message() {
+    use tonic::Code::{FailedPrecondition, NotFound, Unavailable};
+    let cases = [
+        (
+            start_status(StartRefusal::TooManyWatches),
+            FailedPrecondition,
+            "too_many_watches",
+        ),
+        (
+            start_status(StartRefusal::DailyBudgetSpent),
+            FailedPrecondition,
+            "daily_budget_spent",
+        ),
+        (
+            start_status(StartRefusal::DailyBudgetUnset),
+            FailedPrecondition,
+            "daily_budget_unset",
+        ),
+        (
+            start_status(StartRefusal::Unavailable),
+            Unavailable,
+            "store_failed",
+        ),
+        (
+            pause_status(PauseRefusal::UnknownWatch),
+            NotFound,
+            "unknown_watch",
+        ),
+        (
+            pause_status(PauseRefusal::NotRunning),
+            FailedPrecondition,
+            "not_running",
+        ),
+        (
+            pause_status(PauseRefusal::BudgetDay),
+            FailedPrecondition,
+            "budget_day",
+        ),
+        (
+            pause_status(PauseRefusal::Unavailable),
+            Unavailable,
+            "store_failed",
+        ),
+        (
+            resume_status(ResumeRefusal::UnknownWatch),
+            NotFound,
+            "unknown_watch",
+        ),
+        (
+            resume_status(ResumeRefusal::NotPaused),
+            FailedPrecondition,
+            "not_paused",
+        ),
+        (
+            resume_status(ResumeRefusal::BudgetDay),
+            FailedPrecondition,
+            "budget_day",
+        ),
+        (
+            resume_status(ResumeRefusal::Unavailable),
+            Unavailable,
+            "store_failed",
+        ),
+        (
+            remind_status(RemindRefusal::NameInUse),
+            FailedPrecondition,
+            "name_in_use",
+        ),
+        (
+            remind_status(RemindRefusal::Unavailable),
+            Unavailable,
+            "store_failed",
+        ),
+    ];
+    for (status, code, message) in cases {
+        assert_eq!((status.code(), status.message()), (code, message));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_resume_and_remind_check_their_input_first() {
+    let h = harness(settings(), vec![]).await;
+    let service = service(&h);
+    let invalid = tonic::Code::InvalidArgument;
+    let status = service
+        .pause(Request::new(pb::PauseRequest {
+            name: "w".into(),
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!((status.code(), status.message()), (invalid, "invalid name"));
+    let status = service
+        .pause(Request::new(pb::PauseRequest {
+            name: "w".into(),
+            for_minutes: Some(1441),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        (status.code(), status.message()),
+        (invalid, "invalid for_minutes")
+    );
+    let status = service
+        .resume(Request::new(pb::ResumeRequest {
+            name: "w".into(),
+            caller: "chief".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        (status.code(), status.message()),
+        (invalid, "invalid caller")
+    );
+    let status = service
+        .remind(Request::new(pb::RemindRequest {
+            name: "r".into(),
+            folder: h.folder.0.to_string_lossy().into_owned(),
+            when: None,
+            report_to: "chief".into(),
+            text: "x".into(),
+        }))
+        .await
+        .expect_err("refused");
+    assert_eq!((status.code(), status.message()), (invalid, "invalid when"));
 }

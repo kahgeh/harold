@@ -2087,7 +2087,7 @@ fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String 
             "{} running in {} until {}, limit {} s, {counts}",
             watch.name,
             watch.folder,
-            watch_time(watch.ends_at_ms, offset),
+            watch_time(watch.ends_at_ms.unwrap_or(0), offset),
             watch.run_limit_secs
         );
     }
@@ -2173,7 +2173,7 @@ pub(crate) async fn watch_within(
                         folder: folder.to_string_lossy().into_owned(),
                         skill: skill.clone(),
                         every_minutes: *every_minutes,
-                        for_minutes: *for_minutes,
+                        for_minutes: Some(*for_minutes),
                         report_to: report_to.clone().unwrap_or_default(),
                         run_budget_usd: run_budget_usd
                             .as_deref()
@@ -2189,7 +2189,7 @@ pub(crate) async fn watch_within(
                     "started {} in {} until {}, every {every_minutes} minutes, reporting to {}",
                     started.name,
                     folder.display(),
-                    watch_time(started.ends_at_ms, offset),
+                    watch_time(started.ends_at_ms.unwrap_or(0), offset),
                     report_to
                         .as_deref()
                         .filter(|to| !to.is_empty())
@@ -6444,7 +6444,7 @@ mod tests {
             name: "after-release".into(),
             folder: "/work/chief-of-pods".into(),
             running: true,
-            ends_at_ms: 20 * 3_600_000 + 45 * 60_000,
+            ends_at_ms: Some(20 * 3_600_000 + 45 * 60_000),
             runs: 3,
             reports: 1,
             cost_usd: 0.03,

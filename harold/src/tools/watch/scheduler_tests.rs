@@ -127,7 +127,7 @@ impl Harness {
             skill: "pod-watch".into(),
             report_to: ReportTo::Chief,
             every_minutes: every,
-            for_minutes: minutes,
+            for_minutes: Some(minutes),
             every_run: false,
             run_budget_usd_micros: None,
             run_limit_secs: 120,
@@ -331,10 +331,7 @@ async fn start_with_a_running_name_replaces_it_and_runs_start_over() {
 
     pass(Duration::from_secs(2)).await;
     let row = h.row("w").await;
-    assert_eq!(
-        (row.runs, row.every_minutes, row.ends_at_ms),
-        (1, 5, Some(ends))
-    );
+    assert_eq!((row.runs, row.every_minutes, row.ends_at_ms), (1, 5, ends));
     assert!(row.running);
     assert_eq!(h.store.running().await.unwrap().len(), 1);
     // The replaced watch's task is gone: only the new schedule runs.
@@ -817,7 +814,7 @@ async fn stopping_a_watch_kills_the_child_its_run_started() {
         skill: "pod-watch".into(),
         report_to: ReportTo::Chief,
         every_minutes: 10,
-        for_minutes: 120,
+        for_minutes: Some(120),
         every_run: false,
         run_budget_usd_micros: None,
         run_limit_secs: 120,

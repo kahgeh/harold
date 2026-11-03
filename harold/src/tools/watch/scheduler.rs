@@ -20,8 +20,11 @@ use super::obs::{self, EndReason, How, RunObs, Timing};
 use super::report::{ReportSlot, Target, Typist};
 use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchStore};
-use super::validate::{Checked, ReportTo, read_skill, to_micros};
+use super::validate::{
+    Checked, CheckedPause, CheckedRemind, CheckedResume, ReportTo, read_skill, to_micros,
+};
 use crate::settings::WatchSettings;
+use crate::timed_prompts::LocalNow;
 use crate::tools::{Agents, ChiefPane, PaneTyping, Pods};
 
 /// The answer or the failure, the reported cost, and how the process ended with what
@@ -66,7 +69,37 @@ pub(super) struct Deps {
 pub(super) enum StartRefusal {
     TooManyWatches,
     DailyBudgetSpent,
+    DailyBudgetUnset,
     Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PauseRefusal {
+    UnknownWatch,
+    NotRunning,
+    BudgetDay,
+    Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ResumeRefusal {
+    UnknownWatch,
+    NotPaused,
+    BudgetDay,
+    Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RemindRefusal {
+    NameInUse,
+    Unavailable,
+}
+
+/// The watches a pause or a resume changed, and the ones it left alone.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Changed {
+    pub done: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -161,6 +194,23 @@ impl Scheduler {
         self.deps.local.offset().await
     }
 
+    /// The local date and time of day now, for a reminder's `at_local`.
+    pub(super) async fn local_now(&self) -> LocalNow {
+        let text = local_text(clock_ms(), self.offset().await);
+        let (day, clock) = text.split_once(' ').unwrap_or_default();
+        let part = |index: usize| {
+            clock
+                .split(':')
+                .nth(index)
+                .and_then(|digits| digits.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
+        LocalNow {
+            day: day.to_owned(),
+            seconds_of_day: part(0) * 3600 + part(1) * 60 + part(2),
+        }
+    }
+
     async fn today(&self) -> (i64, i64) {
         day_bounds(clock_ms(), self.offset().await)
     }
@@ -174,7 +224,10 @@ impl Scheduler {
     // -----------------------------------------------------------------------
 
     /// Starts a watch, or replaces a running one of the same name. Returns when it ends.
-    pub(super) async fn start(self: &Arc<Self>, checked: Checked) -> Result<i64, StartRefusal> {
+    pub(super) async fn start(
+        self: &Arc<Self>,
+        checked: Checked,
+    ) -> Result<Option<i64>, StartRefusal> {
         let _one_start = self.start_lock.lock().await;
         let store = &self.deps.store;
         let running = store
@@ -204,7 +257,9 @@ impl Scheduler {
                 return Err(StartRefusal::DailyBudgetSpent);
             }
         }
-        let ends_at_ms = now + i64::from(checked.for_minutes) * MINUTE_MS;
+        let ends_at_ms = checked
+            .for_minutes
+            .map(|minutes| now + i64::from(minutes) * MINUTE_MS);
         let watch = NewWatch {
             name: checked.name.clone(),
             folder: checked.folder.to_string_lossy().into_owned(),
@@ -215,7 +270,7 @@ impl Scheduler {
             run_budget_usd_micros: checked.run_budget_usd_micros,
             run_limit_secs: checked.run_limit_secs,
             started_at_ms: now,
-            ends_at_ms: Some(ends_at_ms),
+            ends_at_ms,
             next_run_at_ms: now,
         };
         store
@@ -238,6 +293,33 @@ impl Scheduler {
         )
         .await;
         Ok(ends_at_ms)
+    }
+
+    /// Holds a running watch, or every running watch.
+    pub(super) async fn pause(
+        self: &Arc<Self>,
+        _checked: CheckedPause,
+    ) -> Result<Changed, PauseRefusal> {
+        // Task 4 replaces this stub.
+        Err(PauseRefusal::Unavailable)
+    }
+
+    /// Releases a paused watch, or every paused watch.
+    pub(super) async fn resume_watches(
+        self: &Arc<Self>,
+        _checked: CheckedResume,
+    ) -> Result<Changed, ResumeRefusal> {
+        // Task 4 replaces this stub.
+        Err(ResumeRefusal::Unavailable)
+    }
+
+    /// Stores a reminder. Returns the time it is due, in milliseconds.
+    pub(super) async fn remind(
+        self: &Arc<Self>,
+        _checked: CheckedRemind,
+    ) -> Result<i64, RemindRefusal> {
+        // Task 5 replaces this stub.
+        Err(RemindRefusal::Unavailable)
     }
 
     /// Ends a running watch at once. A run in progress is stopped, its report is not
