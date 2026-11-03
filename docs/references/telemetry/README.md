@@ -441,6 +441,8 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 | Span | Fields |
 |---|---|
 | `event` | `event_type`, `event_version`: the projector's run for one stored event |
+| turn tokens | `cache_read_tokens`: the turn's cache-read tokens |
+| turn tokens | `cache_write_tokens`: the turn's cache-write tokens |
 
 These agent monitor lines carry the fields below:
 
@@ -600,8 +602,6 @@ A reminder also writes the lines of its report slot: `watch report waiting`, `wa
 
 | Field | Meaning |
 |---|---|
-| `cache_read_tokens` | The cache-read tokens of one turn |
-| `cache_write_tokens` | The cache-write tokens of one turn |
 | `reminder` | The name of a reminder. A short name the user or an agent chose, never the text |
 | `paused_until` | The local time a pause ends, as `YYYY-MM-DD HH:MM` |
 | `how` | On `watch paused` and `watch resumed`: `cli`, `control_tower`, `timed` or `budget_day`. On `watch started`: `started`, `replaced` or `resumed` |
