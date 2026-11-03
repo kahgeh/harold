@@ -101,13 +101,13 @@ class FakeGitHub:
                 'url': 'https://github.com/kahgeh/harold/releases/tag/' + tag}
 
     @staticmethod
-    def linux_run(status, conclusion, sha=None):
-        return {'status': status, 'conclusion': conclusion, 'sha': sha,
+    def linux_run(status, conclusion, sha=None, head_sha=None):
+        return {'status': status, 'conclusion': conclusion, 'sha': sha, 'head_sha': head_sha,
                 'url': 'https://github.com/kahgeh/harold/actions/runs/7'}
 
     @staticmethod
-    def mac_run(status, conclusion, sha=None):
-        return {'status': status, 'conclusion': conclusion, 'sha': sha,
+    def mac_run(status, conclusion, sha=None, head_sha=None):
+        return {'status': status, 'conclusion': conclusion, 'sha': sha, 'head_sha': head_sha,
                 'url': 'https://github.com/kahgeh/harold/actions/runs/8'}
 
     @staticmethod
@@ -152,8 +152,10 @@ class FakeGitHub:
             commit = option(args, '--commit')
             listings.append(commit)
             fields = option(args, '--json').split(',')
-            return self.printed(argv, [{field: item[field] for field in fields} for item in runs
-                                       if item['sha'] in (None, commit)])
+            # `headSha` is the commit asked about, unless the run sets another one, as a wrong filter would let through.
+            listed = [dict(item, headSha=item['head_sha'] or commit) for item in runs
+                      if item['sha'] in (None, commit) or item['head_sha']]
+            return self.printed(argv, [{field: item[field] for field in fields} for item in listed])
         if verb == ('run', 'list'):
             assert (option(args, '--workflow'), option(args, '--event')) == ('build.yml', 'release'), argv
             self.listings += 1
@@ -655,6 +657,21 @@ class CheckTests(ReleaseTestCase):
                 message = release.checks_check(self.work)
                 self.assertIn(file, message)
                 self.assertIn(self.short(), message)
+
+    def test_a_run_of_another_head_sha_never_counts(self):
+        for file, runs, _, _, _ in self.WORKFLOWS:
+            with self.subTest(workflow=file):
+                self.reset_runs()
+                maker = FakeGitHub.linux_run if runs == 'linux_runs' else FakeGitHub.mac_run
+                setattr(self.github, runs, [maker('completed', 'success', head_sha='f' * 40)])
+                message = release.checks_check(self.work)
+                self.assertIn('no run of ' + file, message)
+
+    def test_a_run_of_the_right_head_sha_passes(self):
+        sha = git(self.work, 'rev-parse', 'HEAD').strip()
+        self.github.linux_runs = [FakeGitHub.linux_run('completed', 'success', head_sha=sha)]
+        self.github.mac_runs = [FakeGitHub.mac_run('completed', 'success', head_sha=sha)]
+        self.assertIsNone(release.checks_check(self.work))
 
     def test_every_conclusion_but_success_stops_as_failed_for_each_workflow(self):
         for file, runs, _, _, _ in self.WORKFLOWS:

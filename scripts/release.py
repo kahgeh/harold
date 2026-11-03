@@ -237,14 +237,15 @@ def checks_check(cwd):
 
     The release run only builds, so the tests of a commit run on the push to main instead, in
     `LINUX_WORKFLOW` and `MAC_WORKFLOW`. The release trusts them: each workflow needs a push run
-    for exactly this commit with the conclusion `success`. Any other conclusion counts as failed.
+    for exactly this commit with the conclusion `success`. A run whose `headSha` is another commit never counts. Any other conclusion counts as failed.
     A run in progress, a failed run or no run stops the release before anything is public, and
     the message names the run, or the workflow file that has none.
     """
     sha = git(cwd, 'rev-parse', 'HEAD').strip()
     for workflow, name in ((LINUX_WORKFLOW, 'Linux tests'), (MAC_WORKFLOW, 'macOS checks')):
         runs = gh_json(cwd, 'run', 'list', '--workflow', workflow, '--event', 'push', '--commit', sha,
-                       '--limit', '20', '--json', 'status,conclusion,url')
+                       '--limit', '20', '--json', 'status,conclusion,url,headSha')
+        runs = [item for item in runs if item.get('headSha') == sha]
         if any(item['status'] == 'completed' and item['conclusion'] == 'success' for item in runs):
             continue
         waiting = [item for item in runs if item['status'] != 'completed']
