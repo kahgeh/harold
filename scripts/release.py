@@ -128,11 +128,11 @@ class Recorder:
 
         saved = {}
         try:
-            for number in (signal.SIGTERM, signal.SIGHUP):
-                saved[number] = signal.signal(number, stop)
-        except ValueError:  # not the main thread
-            pass
-        try:
+            try:
+                for number in (signal.SIGTERM, signal.SIGHUP):
+                    saved[number] = signal.signal(number, stop)
+            except ValueError:  # not the main thread
+                pass
             self.start = clock()
             for args in self.calls(result, step, seconds):
                 reason = self.call(args)

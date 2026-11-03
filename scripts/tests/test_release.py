@@ -419,6 +419,10 @@ class RecorderTests(ReleaseTestCase):
         self.assertTrue(self.record())
         self.assertEqual(len(harold_calls(self)), 1)
 
+    def test_a_ctrl_c_while_the_handlers_are_set_is_answered(self):
+        with patch.object(release.signal, 'signal', side_effect=KeyboardInterrupt):
+            self.assertEqual(release.Recorder(self.work).record('ok', 'none', {}), 'stopped by the user')
+
     def test_a_short_step_records_one_second(self):
         self.record(seconds={'checks': 0.2})
         self.assertIn(['count', 'harold.release.seconds', '1', '--attr', 'result=ok', '--attr', 'step=checks'],
