@@ -346,5 +346,109 @@ class OneMomentTests(unittest.TestCase):
         self.assertEqual(0, ct.one_moment_sounds([(0.0, self.shown('a', 'Fine.'))]))
 
 
+import tempfile  # noqa: E402
+
+import otel_test as ot  # noqa: E402
+
+PLANTED = {
+    'device-cookie': 'Cookie: harold_device=PLANTED123',
+    'pairing-code': 'HAROLD_PAIRING_CODE=made-up-1',
+    'authorization-header': 'Authorization: Basic madeup',
+    'bearer': 'header Bearer madeuptoken1',
+    'aws-key': 'key AKIAABCDEFGHIJKLMNOP end',
+    'github-token': 'token ghp_abcdefghijklmnopqrstuvwxyz0123',
+    'private-key': '-----BEGIN RSA PRIVATE KEY-----',
+}
+NORMAL = 'INFO harold started\nINFO call ended, listening for the next turn\nINFO answer sent\n'
+
+
+class TestLogCopyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.scratch = self.root / 'scratch'
+        self.scratch.mkdir()
+        self.out = self.root / 'out'
+        self.out.mkdir()
+        self.env = {'TEST_RUN_DIR': str(self.out), 'TEST_RUN_STEM': 'stem'}
+
+    def stub(self, cls=ct.Run, text=NORMAL):
+        run = object.__new__(cls)
+        run.scratch = self.scratch
+        run.log_path = self.scratch / 'harold.log'
+        run.log_path.write_text(text)
+        run.keep = True
+        run.stand_in_to_print = False
+        return run
+
+    def finish(self, run, passed):
+        saved = dict(ct.os.environ)
+        ct.os.environ.update(self.env)
+        try:
+            with io.StringIO() as sink:
+                old, sys.stdout = sys.stdout, sink
+                try:
+                    run.finish(passed)
+                finally:
+                    sys.stdout = old
+        finally:
+            ct.os.environ.clear()
+            ct.os.environ.update(saved)
+
+    def names(self):
+        return sorted(p.name for p in self.out.iterdir())
+
+    def test_copy_on_pass_and_fail(self):
+        for passed in (True, False):
+            for p in self.out.iterdir():
+                p.write_text('')
+            self.finish(self.stub(), passed)
+            self.assertEqual(NORMAL, (self.out / 'stem-harold.log').read_text())
+
+    def test_no_copy_without_variables(self):
+        self.assertEqual([], ct.keep_test_log({'harold': self.stub().log_path}, {}))
+        for env in ({'TEST_RUN_DIR': str(self.out)}, {'TEST_RUN_STEM': 'stem'}):
+            self.assertEqual([], ct.keep_test_log({'harold': self.stub().log_path}, env))
+        self.assertEqual([], self.names())
+
+    def test_planted_device_cookie_is_withheld(self):
+        self.finish(self.stub(text=NORMAL + PLANTED['device-cookie'] + '\n'), True)
+        self.assertEqual(['stem-harold.withheld'], self.names())
+        text = (self.out / 'stem-harold.withheld').read_text()
+        self.assertIn('device-cookie', text)
+        self.assertNotIn('PLANTED123', text)
+
+    def test_each_pattern_detected(self):
+        self.assertEqual(set(ct.SECRET_PATTERNS), set(PLANTED))
+        for key, text in PLANTED.items():
+            with self.subTest(key=key):
+                self.assertEqual(key, ct.first_secret('a line\n' + text + '\n'))
+
+    def test_normal_run_copies_hold_no_pattern(self):
+        self.finish(self.stub(), True)
+        copies = list(self.out.iterdir())
+        self.assertEqual(1, len(copies))
+        for path in copies:
+            self.assertIsNone(ct.first_secret(path.read_text()))
+
+    def test_missing_part_is_skipped(self):
+        written = ct.keep_test_log({'harold': self.scratch / 'none.log'}, self.env)
+        self.assertEqual([], written)
+        self.assertEqual([], self.names())
+
+    def test_otel_parts(self):
+        run = self.stub(ot.OtelRun)
+        (self.scratch / 'a-browser.json').write_text('{"a": 1}')
+        (self.scratch / 'b-browser.json').write_text('{"b": 2}')
+        (self.scratch / 'spans.jsonl').write_text('{"span": 1}\n')
+        self.assertEqual({'harold', 'browser', 'collector'}, set(run.test_log_parts()))
+        self.finish(run, True)
+        self.assertEqual(['stem-browser.log', 'stem-collector.log', 'stem-harold.log'], self.names())
+        browser = (self.out / 'stem-browser.log').read_text()
+        self.assertIn('{"a": 1}', browser)
+        self.assertIn('{"b": 2}', browser)
+
+
 if __name__ == '__main__':
     unittest.main()

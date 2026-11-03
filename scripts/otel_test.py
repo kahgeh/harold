@@ -49,6 +49,16 @@ class OtelRun(ct.Run):
         self.ports = ports
         self.sampler = None
 
+    def test_log_parts(self):
+        parts = super().test_log_parts()
+        results = sorted(self.scratch.glob('*-browser.json'))
+        joined = self.scratch / 'browser-results.txt'
+        if results:
+            joined.write_text(''.join('# {}\n{}\n'.format(r.name, r.read_text(errors='replace')) for r in results))
+        parts['browser'] = joined
+        parts['collector'] = self.scratch / 'spans.jsonl'
+        return parts
+
     def write_config(self):
         for folder in (self.config_dir, self.chief_dir / '.claude', self.scratch / 't'):
             folder.mkdir(parents=True)

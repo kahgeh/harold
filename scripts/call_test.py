@@ -501,6 +501,52 @@ def tmux(env, *args, check=True):
     return subprocess.run(['tmux', '-f', '/dev/null', *args], env=env, text=True, capture_output=True, check=check, timeout=15)
 
 
+# What the copy step looks for. The scratch Harold pairs nobody (require_pairing = false) and
+# never logs a pairing code; the only form a code takes is HAROLD_PAIRING_CODE=<value> (the
+# pairing file) or "pairing code: <value>" in text, so the pattern matches both.
+SECRET_PATTERNS = {
+    'device-cookie': re.compile(r'harold_device='),
+    'pairing-code': re.compile(r'HAROLD_PAIRING_CODE\s*[=:]|pairing[ _-]?code["\']?\s*[=:]\s*\S', re.IGNORECASE),
+    'authorization-header': re.compile(r'Authorization:', re.IGNORECASE),
+    'bearer': re.compile(r'\bBearer\s+\S', re.IGNORECASE),
+    'aws-key': re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'),
+    'github-token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})'),
+    'private-key': re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
+}
+
+
+def first_secret(text):
+    """The key of the first secret pattern that matches `text`, or None."""
+    for key, pattern in SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return key
+    return None
+
+
+def keep_test_log(parts, env=os.environ):
+    """Copies each part to $TEST_RUN_DIR/$TEST_RUN_STEM-<part>.log when it holds no secret;
+    otherwise writes <stem>-<part>.withheld naming the pattern only. Does nothing unless both
+    variables are set. Returns the files it wrote."""
+    folder = env.get('TEST_RUN_DIR')
+    stem = env.get('TEST_RUN_STEM')
+    if not folder or not stem:
+        return []
+    written = []
+    for part, path in parts.items():
+        path = Path(path)
+        if not path.is_file():
+            continue
+        found = first_secret(path.read_text(errors='replace'))
+        if found is None:
+            target = Path(folder) / '{}-{}.log'.format(stem, part)
+            shutil.copyfile(path, target)
+        else:
+            target = Path(folder) / '{}-{}.withheld'.format(stem, part)
+            target.write_text(found + '\n')
+        written.append(target)
+    return written
+
+
 class Run:
     """One call test: the scratch folder, the test Harold and the stand-in chief."""
 
@@ -780,9 +826,14 @@ class Run:
         if self.log_file is not None:
             self.log_file.close()
 
+    def test_log_parts(self):
+        """The files the test-run copy step keeps, by part name."""
+        return {'harold': self.log_path}
+
     def finish(self, passed):
         if not passed and self.stand_in_to_print:
             print(self.stand_in_text)
+        keep_test_log(self.test_log_parts())
         if passed and not self.keep:
             shutil.rmtree(self.scratch, ignore_errors=True)
             return
