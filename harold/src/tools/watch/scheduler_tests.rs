@@ -2147,6 +2147,8 @@ async fn each_changed_count_is_logged_once_and_an_equal_count_is_not() {
             assert!(!line.contains(word), "{word} in {line}");
         }
     }
+}
+
 // ---------------------------------------------------------------------------
 // Cron watches
 // ---------------------------------------------------------------------------
