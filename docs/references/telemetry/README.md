@@ -578,8 +578,10 @@ A watch runs every few minutes (`--every`) or at the minutes of a cron expressio
 **Question this answers.** Did my schedule run when I expected?
 
 - Optimisation: none. A schedule costs one check a minute.
-- Detection: any `missed` outcome of `watch.runs` in a day is a cue to look (info, not an alert). No card in `dashboard.json` shows it yet. To read it, use [the counter rule](#the-counter-rule) on `watch.runs` with `outcome = missed`, by `folder`, over the last 24 hours. A rise above 0 names the folder.
+- Detection: the card "Watch runs missed today" (info, not an alert). Any row is a cue to look.
 - Diagnosis: `late_s` and `missed` on the line, and the watch's `checked` minute in `harold tool watch list`.
+
+**Watch runs missed today.** The card in the Pods group lists each `watch run skipped` line with `reason = missed` since the start of the day, with the watch name, `missed` and the time. Each row is one `missed` outcome of `watch.runs`. The card reads the log lines, so it names the watch, which the metric does not carry. It is a card, not an alert.
 
 ## The dashboards
 
@@ -600,6 +602,7 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Pods | Lines merged, last hour | `pod.merged_lines` in the last hour | SQL: the counter rule over the last hour |
 | Pods | Watches paused over 24 hours | each watch whose newest line is a `watch paused` with no `paused_until`, older than 24 hours | SQL table over `otel.otel_logs`, the last 30 days. Info only. No earlier tile |
 | Pods | Reminders dropped today | the `reminder ended` lines with `reason = dropped` since the start of the day | SQL table over `otel.otel_logs`. Info only, not an alert. No earlier tile |
+| Pods | Watch runs missed today | the `watch run skipped` lines with `reason = missed` since the start of the day | SQL table over `otel.otel_logs`. Info only, not an alert. No earlier tile |
 | Phone requests | Requests | `harold.phone_requests` in the period | SQL: the counter rule |
 | Phone requests | Availability | typed divided by all requests | SQL: the counter rule, typed rises over all rises |
 | Phone requests | Right agent | typed minus wrong, divided by all requests, on every channel but `web_app` (no number if there are none) | SQL: the counter rule, over both counters |

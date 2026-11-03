@@ -807,7 +807,8 @@ async fn a_run_at_an_interval_logs_schedule_every_late_s_and_missed_0() {
     for line in &finished {
         assert!(line.contains("schedule=\"every\""), "{line}");
         assert!(line.contains(" missed=0"), "{line}");
-        assert!((0..=1).contains(&number(line, "late_s")), "{line}");
+        // The paused clock wakes the task at its slot exactly.
+        assert_eq!(number(line, "late_s"), 0, "{line}");
     }
     // The three fields reach the export on the line itself.
     let exported = exported_logs_of(&name)
@@ -842,8 +843,9 @@ async fn a_cron_run_after_a_sleep_over_three_matches_logs_missed_2_and_no_skip()
     assert_eq!(finished.len(), 1, "{text}");
     assert!(finished[0].contains("schedule=\"cron\""), "{}", finished[0]);
     assert!(finished[0].contains(" missed=2"), "{}", finished[0]);
-    let late_s = number(finished[0], "late_s");
-    assert!((5 * 60..=7 * 60).contains(&late_s), "from 12:30: {late_s}");
+    // The task slept to 12:01 by tokio's clock, so it wakes at 12:36:00 by the wall clock:
+    // 6 minutes after 12:30.
+    assert_eq!(number(finished[0], "late_s"), 6 * 60, "from 12:30");
     assert!(
         lines(&text, "watch run skipped", &name).is_empty(),
         "{text}"

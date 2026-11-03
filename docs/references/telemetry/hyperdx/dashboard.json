@@ -1087,6 +1087,22 @@
       }
     },
     {
+      "id": "watch-runs-missed-today",
+      "name": "Watch runs missed today",
+      "x": 0,
+      "y": 12,
+      "w": 12,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT LogAttributes['watch'] AS watch, LogAttributes['missed'] AS missed, Timestamp AS skipped_at FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'watch run skipped' AND LogAttributes['reason'] = 'missed' AND Timestamp >= toStartOfDay(now()) AND Timestamp < now() ORDER BY skipped_at DESC"
+      }
+    },
+    {
       "id": "agents-by-state",
       "name": "Agents by state",
       "x": 0,

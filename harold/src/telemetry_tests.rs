@@ -2036,6 +2036,7 @@ const ATTRIBUTES: &[&str] = &[
     "metric",
     "watch",
     "reminder",
+    "missed",
     "exception.type",
     "code.filepath",
     "harold.opened_at",
@@ -2458,6 +2459,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             REMOTE_ORDER_UNREADABLE_CARD.to_string(),
             WATCHES_PAUSED_CARD.to_string(),
             REMINDERS_DROPPED_CARD.to_string(),
+            WATCH_RUNS_MISSED_CARD.to_string(),
         ])
         .chain(AGENT_CARDS.map(str::to_string))
         .chain(WORK_CARDS.map(str::to_string))
@@ -2643,6 +2645,7 @@ const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
 const REMOTE_ORDER_UNREADABLE_CARD: &str = "Remote order unreadable, by day";
 const WATCHES_PAUSED_CARD: &str = "Watches paused over 24 hours";
 const REMINDERS_DROPPED_CARD: &str = "Reminders dropped today";
+const WATCH_RUNS_MISSED_CARD: &str = "Watch runs missed today";
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
@@ -2817,7 +2820,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
             && name != REX_READS_SLOW_CARD
             && name != REMOTE_ORDER_UNREADABLE_CARD
             && name != WATCHES_PAUSED_CARD
-            && name != REMINDERS_DROPPED_CARD;
+            && name != REMINDERS_DROPPED_CARD
+            && name != WATCH_RUNS_MISSED_CARD;
         let config = &tile["config"];
         match config["sqlTemplate"].as_str() {
             // A SQL tile takes the filter only through `$__filters`.
@@ -5296,7 +5300,18 @@ fn the_watch_and_reminder_cards_read_the_log_lines_in_the_pods_group() {
     ] {
         assert!(dropped.contains(phrase), "{phrase}: {dropped}");
     }
-    // Neither card is an alert.
+    // Each `missed` outcome of `watch.runs` is one `watch run skipped` line with
+    // reason `missed`.
+    let missed = sql_of(WATCH_RUNS_MISSED_CARD);
+    for phrase in [
+        "Body = 'watch run skipped'",
+        "LogAttributes['reason'] = 'missed'",
+        "LogAttributes['missed'] AS missed",
+        "toStartOfDay(now())",
+    ] {
+        assert!(missed.contains(phrase), "{phrase}: {missed}");
+    }
+    // No card is an alert.
     assert!(!dashboard.to_string().contains("watch-paused-alert"));
 }
 
