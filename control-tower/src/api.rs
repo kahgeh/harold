@@ -28,6 +28,10 @@ use harold_api::tools::questions::v1::{
 use harold_api::tools::watch::v1::{
     PauseRequest, ResumeRequest, watch_service_client::WatchServiceClient,
 };
+use harold_api::tools::work::v1::{
+    ListRequest as WorkListRequest, ListResponse as WorkListResponse,
+    work_service_client::WorkServiceClient,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tonic::transport::{Channel, Endpoint};
@@ -162,6 +166,7 @@ pub struct SourceStream {
     backlog: Option<BacklogServiceClient<Channel>>,
     knowledge: Option<KnowledgeServiceClient<Channel>>,
     watch: Option<WatchServiceClient<Channel>>,
+    work: Option<WorkServiceClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -206,6 +211,7 @@ where
         backlog: None,
         knowledge: None,
         watch: None,
+        work: None,
     }
 }
 
@@ -350,6 +356,22 @@ impl SourceStream {
             .map_err(|error| SourceError::transport(error.to_string()))
     }
 
+    /// The open work records in focus, in the order the work tool lists them. An older
+    /// Harold answers `Unimplemented`, which reads as `FocusRead::Unimplemented`.
+    pub async fn list_focus(&self) -> Result<FocusRead, SourceError> {
+        let Some(mut client) = self.work.clone() else {
+            return Err(SourceError::transport("work tool unavailable"));
+        };
+        let answer = tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.list(WorkListRequest { all: false }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("work request timed out"))?
+        .map(tonic::Response::into_inner);
+        focus_read(answer)
+    }
+
     pub async fn answer_question(&self, out: &Outgoing) -> SendResult {
         let Some(mut client) = self.questions.clone() else {
             return SendResult::Unavailable;
@@ -430,9 +452,51 @@ impl AgentStateSource {
             source.questions = Some(QuestionServiceClient::new(channel.clone()));
             source.backlog = Some(BacklogServiceClient::new(channel.clone()));
             source.knowledge = Some(KnowledgeServiceClient::new(channel.clone()));
-            source.watch = Some(WatchServiceClient::new(channel));
+            source.watch = Some(WatchServiceClient::new(channel.clone()));
+            source.work = Some(WorkServiceClient::new(channel));
             Ok(source)
         })
+    }
+}
+
+/// The work tool allows two open work records in focus.
+const FOCUS_LIMIT: usize = 2;
+
+/// One work record in focus, as the screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FocusRecord {
+    pub name: String,
+    pub status: String,
+    pub next_step: String,
+}
+
+/// What the work tool answered: the focus records, or that it is not there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusRead {
+    Records(Vec<FocusRecord>),
+    Unimplemented,
+}
+
+/// Keeps the first two work records in focus, in order, and cleans each text field.
+pub fn map_focus(response: WorkListResponse) -> Vec<FocusRecord> {
+    response
+        .records
+        .into_iter()
+        .filter(|record| record.priority == "focus")
+        .take(FOCUS_LIMIT)
+        .map(|record| FocusRecord {
+            name: sanitize_display(&record.name, PANE_FIELD_LIMIT),
+            status: sanitize_display(&record.status, PANE_FIELD_LIMIT),
+            next_step: sanitize_display(&record.next_step, SUMMARY_LIMIT),
+        })
+        .collect()
+}
+
+fn focus_read(answer: Result<WorkListResponse, tonic::Status>) -> Result<FocusRead, SourceError> {
+    match answer {
+        Ok(response) => Ok(FocusRead::Records(map_focus(response))),
+        Err(status) if status.code() == tonic::Code::Unimplemented => Ok(FocusRead::Unimplemented),
+        Err(status) => Err(SourceError::transport(status.to_string())),
     }
 }
 
@@ -831,9 +895,11 @@ mod tests {
     use crate::app::{AgentState, CallAction, CallState, CallView, MonitorHealthState};
 
     use super::{
-        ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_now,
-        map_snapshot, now_request, spawn_reader,
+        FocusRead, PANE_FIELD_LIMIT, ProtocolError, SUMMARY_LIMIT, SnapshotReader, SourceError,
+        call_request_timeout, focus_read, map_call, map_focus, map_now, map_snapshot, now_request,
+        spawn_reader,
     };
+    use crate::text::sanitize_display;
 
     #[test]
     fn maps_the_harold_version_cleaned_and_cut_or_none_when_empty() {
@@ -1458,6 +1524,85 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.list_queue_now().await.unwrap_err();
         assert!(error.detail().contains("backlog tool unavailable"));
+    }
+
+    fn work_record(
+        name: &str,
+        priority: &str,
+        next_step: &str,
+    ) -> harold_api::tools::work::v1::WorkRecord {
+        harold_api::tools::work::v1::WorkRecord {
+            name: name.to_owned(),
+            priority: priority.to_owned(),
+            status: "building".to_owned(),
+            next_step: next_step.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn work_list(
+        records: Vec<harold_api::tools::work::v1::WorkRecord>,
+    ) -> harold_api::tools::work::v1::ListResponse {
+        harold_api::tools::work::v1::ListResponse {
+            records,
+            file: String::new(),
+        }
+    }
+
+    #[test]
+    fn map_focus_keeps_two_focus_records_in_order() {
+        let mapped = map_focus(work_list(vec![
+            work_record("a", "focus", "x"),
+            work_record("b", "next", "x"),
+            work_record("c", "focus", "x"),
+            work_record("d", "focus", "x"),
+        ]));
+        let names: Vec<&str> = mapped.iter().map(|record| record.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"]);
+    }
+
+    #[test]
+    fn map_focus_ends_with_an_empty_next_step() {
+        let mapped = map_focus(work_list(vec![work_record("a", "focus", "")]));
+        assert_eq!(mapped[0].next_step, "");
+        assert_eq!(mapped[0].status, "building");
+    }
+
+    #[test]
+    fn map_focus_cleans_control_characters() {
+        let mapped = map_focus(work_list(vec![work_record(
+            "a\u{1b}[31mb",
+            "focus",
+            "go\nnow\u{1b}[0m",
+        )]));
+        assert_eq!(
+            mapped[0].name,
+            sanitize_display("a\u{1b}[31mb", PANE_FIELD_LIMIT)
+        );
+        assert_eq!(
+            mapped[0].next_step,
+            sanitize_display("go\nnow\u{1b}[0m", SUMMARY_LIMIT)
+        );
+        assert!(!mapped[0].name.contains('\x1b'));
+        assert!(!mapped[0].next_step.contains('\n'));
+        assert!(!mapped[0].next_step.contains('\x1b'));
+    }
+
+    #[tokio::test]
+    async fn list_focus_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.list_focus().await.unwrap_err();
+        assert!(error.detail().contains("work tool unavailable"));
+    }
+
+    #[test]
+    fn an_unimplemented_work_answer_reads_as_unimplemented() {
+        let read = focus_read(Err(tonic::Status::unimplemented("no work"))).unwrap();
+        assert_eq!(read, FocusRead::Unimplemented);
+        let error = focus_read(Err(tonic::Status::unavailable("down"))).unwrap_err();
+        assert!(matches!(error, SourceError::Transport(_)));
+        let records = focus_read(Ok(work_list(vec![work_record("a", "focus", "x")]))).unwrap();
+        assert!(matches!(records, FocusRead::Records(ref list) if list.len() == 1));
     }
 
     #[test]
