@@ -2322,7 +2322,7 @@ mod one_trace_per_turn {
         let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
         let pane = unique_pane();
         // A model no other test uses, so the counter point is this test's alone.
-        let model = format!("model-{}", uuid::Uuid::new_v4().simple());
+        let model = format!("claude-test-{}", uuid::Uuid::new_v4().simple());
 
         complete_with_tokens(&pane, &model, [1, 0, 0, 0]).await;
 
