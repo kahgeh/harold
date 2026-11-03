@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -411,6 +412,131 @@ class RecorderTests(ReleaseTestCase):
                       harold_calls(self))
 
 
+class AttemptTests(ReleaseTestCase):
+    """Every way `release` ends is recorded with the step it ended in."""
+
+    def setUp(self):
+        super().setUp()
+        self.pack()
+
+    def release(self):
+        return self.main('release', '--prefix', str(self.prefix))
+
+    def recorded(self):
+        """(the result and step of the attempt, the steps that have seconds)."""
+        calls = harold_calls(self)
+        attempts = [call for call in calls if call[:2] == ['count', 'harold.release.attempts']]
+        self.assertEqual(len(attempts), 1)
+        steps = [call[-1][len('step='):] for call in calls if call[:2] == ['count', 'harold.release.seconds']]
+        return attempts[0][2:], steps
+
+    def assert_recorded(self, result, step, steps):
+        self.assertEqual(self.recorded(), (['--attr', 'result=' + result, '--attr', 'step=' + step], steps))
+
+    def test_an_ok_attempt_records_one_count_and_five_step_times(self):
+        code, _, err = self.release()
+        self.assertEqual((code, err), (0, ''))
+        self.assert_recorded('ok', 'none', list(release.STEP_NAMES))
+
+    def test_a_failure_in_github_build_records_failed_and_the_steps_that_ran(self):
+        self.github.outcome = 'failure'
+        code, _, _ = self.release()
+        self.assertEqual(code, 1)
+        self.assert_recorded('failed', 'github_build', ['checks', 'local_tests', 'publish', 'github_build'])
+
+    def test_a_failing_local_test_records_local_tests(self):
+        self.failing = release.TESTS[1]
+        code, _, _ = self.release()
+        self.assertEqual(code, 1)
+        self.assert_recorded('failed', 'local_tests', ['checks', 'local_tests'])
+
+    def test_a_refused_check_records_checks(self):
+        self.github.signed_in = False
+        code, _, _ = self.release()
+        self.assertEqual(code, 1)
+        self.assert_recorded('failed', 'checks', ['checks'])
+
+    def test_an_interrupt_in_github_build_records_stopped(self):
+        def interrupt(seconds):
+            raise KeyboardInterrupt
+        self.github.appears_after = 1
+        with patch.object(release, 'sleep', interrupt):
+            code, _, _ = self.release()
+        self.assertEqual(code, 130)
+        self.assert_recorded('stopped', 'github_build', ['checks', 'local_tests', 'publish', 'github_build'])
+
+    def test_an_interrupt_in_checks_local_tests_and_publish_records_stopped_with_that_step(self):
+        def stop(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        def stop_first_test(argv, *args, **kwargs):
+            if tuple(argv) == release.TESTS[0]:
+                raise KeyboardInterrupt
+            return self.fake_run(argv, *args, **kwargs)
+
+        cases = (('checks', patch.object(release, 'linux_tests_check', stop), ['checks']),
+                 ('local_tests', patch.object(release, 'run', stop_first_test), ['checks', 'local_tests']),
+                 ('publish', patch.object(release, 'publish', stop), ['checks', 'local_tests', 'publish']))
+        for step, patcher, steps in cases:
+            with self.subTest(step=step):
+                self.calls.clear()
+                with patcher:
+                    code, _, err = self.release()
+                self.assertEqual((code, err.splitlines()[0]), (130, 'Interrupted.'))
+                self.assert_recorded('stopped', step, steps)
+
+    def test_a_failed_recording_keeps_the_exit_code_and_prints_one_line(self):
+        for failed_release in (False, True):
+            with self.subTest(failed_release=failed_release):
+                self.calls.clear()
+                self.harold_hangs = False
+                self.harold = [(None, 1, 0)] * 10
+                self.github.outcome = 'failure' if failed_release else 'success'
+                code, _, err = self.release()
+                self.assertEqual(code, 1 if failed_release else 0)
+                self.assertEqual(err.count('release attempt not recorded'), 1)
+
+    def test_a_second_ctrl_c_during_recording_exits_with_the_releases_code(self):
+        self.harold = [(None, KeyboardInterrupt(), 0)]
+        code, _, err = self.release()
+        self.assertEqual(code, 0)
+        self.assertEqual(err.count('release attempt not recorded'), 1)
+
+    def test_a_signal_during_recording_stops_it_and_keeps_the_exit_code(self):
+        def signalled(argv, timeout):
+            signal.raise_signal(signal.SIGTERM)
+            return done(argv, 0, '', '')
+        saved = signal.getsignal(signal.SIGTERM)
+        with patch.object(self, 'fake_harold', signalled):
+            code, _, err = self.release()
+        self.assertEqual(code, 0)
+        self.assertIn('release attempt not recorded: stopped by the user', err)
+        self.assertEqual(len(harold_calls(self)), 1)
+        self.assertIs(signal.getsignal(signal.SIGTERM), saved)
+
+    def test_install_existing_records_nothing(self):
+        self.pack(version=None)
+        code, _, err = self.main('install', '--prefix', str(self.prefix))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(harold_calls(self), [])
+
+    def test_an_unexpected_exception_is_recorded_and_raised(self):
+        def fail(*args, **kwargs):
+            raise ValueError('boom')
+        with patch.object(release, 'publish', fail):
+            with self.assertRaises(ValueError):
+                self.release()
+        self.assert_recorded('failed', 'publish', ['checks', 'local_tests', 'publish'])
+
+    def test_an_oserror_is_recorded_as_failed(self):
+        def fail(*args, **kwargs):
+            raise OSError('disk')
+        with patch.object(release, 'run_tests', fail):
+            code, _, err = self.release()
+        self.assertEqual((code, err.splitlines()[0]), (1, 'Stopped: disk'))
+        self.assert_recorded('failed', 'local_tests', ['checks', 'local_tests'])
+
+
 class CheckTests(ReleaseTestCase):
     def test_another_branch_is_refused(self):
         git(self.work, 'checkout', '-q', '-b', 'topic')
@@ -502,6 +628,8 @@ class CheckTests(ReleaseTestCase):
     def test_the_tests_are_the_workflows_in_its_order(self):
         tag, latest = release.checks(self.work, None, None)
         self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
+        self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
+        release.run_tests(self.work)
         self.assertEqual([tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS], list(release.TESTS))
         self.assertEqual(release.TESTS, (
             ('cargo', 'test', '--workspace', '--locked', '--features',
@@ -523,7 +651,7 @@ class CheckTests(ReleaseTestCase):
     def test_a_missing_tool_is_refused(self):
         self.missing = ('gh',)
         self.assert_refused('Not released: gh is not installed.')
-        self.assertEqual(self.calls, [])
+        self.assertEqual([call for call in self.calls if call[0] != 'harold'], [])
 
     def test_an_untracked_folder_is_not_a_change(self):
         (self.work / 'tasks').mkdir()

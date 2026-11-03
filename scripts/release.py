@@ -6,6 +6,7 @@ marks the release latest and installs it. `install` installs a release that alre
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -281,8 +282,8 @@ def notes_check(cwd, notes):
 def checks(cwd, version, notes):
     """Step 1, before anything is public. Returns the new tag and the latest release's tag.
 
-    Raises Stopped with one line for each failing check. The tests take minutes, so they run
-    only when every other check passes, and the first failing test command stops them.
+    Raises Stopped with one line for each failing check. The tests take minutes, so `run_tests`
+    runs them after this, when every check passes.
     """
     missing = [tool for tool in ('git', 'gh') if shutil.which(tool) is None]
     if missing:
@@ -319,12 +320,16 @@ def checks(cwd, version, notes):
     passes(notes_check, notes)
     if failures:
         raise Stopped('\n'.join(failures))
+    return tag, latest
+
+
+def run_tests(cwd):
+    """The tests of the build workflow. The first failing command stops them."""
     for command in TESTS:
         print('Testing: ' + ' '.join(command), flush=True)
         result = run(command, cwd, merge=True)
         if result.returncode:
             raise Stopped('Not released: tests failed in {}.\n{}'.format(' '.join(command), result.stdout.rstrip()))
-    return tag, latest
 
 
 def release_notes(cwd, latest, notes):
@@ -544,22 +549,47 @@ def install_tag(cwd, tag, prefix, identity):
     return 0
 
 
-def cut(cwd, args):
+class Attempt:
+    """The steps of one release attempt: which step runs now, and the seconds each step took."""
+
+    def __init__(self):
+        self.current = None
+        self.seconds = {}
+
+    @contextlib.contextmanager
+    def step(self, name):
+        """Times the step with `clock`, also when it raises. `current` names it until the next step starts."""
+        self.current = name
+        start = clock()
+        try:
+            yield
+        finally:
+            self.seconds[name] = self.seconds.get(name, 0) + (clock() - start)
+
+
+def cut(cwd, args, attempt=None):
     """`make release`: steps 1 to 8."""
-    tag, latest = checks(cwd, args.version, args.notes)
-    sha = git(cwd, 'rev-parse', 'HEAD').strip()
-    notes = release_notes(cwd, latest, args.notes)
-    url, published = publish(cwd, tag, sha, notes)
-    try:
-        wait_for_build(cwd, tag, url, published)
-    except KeyboardInterrupt:
-        raise Interrupted('\n'.join([
-            'Interrupted: {} stays a pre-release and its build continues on GitHub: {}'.format(tag, url),
-            'When the build succeeds, mark it latest (gh release edit {} --prerelease=false --latest)'.format(tag),
-            '  and install it: make install-release VERSION={}'.format(tag[1:]),
-            'Or withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag)])) from None
-    mark_latest(cwd, tag)
-    return install_tag(cwd, tag, prefix_of(cwd, args.prefix), args.signing_identity)
+    attempt = attempt or Attempt()
+    with attempt.step('checks'):
+        tag, latest = checks(cwd, args.version, args.notes)
+    with attempt.step('local_tests'):
+        run_tests(cwd)
+    with attempt.step('publish'):
+        sha = git(cwd, 'rev-parse', 'HEAD').strip()
+        notes = release_notes(cwd, latest, args.notes)
+        url, published = publish(cwd, tag, sha, notes)
+    with attempt.step('github_build'):
+        try:
+            wait_for_build(cwd, tag, url, published)
+        except KeyboardInterrupt:
+            raise Interrupted('\n'.join([
+                'Interrupted: {} stays a pre-release and its build continues on GitHub: {}'.format(tag, url),
+                'When the build succeeds, mark it latest (gh release edit {} --prerelease=false --latest)'.format(tag),
+                '  and install it: make install-release VERSION={}'.format(tag[1:]),
+                'Or withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag)])) from None
+    with attempt.step('install'):
+        mark_latest(cwd, tag)
+        return install_tag(cwd, tag, prefix_of(cwd, args.prefix), args.signing_identity)
 
 
 def install_existing(cwd, args):
@@ -595,20 +625,34 @@ def main(argv=None, cwd=REPO_ROOT):
         command.add_argument('--prefix', help='install under this folder instead of ~/bin')
         command.add_argument('--signing-identity', help='certificate the installer signs with and saves')
     args = parser.parse_args(argv)
+    attempt = Attempt() if args.command == 'release' else None
+    result, step, unexpected = 'failed', None, None
     try:
-        return cut(cwd, args) if args.command == 'release' else install_existing(cwd, args)
+        code = cut(cwd, args, attempt) if attempt else install_existing(cwd, args)
+        result = 'ok'
     except Stopped as error:
         print(error, file=sys.stderr)
-        return 1
+        code = 1
     except Interrupted as error:
         print(error, file=sys.stderr)
-        return 130
+        code, result = 130, 'stopped'
     except KeyboardInterrupt:
         print('Interrupted.', file=sys.stderr)
-        return 130
+        code, result = 130, 'stopped'
     except OSError as error:
         print('Stopped: {}'.format(error), file=sys.stderr)
-        return 1
+        code = 1
+    except Exception as error:
+        code, unexpected = None, error
+    if attempt:
+        # The release's code is known before anything is recorded, and recording never changes it.
+        step = 'none' if result == 'ok' else attempt.current or 'checks'
+        reason = Recorder(cwd).record(result, step, attempt.seconds)
+        if reason:
+            print('release attempt not recorded: {}'.format(reason), file=sys.stderr)
+    if unexpected:
+        raise unexpected
+    return code
 
 
 if __name__ == '__main__':
