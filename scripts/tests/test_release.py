@@ -85,9 +85,12 @@ class FakeGitHub:
         self.events = []
         self.created = None
         self.listings = self.views = 0
-        # The runs of the Linux tests workflow for the commit that is asked about, newest first.
+        # The push runs of each checks workflow for the commit that is asked about, newest first.
+        # A run with another `sha` is not listed for the commit asked about, as `gh --commit` does.
         self.linux_runs = [self.linux_run('completed', 'success')]
+        self.mac_runs = [self.mac_run('completed', 'success')]
         self.linux_listings = []
+        self.mac_listings = []
 
     @staticmethod
     def release(tag, latest=False, prerelease=False, assets=()):
@@ -96,9 +99,14 @@ class FakeGitHub:
                 'url': 'https://github.com/kahgeh/harold/releases/tag/' + tag}
 
     @staticmethod
-    def linux_run(status, conclusion):
-        return {'status': status, 'conclusion': conclusion,
+    def linux_run(status, conclusion, sha=None):
+        return {'status': status, 'conclusion': conclusion, 'sha': sha,
                 'url': 'https://github.com/kahgeh/harold/actions/runs/7'}
+
+    @staticmethod
+    def mac_run(status, conclusion, sha=None):
+        return {'status': status, 'conclusion': conclusion, 'sha': sha,
+                'url': 'https://github.com/kahgeh/harold/actions/runs/8'}
 
     @staticmethod
     def printed(argv, value):
@@ -134,11 +142,16 @@ class FakeGitHub:
             return done(argv, 0, self.releases[tag]['url'] + '\n')
         if verb == ('release', 'download'):
             return self.download(argv, args)
-        if verb == ('run', 'list') and option(args, '--workflow') == 'linux-tests.yml':
+        checks = {'linux-tests.yml': (self.linux_runs, self.linux_listings),
+                  'macos-checks.yml': (self.mac_runs, self.mac_listings)}
+        if verb == ('run', 'list') and option(args, '--workflow') in checks:
             assert option(args, '--event') == 'push', argv
-            self.linux_listings.append(option(args, '--commit'))
+            runs, listings = checks[option(args, '--workflow')]
+            commit = option(args, '--commit')
+            listings.append(commit)
             fields = option(args, '--json').split(',')
-            return self.printed(argv, [{field: item[field] for field in fields} for item in self.linux_runs])
+            return self.printed(argv, [{field: item[field] for field in fields} for item in runs
+                                       if item['sha'] in (None, commit)])
         if verb == ('run', 'list'):
             assert (option(args, '--workflow'), option(args, '--event')) == ('build.yml', 'release'), argv
             self.listings += 1
@@ -445,7 +458,7 @@ class AttemptTests(ReleaseTestCase):
         self.assert_recorded('failed', 'github_build', ['checks', 'local_tests', 'publish', 'github_build'])
 
     def test_a_failing_local_test_records_local_tests(self):
-        self.failing = release.TESTS[1]
+        self.failing = release.TESTS[0]
         code, _, _ = self.release()
         self.assertEqual(code, 1)
         self.assert_recorded('failed', 'local_tests', ['checks', 'local_tests'])
@@ -474,7 +487,7 @@ class AttemptTests(ReleaseTestCase):
                 raise KeyboardInterrupt
             return self.fake_run(argv, *args, **kwargs)
 
-        cases = (('checks', patch.object(release, 'linux_tests_check', stop), ['checks']),
+        cases = (('checks', patch.object(release, 'checks_check', stop), ['checks']),
                  ('local_tests', patch.object(release, 'run', stop_first_test), ['checks', 'local_tests']),
                  ('publish', patch.object(release, 'publish', stop), ['checks', 'local_tests', 'publish']))
         for step, patcher, steps in cases:
@@ -589,28 +602,82 @@ class CheckTests(ReleaseTestCase):
     def short(self):
         return git(self.work, 'rev-parse', 'HEAD')[:7]
 
-    def test_the_linux_tests_are_asked_about_the_commit_that_is_released(self):
-        release.checks(self.work, None, None)
-        self.assertEqual(self.github.linux_listings, [git(self.work, 'rev-parse', 'HEAD').strip()])
+    WORKFLOWS = (('linux-tests.yml', 'linux_runs', 'linux_listings', 'Linux tests', 'run'),
+                 ('macos-checks.yml', 'mac_runs', 'mac_listings', 'macOS checks', 'mac_run'))
 
-    def test_a_failed_linux_run_stops_the_release_with_no_release_made(self):
-        self.github.linux_runs = [FakeGitHub.linux_run('completed', 'failure')]
-        self.assert_refused('Not released: the Linux tests of {} ended in failure: '
-                            'https://github.com/kahgeh/harold/actions/runs/7\n'
+    def reset_runs(self):
+        self.github.linux_runs = [FakeGitHub.linux_run('completed', 'success')]
+        self.github.mac_runs = [FakeGitHub.mac_run('completed', 'success')]
+
+    def test_both_workflows_are_asked_about_the_commit_that_is_released(self):
+        release.checks(self.work, None, None)
+        sha = git(self.work, 'rev-parse', 'HEAD').strip()
+        self.assertEqual((self.github.linux_listings, self.github.mac_listings), ([sha], [sha]))
+
+    def test_both_workflows_green_on_the_commit_pass(self):
+        self.assertIsNone(release.checks_check(self.work))
+
+    def test_a_success_on_another_commit_stops_for_each_workflow(self):
+        for file, runs, _, _, _ in self.WORKFLOWS:
+            with self.subTest(workflow=file):
+                self.reset_runs()
+                maker = FakeGitHub.linux_run if runs == 'linux_runs' else FakeGitHub.mac_run
+                setattr(self.github, runs, [maker('completed', 'success', 'f' * 40)])
+                message = release.checks_check(self.work)
+                self.assertIn(file, message)
+                self.assertIn(self.short(), message)
+
+    def test_every_conclusion_but_success_stops_as_failed_for_each_workflow(self):
+        for file, runs, _, _, _ in self.WORKFLOWS:
+            for conclusion in ('failure', 'skipped', 'cancelled', 'neutral', 'timed_out'):
+                with self.subTest(workflow=file, conclusion=conclusion):
+                    self.reset_runs()
+                    maker = FakeGitHub.linux_run if runs == 'linux_runs' else FakeGitHub.mac_run
+                    run_made = maker('completed', conclusion)
+                    setattr(self.github, runs, [run_made])
+                    message = release.checks_check(self.work)
+                    self.assertIn('ended in ' + conclusion, message)
+                    self.assertIn(run_made['url'], message)
+
+    def test_a_running_run_stops_and_names_its_url_for_each_workflow(self):
+        for file, runs, _, _, _ in self.WORKFLOWS:
+            for status in ('in_progress', 'queued'):
+                with self.subTest(workflow=file, status=status):
+                    self.reset_runs()
+                    maker = FakeGitHub.linux_run if runs == 'linux_runs' else FakeGitHub.mac_run
+                    run_made = maker(status, '')
+                    setattr(self.github, runs, [run_made])
+                    message = release.checks_check(self.work)
+                    self.assertIn('still running', message)
+                    self.assertIn(run_made['url'], message)
+
+    def test_a_missing_run_stops_and_names_the_workflow_file_for_each_workflow(self):
+        for file, runs, _, _, _ in self.WORKFLOWS:
+            with self.subTest(workflow=file):
+                self.reset_runs()
+                setattr(self.github, runs, [])
+                message = release.checks_check(self.work)
+                self.assertIn('no run', message)
+                self.assertIn(file, message)
+
+    def test_one_green_and_one_missing_stops_naming_the_missing_workflow(self):
+        self.github.mac_runs = []
+        message = release.checks_check(self.work)
+        self.assertIn('macos-checks.yml', message)
+        self.assertNotIn('linux-tests.yml', message)
+        self.github.mac_runs = [FakeGitHub.mac_run('completed', 'success')]
+        self.github.linux_runs = []
+        message = release.checks_check(self.work)
+        self.assertIn('linux-tests.yml', message)
+        self.assertNotIn('macos-checks.yml', message)
+
+    def test_a_stop_in_the_checks_makes_nothing_public_and_runs_no_test(self):
+        self.github.mac_runs = [FakeGitHub.mac_run('completed', 'failure')]
+        self.assert_refused('Not released: the macOS checks of {} ended in failure: '
+                            'https://github.com/kahgeh/harold/actions/runs/8\n'
                             'Fix them and push, then run make release again.'.format(self.short()))
         self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
-
-    def test_a_running_linux_run_names_the_run_to_wait_for_and_makes_nothing(self):
-        self.github.linux_runs = [FakeGitHub.linux_run('in_progress', '')]
-        self.assert_refused('Not released: the Linux tests of {} are still running: '
-                            'https://github.com/kahgeh/harold/actions/runs/7\n'
-                            'Wait for them, then run make release again.'.format(self.short()))
-
-    def test_no_linux_run_for_the_commit_makes_nothing(self):
-        self.github.linux_runs = []
-        self.assert_refused('Not released: no run of the Linux tests exists for {}. Push it to main and '
-                            'wait for the run of linux-tests.yml, then run make release again.'.format(
-                                self.short()))
+        self.assertFalse([argv for argv in self.calls if argv[:3] == ['gh', 'release', 'create']])
 
     def test_a_passed_run_after_a_failed_run_of_the_same_commit_lets_the_release_go_on(self):
         self.github.linux_runs = [FakeGitHub.linux_run('completed', 'success'),
@@ -618,14 +685,17 @@ class CheckTests(ReleaseTestCase):
         tag, latest = release.checks(self.work, None, None)
         self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
 
-    def test_a_failing_test_is_refused_with_its_output(self):
-        self.failing = ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests')
-        self.assert_refused('Not released: tests failed in python3 -m unittest discover -s scripts/tests.\n'
-                            'FAILED (failures=1)')
-        ran = [tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS]
-        self.assertEqual(ran, list(release.TESTS[:2]))
+    def test_the_build_limit_is_30_minutes(self):
+        self.assertEqual(release.BUILD_LIMIT, 30 * 60)
 
-    def test_the_tests_are_the_workflows_in_its_order(self):
+    def test_a_failing_test_is_refused_with_its_output(self):
+        self.failing = release.TESTS[0]
+        self.assert_refused('Not released: tests failed in {}.\n'
+                            'FAILED (failures=1)'.format(' '.join(release.TESTS[0])))
+        ran = [tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS]
+        self.assertEqual(ran, list(release.TESTS))
+
+    def test_the_tests_are_the_timing_command_only(self):
         tag, latest = release.checks(self.work, None, None)
         self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
         self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
@@ -633,11 +703,7 @@ class CheckTests(ReleaseTestCase):
         self.assertEqual([tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS], list(release.TESTS))
         self.assertEqual(release.TESTS, (
             ('cargo', 'test', '--workspace', '--locked', '--features',
-             'harold/timing-tests,control-tower/timing-tests'),
-            ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
-            ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
-            ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),
-            ('bash', 'scripts/check_features.sh')))
+             'harold/timing-tests,control-tower/timing-tests'),))
 
     def test_every_failing_check_is_printed_and_no_test_runs(self):
         git(self.work, 'checkout', '-q', '-b', 'topic')
@@ -812,9 +878,9 @@ class BuildTests(ReleaseTestCase):
         self.github.outcome = 'failure'
         self.assert_failed_build('ended in failure', 'https://github.com/kahgeh/harold/actions/runs/2')
 
-    def test_a_build_past_60_minutes_is_a_failed_build(self):
+    def test_a_build_past_30_minutes_is_a_failed_build(self):
         self.github.polls = 10 ** 6
-        self.assert_failed_build('did not finish within 60 minutes',
+        self.assert_failed_build('did not finish within 30 minutes',
                                  'https://github.com/kahgeh/harold/actions/runs/2')
         self.assertGreaterEqual(self.clock.now, release.BUILD_LIMIT)
         self.assertLess(self.clock.now, release.BUILD_LIMIT + 2 * release.POLL)

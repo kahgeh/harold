@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cut a Harold release on GitHub and install it on this Mac, or install a release that exists.
 
-`release` checks this checkout and that the Linux tests passed on its commit, publishes HEAD as a pre-release, follows the build that starts,
+`release` checks this checkout and that the Linux and macOS push checks passed on its commit, publishes HEAD as a pre-release, follows the build that starts,
 marks the release latest and installs it. `install` installs a release that already exists.
 """
 
@@ -25,18 +25,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PREFIX = Path.home() / 'bin'
 WORKFLOW = 'build.yml'
 LINUX_WORKFLOW = 'linux-tests.yml'
+MAC_WORKFLOW = 'macos-checks.yml'
 PACKAGE = 'harold-aarch64-apple-darwin'
 PACKAGES = (PACKAGE, 'harold-x86_64-unknown-linux-gnu')
 ARCHIVE = PACKAGE + '.tar.gz'
 CHECKSUM = ARCHIVE + '.sha256'
-# The tests the build workflow runs, in its order.
+# The tests that stay on this Mac: the timing tests need the real machine. The push checks run the rest.
 TESTS = (('cargo', 'test', '--workspace', '--locked', '--features',
-          'harold/timing-tests,control-tower/timing-tests'),
-         ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
-         ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
-         ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),
-         ('bash', 'scripts/check_features.sh'))
-BUILD_LIMIT = 60 * 60  # the workflow's timeout-minutes
+          'harold/timing-tests,control-tower/timing-tests'),)
+BUILD_LIMIT = 30 * 60  # the release run's job limit
 FIND_LIMIT = 2 * 60
 POLL = 10
 # The steps of a release attempt, in order, and the results an attempt can have.
@@ -235,29 +232,32 @@ def signed_in_check(cwd):
     return None
 
 
-def linux_tests_check(cwd):
-    """Refuses a commit whose Linux tests have not passed on GitHub.
+def checks_check(cwd):
+    """Refuses a commit whose push checks have not both passed on GitHub. None when both passed.
 
-    The Build workflow runs on a published release, so its Linux job runs after the release is
-    public. The Linux tests workflow runs on each push to main instead. A passing run for the
-    commit lets the release go on. A running, failed or missing run stops it before anything is
-    public, and the message names the run to wait for.
+    The release run only builds, so the tests of a commit run on the push to main instead, in
+    `LINUX_WORKFLOW` and `MAC_WORKFLOW`. The release trusts them: each workflow needs a push run
+    for exactly this commit with the conclusion `success`. Any other conclusion counts as failed.
+    A run in progress, a failed run or no run stops the release before anything is public, and
+    the message names the run, or the workflow file that has none.
     """
     sha = git(cwd, 'rev-parse', 'HEAD').strip()
-    runs = gh_json(cwd, 'run', 'list', '--workflow', LINUX_WORKFLOW, '--event', 'push', '--commit', sha,
-                   '--limit', '20', '--json', 'status,conclusion,url')
-    if any(item['status'] == 'completed' and item['conclusion'] == 'success' for item in runs):
-        return None
-    waiting = [item for item in runs if item['status'] != 'completed']
-    if waiting:
-        return ('Not released: the Linux tests of {} are still running: {}\n'
-                'Wait for them, then run make release again.'.format(sha[:7], waiting[0]['url']))
-    if runs:
-        return ('Not released: the Linux tests of {} ended in {}: {}\n'
-                'Fix them and push, then run make release again.'.format(
-                    sha[:7], runs[0]['conclusion'], runs[0]['url']))
-    return ('Not released: no run of the Linux tests exists for {}. Push it to main and wait for the '
-            'run of {}, then run make release again.'.format(sha[:7], LINUX_WORKFLOW))
+    for workflow, name in ((LINUX_WORKFLOW, 'Linux tests'), (MAC_WORKFLOW, 'macOS checks')):
+        runs = gh_json(cwd, 'run', 'list', '--workflow', workflow, '--event', 'push', '--commit', sha,
+                       '--limit', '20', '--json', 'status,conclusion,url')
+        if any(item['status'] == 'completed' and item['conclusion'] == 'success' for item in runs):
+            continue
+        waiting = [item for item in runs if item['status'] != 'completed']
+        if waiting:
+            return ('Not released: the {} of {} are still running: {}\n'
+                    'Wait for them, then run make release again.'.format(name, sha[:7], waiting[0]['url']))
+        if runs:
+            return ('Not released: the {} of {} ended in {}: {}\n'
+                    'Fix them and push, then run make release again.'.format(
+                        name, sha[:7], runs[0]['conclusion'], runs[0]['url']))
+        return ('Not released: no run of {} exists for {}. Push it to main and wait for the '
+                'run, then run make release again.'.format(workflow, sha[:7]))
+    return None
 
 
 def tag_check(cwd, tag):
@@ -282,7 +282,7 @@ def notes_check(cwd, notes):
 def checks(cwd, version, notes):
     """Step 1, before anything is public. Returns the new tag and the latest release's tag.
 
-    Raises Stopped with one line for each failing check. The tests take minutes, so `run_tests`
+    Raises Stopped with one line for each failing check. The timing tests take minutes, so `run_tests`
     runs them after this, when every check passes.
     """
     missing = [tool for tool in ('git', 'gh') if shutil.which(tool) is None]
@@ -306,7 +306,7 @@ def checks(cwd, version, notes):
     tag = latest = None
     if passes(signed_in_check):
         if on_main:
-            passes(linux_tests_check)
+            passes(checks_check)
         try:
             latest = latest_release(cwd)
         except Stopped as error:
@@ -324,7 +324,7 @@ def checks(cwd, version, notes):
 
 
 def run_tests(cwd):
-    """The tests of the build workflow. The first failing command stops them."""
+    """The timing tests. The first failing command stops them."""
     for command in TESTS:
         print('Testing: ' + ' '.join(command), flush=True)
         result = run(command, cwd, merge=True)
