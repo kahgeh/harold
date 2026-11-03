@@ -54,6 +54,10 @@ const SERVER_STOP_LIMIT: Duration = Duration::from_secs(1);
 mod assets_tests;
 
 #[cfg(test)]
+#[path = "back_swipe_tests.rs"]
+mod back_swipe_tests;
+
+#[cfg(test)]
 #[path = "browser_traces_tests.rs"]
 mod browser_traces_tests;
 
