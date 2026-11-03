@@ -109,36 +109,92 @@ fn working_again_clears_without_a_duration() {
 }
 
 #[test]
-fn unknown_focus_changes_nothing() {
+fn unknown_focus_marks_a_finishing_agent_and_clears_nothing() {
     let mut t = WaitingTracker::new();
-    observe(
-        &mut t,
-        vec![pane("%1", 5, Working), pane("%2", 6, Working)],
-        &on("%3"),
-        100,
+    observe(&mut t, vec![pane("%1", 5, Working)], &Focus::Unknown, 100);
+    let ev = observe(&mut t, vec![pane("%1", 5, Done)], &Focus::Unknown, 200);
+    assert_eq!(ev, vec![began("%1")]);
+    let ev = observe(&mut t, vec![pane("%1", 5, Done)], &Focus::Unknown, 300);
+    assert!(ev.is_empty());
+    assert_eq!(t.view().since_ms.get("%1"), Some(&200));
+}
+
+#[test]
+fn focus_known_on_a_marked_pane_sees_it() {
+    let mut t = WaitingTracker::new();
+    observe(&mut t, vec![pane("%1", 5, Working)], &Focus::Unknown, 100);
+    observe(&mut t, vec![pane("%1", 5, Done)], &Focus::Unknown, 1_000);
+    let ev = observe(&mut t, vec![pane("%1", 5, Done)], &on("%1"), 2_000);
+    assert_eq!(
+        ev,
+        vec![WaitingEvent::Seen {
+            pane_id: "%1".into(),
+            role: role("%1"),
+            waited_s: 1.0
+        }]
     );
-    observe(
-        &mut t,
-        vec![pane("%1", 5, Done), pane("%2", 6, Working)],
-        &on("%3"),
-        200,
+    assert!(t.view().since_ms.is_empty());
+}
+
+fn waiting_tracker(id: &str, focus: &Focus) -> WaitingTracker {
+    let mut t = WaitingTracker::new();
+    observe(&mut t, vec![pane(id, 5, Working)], focus, 100);
+    observe(&mut t, vec![pane(id, 5, Done)], focus, 1_000);
+    t
+}
+
+#[test]
+fn seen_call_clears_with_a_known_focus() {
+    let mut t = waiting_tracker("%1", &on("%2"));
+    let ev = t.seen("%1", 2_000);
+    assert!(matches!(ev, Some(WaitingEvent::Seen { ref pane_id, .. }) if pane_id == "%1"));
+    assert!(t.view().since_ms.is_empty());
+}
+
+#[test]
+fn seen_call_clears_with_an_unknown_focus_and_records_waited_s() {
+    let mut t = waiting_tracker("%1", &Focus::Unknown);
+    let ev = t.seen("%1", 3_500);
+    assert_eq!(
+        ev,
+        Some(WaitingEvent::Seen {
+            pane_id: "%1".into(),
+            role: role("%1"),
+            waited_s: 2.5
+        })
     );
+    assert!(t.view().since_ms.is_empty());
+}
+
+#[test]
+fn seen_call_clears_a_remote_host_pane() {
+    let mut t = waiting_tracker("rex:h:%1", &on("%2"));
+    let ev = t.seen("rex:h:%1", 2_000);
+    assert!(matches!(ev, Some(WaitingEvent::Seen { ref pane_id, .. }) if pane_id == "rex:h:%1"));
+    assert!(t.view().since_ms.is_empty());
+}
+
+#[test]
+fn seen_call_for_a_pane_that_does_not_wait_returns_none() {
+    let mut t = waiting_tracker("%1", &on("%2"));
+    assert_eq!(t.seen("%9", 2_000), None);
+    assert_eq!(t.seen("", 2_000), None);
+    assert_eq!(t.view().since_ms.len(), 1);
+    assert!(t.seen("%1", 2_000).is_some());
+    assert_eq!(t.seen("%1", 3_000), None);
+}
+
+#[test]
+fn remote_host_pane_is_not_cleared_by_focus() {
+    let mut t = waiting_tracker("rex:h:%1", &Focus::Unknown);
     let ev = observe(
         &mut t,
-        vec![pane("%1", 5, Done), pane("%2", 6, Done)],
-        &Focus::Unknown,
-        300,
+        vec![pane("rex:h:%1", 5, Done)],
+        &on("rex:h:%1"),
+        2_000,
     );
     assert!(ev.is_empty());
     assert_eq!(t.view().since_ms.len(), 1);
-    assert!(t.view().since_ms.contains_key("%1"));
-    let ev = observe(
-        &mut t,
-        vec![pane("%1", 5, Done), pane("%2", 6, Done)],
-        &Focus::Unknown,
-        400,
-    );
-    assert!(ev.is_empty());
 }
 
 #[test]

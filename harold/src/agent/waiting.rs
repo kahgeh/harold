@@ -16,7 +16,7 @@ pub(crate) struct TrackedRow {
 /// The pane the user looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
-    /// The focus is not known. Nothing begins or ends by focus.
+    /// The focus is not known. A finishing agent waits. Focus clears nothing.
     Unknown,
     /// The focus is known. `None` means no agent pane has the focus.
     Pane(Option<String>),
@@ -143,8 +143,10 @@ impl WaitingTracker {
             } else if let Some(prev) = previous
                 && prev.is_working()
                 && state.is_at_rest()
-                && let Focus::Pane(focused) = focus
-                && focused.as_deref() != Some(id)
+                && match focus {
+                    Focus::Unknown => true,
+                    Focus::Pane(focused) => focused.as_deref() != Some(id),
+                }
             {
                 let role = role_of(id);
                 self.waiting.insert(
@@ -161,6 +163,18 @@ impl WaitingTracker {
             }
         }
         events
+    }
+
+    /// The user saw this pane by a way other than focus. Clear its wait.
+    /// Return `None` if the pane does not wait.
+    #[allow(dead_code)] // Task 2 uses this
+    pub(crate) fn seen(&mut self, pane_id: &str, now_ms: i64) -> Option<WaitingEvent> {
+        let entry = self.waiting.remove(pane_id)?;
+        Some(WaitingEvent::Seen {
+            pane_id: pane_id.to_string(),
+            role: entry.role,
+            waited_s: (now_ms - entry.since_ms) as f64 / 1000.0,
+        })
     }
 
     pub(crate) fn view(&self) -> WaitingView {
