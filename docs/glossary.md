@@ -193,8 +193,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
 | dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |
 | photo | An image you attach to a web app reply, kept by Harold in `app-photos/` and named in the line typed to the chief | "attachment" alone, "image upload", "media" |
-| thread page | The web app's page that shows the thread and the reply box | "message page", "chat page" |
+| thread page | The web app's page that shows the thread and the reply box. Its header links Todos and Pages | "message page", "chat page" |
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
+| back swipe | A swipe right from the left edge of a page outside the thread, which goes back one level | "swipe" alone (the thread and the todos have their own) |
 | page dots | The two dots above the reply box that show which page is open | "pager", "swipe indicator" |
 | read mark | The newest thread message a device has shown fully on screen, kept in that device's browser | "last seen", "read receipt", "unread marker" |
 | todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions | "badge", "unread count" |
@@ -347,7 +348,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | --- | --- | --- |
 | alert | A HyperDX alert typed to the chief | push (the phone) |
 | summary | Never alone | work summary, activity summary, summary strip |
-| note | The control-tower's revise or reject text. The web app's "Notes" page and header link mean vault notes, never backlog notes | backlog note, vault note |
+| note | The control-tower's revise or reject text. The web app's Notes page, reached from Pages, means vault notes, never backlog notes | backlog note, vault note |
 | dash | not used: say control-tower | HyperDX dashboard |
 | monitor | Never alone | agent monitor, HyperDX alert |
 | state | Never alone. It has three senses: agent state (what an agent does now), spec state (the question tool's state of a spec, such as `changed`), and switch state (the `state` field, `on` or `off`, of `harold get voice` and `harold get messaging`; `off` means the switch stops it) | agent state, spec state, switch state |

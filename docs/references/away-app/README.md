@@ -154,7 +154,7 @@ Harold creates its own key pair the first time it starts with `[web_app]` set ([
 
 The app has two pages side by side: the thread page and the todo page. Swipe left from the thread page to reach the todo page and right to come back, or tap **Todos** in the thread page's header and **‹ <app name>** in the todo page's. Two page dots sit above the reply box (at the bottom of the todo page, which has no reply box); the dark one is the page you are on.
 
-The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**, a round phone-icon button (greyed out, with `Voice is not set up on the Mac` as its label, when voice isn't set up).
+The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), **Pages**, which opens the [Pages screen](#the-pages-screen), the **Turn on alerts** button until push is on, and **Call**, a round phone-icon button (greyed out, with `Voice is not set up on the Mac` as its label, when voice isn't set up).
 
 The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. The page opens with the newest 50 messages and loads older ones, 50 at a time, as you scroll up; "Loading earlier messages…" shows at the top while more remain. While the page is open, each new message appears as soon as Harold stores it. After Harold restarts, the page picks the thread up again by itself within seconds, and keeps the older messages it had loaded. While Harold can't be reached, it tries less often, at least every 30 s.
 
@@ -239,7 +239,7 @@ The web app reads the todos through the question tool's gRPC service on Harold's
 
 **Notes** means the vault notes, the organisation's Markdown notes that the [knowledge tool](../tools/knowledge.md) indexes. It never means backlog notes. The page exists only when `[knowledge] vault` is set; without it there is no Notes link and the routes answer `404`.
 
-- **The link.** The thread's header shows **Notes** beside **Todos**. It opens the Notes page, and ‹ back comes back to the thread. The header row wraps: until push is on, **Turn on alerts** takes a second line, so the row fits at 320 px.
+- **The link.** Notes is a row of the Pages screen. The thread's header has no **Notes** button. The Notes page has **‹ Pages**, which goes to `/c`. The header row wraps: until push is on, **Turn on alerts** takes a second line, so the row fits at 320 px.
 - **The page** is a search box, then **Changed lately**: the 10 vault notes changed most recently, newest first. Each row shows only the vault note's kind (such as `idea`, `reference` or `decision`) and its title. Nothing more is on the first screen: no description, no matching passage and no related list.
 - **A search** runs as you pause typing (300 ms). The list becomes **Closest notes**, at most 10 rows, in the same form. A query under 2 characters keeps the recent list. When nothing matches the list reads `No notes match.` When the model could not load it reads `Search is resting: the model didn't load.` and when the tool cannot be reached, `Notes are not available right now.`
 - **Tapping a row** opens the vault note, read-only: its kind, its title and its Markdown rendered, with raw HTML switched off (shown as the text it is), images left out, and links only to a web address, mail or a place in the page. Its `[[links]]` show as plain words, not links. There is no related list. A vault note that no longer exists answers `404`.
@@ -254,7 +254,7 @@ The routes sit behind the web app's login, device, host and origin checks like e
 
 ## Specs
 
-A todo's **Open the spec** link opens its spec page. A spec page links to the specs list, and the back arrow comes back to the thread. The pages show the spec files of the products in the registry that `[telemetry] pod_registry` names, through the same `Products` port as the question tool ([ADR 0015](../../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). They show nothing the files do not hold.
+A todo's **Open the spec** link opens its spec page. A spec page links to the specs list, and the back arrow comes back to the thread. The specs list has **‹ Pages**, which goes to `/c`. The pages show the spec files of the products in the registry that `[telemetry] pod_registry` names, through the same `Products` port as the question tool ([ADR 0015](../../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). They show nothing the files do not hold.
 
 - **The list** (`GET /specs`) shows each product's specs, newest first, with their titles. A machine with no registry reads `No specs on this machine`.
 - **A spec page** (`GET /specs/{product}/{id}`) shows the product, the id and the first 12 characters of the file's SHA-256 on its top line, so you can compare it with the SPEC line, then the rendered spec. The id is lowercase letters, digits and `-`. A fenced `mermaid` block, or a raw `<pre class="mermaid">` block, is drawn as a diagram, with the theme `neutral` in light mode and `dark` in dark mode. Mermaid runs with `securityLevel: 'strict'`. A diagram that fails to draw shows its source. Raw HTML shows as text, and a link keeps its `href` only for `http:`, `https:` or a relative address.
@@ -333,7 +333,7 @@ The list page (`/c/{collection}`) shows the newest files first, by the file's ti
 
 ### The Pages screen
 
-The Pages screen (`/c`) lists each listed collection with its page count as a number badge at the right. It then lists Specs, and Notes when notes are on, with no badge. A collection with `listed = false` is not on it.
+The thread's **Pages** button opens the Pages screen (`/c`). It lists each listed collection with its page count as a number badge at the right. It then lists Specs, and Notes when notes are on, with no badge. A collection with `listed = false` is not on it.
 
 ### Back controls
 
@@ -344,8 +344,27 @@ Each screen goes back one level with the control in its header. The header is pa
 | Pages | `‹` and the app's name | The thread |
 | A collection list | `‹ Pages` | `/c` |
 | A collection page | `‹` and the collection's `title` | `/c/{collection}` |
+| The Notes page | `‹ Pages` | `/c` |
+| A note | `‹ Notes` | `/notes` |
+| The specs list | `‹ Pages` | `/c` |
+| A spec page | `‹` and the app's name | The thread |
+| A gone spec | `‹ Specs` | `/specs` |
 
-The specs listener has no thread, so its Pages screen has no back control. The thread's header does not link to `/c` yet.
+The specs listener has no thread, so its Pages screen has no back control.
+
+### The back swipe
+
+On the phone, a swipe right from the left edge of a page goes back one level. The app runs without a browser bar and without a browser back button, so this swipe and the header controls are the ways back.
+
+- **The hook.** Each back control above carries `data-back`, which holds its address. The script `/static/back-swipe.js` reads only that. A page with no `data-back` element gets no swipe.
+- **The swipe.** The touch must start within 16 px of the left edge. This is the width of the strip beside a framed `.html` page, so the touch always lands on the shell and never in the frame. The touch must move right at least 80 px, and more sideways than down. Then the script opens the `data-back` address.
+- **Skips.** The script ignores a touch that starts in an element scrolled sideways (a wide code block or table). It also ignores a touch while a text selection exists, and a touch with more than one finger.
+- **`preventDefault`.** For a swipe from the edge that moves right, the script calls `preventDefault` on `touchmove`. This stops iOS from running a back gesture of its own, which could go back two levels.
+- **Where it loads.** Only the web app's pages load the script, and Harold serves it on the web app's listener only. The specs listener answers `404` for it, and the desk browser has its own back button, so the desk listener gets no script and no **Harold** control. The thread and the todo page load no copy of the script and keep their own swipe.
+- **The Harold control.** Every page that has the swipe, except the spec page, shows **Harold** at the right of its header (`id="to-chat"`). It opens the thread. The back control and **Harold** each have a tap target of at least 44 px. A long collection title is cut with an ellipsis, so **Harold** keeps its width.
+- **The phone's Home.** The Home press of the iPhone leaves the app. When you open the app again, it shows the same page with its header, so **Harold** is one tap away.
+
+The live check on the phone is not done yet. It must show whether one swipe goes back one level or two. If it goes back two levels, the fix is to drop the `preventDefault` path and keep the header controls as the way back.
 
 ### The policies
 
