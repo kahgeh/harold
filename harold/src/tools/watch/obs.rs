@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use opentelemetry::KeyValue;
 use tracing::field::Empty;
-use tracing::{Span, info, info_span, warn};
+use tracing::{Span, debug, info, info_span, warn};
 
 use super::answer::{Cause, Failure};
 use super::runner::Exit;
@@ -126,6 +126,12 @@ pub(super) fn watch_paused(watch: &str, how: How, paused_until: Option<&str>) {
 /// `watch resumed`.
 pub(super) fn watch_resumed(watch: &str, how: How) {
     info!(watch, how = how.as_str(), "watch resumed");
+}
+
+/// `watch counts sent`: the watch tool sent new counts to the host. The counts are the
+/// only fields.
+pub(super) fn watch_counts_sent(running: u32, paused: u32, capped: u32) {
+    debug!(running, paused, capped, "watch counts sent");
 }
 
 /// Why a reminder ended without being typed: the `reason` of `reminder ended`.

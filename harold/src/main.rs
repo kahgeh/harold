@@ -89,6 +89,8 @@ struct HaroldService {
     local_icon: String,
     /// The settings values that `GetHaroldState` reports, read once at start.
     state_view: HaroldStateView,
+    /// The watch counts the watch tool pushes. The stream puts the newest in each snapshot.
+    watch_counts: watch::Receiver<tools::WatchCounts>,
 }
 
 /// The settings values that `GetHaroldState` reports. It holds no other setting, so a
@@ -207,6 +209,7 @@ fn harold_service(
     window_names: agent::inventory::WindowNames,
     local_icon: String,
     state_view: HaroldStateView,
+    watch_counts: watch::Receiver<tools::WatchCounts>,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -222,6 +225,7 @@ fn harold_service(
         window_names,
         local_icon,
         state_view,
+        watch_counts,
     }
 }
 
@@ -589,6 +593,7 @@ impl Harold for HaroldService {
             window_names,
             self.local_icon.clone(),
             self.state_view.roles.clone(),
+            self.watch_counts.clone(),
             sender,
             shutdown,
         ));
@@ -790,6 +795,7 @@ async fn forward_agent_snapshots(
     window_names: agent::inventory::WindowNames,
     local_icon: String,
     roles: RoleSources,
+    mut counts: watch::Receiver<tools::WatchCounts>,
     sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -814,6 +820,8 @@ async fn forward_agent_snapshots(
         &local_icon,
         &roles,
     );
+    let initial = with_watch_counts(initial, *counts.borrow_and_update());
+    let mut counts_open = true;
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }
@@ -829,6 +837,7 @@ async fn forward_agent_snapshots(
                 }
                 let snapshot =
                     map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -838,6 +847,7 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -847,6 +857,7 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -856,6 +867,21 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = counts.changed(), if counts_open => {
+                if changed.is_err() {
+                    // The watch tool is gone: the last counts stay, and the stream goes on.
+                    counts_open = false;
+                    continue;
+                }
+                // A count change sends the same agent state again with the new counts,
+                // at the same `through_event_version`.
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -865,12 +891,25 @@ async fn forward_agent_snapshots(
                     break;
                 }
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
             }
         }
     }
+}
+
+/// Puts the watch tool's newest counts in `snapshot`. `map_agent_snapshot` leaves them 0:
+/// the agent state does not hold them.
+fn with_watch_counts(
+    mut snapshot: AgentStateSnapshot,
+    counts: tools::WatchCounts,
+) -> AgentStateSnapshot {
+    snapshot.watches_running = counts.running;
+    snapshot.watches_paused = counts.paused;
+    snapshot.watches_capped = counts.capped;
+    snapshot
 }
 
 async fn send_agent_snapshot(
@@ -1729,11 +1768,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     // The tools' services join the core service on one server. A tool that cannot start
     // is logged and left out.
+    // One channel: the watch tool sends the counts, the snapshot stream reads them.
+    let (watch_counts_tx, watch_counts_rx) = watch::channel(tools::WatchCounts::default());
     let tools = tools::start(
         cfg,
         &store_path,
         snapshots.clone(),
         web_app.as_ref().and_then(|running| running.specs_addr),
+        Arc::new(watch_counts_tx),
         shutdown_rx.clone(),
     )
     .await;
@@ -1782,6 +1824,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .to_owned(),
         HaroldStateView::from_settings(cfg),
+        watch_counts_rx,
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())

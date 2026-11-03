@@ -936,6 +936,9 @@ async fn start_creates_questions_db_and_serves() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        watch_counts: std::sync::Arc::new(
+            tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+        ),
         pod_registry: None,
         shutdown: shutdown_rx,
     })
@@ -995,6 +998,9 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        watch_counts: std::sync::Arc::new(
+            tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+        ),
         pod_registry: None,
         shutdown: shutdown_rx,
     })

@@ -703,6 +703,9 @@ async fn serve_backlog(
         cli_path: String::new(),
         pod_registry: None,
         grpc_addr: None,
+        watch_counts: std::sync::Arc::new(
+            tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+        ),
         shutdown,
     })
     .await

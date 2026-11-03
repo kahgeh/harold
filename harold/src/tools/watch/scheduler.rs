@@ -29,7 +29,7 @@ use super::validate::{
 };
 use crate::settings::WatchSettings;
 use crate::timed_prompts::LocalNow;
-use crate::tools::{Agents, ChiefPane, PaneTyping, Pods};
+use crate::tools::{Agents, ChiefPane, PaneTyping, Pods, WatchCounts};
 
 /// The answer or the failure, the reported cost, and how the process ended with what
 /// Claude Code reported (for a run that exited).
@@ -67,6 +67,8 @@ pub(super) struct Deps {
     pub settings: WatchSettings,
     pub local: Arc<dyn LocalOffset>,
     pub shutdown: signal::Receiver<()>,
+    /// Where the scheduler pushes the watch counts for the host.
+    pub counts: Arc<signal::Sender<WatchCounts>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +146,8 @@ pub(super) struct Scheduler {
     state: Mutex<State>,
     /// One `start` at a time, so the limit and a replacement are checked and stored together.
     start_lock: tokio::sync::Mutex<()>,
+    /// One count push at a time, so an older read never overwrites a newer one.
+    counts_lock: tokio::sync::Mutex<()>,
     model_wait: Duration,
     retry: Duration,
 }
@@ -182,6 +186,20 @@ fn is_capped(row: &WatchRow) -> bool {
     row.state == WatchState::Paused && row.pause_how.as_deref() == Some(How::BudgetDay.as_str())
 }
 
+/// The counts of the live watches. A capped watch is not counted as paused.
+fn counts_of(live: &[WatchRow]) -> WatchCounts {
+    let mut counts = WatchCounts::default();
+    for row in live {
+        match row.state {
+            WatchState::Running => counts.running += 1,
+            WatchState::Paused if is_capped(row) => counts.capped += 1,
+            WatchState::Paused => counts.paused += 1,
+            WatchState::Stopped => {}
+        }
+    }
+    counts
+}
+
 /// `HH:MM` of a local time text `YYYY-MM-DD HH:MM:SS`.
 fn clock_of(text: &str) -> &str {
     text.get(11..16).unwrap_or(text)
@@ -216,6 +234,7 @@ impl Scheduler {
             model: tokio::sync::Mutex::new(()),
             state: Mutex::default(),
             start_lock: tokio::sync::Mutex::new(()),
+            counts_lock: tokio::sync::Mutex::new(()),
             model_wait: MODEL_WAIT,
             retry: RETRY,
         })
@@ -542,6 +561,8 @@ impl Scheduler {
             }
         }
         self.reminders.resume_all().await;
+        // Once at start, so the host has the counts of the stored watches.
+        self.push_counts().await;
     }
 
     // -----------------------------------------------------------------------
@@ -553,6 +574,26 @@ impl Scheduler {
             Target::Chief
         } else {
             Target::Folder(row.folder.clone())
+        }
+    }
+
+    /// Reads the counts from the store and sends them to the host when they changed. A
+    /// store that cannot be read leaves the last counts in place.
+    async fn push_counts(&self) {
+        let _one_push = self.counts_lock.lock().await;
+        let Ok(live) = self.deps.store.live().await else {
+            return;
+        };
+        let counts = counts_of(&live);
+        let changed = self.deps.counts.send_if_modified(|current| {
+            if *current == counts {
+                return false;
+            }
+            *current = counts;
+            true
+        });
+        if changed {
+            obs::watch_counts_sent(counts.running, counts.paused, counts.capped);
         }
     }
 
@@ -572,6 +613,7 @@ impl Scheduler {
             how,
             model: &self.deps.settings.model,
         });
+        self.push_counts().await;
     }
 
     /// Gives the watch a new task and a new report slot. The old task is cancelled (a run
@@ -622,6 +664,7 @@ impl Scheduler {
             None => None,
         };
         obs::watch_paused(&row.name, how, until_text.as_deref());
+        self.push_counts().await;
         Ok(Some(slot))
     }
 
@@ -637,6 +680,7 @@ impl Scheduler {
             return Ok(None);
         };
         obs::watch_resumed(&row.name, how);
+        self.push_counts().await;
         Ok(Some(resumed))
     }
 
@@ -1007,6 +1051,7 @@ impl Scheduler {
             Ok(Some(ended)) => ended,
             _ => return,
         };
+        self.push_counts().await;
         let live = {
             let mut state = self.state();
             match state.live.get(&row.name) {

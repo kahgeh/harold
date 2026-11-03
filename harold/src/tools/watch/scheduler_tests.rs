@@ -118,6 +118,7 @@ pub(in crate::tools::watch) fn build_on(
         settings,
         local: local.clone(),
         shutdown,
+        counts: Arc::new(signal::channel(WatchCounts::default()).0),
     })
 }
 
@@ -809,6 +810,7 @@ async fn stopping_a_watch_kills_the_child_its_run_started() {
         settings: settings(),
         local: ScriptedOffset::at(UtcOffset::UTC),
         shutdown,
+        counts: Arc::new(signal::channel(WatchCounts::default()).0),
     });
     let checked = Checked {
         name: "w".into(),
@@ -1996,4 +1998,151 @@ async fn a_failed_store_read_is_logged_and_tried_again_and_the_watch_goes_on() {
     );
     let line = log_lines(&logs.text(), "watch store read failed", "w")[0].to_owned();
     assert!(line.contains("reason=\"store_failed\""), "{line}");
+}
+
+// -----------------------------------------------------------------------
+// The counts the watch tool pushes to the host
+// -----------------------------------------------------------------------
+
+fn counts_of(h: &Harness) -> crate::tools::WatchCounts {
+    *h.scheduler.deps.counts.borrow()
+}
+
+fn counts(running: u32, paused: u32, capped: u32) -> crate::tools::WatchCounts {
+    crate::tools::WatchCounts {
+        running,
+        paused,
+        capped,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_counts_follow_start_pause_resume_cap_and_stop() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    assert_eq!(counts_of(&h), counts(0, 0, 0));
+
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(counts_of(&h), counts(1, 0, 0), "start");
+    h.pause("w", None).await;
+    assert_eq!(counts_of(&h), counts(0, 1, 0), "pause");
+    h.resume("w").await;
+    assert_eq!(counts_of(&h), counts(1, 0, 0), "resume");
+    // The budget check caps every running watch with no end, so "w" is capped too.
+    h.start_capped("pods").await;
+    assert_eq!(counts_of(&h), counts(0, 0, 2), "cap");
+    h.scheduler.stop("w").await.unwrap();
+    assert_eq!(counts_of(&h), counts(0, 0, 1), "stop of a capped watch");
+    h.scheduler.stop("pods").await.unwrap();
+    assert_eq!(
+        counts_of(&h),
+        counts(0, 0, 0),
+        "stop of the last capped watch"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_pause_that_ends_changes_the_counts_without_a_call() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", Some(30)).await;
+    assert_eq!(counts_of(&h), counts(0, 1, 0));
+
+    pass(31 * MINUTE).await;
+
+    assert_eq!(counts_of(&h), counts(1, 0, 0), "the pause ended by itself");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_sends_the_counts_of_the_stored_watches() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", None).await;
+    h.start_capped("pods").await;
+    let (_stop, shutdown) = signal::channel(());
+
+    let again = build(
+        &h.store,
+        &h.runner,
+        &h.typing,
+        &h.agents,
+        &h.chief,
+        &h.pods,
+        with_daily(0.5),
+        shutdown,
+    );
+    assert_eq!(
+        *again.deps.counts.borrow(),
+        counts(0, 0, 0),
+        "before resume"
+    );
+    again.resume().await;
+
+    assert_eq!(*again.deps.counts.borrow(), counts(0, 1, 1));
+}
+
+/// A log buffer at debug level for this thread. The shared test subscriber keeps info and
+/// above, and `watch counts sent` is a debug line.
+#[derive(Clone, Default)]
+struct DebugBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for DebugBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl DebugBuffer {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_changed_count_is_logged_once_and_an_equal_count_is_not() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    let buffer = DebugBuffer::default();
+    let writer = buffer.clone();
+    let _debug = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", None).await;
+    h.resume("w").await;
+    // A replacement keeps the counts, so it logs no new line.
+    h.start_open("w", 10).await;
+    pass(Duration::from_secs(5)).await;
+
+    let text = buffer.text();
+    let sent: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("watch counts sent"))
+        .collect();
+    assert_eq!(sent.len(), 3, "start, pause, resume: {text}");
+    for (line, (running, paused)) in sent.iter().zip([(1, 0), (0, 1), (1, 0)]) {
+        assert!(line.starts_with("DEBUG"), "{line}");
+        assert!(line.contains(&format!("running={running}")), "{line}");
+        assert!(line.contains(&format!("paused={paused}")), "{line}");
+        assert!(line.contains("capped=0"), "{line}");
+        for word in ["watch=", "text=", "folder="] {
+            assert!(!line.contains(word), "{word} in {line}");
+        }
+    }
 }

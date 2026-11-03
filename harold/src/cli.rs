@@ -5147,6 +5147,9 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             pod_registry: None,
             shutdown,
         })
@@ -5229,6 +5232,9 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             pod_registry: None,
             shutdown,
         })
@@ -5901,6 +5907,9 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             pod_registry: None,
             shutdown,
         })
@@ -6386,6 +6395,9 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             pod_registry: None,
             shutdown,
         })
@@ -7250,6 +7262,9 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "/usr/bin/true".into(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             pod_registry: None,
             shutdown,
         })
@@ -7360,6 +7375,9 @@ mod tests {
             watch_settings: Default::default(),
             model_environment: Vec::new(),
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             cli_path: "/usr/bin/true".into(),
             pod_registry: Some(registry),
             shutdown,
@@ -7414,6 +7432,9 @@ mod tests {
             cli_path: "/usr/bin/true".into(),
             pod_registry: None,
             grpc_addr: None,
+            watch_counts: std::sync::Arc::new(
+                tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+            ),
             shutdown,
         })
         .await
@@ -8519,6 +8540,9 @@ mod tests {
                 cli_path: "agent".into(),
                 pod_registry: None,
                 grpc_addr: None,
+                watch_counts: std::sync::Arc::new(
+                    tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+                ),
                 shutdown,
             })
             .await

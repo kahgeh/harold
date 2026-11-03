@@ -103,6 +103,7 @@ where
             window_names: WindowNames::default(),
             local_icon: String::new(),
             state_view: HaroldStateView::default(),
+            watch_counts: watch::channel(crate::tools::WatchCounts::default()).1,
         },
         shutdown,
         task,
@@ -2566,10 +2567,130 @@ fn named_stream(
         names.clone(),
         String::new(),
         RoleSources::default(),
+        watch::channel(crate::tools::WatchCounts::default()).1,
         sender,
         shutdown_rx,
     ));
     (receiver, shutdown, hub)
+}
+
+/// Runs `forward_agent_snapshots` with a count channel the test sends on.
+fn counts_stream() -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    watch::Sender<crate::tools::WatchCounts>,
+) {
+    counts_stream_from(crate::tools::WatchCounts::default())
+}
+
+fn counts_stream_from(
+    first: crate::tools::WatchCounts,
+) -> (
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    watch::Sender<()>,
+    watch::Sender<crate::tools::WatchCounts>,
+) {
+    let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
+    let (counts, counts_rx) = watch::channel(first);
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    tokio::spawn(async move {
+        super::forward_agent_snapshots(
+            hub.subscribe(),
+            CurrentSteps::default(),
+            Recaps::default(),
+            HostAgents::default(),
+            WindowNames::default(),
+            String::new(),
+            RoleSources::default(),
+            counts_rx,
+            sender,
+            shutdown_rx,
+        )
+        .await;
+        drop(hub);
+    });
+    (receiver, shutdown, counts)
+}
+
+fn watch_counts_of(snapshot: &super::harold::AgentStateSnapshot) -> (u32, u32, u32) {
+    (
+        snapshot.watches_running,
+        snapshot.watches_paused,
+        snapshot.watches_capped,
+    )
+}
+
+fn counts(running: u32, paused: u32, capped: u32) -> crate::tools::WatchCounts {
+    crate::tools::WatchCounts {
+        running,
+        paused,
+        capped,
+    }
+}
+
+#[tokio::test]
+async fn the_first_snapshot_holds_the_counts_the_watch_tool_sent_before_the_stream() {
+    let (mut receiver, _shutdown, _counts) = counts_stream_from(counts(2, 1, 1));
+    let item = next_item(&mut receiver).await;
+    assert_eq!(watch_counts_of(&item), (2, 1, 1));
+}
+
+#[tokio::test]
+async fn the_snapshot_counts_follow_start_pause_resume_cap_and_stop() {
+    let (mut receiver, _shutdown, sender) = counts_stream();
+    let first = next_item(&mut receiver).await;
+    assert_eq!(watch_counts_of(&first), (0, 0, 0));
+    let version = first.through_event_version;
+
+    // start, pause, resume, cap, stop of the paused one, stop of the capped one
+    let steps = [
+        (counts(1, 0, 0), (1, 0, 0)),
+        (counts(0, 1, 0), (0, 1, 0)),
+        (counts(1, 0, 0), (1, 0, 0)),
+        (counts(1, 0, 1), (1, 0, 1)),
+        (counts(0, 0, 1), (0, 0, 1)),
+        (counts(0, 0, 0), (0, 0, 0)),
+    ];
+    for (sent, expected) in steps {
+        sender.send_replace(sent);
+        let item = next_item(&mut receiver).await;
+        assert_eq!(watch_counts_of(&item), expected);
+        assert_eq!(
+            item.through_event_version, version,
+            "a count change does not raise the event version"
+        );
+    }
+    no_item(&mut receiver).await;
+}
+
+#[tokio::test]
+async fn a_count_change_sends_one_snapshot_with_the_agent_state_unchanged() {
+    let (mut receiver, _shutdown, sender) = counts_stream();
+    let first = next_item(&mut receiver).await;
+
+    sender.send_replace(counts(3, 0, 0));
+    let second = next_item(&mut receiver).await;
+
+    assert_eq!(second.panes, first.panes);
+    assert_eq!(second.through_event_version, first.through_event_version);
+    no_item(&mut receiver).await;
+}
+
+#[tokio::test]
+async fn the_stream_goes_on_after_the_watch_tool_is_gone() {
+    let (mut receiver, _shutdown, sender) = counts_stream();
+    next_item(&mut receiver).await;
+    sender.send_replace(counts(1, 0, 0));
+    next_item(&mut receiver).await;
+
+    drop(sender);
+
+    no_item(&mut receiver).await;
+    assert!(
+        !receiver.is_closed(),
+        "the stream stays open with the last counts"
+    );
 }
 
 async fn next_item(

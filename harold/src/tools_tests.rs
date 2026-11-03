@@ -78,6 +78,7 @@ pub(crate) fn no_extras() -> Extras {
         cli_path: "claude".into(),
         grpc_addr: None,
         pod_registry: None,
+        watch_counts: Arc::new(tokio::sync::watch::channel(WatchCounts::default()).0),
     }
 }
 
@@ -1037,6 +1038,9 @@ async fn the_question_tool_refuses_to_start_without_typing() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        watch_counts: std::sync::Arc::new(
+            tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
+        ),
         pod_registry: None,
     })
     .await;

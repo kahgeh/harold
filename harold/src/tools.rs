@@ -124,6 +124,17 @@ pub(crate) trait Pods: Send + Sync {
     fn pods(&self) -> PodSnapshot;
 }
 
+/// How many watches run, are paused, and are capped. The watch tool counts them from its
+/// own store and pushes them; the snapshot publisher never reads that store. A paused
+/// watch here is one a person or an agent paused. A capped watch is paused by the daily
+/// budget. Reminders are not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WatchCounts {
+    pub(crate) running: u32,
+    pub(crate) paused: u32,
+    pub(crate) capped: u32,
+}
+
 /// What the host gives a tool when it starts.
 pub(crate) struct ToolContext {
     /// The tool's own folder, `<store folder>/tools/<name>/`.
@@ -147,6 +158,9 @@ pub(crate) struct ToolContext {
     pub(crate) grpc_addr: Option<std::net::SocketAddr>,
     /// The path of `products.toml`; `None` when no pod registry is set.
     pub(crate) pod_registry: Option<PathBuf>,
+    /// Where the watch tool pushes its counts. The host holds one receiver, for the
+    /// snapshot publisher. The sender is shared because it is not `Clone`.
+    pub(crate) watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
     pub(crate) shutdown: tokio::sync::watch::Receiver<()>,
 }
 
@@ -166,6 +180,8 @@ pub(crate) struct Extras {
     pub(crate) knowledge: Option<knowledge::Launch>,
     /// Harold's own gRPC address, for `ToolContext::grpc_addr`.
     pub(crate) grpc_addr: Option<std::net::SocketAddr>,
+    /// For `ToolContext::watch_counts`.
+    pub(crate) watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -210,6 +226,7 @@ pub(crate) async fn start(
     store_path: &str,
     snapshots: AgentSnapshotHub,
     specs_addr: Option<std::net::SocketAddr>,
+    watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
     shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Tools {
     let ports =
@@ -249,6 +266,7 @@ pub(crate) async fn start(
             machine_name: cfg.machine_name.clone(),
         }),
         grpc_addr: cfg.grpc.addr().ok(),
+        watch_counts,
     };
     let pane_folder = SnapshotPaneFolder { ports };
     start_with(
@@ -343,6 +361,7 @@ fn contexts(
         cli_path: extras.cli_path.clone(),
         grpc_addr: extras.grpc_addr,
         pod_registry: extras.pod_registry.clone(),
+        watch_counts: Arc::clone(&extras.watch_counts),
         shutdown: shutdown.clone(),
     };
     [

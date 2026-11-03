@@ -56,6 +56,7 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         settings: ctx.watch_settings.clone(),
         local: Arc::new(clock::DateClock::new()),
         shutdown: ctx.shutdown.clone(),
+        counts: ctx.watch_counts,
     });
     let service = service::WatchToolService::new(Arc::clone(&scheduler), ctx.watch_settings);
     let task = tokio::spawn(scheduler::run(scheduler, ctx.shutdown));
