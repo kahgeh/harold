@@ -217,7 +217,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | filter | The control-tower's search, which hides agent rows that don't match | — |
 | agent row | A row of the agent list for one agent | — |
 | cursor | The row the control-tower's keys act on, marked `▶` | "focus", "selection" |
-| Now line | The dim `NOW` line under the masthead with the chief's Now item | — |
+| focus line | A control-tower line under the masthead that shows one work record at priority `focus`: its name, status and next step | "NOW line" |
+| Now line | The dim `NOW` line under the masthead with the chief's Now item. It shows only when Harold is too old to serve the work tool | — |
 | detail panel | The panel beside the agent list, on a wide terminal, about the agent under the cursor | — |
 | held keys | Keys the control-tower ignores after a question changed under a note, until Esc | "held" alone |
 | remote control | The small numbered list that one key opens over your Rex window: the chief as 0 and each running PnEM after it, in your order. A digit jumps there. `harold start-control-tower --remote` starts it, and its title is `Harold: remote control`. Here "remote" means a control at a distance. It never means an agent on a Rex host | "switcher", "picker" |
