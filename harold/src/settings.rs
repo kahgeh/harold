@@ -194,10 +194,10 @@ impl ActivitySummarySettings {
     }
 }
 
-/// The most days a work record stays in the active file before it rotates out.
+/// The most days the current work file may age before Harold rotates it.
 pub(crate) const MAX_ROTATION_DAYS: u32 = 365;
 
-/// The `[work]` table: how long Harold keeps work records before it rotates them.
+/// The `[work]` table: how old the current work file may get before Harold rotates it.
 /// `0` turns rotation off: no more rotation, and old files stay readable.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
