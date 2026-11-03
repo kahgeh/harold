@@ -10,7 +10,7 @@ Run this command from the repository root or from a worktree:
 scripts/test-run <spec id> <name> -- <command...>
 ```
 
-The spec id and the name are kebab-case. The runner prints the output and writes it to the log. The runner exits with the exit code of the command.
+The spec id and the name are kebab-case. The runner prints the output and writes it to the log. It exits with the exit code of the command.
 
 The log is in the test log folder of the base checkout:
 
@@ -22,7 +22,9 @@ The base checkout is the worktree of `main`. When a log of the same name exists,
 
 ## Run the Harold tests
 
-Run the full test suite with the timing tests under the lock:
+Run the full test suite with the timing tests under the lock. The lock lets only one full suite run at a time on this Mac. `lockf` is a macOS and BSD tool.
+
+Run this command:
 
 ```sh
 lockf -k /tmp/pods-full-test.lock scripts/test-run <spec id> cargo-test -- \
@@ -47,7 +49,7 @@ The runner sets `TEST_RUN_DIR` and `TEST_RUN_STEM` for the script. The script th
 | `<stem>-collector.log` | The collector output (`otel_test.py` only) |
 | `<stem>-<part>.withheld` | A note that a file held a secret, so the script did not copy it |
 
-Each script scans a file for secrets before it copies the file. A file with a secret is not copied. The `-<part>.withheld` file names the pattern and never the match. Without the two variables, the scripts copy nothing.
+Each script scans a file for secrets before it copies the file. The script does not copy a file with a secret. The `-<part>.withheld` file names the pattern and never the match. Without the two variables, the scripts copy nothing.
 
 ## Read a log
 
@@ -79,4 +81,4 @@ The runner sends a SIGTERM on to the command. The runner does not send any other
 
 ## Keep and delete
 
-The logs stay on the local machine. The folder is ignored by git. Nothing goes to git or S3. The logs stay until the pod closes. Delete them by hand.
+The logs stay on the local machine. Git ignores the folder. Nothing goes to git or S3. The logs stay until the pod closes. Delete them by hand.
