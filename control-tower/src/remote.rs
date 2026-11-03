@@ -160,6 +160,15 @@ impl Model {
         }
     }
 
+    /// Moves the selected row and clears the notice only when a row moved.
+    fn moved(&mut self, up: bool) -> Action {
+        let action = self.move_selected(up);
+        if action != Action::None {
+            self.notice = None;
+        }
+        action
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind == KeyEventKind::Release
             || key
@@ -168,30 +177,35 @@ impl Model {
         {
             return Action::None;
         }
-        self.notice = None;
         let last = self.entries.len().saturating_sub(1);
         match key.code {
             KeyCode::Esc => Action::Close,
             KeyCode::Enter if self.entries.is_empty() => Action::None,
-            KeyCode::Enter => Action::Jump(self.selected),
+            KeyCode::Enter => {
+                self.notice = None;
+                Action::Jump(self.selected)
+            }
             KeyCode::Char(digit @ '0'..='9') => {
                 let index = digit as usize - '0' as usize;
                 if index < self.entries.len() {
+                    self.notice = None;
                     Action::Jump(index)
                 } else {
                     Action::None
                 }
             }
             KeyCode::Char('j') => {
+                self.notice = None;
                 self.selected = (self.selected + 1).min(last);
                 Action::None
             }
             KeyCode::Char('k') => {
+                self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
                 Action::None
             }
-            KeyCode::Char('J') => self.move_selected(false),
-            KeyCode::Char('K') => self.move_selected(true),
+            KeyCode::Char('J') => self.moved(false),
+            KeyCode::Char('K') => self.moved(true),
             _ => Action::None,
         }
     }
@@ -899,11 +913,12 @@ mod tests {
         for key in other_keys() {
             let mut m = model(&["a", "b"]);
             m.selected = 1;
+            m.notice = Some("jump failed".into());
             let before = m.entries.clone();
             assert_eq!(m.key(key), Action::None, "{key:?}");
             assert_eq!(m.selected, 1, "{key:?}");
             assert_eq!(m.entries, before, "{key:?}");
-            assert_eq!(m.notice, None, "{key:?}");
+            assert_eq!(m.notice.as_deref(), Some("jump failed"), "{key:?}");
         }
     }
 
@@ -922,6 +937,25 @@ mod tests {
         assert_eq!(m.key(ch('J')), Action::None);
         assert_eq!(m.entries, before);
         assert_eq!(m.selected, 2);
+        assert_eq!(m.notice, None);
+    }
+
+    #[test]
+    fn a_notice_stays_until_a_key_acts() {
+        let mut m = model(&["a", "b"]);
+        m.notice = Some("jump failed".into());
+        // A digit with no entry and a blocked move do nothing, so the notice stays.
+        assert_eq!(m.key(ch('7')), Action::None);
+        assert_eq!(m.key(ch('J')), Action::None);
+        assert_eq!(m.notice.as_deref(), Some("jump failed"));
+        // A key that acts clears it.
+        assert_eq!(m.key(ch('j')), Action::None);
+        assert_eq!(m.notice, None);
+        m.notice = Some("jump failed".into());
+        assert_eq!(m.key(ch('1')), Action::Jump(1));
+        assert_eq!(m.notice, None);
+        m.notice = Some("jump failed".into());
+        assert!(matches!(m.key(ch('J')), Action::Move { .. }));
         assert_eq!(m.notice, None);
     }
 
