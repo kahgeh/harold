@@ -3063,13 +3063,6 @@ fn telemetry_call_attributes(prefix: &str, kind: &str, outcome: &str) -> [KeyVal
 /// Records 0 once on `harold.telemetry.calls` for each prefix in `prefixes` and `chief`, each
 /// kind and each outcome, so the first refusal after a start shows as a rise. The telemetry
 /// tool calls it at its start.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool's start calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn register_telemetry_counters(prefixes: &[String]) {
     let calls = &instruments().telemetry_calls;
     let chief = (!prefixes.iter().any(|p| p == CHIEF_PREFIX)).then_some(CHIEF_PREFIX);

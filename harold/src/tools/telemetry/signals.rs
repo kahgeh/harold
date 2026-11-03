@@ -15,6 +15,8 @@ pub(crate) trait Signals: Send + Sync + 'static {
     fn forget(&self, name: &str);
     /// Counts one call of the tool on `harold.telemetry.calls`.
     fn call(&self, prefix: &str, kind: &str, outcome: &str);
+    /// Counts 0 on `harold.telemetry.calls` for each prefix, kind and outcome.
+    fn seed_calls(&self, prefixes: &[String]);
 }
 
 /// The signals that go to Harold's exporter.
@@ -39,5 +41,9 @@ impl Signals for ExportedSignals {
 
     fn call(&self, prefix: &str, kind: &str, outcome: &str) {
         telemetry::count_telemetry_call(prefix, kind, outcome);
+    }
+
+    fn seed_calls(&self, prefixes: &[String]) {
+        telemetry::register_telemetry_counters(prefixes);
     }
 }

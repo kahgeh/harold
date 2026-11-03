@@ -47,20 +47,16 @@ pub(crate) enum Declared {
 }
 
 pub(crate) trait TelemetryStore: Send + Sync + 'static {
-    /// Stores the declaration, replacing one with the same name. The gauge's
-    /// last value starts empty. The caller checks the caps and the rules.
-    fn put(&self, declaration: &Declaration) -> impl Future<Output = Result<()>> + Send;
     /// Declares the name in one transaction: it compares with a stored
     /// declaration, checks the prefix's caps, and stores a new one. The caller
-    /// validates the declaration first.
+    /// validates the declaration first. A new declaration has no gauge
+    /// values.
     fn declare(&self, declaration: &Declaration) -> impl Future<Output = Result<Declared>> + Send;
     fn get(&self, name: &str) -> impl Future<Output = Result<Option<Declaration>>> + Send;
     /// The declared names by name, of one prefix or all.
     fn list(&self, prefix: Option<&str>) -> impl Future<Output = Result<Vec<Declaration>>> + Send;
     /// Removes the name; `false` when it was not there.
     fn remove(&self, name: &str) -> impl Future<Output = Result<bool>> + Send;
-    /// The number of names and, of those, of events for the prefix.
-    fn count_for_prefix(&self, prefix: &str) -> impl Future<Output = Result<(u32, u32)>> + Send;
     /// Keeps a gauge's last value for one series (see `series_key`); `false`
     /// when the name is not there.
     fn set_last_value(
@@ -327,12 +323,6 @@ impl TelemetryStore for TursoTelemetryStore {
         finish(&conn, declare_in(&conn, declaration).await).await
     }
 
-    async fn put(&self, declaration: &Declaration) -> Result<()> {
-        let conn = self.conn.lock().await;
-        begin(&conn).await?;
-        finish(&conn, put_in(&conn, declaration).await).await
-    }
-
     async fn get(&self, name: &str) -> Result<Option<Declaration>> {
         let conn = self.conn.lock().await;
         get_in(&conn, name).await
@@ -369,11 +359,6 @@ impl TelemetryStore for TursoTelemetryStore {
             .map(|changed| changed > 0)
             .map_err(StoreError::from);
         finish(&conn, work).await
-    }
-
-    async fn count_for_prefix(&self, prefix: &str) -> Result<(u32, u32)> {
-        let conn = self.conn.lock().await;
-        count_in(&conn, prefix).await
     }
 
     async fn set_last_value(&self, name: &str, series: &str, value: f64) -> Result<bool> {

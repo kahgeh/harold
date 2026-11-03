@@ -304,6 +304,7 @@ async fn start_with(
         (work_name, work_ctx),
         (watch_name, watch_ctx),
         (release_name, release_ctx),
+        (telemetry_name, telemetry_ctx),
     ] = contexts(
         store_path,
         typing,
@@ -322,6 +323,11 @@ async fn start_with(
     start_tool(work_name, work::start(work_ctx).await, &mut tools);
     start_tool(watch_name, watch::start(watch_ctx).await, &mut tools);
     start_tool(release_name, release::start(release_ctx).await, &mut tools);
+    start_tool(
+        telemetry_name,
+        telemetry::start(telemetry_ctx).await,
+        &mut tools,
+    );
     if let Some(launch) = knowledge_launch {
         start_tool(
             knowledge::NAME,
@@ -338,8 +344,8 @@ async fn start_with(
 }
 
 /// Each tool's name and context, in the order they start. The question tool types as
-/// `questions`, the watch tool as `watch` through `extras.watch_typing`, and the backlog and work
-/// tools are given no typing.
+/// `questions`, the watch tool as `watch` through `extras.watch_typing`, and the backlog, work,
+/// release and telemetry tools are given no typing.
 fn contexts(
     store_path: &str,
     typing: Arc<dyn PaneTyping>,
@@ -348,7 +354,7 @@ fn contexts(
     products: Arc<dyn Products>,
     extras: Extras,
     shutdown: tokio::sync::watch::Receiver<()>,
-) -> [(&'static str, ToolContext); 5] {
+) -> [(&'static str, ToolContext); 6] {
     let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
         data_folder: data_folder(store_path, name),
         typing,
@@ -374,6 +380,7 @@ fn contexts(
             context(watch::NAME, Some(Arc::clone(&extras.watch_typing))),
         ),
         (release::NAME, context(release::NAME, None)),
+        (telemetry::NAME, context(telemetry::NAME, None)),
     ]
 }
 

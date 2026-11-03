@@ -18,8 +18,35 @@ pub(crate) fn series_key(pairs: &[(String, String)]) -> String {
     parts.join(",")
 }
 
+/// The pairs of a series key, in the declared key order. `None` when the key
+/// does not give each declared key exactly once, so a stored value that does
+/// not fit the declaration is never sent.
+pub(crate) fn series_pairs(key: &str, attrs: &[Attr]) -> Option<Vec<(String, String)>> {
+    let parsed: Vec<(&str, &str)> = match key.is_empty() {
+        true => Vec::new(),
+        false => key
+            .split(',')
+            .map(|part| part.split_once('='))
+            .collect::<Option<_>>()?,
+    };
+    if parsed.len() != attrs.len() {
+        return None;
+    }
+    attrs
+        .iter()
+        .map(|attr| {
+            let mut found = parsed.iter().filter(|(k, _)| *k == attr.key);
+            let (_, value) = found.next()?;
+            match found.next() {
+                Some(_) => None,
+                None => Some((attr.key.clone(), value.to_string())),
+            }
+        })
+        .collect()
+}
+
 /// One declared name. `last_values` holds a gauge's last value for each
-/// series; `put` ignores it.
+/// series; a declaration stores none of it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Declaration {
     pub name: String,

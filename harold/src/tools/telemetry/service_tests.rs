@@ -86,6 +86,8 @@ impl Signals for FakeSignals {
     fn call(&self, prefix: &str, kind: &str, outcome: &str) {
         self.push(Sent::Call(prefix.into(), kind.into(), outcome.into()));
     }
+
+    fn seed_calls(&self, _prefixes: &[String]) {}
 }
 
 struct FakeClock(AtomicI64);

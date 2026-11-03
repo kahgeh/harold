@@ -33,6 +33,11 @@ fn declaration(name: &str, kind: Kind) -> Declaration {
     }
 }
 
+/// The number of names and, of those, of events for the prefix.
+async fn counts(store: &TursoTelemetryStore, prefix: &str) -> (u32, u32) {
+    count_in(&*store.conn.lock().await, prefix).await.unwrap()
+}
+
 async fn names(store: &TursoTelemetryStore, prefix: Option<&str>) -> Vec<String> {
     store
         .list(prefix)
@@ -44,18 +49,18 @@ async fn names(store: &TursoTelemetryStore, prefix: Option<&str>) -> Vec<String>
 }
 
 #[tokio::test]
-async fn put_get_list_remove_round_trip() {
+async fn declare_get_list_remove_round_trip() {
     let folder = TempFolder::new();
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
     assert!(folder.0.join("telemetry.db").exists());
     let one = declaration("harold.b", Kind::Counter);
-    store.put(&one).await.unwrap();
+    store.declare(&one).await.unwrap();
     store
-        .put(&declaration("harold.a", Kind::Event))
+        .declare(&declaration("harold.a", Kind::Event))
         .await
         .unwrap();
     store
-        .put(&declaration("chief.c", Kind::Gauge))
+        .declare(&declaration("chief.c", Kind::Gauge))
         .await
         .unwrap();
 
@@ -81,7 +86,7 @@ async fn a_reopened_file_gives_the_data_back() {
     let folder = TempFolder::new();
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
     let one = declaration("harold.b", Kind::Gauge);
-    store.put(&one).await.unwrap();
+    store.declare(&one).await.unwrap();
     assert!(
         store
             .set_last_value("harold.b", "result=ok", 2.5)
@@ -113,34 +118,34 @@ async fn a_reopened_file_gives_the_data_back() {
 async fn counts_are_for_one_prefix() {
     let folder = TempFolder::new();
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
-    assert_eq!(store.count_for_prefix("harold").await.unwrap(), (0, 0));
+    assert_eq!(counts(&store, "harold").await, (0, 0));
     store
-        .put(&declaration("harold.a", Kind::Event))
+        .declare(&declaration("harold.a", Kind::Event))
         .await
         .unwrap();
     store
-        .put(&declaration("harold.b", Kind::Event))
+        .declare(&declaration("harold.b", Kind::Event))
         .await
         .unwrap();
     store
-        .put(&declaration("harold.c", Kind::Counter))
+        .declare(&declaration("harold.c", Kind::Counter))
         .await
         .unwrap();
     store
-        .put(&declaration("chief.a", Kind::Event))
+        .declare(&declaration("chief.a", Kind::Event))
         .await
         .unwrap();
-    assert_eq!(store.count_for_prefix("harold").await.unwrap(), (3, 2));
-    assert_eq!(store.count_for_prefix("chief").await.unwrap(), (1, 1));
+    assert_eq!(counts(&store, "harold").await, (3, 2));
+    assert_eq!(counts(&store, "chief").await, (1, 1));
 }
 
 #[tokio::test]
-async fn the_last_value_is_set_and_a_put_clears_it() {
+async fn the_last_value_is_set_and_a_new_declaration_clears_it() {
     let folder = TempFolder::new();
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
     assert!(!store.set_last_value("harold.g", "", 1.0).await.unwrap());
     store
-        .put(&declaration("harold.g", Kind::Gauge))
+        .declare(&declaration("harold.g", Kind::Gauge))
         .await
         .unwrap();
     assert_eq!(
@@ -153,8 +158,19 @@ async fn the_last_value_is_set_and_a_put_clears_it() {
         store.get("harold.g").await.unwrap().unwrap().last_values,
         LastValues::from([(String::new(), 7.0)])
     );
+    // The same declaration again changes nothing.
     store
-        .put(&declaration("harold.g", Kind::Gauge))
+        .declare(&declaration("harold.g", Kind::Gauge))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get("harold.g").await.unwrap().unwrap().last_values,
+        LastValues::from([(String::new(), 7.0)])
+    );
+    // A remove and a new declaration clear it.
+    assert!(store.remove("harold.g").await.unwrap());
+    store
+        .declare(&declaration("harold.g", Kind::Gauge))
         .await
         .unwrap();
     assert_eq!(
@@ -210,7 +226,7 @@ async fn declare_adds_compares_and_checks_the_caps_in_one_step() {
         store.declare(&counter).await.unwrap(),
         Declared::TooManyNames
     );
-    assert_eq!(store.count_for_prefix("harold").await.unwrap(), (50, 20));
+    assert_eq!(counts(&store, "harold").await, (50, 20));
 }
 
 #[tokio::test]

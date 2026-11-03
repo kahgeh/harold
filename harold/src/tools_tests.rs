@@ -5,6 +5,7 @@ use std::time::Duration;
 use harold_api::harold as hp;
 use harold_api::tools::backlog::v1 as bp;
 use harold_api::tools::questions::v1 as pb;
+use harold_api::tools::telemetry::v1 as tp;
 use harold_api::tools::work::v1 as wp;
 use tokio::sync::watch;
 use tonic::service::Routes;
@@ -21,6 +22,7 @@ const CANARY: &str = "QUEUE-CANARY-2207";
 const QUESTIONS: &str = "harold.tools.questions.v1.QuestionService";
 const BACKLOG: &str = "harold.tools.backlog.v1.BacklogService";
 const WORK: &str = "harold.tools.work.v1.WorkService";
+const TELEMETRY: &str = "harold.tools.telemetry.v1.TelemetryService";
 const DAY: &str = "2026-10-14";
 
 /// A folder under the system's temporary folder, removed when dropped.
@@ -263,7 +265,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     )
     .await;
 
-    // The release tool keeps no folder, so it starts; the other three fail.
+    // The release tool keeps no folder, so it starts; the other five fail.
     assert_eq!(tools.tasks.len(), 1);
     let text = logs.text();
     let failed: Vec<&str> = text
@@ -278,6 +280,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
             " WARN harold::tools: tool failed to start tool=\"backlog\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"work\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"watch\" reason=\"store_open_failed\"",
+            " WARN harold::tools: tool failed to start tool=\"telemetry\" reason=\"store_open_failed\"",
         ],
         "{text}"
     );
@@ -480,7 +483,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 5);
+    assert_eq!(tools.tasks.len(), 6);
     assert!(folder.0.join("tools/backlog/backlog.db").is_file());
     let listing: bp::ListQueueResponse = call(
         &tools.routes,
@@ -524,7 +527,7 @@ async fn the_work_tool_starts_and_makes_the_current_work_file() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 5);
+    assert_eq!(tools.tasks.len(), 6);
     let made: Vec<String> = std::fs::read_dir(folder.0.join("tools/work"))
         .unwrap()
         .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
@@ -543,6 +546,143 @@ async fn the_work_tool_starts_and_makes_the_current_work_file() {
         .expect("every tool stops on shutdown");
 }
 
+#[tokio::test]
+async fn the_telemetry_tool_starts_seeds_and_records_through_the_host() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let (typing, _, folders, _) = host_ports(&Fake::at(DAY, "09:00:00"));
+    // A product name no other test uses, so its seeded series can be told apart.
+    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let product = format!("p{id}");
+    let products = FixedProducts(Ok(vec![(product.clone(), folder.0.join("p"))]));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        Arc::new(FixedChief("%2")),
+        folders,
+        Arc::new(products),
+        no_extras(),
+        shutdown_rx,
+    )
+    .await;
+    assert_eq!(tools.tasks.len(), 6);
+    assert!(folder.0.join("tools/telemetry/telemetry.db").is_file());
+    // The start seeds `harold.telemetry.calls` for the registry's product.
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.telemetry.calls",
+            &[
+                ("prefix", product.as_str()),
+                ("kind", "count"),
+                ("outcome", "rate_limited")
+            ],
+        ),
+        Some(0)
+    );
+
+    let counter = format!("chief.c{id}");
+    let digest = format!("chief.e{id}");
+    let result = || {
+        vec![tp::Attr {
+            key: "result".into(),
+            values: vec!["ok".into(), "failed".into()],
+        }]
+    };
+    let failed = || {
+        vec![tp::Pair {
+            key: "result".into(),
+            value: "failed".into(),
+        }]
+    };
+    for (name, kind) in [(&counter, tp::Kind::Counter), (&digest, tp::Kind::Event)] {
+        let _: tp::DeclareResponse = call(
+            &tools.routes,
+            TELEMETRY,
+            "Declare",
+            tp::DeclareRequest {
+                caller_pane: "%2".into(),
+                name: name.clone(),
+                kind: kind as i32,
+                meaning: "A meaning".into(),
+                attrs: result(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let _: tp::CountResponse = call(
+        &tools.routes,
+        TELEMETRY,
+        "Count",
+        tp::CountRequest {
+            caller_pane: "%2".into(),
+            name: counter.clone(),
+            n: 3,
+            attrs: failed(),
+        },
+    )
+    .await
+    .unwrap();
+    let _: tp::EventResponse = call(
+        &tools.routes,
+        TELEMETRY,
+        "Event",
+        tp::EventRequest {
+            caller_pane: "%2".into(),
+            name: digest.clone(),
+            attrs: failed(),
+        },
+    )
+    .await
+    .unwrap();
+    // Another pane may not write `chief.`: PermissionDenied.
+    let refused: Result<tp::CountResponse, String> = call(
+        &tools.routes,
+        TELEMETRY,
+        "Count",
+        tp::CountRequest {
+            caller_pane: "%9".into(),
+            name: counter.clone(),
+            n: 1,
+            attrs: failed(),
+        },
+    )
+    .await;
+    assert!(
+        refused.as_ref().unwrap_err().starts_with("7 "),
+        "{refused:?}"
+    );
+    let listed: tp::ListResponse = call(
+        &tools.routes,
+        TELEMETRY,
+        "List",
+        tp::ListRequest {
+            caller_pane: "%2".into(),
+            prefix: "chief".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let names: Vec<&str> = listed.signals.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, [counter.as_str(), digest.as_str()]);
+
+    let metric = format!("agent.{counter}");
+    assert_eq!(
+        test_support::exact_counter_value(&metric, &[("agent.attr.result", "failed")]),
+        Some(3)
+    );
+    assert_eq!(
+        test_support::exact_counter_value(&metric, &[("agent.attr.result", "ok")]),
+        Some(0)
+    );
+    assert!(test_support::exported_text().contains(&digest));
+    drop(shutdown);
+    tokio::time::timeout(Duration::from_secs(5), tools.stopped())
+        .await
+        .expect("every tool stops on shutdown");
+}
+
 #[test]
 fn the_backlog_tool_is_given_no_typing() {
     let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
@@ -554,6 +694,7 @@ fn the_backlog_tool_is_given_no_typing() {
         (third, work_ctx),
         (fourth, watch_ctx),
         (fifth, release_ctx),
+        (sixth, telemetry_ctx),
     ] = contexts(
         "/Users/me/.harold/store",
         typing,
@@ -565,13 +706,14 @@ fn the_backlog_tool_is_given_no_typing() {
     );
 
     assert_eq!(
-        (first, second, third, fourth, fifth),
+        (first, second, third, fourth, fifth, sixth),
         (
             questions::NAME,
             backlog::NAME,
             crate::tools::work::NAME,
             crate::tools::watch::NAME,
-            crate::tools::release::NAME
+            crate::tools::release::NAME,
+            crate::tools::telemetry::NAME
         )
     );
     assert!(questions.typing.is_some());
@@ -583,6 +725,11 @@ fn the_backlog_tool_is_given_no_typing() {
     );
     assert!(watch_ctx.typing.is_some());
     assert!(release_ctx.typing.is_none());
+    assert!(telemetry_ctx.typing.is_none());
+    assert_eq!(
+        telemetry_ctx.data_folder,
+        PathBuf::from("/Users/me/.harold/tools/telemetry")
+    );
     assert_eq!(
         backlog.data_folder,
         PathBuf::from("/Users/me/.harold/tools/backlog")
@@ -607,7 +754,7 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 5);
+    assert_eq!(tools.tasks.len(), 6);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
@@ -722,7 +869,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 5);
+    assert_eq!(tools.tasks.len(), 6);
     // An item id no other test uses, so this test's lines can be told apart.
     let id = unique_id();
 

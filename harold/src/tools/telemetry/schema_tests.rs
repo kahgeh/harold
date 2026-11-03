@@ -97,3 +97,33 @@ fn same_shape_ignores_meaning_and_order() {
     changed[1].values = ValueList::Range { lo: 1, hi: 6 };
     assert!(!one.same_shape(&declaration(Kind::Counter, "one", changed)));
 }
+
+#[test]
+fn series_pairs_gives_a_series_key_back_in_the_declared_key_order() {
+    let attrs = vec![
+        parse_attr("step", &list(&["1-3"])).unwrap(),
+        parse_attr("result", &list(&["ok", "failed"])).unwrap(),
+    ];
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    let written = pairs(&[("step", "2"), ("result", "ok")]);
+    assert_eq!(
+        series_pairs(&series_key(&written), &attrs),
+        Some(written.clone())
+    );
+    assert_eq!(series_pairs("", &[]), Some(Vec::new()));
+    // A key that does not fit the declaration gives nothing.
+    for key in [
+        "",
+        "result=ok",
+        "result=ok,step=2,x=1",
+        "result,step=2",
+        "result=ok,result=failed",
+    ] {
+        assert_eq!(series_pairs(key, &attrs), None, "{key}");
+    }
+    assert_eq!(series_pairs("result=ok", &[]), None);
+}
