@@ -419,7 +419,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.checked` | counter, `{record}` | `priority` (`focus`, `next`, `later`). One count when a work record reaches `checked by the user` |
 | `harold.work.lead_time` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `phase` (`whole`, `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check`). Recorded at closing |
 | `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
-| `harold.telemetry.calls` | counter, `{call}` | `prefix` (`chief` or a product), `kind` (`declare`, `count`, `gauge`, `event`, `remove`), `outcome` (`ok` or the reason word of a refusal). Seeded at 0 for each prefix, kind and outcome |
+| `harold.telemetry.calls` | counter, `{call}` | `prefix` (`chief`, a product, or `unknown` for a bad name or a made-up prefix), `kind` (`declare`, `count`, `gauge`, `event`, `remove`), `outcome` (`ok` or the reason word of a refusal). Seeded at 0 for each prefix, kind and outcome |
 | `agent.<name>` | counter or gauge, no unit | `agent.attr.<key>` for each declared attribute. See [Agent signals](#what-leaves-harold) |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 

@@ -419,7 +419,7 @@ async fn an_unknown_prefix_is_refused_and_never_becomes_a_series() {
     );
     assert_eq!(
         s.signals.calls(),
-        vec![call("", "declare", "unknown_prefix")]
+        vec![call("unknown", "declare", "unknown_prefix")]
     );
     assert!(!logs.text().contains("web"), "{}", logs.text());
 }
@@ -859,7 +859,7 @@ async fn a_bad_name_is_invalid_with_no_prefix() {
         s.signals
             .calls()
             .iter()
-            .all(|c| *c == call("", "declare", "invalid"))
+            .all(|c| *c == call("unknown", "declare", "invalid"))
     );
     assert!(list(&service, "").await.is_empty());
 }
@@ -1554,4 +1554,136 @@ async fn the_exported_signals_carry_the_records_and_never_the_meaning() {
     let exported = test_support::exported_text();
     assert!(exported.contains(&digest), "the agent event is exported");
     assert!(!exported.contains(&meaning), "a meaning is exported");
+}
+
+#[tokio::test]
+async fn the_61st_remove_in_a_minute_is_rate_limited() {
+    let s = Setup::new().await;
+    let service = s.service();
+    for _ in 0..60 {
+        declare(&service, HAROLD_PANE, "harold.r", pb::Kind::Event, vec![])
+            .await
+            .unwrap();
+        remove(&service, HAROLD_PANE, "harold.r").await.unwrap();
+    }
+    declare(&service, HAROLD_PANE, "harold.r", pb::Kind::Event, vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal(remove(&service, HAROLD_PANE, "harold.r").await),
+        refused(
+            Code::ResourceExhausted,
+            "rate_limited",
+            "harold. wrote 60 times this minute: wait"
+        )
+    );
+    assert_eq!(list(&service, "harold").await.len(), 1);
+    // A refused remove sends nothing: 60 forgets only.
+    let forgets = s
+        .signals
+        .records()
+        .into_iter()
+        .filter(|r| matches!(r, Sent::Forget(_)))
+        .count();
+    assert_eq!(forgets, 60);
+}
+
+type StoreResult<T> = std::result::Result<T, StoreError>;
+
+/// A store whose gauge write finds no name, as when a `remove` lands between
+/// the read and the write.
+struct VanishingStore(TursoTelemetryStore);
+
+impl TelemetryStore for VanishingStore {
+    async fn declare(&self, declaration: &Declaration) -> StoreResult<Declared> {
+        self.0.declare(declaration).await
+    }
+    async fn get(&self, name: &str) -> StoreResult<Option<Declaration>> {
+        self.0.get(name).await
+    }
+    async fn list(&self, prefix: Option<&str>) -> StoreResult<Vec<Declaration>> {
+        self.0.list(prefix).await
+    }
+    async fn remove(&self, name: &str) -> StoreResult<bool> {
+        self.0.remove(name).await
+    }
+    async fn set_last_value(&self, name: &str, _series: &str, _value: f64) -> StoreResult<bool> {
+        self.0.remove(name).await?;
+        Ok(false)
+    }
+}
+
+#[tokio::test]
+async fn a_gauge_whose_name_is_removed_meanwhile_is_undeclared_and_sends_nothing() {
+    let s = Setup::new().await;
+    let store = Arc::new(VanishingStore(
+        TursoTelemetryStore::open(&s.tmp.0.join("vanishing"))
+            .await
+            .unwrap(),
+    ));
+    let service = TelemetryToolService::new(
+        Arc::clone(&store),
+        s.guard_with(Ok(s.registry())),
+        s.signals.clone(),
+    );
+    service
+        .declare(Request::new(declare_request(
+            HAROLD_PANE,
+            "harold.depth",
+            pb::Kind::Gauge,
+            MEANING,
+            vec![],
+        )))
+        .await
+        .unwrap();
+    let status = service
+        .gauge(Request::new(pb::GaugeRequest {
+            caller_pane: HAROLD_PANE.into(),
+            name: "harold.depth".into(),
+            value: 1.0,
+            attrs: vec![],
+        }))
+        .await
+        .map(|_| ());
+    assert_eq!(
+        refusal(status),
+        refused(
+            Code::FailedPrecondition,
+            "undeclared",
+            "harold.depth is not declared: declare it first"
+        )
+    );
+    assert!(s.signals.records().is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_prefix_and_a_bad_name_land_on_a_seeded_series() {
+    use crate::telemetry::{register_telemetry_counters, test_support};
+    test_support::install();
+    register_telemetry_counters(&[]);
+    let series = |outcome: &'static str| {
+        let wanted = [
+            ("prefix", "unknown"),
+            ("kind", "declare"),
+            ("outcome", outcome),
+        ];
+        test_support::exact_counter_value("harold.telemetry.calls", &wanted)
+    };
+    // Only this test counts on these series through the exporter.
+    let unknown_before = series("unknown_prefix").expect("seeded at 0");
+    let invalid_before = series("invalid").expect("seeded at 0");
+    let s = Setup::new().await;
+    let service = TelemetryToolService::new(
+        Arc::clone(&s.store),
+        s.guard_with(Ok(s.registry())),
+        Arc::new(ExportedSignals),
+    );
+    let (_, reason, _) =
+        refusal(declare(&service, CHIEF_PANE, "web.visits", pb::Kind::Event, vec![]).await);
+    assert_eq!(reason, "unknown_prefix");
+    let (_, reason, _) =
+        refusal(declare(&service, CHIEF_PANE, "Bad.name", pb::Kind::Event, vec![]).await);
+    assert_eq!(reason, "invalid");
+    assert_eq!(series("unknown_prefix"), Some(unknown_before + 1));
+    assert_eq!(series("invalid"), Some(invalid_before + 1));
 }

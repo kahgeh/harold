@@ -6049,7 +6049,7 @@ fn the_telemetry_calls_counter_is_seeded_for_every_prefix_kind_and_outcome() {
     assert_eq!(TELEMETRY_OUTCOMES[0], "ok");
     assert_eq!(TELEMETRY_OUTCOMES.len(), 13);
     assert_eq!(TELEMETRY_OUTCOMES[12], "invalid");
-    for prefix in [product.as_str(), "harold", "chief"] {
+    for prefix in [product.as_str(), "harold", "chief", "unknown"] {
         for kind in TELEMETRY_KINDS {
             for outcome in TELEMETRY_OUTCOMES {
                 let point = test_support::exact_counter_value(

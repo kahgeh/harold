@@ -1,6 +1,6 @@
 //! The telemetry tool's gRPC service. Every call parses the name, checks the
-//! caller's pane against the prefix, takes a write from the rate limit (`count`,
-//! `gauge` and `event` only), and then applies the call's rule. Every call that
+//! caller's pane against the prefix, takes one from the rate limit (`count`,
+//! `gauge`, `event` and `remove`), and then applies the call's rule. Every call that
 //! writes ends with one count on `harold.telemetry.calls`; a refusal also writes
 //! the log line `telemetry call refused` with `prefix`, `kind` and `reason` only.
 
@@ -17,6 +17,7 @@ use super::name::{Attr, Kind, Refused, ValueList, parse_attr, parse_name};
 use super::schema::{Declaration, LastValues, series_key};
 use super::signals::Signals;
 use super::store::{Declared, StoreError, TelemetryStore};
+use crate::telemetry::UNKNOWN_PREFIX;
 
 /// The most a `count` adds at once.
 pub(crate) const MAX_COUNT: u64 = 1_000_000;
@@ -69,16 +70,16 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
     }
 
     /// The prefix as a field: the name's prefix when it is `chief` or a product
-    /// in the registry, or empty. A prefix that a caller makes up never becomes
-    /// a series or a log field.
+    /// in the registry, or `unknown`. A prefix that a caller makes up never
+    /// becomes a series or a log field.
     fn known_prefix(&self, raw_name: &str) -> String {
         let Ok(name) = parse_name(raw_name) else {
-            return String::new();
+            return UNKNOWN_PREFIX.into();
         };
         let known = name.prefix == CHIEF || self.guard.registry_prefixes().contains(&name.prefix);
         match known {
             true => name.prefix,
-            false => String::new(),
+            false => UNKNOWN_PREFIX.into(),
         }
     }
 
@@ -107,12 +108,12 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
         }
     }
 
-    /// Parses the name and checks the pane. A write also takes one from the
-    /// rate limit.
-    fn admit(&self, raw_name: &str, pane: &str, write: bool) -> Result<String, Refused> {
+    /// Parses the name and checks the pane. A `limited` call also takes one
+    /// from the rate limit.
+    fn admit(&self, raw_name: &str, pane: &str, limited: bool) -> Result<String, Refused> {
         let name = parse_name(raw_name)?;
         self.guard.check_prefix(pane, &name.prefix)?;
-        if write {
+        if limited {
             self.guard.take_write(&name.prefix)?;
         }
         Ok(name.full)
@@ -181,6 +182,9 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
             n if n <= MAX_COUNT => n,
             _ => return Err(Refused::Invalid(BAD_COUNT).into()),
         };
+        // A `remove` that ends between the `declared` read and this line is the
+        // one window: the count then makes the forgotten name again until the
+        // next start. The store has no cheaper check than a second read.
         self.signals.counter_add(&name, n, &pairs);
         Ok(())
     }
@@ -192,9 +196,14 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
         if !request.value.is_finite() {
             return Err(Refused::Invalid(BAD_GAUGE).into());
         }
-        self.store
+        // The name was removed after the `declared` read: send nothing.
+        if !self
+            .store
             .set_last_value(&name, &series_key(&pairs), request.value)
-            .await?;
+            .await?
+        {
+            return Err(Refused::Undeclared { name }.into());
+        }
         self.signals.gauge_set(&name, request.value, &pairs);
         Ok(())
     }
@@ -203,12 +212,16 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
         let name = self.admit(&request.name, &request.caller_pane, true)?;
         let declaration = self.declared(&name, Kind::Event).await?;
         let pairs = checked_pairs(&declaration, &request.attrs)?;
+        // The same window as in `count_call`, but an event keeps no state: a
+        // line written just after a `remove` is the only effect.
         self.signals.event(&name, &pairs);
         Ok(())
     }
 
     async fn remove_call(&self, request: pb::RemoveRequest) -> Result<(), Failure> {
-        let name = self.admit(&request.name, &request.caller_pane, false)?;
+        // A remove takes from the rate limit too: each one makes a new
+        // signals provider.
+        let name = self.admit(&request.name, &request.caller_pane, true)?;
         if !self.store.remove(&name).await? {
             return Err(Refused::Undeclared { name }.into());
         }

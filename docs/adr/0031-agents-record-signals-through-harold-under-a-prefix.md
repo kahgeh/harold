@@ -17,4 +17,4 @@ The chief and the PnEMs need to record what they measure, and today only Harold'
 
 - A new signal needs no Harold change.
 - The prefix check is a mix-up check. The pane comes from `TMUX_PANE` or `REX_BLOCK`, so a local process that lies can write any prefix (ADR 0002).
-- Series stay bounded by the declared values and the caps, and writes by the rate limit.
+- Series stay bounded by the declared values and the caps, and writes and removes by the rate limit.

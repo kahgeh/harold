@@ -3045,6 +3045,11 @@ pub(crate) const TELEMETRY_OUTCOMES: [&str; 13] = [
 /// The prefix of the chief's signals, seeded with the products' prefixes.
 const CHIEF_PREFIX: &str = "chief";
 
+/// The `prefix` of a call whose name has no prefix of `chief` or a product: a bad name, or a
+/// prefix that the caller made up. It is seeded with the others, so its refusals have a 0
+/// point.
+pub(crate) const UNKNOWN_PREFIX: &str = "unknown";
+
 /// Counts one call of the telemetry tool.
 pub(crate) fn count_telemetry_call(prefix: &str, kind: &str, outcome: &str) {
     instruments()
@@ -3060,13 +3065,15 @@ fn telemetry_call_attributes(prefix: &str, kind: &str, outcome: &str) -> [KeyVal
     ]
 }
 
-/// Records 0 once on `harold.telemetry.calls` for each prefix in `prefixes` and `chief`, each
-/// kind and each outcome, so the first refusal after a start shows as a rise. The telemetry
-/// tool calls it at its start.
+/// Records 0 once on `harold.telemetry.calls` for each prefix in `prefixes`, `chief` and
+/// `unknown`, each kind and each outcome, so the first refusal after a start shows as a rise.
+/// The telemetry tool calls it at its start.
 pub(crate) fn register_telemetry_counters(prefixes: &[String]) {
     let calls = &instruments().telemetry_calls;
-    let chief = (!prefixes.iter().any(|p| p == CHIEF_PREFIX)).then_some(CHIEF_PREFIX);
-    for prefix in prefixes.iter().map(String::as_str).chain(chief) {
+    let fixed = [CHIEF_PREFIX, UNKNOWN_PREFIX]
+        .into_iter()
+        .filter(|fixed| !prefixes.iter().any(|p| p == fixed));
+    for prefix in prefixes.iter().map(String::as_str).chain(fixed) {
         for kind in TELEMETRY_KINDS {
             for outcome in TELEMETRY_OUTCOMES {
                 calls.add(0, &telemetry_call_attributes(prefix, kind, outcome));

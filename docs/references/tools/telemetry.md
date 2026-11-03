@@ -70,11 +70,11 @@ An attribute key or value that you did not declare is refused. A write can add n
 | Series for a counter or a gauge | 100: the product of the value counts of its keys |
 | Count in one `count` | 1,000,000 |
 | Meaning length | 80 characters |
-| Writes for each prefix | 60 in a sliding minute |
+| Writes and removes for each prefix | 60 in a sliding minute |
 
 An event has no series to seed. Its keys and values are declared and checked in the same way.
 
-The rate limit applies to `count`, `gauge` and `event` only. `declare`, `remove` and `list` are not limited.
+The rate limit applies to `count`, `gauge`, `event` and `remove`. Each `remove` makes a new signals provider in Harold, so it counts as a write. `declare` and `list` are not limited.
 
 ## Events
 
@@ -110,11 +110,11 @@ A database failure is not a refusal. The call returns `Unavailable` with the tex
 
 `harold.telemetry.calls` counts each declare, count, gauge, event and remove call:
 
-- `prefix` is `chief` or a product.
+- `prefix` is `chief`, a product, or `unknown`. `unknown` is a bad name or a prefix that is not `chief` or a product, so a made-up prefix never becomes a series.
 - `kind` is `declare`, `count`, `gauge`, `event` or `remove`.
 - `outcome` is `ok` or a reason word. `invalid` is the 12th reason word, so the counter has 13 outcome entries with `ok`.
 
-Harold seeds the counter at 0 for every registry prefix plus `chief`, every kind and every outcome. Each refusal series has its 0 point. A refused call also writes the `telemetry call refused` log line (`info`) with `prefix`, `kind` and `reason`, and no value or text.
+Harold seeds the counter at 0 for every registry prefix plus `chief` and `unknown`, every kind and every outcome. Each refusal series has its 0 point. A refused call also writes the `telemetry call refused` log line (`info`) with `prefix`, `kind` and `reason`, and no value or text.
 
 The dashboard tile "Agent signals: calls and refusals" shows the refusals of the last 24 hours. More than 10 in a day is an info note: a script uses a wrong prefix or loops.
 
