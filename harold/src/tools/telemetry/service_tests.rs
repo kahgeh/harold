@@ -1687,3 +1687,61 @@ async fn an_unknown_prefix_and_a_bad_name_land_on_a_seeded_series() {
     assert_eq!(series("unknown_prefix"), Some(unknown_before + 1));
     assert_eq!(series("invalid"), Some(invalid_before + 1));
 }
+
+/// Records on which thread `forget` runs, and forwards everything to a fake.
+struct ThreadOfForget {
+    inner: Arc<FakeSignals>,
+    thread: Mutex<Option<std::thread::ThreadId>>,
+}
+
+impl Signals for ThreadOfForget {
+    fn counter_add(&self, name: &str, n: u64, attrs: &[(String, String)]) {
+        self.inner.counter_add(name, n, attrs);
+    }
+
+    fn gauge_set(&self, name: &str, value: f64, attrs: &[(String, String)]) {
+        self.inner.gauge_set(name, value, attrs);
+    }
+
+    fn event(&self, name: &str, attrs: &[(String, String)]) {
+        self.inner.event(name, attrs);
+    }
+
+    fn forget(&self, name: &str) {
+        *self.thread.lock().unwrap() = Some(std::thread::current().id());
+        self.inner.forget(name);
+    }
+
+    fn call(&self, prefix: &str, kind: &str, outcome: &str) {
+        self.inner.call(prefix, kind, outcome);
+    }
+
+    fn seed_calls(&self, prefixes: &[String]) {
+        self.inner.seed_calls(prefixes);
+    }
+}
+
+#[tokio::test]
+async fn remove_forgets_off_the_async_worker_after_the_row_is_gone() {
+    let s = Setup::new().await;
+    let signals = Arc::new(ThreadOfForget {
+        inner: s.signals.clone(),
+        thread: Mutex::new(None),
+    });
+    let service = TelemetryToolService::new(
+        Arc::clone(&s.store),
+        s.guard_with(Ok(s.registry())),
+        signals.clone(),
+    );
+    declare_attempts(&service).await;
+    remove(&service, HAROLD_PANE, ATTEMPTS).await.unwrap();
+    // The reply waits for the forget, and the row is gone.
+    assert_eq!(
+        s.signals.records().last(),
+        Some(&Sent::Forget(ATTEMPTS.into()))
+    );
+    assert_eq!(s.store.get(ATTEMPTS).await.unwrap(), None);
+    // The test's runtime has one thread: a forget on another thread ran off it.
+    let thread = signals.thread.lock().unwrap().expect("forget ran");
+    assert_ne!(thread, std::thread::current().id());
+}

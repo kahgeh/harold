@@ -225,7 +225,13 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
         if !self.store.remove(&name).await? {
             return Err(Refused::Undeclared { name }.into());
         }
-        self.signals.forget(&name);
+        // The row is gone first, then the export. `forget` may wait up to 5 s
+        // for a send on its way, so it runs off the async workers. The reply
+        // waits for it, so the export has stopped when `remove` returns. If
+        // the task fails, the row is still gone and the next start sends
+        // nothing for the name.
+        let signals = Arc::clone(&self.signals);
+        let _ = tokio::task::spawn_blocking(move || signals.forget(&name)).await;
         Ok(())
     }
 }
