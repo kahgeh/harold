@@ -1278,6 +1278,20 @@ impl Scheduler {
         slot.close(closing.map(|line| (line, obs::ReportObs::new(&ended.name, ended.runs))));
     }
 
+    /// The start of the next local day and its clock text. A failed read gives the sum
+    /// and logs one line.
+    async fn next_local_midnight(&self) -> (i64, String) {
+        let (day_start, day_end) = self.today().await;
+        match self.deps.local.midnight_after(day_start).await {
+            Ok(midnight) => (midnight, "00:00".to_owned()),
+            Err(reason) => {
+                obs::clock_unreadable(reason);
+                let text = local_text(day_end, self.offset().await);
+                (day_end, clock_of(&text).to_owned())
+            }
+        }
+    }
+
     /// The daily budget would be passed. Every running watch with an end stops with its
     /// own closing line. Every running watch with no end becomes a capped watch: paused
     /// until the next local day, with one line that tells so.
@@ -1285,23 +1299,24 @@ impl Scheduler {
         let Ok(running) = self.deps.store.running().await else {
             return;
         };
-        let (day_start, day_end) = self.today().await;
-        // The real next midnight; on a day of 23 or 25 hours it is not the sum. When the
-        // clock cannot give it, the sum is used and one line tells so.
-        let (next_day, resumes_clock) = match self.deps.local.midnight_after(day_start).await {
-            Ok(midnight) => (midnight, "00:00".to_owned()),
-            Err(reason) => {
-                obs::clock_unreadable(reason);
-                let text = local_text(day_end, self.offset().await);
-                (day_end, clock_of(&text).to_owned())
-            }
-        };
+        // The real next midnight; on a day of 23 or 25 hours it is not the sum. It is
+        // read once, when the first watch with no end needs it. When the clock cannot give
+        // it, the sum is used and one line tells so.
+        let mut resume: Option<(i64, String)> = None;
         for row in running {
             if row.ends_at_ms.is_some() {
                 self.end(&row, EndReason::DailyBudgetSpent, Some(daily))
                     .await;
                 continue;
             }
+            let (next_day, resumes_clock) = match &resume {
+                Some(known) => known.clone(),
+                None => {
+                    let known = self.next_local_midnight().await;
+                    resume = Some(known.clone());
+                    known
+                }
+            };
             let slot = match self.hold(&row, Some(next_day), How::BudgetDay).await {
                 Ok(Some(slot)) => slot,
                 Ok(None) => continue,

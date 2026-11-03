@@ -413,11 +413,26 @@ mod midnight_tests {
 
     #[tokio::test]
     async fn the_next_midnight_is_the_printed_instant_in_milliseconds() {
-        let (clock, seen) = clock_with(Ok("1791036000\n"));
-        // 2026-10-20 23:30 at +10:00: the next date is 2026-10-21.
+        let (clock, _) = clock_with(Ok("1791036000\n"));
         let day = local_ms("2026-10-20 23:30", UtcOffset::from_hms(10, 0, 0).unwrap()).unwrap();
         assert_eq!(clock.midnight_after(day).await, Ok(1_791_036_000_000));
-        assert_eq!(seen.lock().unwrap()[0][3], "2026-10-21 00:00:00");
+    }
+
+    #[tokio::test]
+    async fn the_date_asked_for_is_the_day_after_the_local_day() {
+        let plus_ten = UtcOffset::from_hms(10, 0, 0).unwrap();
+        for (local, next) in [
+            // 00:00 at +10:00 is 14:00 UTC of the day before: the UTC date is a day behind.
+            ("2026-10-20 00:00", "2026-10-21 00:00:00"),
+            ("2026-10-20 23:30", "2026-10-21 00:00:00"),
+            ("2026-10-31 08:00", "2026-11-01 00:00:00"),
+            ("2026-12-31 00:00", "2027-01-01 00:00:00"),
+        ] {
+            let (clock, seen) = clock_with(Ok("1791036000"));
+            let day = local_ms(local, plus_ten).unwrap();
+            clock.midnight_after(day).await.unwrap();
+            assert_eq!(seen.lock().unwrap()[0][3], next, "{local}");
+        }
     }
 
     #[tokio::test]

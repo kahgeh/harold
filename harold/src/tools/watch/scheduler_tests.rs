@@ -1915,6 +1915,52 @@ async fn a_failed_date_read_falls_back_to_the_sum_and_logs_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn two_watches_capped_by_one_event_with_a_failed_date_read_log_one_line() {
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    local.set_midnight(Err(clock::ClockReason::Unparsable));
+    let h = harness_on(with_daily(0.5), vec![answer("QUIET", 0.01)], &local).await;
+    start_just_after_midnight().await;
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let day_end = next_day_start();
+
+    h.start_capped("a").await;
+    h.start_capped("b").await;
+    let starts = local.midnight_reads();
+
+    let text = logs.text();
+    let count = text
+        .lines()
+        .filter(|line| line.contains("watch clock unreadable"))
+        .count();
+    assert!(starts >= 1);
+    assert_eq!(count, starts, "one line for each read: {text}");
+    assert_eq!(h.row("a").await.paused_until_ms, Some(day_end));
+    assert_eq!(h.row("b").await.paused_until_ms, Some(day_end));
+}
+
+#[tokio::test(start_paused = true)]
+async fn watches_with_an_end_stop_without_a_date_read() {
+    let local = ScriptedOffset::at(UtcOffset::UTC);
+    let h = harness_on(with_daily(1.0), vec![answer("QUIET", 0.6)], &local).await;
+    start_just_after_midnight().await;
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let mut ending = h.checked("a", 10, 120);
+    ending.run_budget_usd_micros = Some(600_000);
+    h.scheduler.start(ending).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+    // The second run could pass the daily budget: the watch stops.
+    pass(10 * MINUTE).await;
+
+    assert_eq!(local.midnight_reads(), 0);
+    assert!(!logs.text().contains("watch clock unreadable"));
+    assert!(
+        h.typing
+            .typed()
+            .contains(&"WATCH a stopped: daily budget of $1.00 spent".to_string())
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_capped_watch_stays_paused_over_a_restart_and_resumes_at_the_next_day_start() {
     let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
     start_just_after_midnight().await;

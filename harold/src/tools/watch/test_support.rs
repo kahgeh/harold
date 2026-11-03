@@ -313,18 +313,28 @@ impl ModelRunner for FakeRunner {
 }
 
 /// An offset the test sets and changes, as daylight saving time does.
-pub(super) struct ScriptedOffset(Mutex<UtcOffset>, Mutex<Result<i64, ClockReason>>);
+pub(super) struct ScriptedOffset(
+    Mutex<UtcOffset>,
+    Mutex<Result<i64, ClockReason>>,
+    std::sync::atomic::AtomicUsize,
+);
 
 impl ScriptedOffset {
     pub(super) fn at(offset: UtcOffset) -> Arc<Self> {
         Arc::new(Self(
             Mutex::new(offset),
             Mutex::new(Err(ClockReason::Missing)),
+            std::sync::atomic::AtomicUsize::new(0),
         ))
     }
 
     pub(super) fn set(&self, offset: UtcOffset) {
         *self.0.lock().unwrap() = offset;
+    }
+
+    /// How many times `midnight_after` ran.
+    pub(super) fn midnight_reads(&self) -> usize {
+        self.2.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The answer of `midnight_after`. Until the test sets it, the answer is `Missing`.
@@ -340,6 +350,7 @@ impl LocalOffset for ScriptedOffset {
     }
 
     fn midnight_after(&self, _day_ms: i64) -> BoxFuture<'_, Result<i64, ClockReason>> {
+        self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let answer = *self.1.lock().unwrap();
         Box::pin(async move { answer })
     }
