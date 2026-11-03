@@ -25,7 +25,7 @@ impl Facts for Fake {
         self.questions
             .get(id)
             .copied()
-            .unwrap_or(QuestionFact::Unknown)
+            .unwrap_or(QuestionFact::Missing)
     }
 }
 
@@ -142,4 +142,37 @@ fn status_ordering_uses_ordinal() {
     let fake = fake_spec(spec_facts(|s| s.merged = true));
     let r = linked("a", Status::Merged, "spec:p/s1");
     assert!(check(&[r], &fake).is_empty());
+}
+
+#[test]
+fn unreadable_question_gives_no_line() {
+    let mut fake = Fake::default();
+    fake.questions.insert("Q1".into(), QuestionFact::Unreadable);
+    let r = linked("a", Status::Approved, "question:Q1");
+    assert!(check(&[r], &fake).is_empty());
+}
+
+#[test]
+fn approved_spec_on_approved_record_is_not_flagged() {
+    let fake = fake_spec(spec_facts(|s| s.approved = true));
+    let r = linked("a", Status::Approved, "spec:p/s1");
+    assert!(check(&[r], &fake).is_empty());
+}
+
+#[test]
+fn one_record_gives_several_lines() {
+    let mut fake = fake_spec(spec_facts(|s| s.merged = true));
+    fake.questions.insert("Q1".into(), QuestionFact::Waiting);
+    let mut r = linked("a", Status::Approved, "spec:p/s1");
+    r.links.push("question:Q1".into());
+    let kinds: Vec<_> = check(&[r], &fake).iter().map(|m| m.kind).collect();
+    assert_eq!(kinds, ["waiting_question", "merged_status_behind"]);
+}
+
+#[test]
+fn malformed_spec_link_gives_missing_link() {
+    let r = linked("a", Status::Idea, "spec:nothing");
+    let m = one(&[r], &Fake::default());
+    assert_eq!(m.kind, "missing_link");
+    assert_eq!(m.line, "a links spec:nothing, which names no spec.");
 }

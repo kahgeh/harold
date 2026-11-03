@@ -19,7 +19,10 @@ pub(super) struct SpecFacts {
 pub(super) enum QuestionFact {
     Waiting,
     Answered,
-    Unknown,
+    /// The question does not exist.
+    Missing,
+    /// The question tool cannot be read. This gives no line.
+    Unreadable,
 }
 
 pub(super) trait Facts: Send + Sync {
@@ -53,6 +56,16 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
             line: format!("{name} {text}"),
         });
     };
+    for link in &record.links {
+        if let Some(rest) = link.strip_prefix("spec:")
+            && !rest.contains('/')
+        {
+            add(
+                "missing_link",
+                format!("links {link}, which names no spec."),
+            );
+        }
+    }
     let specs: Vec<(&str, &str, SpecFacts)> = record
         .links
         .iter()
@@ -135,7 +148,7 @@ fn check_record(record: &Record, facts: &dyn Facts, found: &mut Vec<Mismatch>) {
         }
     }
     for (id, fact) in &questions {
-        if *fact == QuestionFact::Unknown {
+        if *fact == QuestionFact::Missing {
             add(
                 "missing_link",
                 format!("links question {id}, which does not exist."),
