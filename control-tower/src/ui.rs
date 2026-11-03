@@ -9,7 +9,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Wrap,
 };
 
-use crate::api::HAROLD_VERSION_LIMIT;
+use crate::api::{FocusRecord, HAROLD_VERSION_LIMIT};
 use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, StateCounts, VoiceState};
 use crate::questions::{
     ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
@@ -52,9 +52,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     let compact = area.width < COMPACT_WIDTH || area.height < 24;
     let chrome_height = if compact { 2 } else { 3 };
     let fixed = 3 + 3 * chrome_height + WORKSPACE_MIN + 3;
-    // The Now line takes a row only when one is spare beside the list's six rows, so at
-    // the smallest height it hides rather than squeeze the list.
-    let now_height = u16::from(app.now_line.is_some() && area.height > fixed);
+    let now_height = focus_height(app, area.height, fixed);
     let [masthead, now, monitor, summary, search, workspace, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(now_height),
@@ -67,7 +65,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     .areas(area);
 
     render_masthead(frame, masthead, app);
-    if let Some(line) = app.now_line.as_deref() {
+    if !app.focus.is_empty() {
+        render_focus(frame, now, &app.focus);
+    } else if let Some(line) = app.now_line.as_deref() {
         render_now(frame, now, line);
     }
     render_monitor(frame, monitor, app, now_ms);
@@ -246,6 +246,37 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(title).block(board_block().borders(Borders::ALL)),
         area,
     );
+}
+
+/// The rows under the masthead: one per focus record (at most two), or one for the
+/// Now line while no record is in focus. Only rows spare beside the list's six rows
+/// count, so at the smallest height they hide rather than squeeze the list.
+fn focus_height(app: &App, area_height: u16, fixed: u16) -> u16 {
+    let rows = if app.focus.is_empty() {
+        u16::from(app.now_line.is_some())
+    } else {
+        u16::try_from(app.focus.len().min(2)).unwrap_or(2)
+    };
+    rows.min(area_height.saturating_sub(fixed))
+}
+
+/// The work records in focus, one dim row each under the masthead, in line with the
+/// text inside the boxes. Each row is cut to the width and never takes the focus.
+fn render_focus(frame: &mut Frame<'_>, area: Rect, records: &[FocusRecord]) {
+    let rows = Layout::vertical(vec![Constraint::Length(1); records.len()]).split(area);
+    for (record, row) in records.iter().zip(rows.iter()) {
+        let inner = row.inner(Margin::new(1, 0));
+        let mut text = format!("FOCUS  {}  [{}]", record.name, record.status);
+        if !record.next_step.is_empty() {
+            text.push_str("  next: ");
+            text.push_str(&record.next_step);
+        }
+        let text = fit(&text, usize::from(inner.width)).into_owned();
+        frame.render_widget(
+            Paragraph::new(Line::styled(text, Style::default().fg(MUTED))),
+            inner,
+        );
+    }
 }
 
 /// The chief's Now item, on one dim row under the masthead, in line with the text
@@ -6157,6 +6188,116 @@ mod tests {
         let lines = rendered_lines(&with, 60, 19, 100_000);
         assert_eq!(row_with(&lines, "NOW  "), 3, "{lines}");
         row_with(&lines, "q quit");
+    }
+
+    fn focus_rec(name: &str, status: &str, next: &str) -> crate::api::FocusRecord {
+        crate::api::FocusRecord {
+            name: name.into(),
+            status: status.into(),
+            next_step: next.into(),
+        }
+    }
+
+    /// 70 characters, so it fits at 118 columns and is cut at 90.
+    const LONG_NEXT: &str =
+        "write the focus lines into the screen and then check them at each width";
+
+    fn focus_app(records: Vec<crate::api::FocusRecord>) -> App {
+        let mut app = now_app();
+        app.observe_now(None);
+        app.observe_focus_records(records);
+        app
+    }
+
+    #[test]
+    fn two_focus_lines_show_under_the_masthead() {
+        let app = focus_app(vec![
+            focus_rec("alpha-work", "building", LONG_NEXT),
+            focus_rec("beta-work", "open", LONG_NEXT),
+        ]);
+        for width in [140u16, 118, 90, 60] {
+            let lines = rendered_lines(&app, width, 30, 100_000);
+            let rows: Vec<&str> = lines.lines().collect();
+            for (index, (name, status)) in [("alpha-work", "building"), ("beta-work", "open")]
+                .into_iter()
+                .enumerate()
+            {
+                let row = rows[3 + index];
+                let start = format!(" FOCUS  {name}  [{status}]  next: ");
+                let cut = width < 100;
+                if width >= 90 {
+                    assert!(row.starts_with(&start), "{width}: {lines}");
+                } else {
+                    assert!(row.starts_with(" FOCUS  "), "{width}: {lines}");
+                }
+                let text = row.trim_end();
+                assert_eq!(text.ends_with('…'), cut, "{width}: {lines}");
+                assert!(text.chars().count() <= usize::from(width), "{lines}");
+            }
+            assert!(!lines.contains("NOW  "), "{lines}");
+        }
+    }
+
+    #[test]
+    fn a_record_with_an_empty_next_step_ends_after_its_status() {
+        let app = focus_app(vec![focus_rec("alpha-work", "building", "")]);
+        let lines = rendered_lines(&app, 140, 30, 100_000);
+        let row = lines.lines().nth(3).unwrap();
+        assert_eq!(row.trim_end(), " FOCUS  alpha-work  [building]", "{lines}");
+        assert!(!lines.contains("next:"), "{lines}");
+    }
+
+    #[test]
+    fn one_spare_row_shows_the_first_focus_record_only() {
+        let app = focus_app(vec![
+            focus_rec("alpha-work", "building", "a"),
+            focus_rec("beta-work", "open", "b"),
+        ]);
+        // At 60 columns the screen is compact and its fixed height is 18.
+        let lines = rendered_lines(&app, 60, 19, 100_000);
+        assert_eq!(row_with(&lines, "FOCUS  alpha-work"), 3, "{lines}");
+        assert!(!lines.contains("beta-work"), "{lines}");
+    }
+
+    #[test]
+    fn no_spare_row_hides_the_focus_lines() {
+        let with = focus_app(vec![focus_rec("alpha-work", "building", "a")]);
+        let without = focus_app(Vec::new());
+        assert_eq!(
+            rendered_lines(&with, 60, 18, 100_000),
+            rendered_lines(&without, 60, 18, 100_000)
+        );
+    }
+
+    #[test]
+    fn no_focus_record_takes_no_row() {
+        let app = focus_app(Vec::new());
+        let lines = rendered_lines(&app, 140, 30, 100_000);
+        let rows: Vec<&str> = lines.lines().collect();
+        assert!(
+            rows[3].contains("MONITOR"),
+            "the monitor box starts at row 3:\n{lines}"
+        );
+        assert!(!lines.contains("FOCUS"), "{lines}");
+    }
+
+    #[test]
+    fn the_fallback_now_line_still_shows_as_now() {
+        let mut app = focus_app(Vec::new());
+        app.observe_now(Some(NOW.into()));
+        let lines = rendered_lines(&app, 140, 30, 100_000);
+        assert_eq!(row_with(&lines, "NOW  "), 3, "{lines}");
+        assert!(!lines.contains("FOCUS"), "{lines}");
+    }
+
+    #[test]
+    fn focus_wins_over_now() {
+        let mut app = focus_app(vec![focus_rec("alpha-work", "building", "a")]);
+        app.observe_now(Some(NOW.into()));
+        let lines = rendered_lines(&app, 140, 30, 100_000);
+        assert_eq!(row_with(&lines, "FOCUS  alpha-work"), 3, "{lines}");
+        assert!(!lines.contains("NOW  "), "{lines}");
+        assert!(!lines.contains("Ship the backlog"), "{lines}");
     }
 
     #[test]

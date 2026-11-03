@@ -3128,10 +3128,9 @@ mod tests {
     }
 
     /// Runs `consume_stream` for `run_for` with the question poll every 20 ms, the
-    /// question tool as `questions` and the backlog tool
-    /// answering `answers` in order, and returns how often the backlog tool was read.
-    /// Runs the stream with a work tool that is not there (`Unimplemented`), so the
-    /// queue Now read decides the line. Returns the queue Now read count.
+    /// question tool as `questions` and the backlog tool answering `answers` in order.
+    /// The work tool is not there (`Unimplemented`), so the queue Now read decides the
+    /// line. Returns how often the backlog tool was read.
     async fn run_now_stream(
         core: &mut RuntimeCore,
         questions: QuestionProbe,
@@ -3275,8 +3274,8 @@ mod tests {
         assert_eq!(core.app.now_line, None);
     }
 
-    #[tokio::test]
-    async fn a_disconnect_clears_the_focus() {
+    #[test]
+    fn a_disconnect_clears_the_focus() {
         let mut core = connected_core();
         core.app.observe_focus_records(vec![focus_record("a")]);
         core.app.mark_disconnected();

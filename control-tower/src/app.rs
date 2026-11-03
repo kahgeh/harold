@@ -343,8 +343,6 @@ pub struct App {
     pub now_line: Option<String>,
     /// The work records in focus, at most two; empty while the work tool has none or
     /// cannot be read. They are never focused and take no keys.
-    // Task 3 (ui.rs) draws these; until then nothing reads the field.
-    #[allow(dead_code)]
     pub focus: Vec<FocusRecord>,
     /// `Some` when the cursor is on that row of the questions; `selected` then names the
     /// asker's row (the chief's) when it shows.
@@ -666,7 +664,6 @@ impl App {
         self.call = view;
     }
 
-    /// Takes the latest read of the chief's Now item, and reports whether the line changed.
     /// Takes the focus records, and reports whether they changed.
     pub fn observe_focus_records(&mut self, records: Vec<FocusRecord>) -> bool {
         let changed = self.focus != records;
@@ -674,6 +671,7 @@ impl App {
         changed
     }
 
+    /// Takes the latest read of the chief's Now item, and reports whether the line changed.
     pub fn observe_now(&mut self, line: Option<String>) -> bool {
         let changed = self.now_line != line;
         self.now_line = line;
