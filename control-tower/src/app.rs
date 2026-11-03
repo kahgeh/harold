@@ -199,6 +199,12 @@ pub struct Snapshot {
     pub rows: Vec<AgentRow>,
     pub tts_muted: bool,
     pub messaging_paused: bool,
+    /// Watches that run now. Harold sends 0 when it is too old to count.
+    pub watches_running: u32,
+    /// Watches that a person or an agent paused.
+    pub watches_paused: u32,
+    /// Watches that stopped because they reached the day budget.
+    pub watches_capped: u32,
     /// The release Harold reports, `None` while disconnected or when it sent none.
     pub harold_version: Option<String>,
 }
@@ -959,6 +965,7 @@ impl App {
     pub fn apply_later_snapshot(&mut self, snapshot: Snapshot) -> Result<bool, SnapshotError> {
         if snapshot.through_event_version == self.snapshot.through_event_version
             && !self.detail_text_changed_in(&snapshot)
+            && !self.watch_counts_changed_in(&snapshot)
         {
             return Ok(false);
         }
@@ -988,6 +995,14 @@ impl App {
                         || old.recap_at_ms != new.recap_at_ms)
             })
         })
+    }
+
+    /// A change of the watch counts does not raise the event version, so a snapshot
+    /// at the same version still counts when one of the three counts is different.
+    pub fn watch_counts_changed_in(&self, snapshot: &Snapshot) -> bool {
+        snapshot.watches_running != self.snapshot.watches_running
+            || snapshot.watches_paused != self.snapshot.watches_paused
+            || snapshot.watches_capped != self.snapshot.watches_capped
     }
 
     pub fn mark_disconnected(&mut self) {
@@ -1560,6 +1575,9 @@ mod tests {
             rows: Vec::new(),
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
         };
         let search = SearchState {
             query: String::new(),
@@ -1579,6 +1597,9 @@ mod tests {
             through_event_version: 2,
             tts_muted: true,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             ..empty
         })
         .unwrap();
@@ -1606,6 +1627,9 @@ mod tests {
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             through_event_version: 2,
             server_time_ms: 222,
             monitor_health: vec![health(MonitorHealthState::Degraded, "tmux_unavailable")],
@@ -1713,6 +1737,37 @@ mod tests {
     }
 
     #[test]
+    fn same_version_snapshot_with_new_watch_counts_is_applied() {
+        let mut app = app_with_step(None);
+        let mut next = same_version_with_step(None);
+        next.watches_running = 2;
+        next.watches_paused = 1;
+        next.watches_capped = 3;
+
+        assert!(app.apply_later_snapshot(next).unwrap());
+
+        assert_eq!(app.snapshot.watches_running, 2);
+        assert_eq!(app.snapshot.watches_paused, 1);
+        assert_eq!(app.snapshot.watches_capped, 3);
+        assert_eq!(app.snapshot.through_event_version, 7);
+    }
+
+    #[test]
+    fn same_version_snapshot_with_same_counts_is_dropped() {
+        let mut app = app_with_step(None);
+        let mut first = same_version_with_step(None);
+        first.watches_running = 2;
+        assert!(app.apply_later_snapshot(first).unwrap());
+        let accepted = app.snapshot.clone();
+        let mut again = same_version_with_step(None);
+        again.watches_running = 2;
+
+        assert!(!app.apply_later_snapshot(again).unwrap());
+
+        assert_eq!(app.snapshot, accepted);
+    }
+
+    #[test]
     fn a_step_that_goes_away_at_the_same_version_is_applied() {
         let mut app = app_with_step(Some("Testing"));
 
@@ -1732,6 +1787,9 @@ mod tests {
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             through_event_version: 10,
             server_time_ms: 1_000,
             monitor_health: vec![
@@ -1753,6 +1811,9 @@ mod tests {
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 through_event_version: 10,
                 server_time_ms: 1_001,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1767,6 +1828,9 @@ mod tests {
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
                 through_event_version: 11,
                 server_time_ms: 1_100,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -2436,6 +2500,9 @@ mod tests {
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             through_event_version,
             server_time_ms,
             monitor_health: Vec::new(),
@@ -2555,6 +2622,9 @@ mod tests {
             rows: Vec::new(),
             tts_muted: muted,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
         };
         let mut app = App::new(
             ConnectionState::Connecting,
@@ -2654,6 +2724,9 @@ mod tests {
                 rows: Vec::new(),
                 tts_muted: false,
                 messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
             },
             SearchState {
                 query: String::new(),
@@ -2740,6 +2813,9 @@ mod tests {
                 rows: Vec::new(),
                 tts_muted: false,
                 messaging_paused: false,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
             },
             SearchState {
                 query: String::new(),
@@ -2864,6 +2940,9 @@ mod tests {
                 rows: Vec::new(),
                 tts_muted: false,
                 messaging_paused: true,
+                watches_running: 0,
+                watches_paused: 0,
+                watches_capped: 0,
             },
             SearchState {
                 query: String::new(),

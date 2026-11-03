@@ -64,6 +64,9 @@ fn demo_app() -> App {
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             through_event_version: 1842,
             server_time_ms: NOW_MS,
             monitor_health: vec![

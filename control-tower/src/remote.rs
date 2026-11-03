@@ -1256,6 +1256,9 @@ mod tests {
             rows,
             tts_muted: false,
             messaging_paused: false,
+            watches_running: 0,
+            watches_paused: 0,
+            watches_capped: 0,
             harold_version: None,
         }
     }

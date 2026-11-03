@@ -435,6 +435,9 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         rows,
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
+        watches_running: snapshot.watches_running,
+        watches_paused: snapshot.watches_paused,
+        watches_capped: snapshot.watches_capped,
         harold_version: Some(sanitize_display(
             &snapshot.harold_version,
             HAROLD_VERSION_LIMIT,
@@ -828,6 +831,20 @@ mod tests {
             assert_eq!(mapped.messaging_paused, paused);
             assert!(!mapped.tts_muted);
         }
+    }
+
+    #[test]
+    fn maps_watch_counts_from_the_snapshot() {
+        let mapped = map_snapshot(AgentStateSnapshot {
+            watches_running: 2,
+            watches_paused: 1,
+            watches_capped: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(mapped.watches_running, 2);
+        assert_eq!(mapped.watches_paused, 1);
+        assert_eq!(mapped.watches_capped, 3);
     }
 
     #[test]
