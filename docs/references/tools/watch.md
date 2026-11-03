@@ -128,7 +128,7 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 - **Give one of `--in`, `--at` and `--cron`.** A cron reminder is a one-time reminder: it is typed at the next matching minute, then it ends. It has no 2-minute rule. A text that starts with `-` goes after `--`.
 - **The output** is `reminder <name> at HH:MM`, the due time in local time.
 - **Harold types** `REMIND <name>: <text>` once, with the checks of the watch reports (see The lines Harold types).
-- **A missed reminder.** A reminder (a cron reminder too) that is not typed within 120 minutes of its time is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
+- **A missed reminder.** A reminder (a cron reminder too) that is 120 minutes or more late is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
 - **`watch stop <name>`** cancels a waiting reminder. `list` shows each waiting reminder as `reminder <name> due HH:MM, reporting to <chief|self>`.
 - **A name in use** is refused with `name <name> is in use` (`FailedPrecondition` `name_in_use`), when a running or paused watch or a waiting reminder has the name. `start` with the name of a waiting reminder is refused the same way.
 - **A `--at` reminder keeps its local date and time.** It is due when the local clock reaches it. A change of the local offset moves it with the clock. A time in a spring-forward gap is due at the first instant after the gap. A time that occurs twice is due at its first occurrence. A cron reminder follows the same two rules.
@@ -185,7 +185,7 @@ give exactly one of every_minutes and cron
 - **The checked minute.** Harold keeps, for each cron watch, the newest local minute it has checked. It stores that minute, so it stays across a restart. At each check Harold looks at every local minute after the checked minute, up to now. Then the checked minute moves on to now. It never moves back. Harold stores it before the run starts.
 - **A missed run.** After a sleep or a restart, the minutes since the last check can hold more than one match. Harold runs once, for the newest match, only when that match is at most 120 minutes old. Older matches are skipped and never run as a backlog. The `missed` field of `watch run finished` gives their count.
 - **A match outside the window.** When the newest match is more than 120 minutes old, nothing runs. Harold logs `watch run skipped` with `reason` = `missed` and counts the outcome `missed` in `watch.runs`.
-- **A cron reminder** types once at its match. A reminder that is more than 120 minutes late is dropped.
+- **A cron reminder** types once at its match. A reminder that is at least 120 minutes late is dropped.
 - **`--for`** and the open-ended watch work as for `--every`. A cron watch with no `--for` needs `[watch] daily_budget_usd`, and the daily budget stops or caps it in the same way.
 - **Pause and resume.** While a cron watch is paused, its checked minute moves on. The resume runs once, at once, with no backlog. After a pause, the next runs are at the next matching minutes.
 
@@ -201,7 +201,7 @@ Harold reads the local date and time from `/bin/date` (see The clock). It checks
 - **Matches during a long run.** When a cron match passes while a run is still in progress, the next run starts at once after it. So a watch with a dense schedule and long runs runs back to back. An `--every` watch skips such slots.
 - **The end of a daily-budget cap.** When the cap of an open-ended cron watch ends, the watch runs once at once, even with no match. This is the resume rule.
 - **The give-up window is fixed.** A watch has no `give_up_after_minutes`. The window of a cron watch and of a cron reminder is 120 minutes.
-- **The window counts local clock minutes.** Harold takes the age of a match from the difference of two local clock readings. A match from before a skipped hour is therefore due for only 60 minutes of real time after the change. The same rule makes `late_s` after a skipped hour count wall-clock minutes.
+- **The window counts local clock minutes.** Harold takes the age of a match from the difference of two local clock readings. A match from before a skipped hour is therefore due for a window that is an hour shorter in real time. The same rule makes `late_s` after a skipped hour count wall-clock minutes.
 
 ## Settings
 
@@ -329,9 +329,11 @@ No line carries the text of a reminder or any of the skill's text, its `allowed-
 | Moment | Level | Line | Fields |
 |---|---|---|---|
 | A watch starts, is replaced or resumes | info | `watch started` | `watch`, `folder`, `skill`, `ends_at`, `every_minutes`, `every_run`, `how` (`started`, `replaced` or `resumed`), `model` (the `[watch] model` every run passes) |
-| A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms`, `wait_ms` (the wait for the model), `run_ms` (the Claude Code run), `add_dirs` |
+| A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms`, `wait_ms` (the wait for the model), `run_ms` (the Claude Code run), `add_dirs`, `schedule` (`every` or `cron`), `late_s` (seconds from the slot or the matched minute to the start), `missed` (the count of older cron matches skipped before this run; 0 for `every`) |
 | A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`), `cost_usd`, `wait_ms`, `run_ms`, `add_dirs`; for a `process_failed` or `max_turns_reached` run that exited, also those of `exit_code`, `signal`, `subtype`, `is_error`, `num_turns`, `terminal_reason` and `api_error_status` that are known (`subtype` is `unreadable_json` when the output was not JSON, and `other` when it or `terminal_reason` was not a short name; `api_error_status` is a whole number from 100 to 599) |
-| A run is skipped | warn | `watch run skipped` | `watch`, `run`, `reason` (`model_busy`) |
+| A run is skipped | warn | `watch run skipped` | `watch`, `run`, `reason` (`model_busy`); or `watch`, `reason` (`missed`) and `missed` (the count of cron matches that gave no run), with no `run`, when the newest cron match is older than 120 minutes |
+| The checked minute of a cron watch is not stored | warn | `watch checked minute not stored` | `watch`, `reason` (`store_failed`). The watch keeps the minute in memory. The line comes once a minute while the store fails |
+| A stored cron expression does not parse | warn | `watch cron not read` | `watch`, `reason` (`bad_cron`). The watch runs nothing. The line comes once a minute. The expression is not logged |
 | A skill's `allowed-tools` is a YAML list, at each run | warn | `watch skill tools not read` | `watch`, `reason` (`yaml_list`) |
 | A report waits, logged when its reason changes | info | `watch report waiting` | `watch`, `run`, `reason` (the timed-prompt reasons, such as `agent_busy`) |
 | A waiting report is replaced or dropped | info | `watch report replaced` | `watch`, `run`, `why` (`newer_report` or `watch_ended`) |
@@ -341,13 +343,13 @@ No line carries the text of a reminder or any of the skill's text, its `allowed-
 | The store fails on a pause or a resume of `--all`, at the timed end of a pause, or at a cap | warn | `watch not paused` or `watch not resumed` | `watch`, `reason` (`store_failed`). A timed resume tries again after 5 seconds |
 | A watch's task cannot read its row from the store | warn | `watch store read failed` | `watch`, `reason` (`store_failed`). The task tries again after 5 seconds |
 | A reminder is set | info | `reminder set` | `reminder`, `due_at` |
-| A reminder is typed | info | `reminder typed` | `reminder`, `late_s` |
-| A reminder is dropped or cancelled | info | `reminder ended` | `reminder`, `reason` (`dropped` or `cancelled`) |
+| A reminder is typed | info | `reminder typed` | `reminder`, `late_s`, `schedule` (`in`, `at` or `cron`), `missed` (always 0) |
+| A reminder is dropped or cancelled | info | `reminder ended` | `reminder`, `reason` (`dropped` or `cancelled`), `schedule` |
 | A watch ends | info | `watch stopped` | `watch`, `reason` (`ended`, `stopped`, `daily_budget_spent`, `runs_failing`), `runs`, `cost_usd` |
 
 `watch run finished`, `watch run failed` and `watch run skipped` are written inside the run's `harold.watch.run` span, so they carry its trace id. Counted from 0 at a watch's start, for HyperDX:
 
-- `watch.runs`, by `folder` and `outcome` (`quiet`, `report`, `skipped`, or a failure reason). The watch's name is chosen by an agent, so it is never a counter attribute, only a log field and a span attribute.
+- `watch.runs`, by `folder` and `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason). `missed` counts a cron match that gave no run, and is not a `skipped` run. The watch's name is chosen by an agent, so it is never a counter attribute, only a log field and a span attribute.
 - `watch.cost_usd`, by `folder`.
 - The span `harold.watch.run`, with `watch`, `run`, `outcome`, `reason` and `cost_usd`, and its child `harold.watch.model` with `result` (`exited`, `killed` or `failed_to_start`).
 
@@ -359,7 +361,7 @@ To find out why a run is slow, read the two run lines: a large `wait_ms` means a
 
 ## Data
 
-The tool's database is `<store folder>/tools/watch/watch.db` (Turso), with the tables `watches`, `runs` and `reminders` (`001_watches.sql`, `002_run_limit.sql`, `003_controls.sql`). `runs` holds each run's watch, folder, run number, start, outcome and cost (empty when unknown); the day's spend is summed from it. `watches` also keeps when a watch ended, for `list`.
+The tool's database is `<store folder>/tools/watch/watch.db` (Turso), with the tables `watches`, `runs` and `reminders` (`001_watches.sql`, `002_run_limit.sql`, `003_controls.sql`, `004_cron.sql`). `runs` holds each run's watch, folder, run number, start, outcome and cost (empty when unknown); the day's spend is summed from it. `watches` also keeps when a watch ended, for `list`.
 
 Migration `003_controls.sql` rebuilds `watches`, because a Turso table cannot change a `CHECK` or `NOT NULL` in place. In the new table:
 
@@ -368,7 +370,9 @@ Migration `003_controls.sql` rebuilds `watches`, because a Turso table cannot ch
 - `paused_until_ms` holds the end of a pause (empty when the pause has no end).
 - `pause_how` holds who paused the watch: `cli`, `control_tower` or `budget_day`.
 
-The migration copies every row of the old table, with the old column names. The new table `reminders` holds `name`, `folder`, `report_to`, `text`, `due_at_ms` (for `--in`), `due_local` (for `--at`, a local date and time), `state` (`waiting`, `typed`, `dropped` or `cancelled`), `created_at_ms` and `ended_at_ms`.
+Migration `004_cron.sql` adds the columns `cron` and `checked_local` to `watches` and to `reminders`. `cron` holds the cron expression. `checked_local` holds the newest local minute (`YYYY-MM-DD HH:MM`) that the schedule checked. Both stay empty for a row that does not use cron. A cron watch stores `every_minutes` 0. The column `checked_local` of `reminders` is not used.
+
+Migration `003_controls.sql` copies every row of the old table, with the old column names. The new table `reminders` holds `name`, `folder`, `report_to`, `text`, `due_at_ms` (for `--in`), `due_local` (for `--at`, a local date and time), `state` (`waiting`, `typed`, `dropped` or `cancelled`), `created_at_ms` and `ended_at_ms`.
 
 ## The gRPC contract
 
@@ -376,18 +380,18 @@ The migration copies every row of the old table, with the old column names. The 
 
 | RPC | Request | Response |
 |---|---|---|
-| `StartWatch` | `name`, `folder`, `skill`, `every_minutes`, optional `for_minutes` (absent: no end), `report_to`, `run_budget_usd`, `every_run`, `run_limit_secs` | `name`, optional `ends_at_ms` (absent: no end) |
+| `StartWatch` | `name`, `folder`, `skill`, optional `every_minutes` (4), optional `cron` (10) (give one of the two), optional `for_minutes` (absent: no end), `report_to`, `run_budget_usd`, `every_run`, `run_limit_secs` | `name`, optional `ends_at_ms` (absent: no end) |
 | `StopWatch` | `name` | empty |
 | `ListWatches` | empty | `watches` (`Watch`), `spent_usd`, `reminders` (`Reminder`: `name`, `report_to`, `due_at_ms`) |
 | `Pause` | `name`, `all`, optional `for_minutes`, `caller` (`cli`, `control_tower`; empty means `cli`) | `paused`, `skipped` (names) |
 | `Resume` | `name`, `all`, `caller` | `resumed`, `skipped` (the capped watches) |
-| `Remind` | `name`, `folder`, `in_minutes` or `at_local`, `report_to`, `text` | `due_at_ms` |
+| `Remind` | `name`, `folder`, `in_minutes`, `at_local` or `cron` (7), `report_to`, `text` | `due_at_ms` |
 
-`Watch` gains `paused`, optional `paused_until_ms`, `pause_how` and optional `ends_at_ms`. Refusals: `InvalidArgument` `invalid <field>`; `NotFound` `unknown_skill` and `unknown_watch`; `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset`, `not_running`, `not_paused`, `budget_day` and `name_in_use`; `Unavailable` when the database write fails.
+`Watch` gains `cron` (18) and `checked_local` (19), both empty when unused, and `Reminder` gains `cron` (4). `Watch` also gains `paused`, optional `paused_until_ms`, `pause_how` and optional `ends_at_ms`. Refusals: `InvalidArgument` `invalid <field>`; `NotFound` `unknown_skill` and `unknown_watch`; `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset`, `not_running`, `not_paused`, `budget_day` and `name_in_use`; `Unavailable` when the database write fails.
 
 ## Rollback
 
-An older Harold does not know migration `003_controls`. When it opens a `watch.db` that has this migration, it refuses the database. Its watch tool does not start, and Harold logs `tool failed to start` with `reason` = `store_open_failed`. The other tools work.
+An older Harold does not know migrations `003_controls` and `004_cron`. When it opens a `watch.db` that has a migration it does not know, it refuses the database with `incompatible watch schema`. This holds for a database that has `004_cron`, with or without a cron watch row. Its watch tool does not start, and Harold logs `tool failed to start` with `reason` = `store_open_failed`. The other tools work.
 
 To use the watch tool with an older Harold:
 
