@@ -34,6 +34,9 @@ pub mod tools {
         }
     }
     pub mod work {
+        // The generated code trips a clippy lint that the older generated modules also trip.
+        // This module adds no new warning.
+        #[allow(clippy::double_must_use)]
         pub mod v1 {
             tonic::include_proto!("harold.tools.work.v1");
         }
