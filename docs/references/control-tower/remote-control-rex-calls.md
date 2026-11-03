@@ -25,6 +25,8 @@ Harold keeps the order in `remote-order.json` in its data folder, beside `restar
 2. A product that is not in the file joins at the end, in the alphabetical order of the product names. This is the order in which Harold's registry reads them (`read_registry`), not the order of the lines in `products.toml`.
 3. A product that is no longer in the registry drops out.
 
+After `J` or `K`, the remote sends the full order to `SetRemoteOrder`, not only the running PnEMs. The moved products take the places that the running products held in the order from `GetRemoteOrder`, so a product whose PnEM is stopped keeps its place. When `GetRemoteOrder` gave an empty order, the remote sends the running PnEMs in their new order.
+
 The chief is not in the file. The chief is always 0.
 
 Two log lines show the state of the file:

@@ -261,6 +261,69 @@ pub fn draw(frame: &mut Frame, model: &Model) {
     frame.render_widget(Paragraph::new(hints.to_vec()), hint_area);
 }
 
+/// The full order to save after a move: the moved running products take the places
+/// that the running products held in `full`, so a stopped product keeps its place.
+/// A moved product that is not in `full` joins at the end. With an empty `full` (an
+/// older Harold, or no registry), it is the moved list.
+fn merge_order(full: &[String], moved: &[String]) -> Vec<String> {
+    if full.is_empty() {
+        return moved.to_vec();
+    }
+    let mut running: Vec<&String> = Vec::new();
+    for product in moved {
+        if !running.contains(&product) {
+            running.push(product);
+        }
+    }
+    let mut next = running.iter().filter(|product| full.contains(product));
+    let mut merged: Vec<String> = full
+        .iter()
+        .map(|product| {
+            let slot = running.contains(&product).then(|| next.next()).flatten();
+            slot.map_or_else(|| product.clone(), |moved| (*moved).clone())
+        })
+        .collect();
+    merged.extend(
+        running
+            .iter()
+            .filter(|product| !full.contains(product))
+            .map(|product| (*product).clone()),
+    );
+    merged
+}
+
+/// The remote order as Harold stores it, and the order on the screen. They differ
+/// only after a failed save.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Orders {
+    stored: Vec<String>,
+    screen: Vec<String>,
+}
+
+impl Orders {
+    fn new(stored: Vec<String>) -> Orders {
+        Orders {
+            screen: stored.clone(),
+            stored,
+        }
+    }
+
+    /// The full list to send after the running PnEMs moved to `moved`.
+    fn to_save(&self, moved: &[String]) -> Vec<String> {
+        merge_order(&self.stored, moved)
+    }
+
+    fn saved(&mut self, sent: Vec<String>) {
+        self.stored = sent.clone();
+        self.screen = sent;
+    }
+
+    /// The screen keeps the new order; the stored order stays as Harold has it.
+    fn not_saved(&mut self, sent: Vec<String>) {
+        self.screen = sent;
+    }
+}
+
 /// The longest notice on the last line, in characters, before the width cuts it.
 const NOTICE_LIMIT: usize = 200;
 
@@ -430,7 +493,7 @@ async fn remote_loop<S: RemoteSource>(
     navigator: &TmuxNavigator,
 ) -> Result<(), AppError> {
     let mut model = Model::new(Vec::new());
-    let mut order: Vec<String> = Vec::new();
+    let mut orders = Orders::default();
     let mut stream: Option<S::Stream> = None;
     let mut opening = true;
     let open = source.open();
@@ -444,7 +507,7 @@ async fn remote_loop<S: RemoteSource>(
                 match opened {
                     Ok(opened) => {
                         match opened.remote_order().await {
-                            Ok(products) => order = products,
+                            Ok(products) => orders = Orders::new(products),
                             Err(error) => {
                                 model.notice =
                                     Some(notice("could not read the remote order", error.detail()));
@@ -460,7 +523,7 @@ async fn remote_loop<S: RemoteSource>(
             item = next_snapshot(&mut stream) => {
                 match item {
                     Some(Ok(snapshot)) => {
-                        model.replace_entries(entries(&snapshot.rows, &order));
+                        model.replace_entries(entries(&snapshot.rows, &orders.screen));
                     }
                     Some(Err(error)) => {
                         model.notice = Some(notice("Harold stream failed", error.detail()));
@@ -490,14 +553,19 @@ async fn remote_loop<S: RemoteSource>(
                         }
                     }
                     Action::Move { order: moved } => {
+                        // The full order goes to Harold, so a stopped PnEM keeps its place.
                         // The screen keeps the new order even when the save fails.
-                        order = moved;
+                        let sent = orders.to_save(&moved);
                         let saved = match &stream {
-                            Some(stream) => stream.save_remote_order(&order).await,
+                            Some(stream) => stream.save_remote_order(&sent).await,
                             None => Err(SourceError::Transport("Harold is not connected".into())),
                         };
-                        if let Err(error) = saved {
-                            model.notice = Some(notice("could not save the remote order", error.detail()));
+                        match saved {
+                            Ok(()) => orders.saved(sent),
+                            Err(error) => {
+                                orders.not_saved(sent);
+                                model.notice = Some(notice("could not save the remote order", error.detail()));
+                            }
                         }
                     }
                     Action::None => {}
@@ -1333,6 +1401,96 @@ mod tests {
         );
         assert_eq!(outcome.last.notice, None);
         assert!(outcome.rex.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shift_k_on_c_with_b_stopped_sends_the_full_order() {
+        let outcome = run_case(Case {
+            snapshots: vec![snapshot(1, vec![chief(), pnem("a"), pnem("c")])],
+            order: Ok(names(&["a", "b", "c"])),
+            keys: vec![ch('j'), ch('j'), ch('K')],
+            ..Case::default()
+        })
+        .await;
+
+        assert_eq!(outcome.saved, [names(&["c", "b", "a"])]);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · c", "PnEM · a"]
+        );
+        assert_eq!(outcome.last.notice, None);
+    }
+
+    #[tokio::test]
+    async fn shift_j_on_a_with_b_stopped_sends_the_full_order() {
+        let outcome = run_case(Case {
+            snapshots: vec![snapshot(1, vec![chief(), pnem("a"), pnem("c")])],
+            order: Ok(names(&["a", "b", "c"])),
+            keys: vec![ch('j'), ch('J')],
+            ..Case::default()
+        })
+        .await;
+
+        assert_eq!(outcome.saved, [names(&["c", "b", "a"])]);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · c", "PnEM · a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_no_full_order_a_move_sends_the_moved_list() {
+        let outcome = run_case(Case {
+            order: Ok(Vec::new()),
+            keys: vec![ch('j'), ch('J')],
+            ..Case::default()
+        })
+        .await;
+
+        assert_eq!(outcome.saved, [names(&["b", "a"])]);
+        assert_eq!(
+            labels(&outcome.last.entries),
+            ["Chief", "PnEM · b", "PnEM · a"]
+        );
+    }
+
+    #[test]
+    fn the_moved_products_fill_the_slots_of_the_running_products() {
+        let full = names(&["a", "b", "c"]);
+        assert_eq!(
+            merge_order(&full, &names(&["c", "a"])),
+            names(&["c", "b", "a"])
+        );
+        assert_eq!(
+            merge_order(&full, &names(&["b", "a", "c"])),
+            names(&["b", "a", "c"])
+        );
+        assert_eq!(merge_order(&[], &names(&["b", "a"])), names(&["b", "a"]));
+        // A running product that is not in the full order joins at the end.
+        assert_eq!(
+            merge_order(&full, &names(&["x", "c", "a"])),
+            names(&["c", "b", "a", "x"])
+        );
+        // Two PnEMs of one product count once.
+        assert_eq!(
+            merge_order(&full, &names(&["c", "c", "a"])),
+            names(&["c", "b", "a"])
+        );
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_screen_and_the_stored_full_order() {
+        let mut orders = Orders::new(names(&["a", "b", "c"]));
+        let sent = orders.to_save(&names(&["c", "a"]));
+        assert_eq!(sent, names(&["c", "b", "a"]));
+
+        orders.not_saved(sent.clone());
+        assert_eq!(orders.stored, names(&["a", "b", "c"]));
+        assert_eq!(orders.screen, names(&["c", "b", "a"]));
+
+        orders.saved(sent);
+        assert_eq!(orders.stored, names(&["c", "b", "a"]));
+        assert_eq!(orders.screen, names(&["c", "b", "a"]));
     }
 
     #[tokio::test]
