@@ -194,10 +194,24 @@ body.on-todos .todos-row {
 
 .back-button {
   flex: 0 1 auto;
+  min-width: var(--target);
+}
+
+.back-button svg {
+  flex: none;
+}
+
+/* A long page title is cut on one line, so it never squeezes the back control. */
+body.notes .top h2 {
+  flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .back-label {
+  max-width: 40vw;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

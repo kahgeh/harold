@@ -247,6 +247,7 @@ try {
       const label = b.querySelector(".back-label");
       const rect = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width, height: r.height }; };
       return { harold: rect(k), back: rect(b), innerWidth: innerWidth, scrollWidth: document.documentElement.scrollWidth,
+        backLabel: b.querySelector(".back-label").textContent.trim(), titleCut: !!document.querySelector("header h2") && document.querySelector("header h2").scrollWidth > document.querySelector("header h2").clientWidth,
         labelCut: label.scrollWidth > label.clientWidth, visible: !!k && k.getBoundingClientRect().right <= innerWidth + 0.5 && k.getBoundingClientRect().left >= 0 }; })()`) };
     await shot(key + "-320");
   }
@@ -418,8 +419,13 @@ def verify(results, data):
         h = data['pages'][key]['header']
         k = h['harold']
         check('at 320 px Harold stays visible, 44 px or more, with a long title: ' + key,
-              k is not None and h['visible'] and k['width'] >= 44 and k['height'] >= 44 and h['labelCut']
+              k is not None and h['visible'] and k['width'] >= 44 and k['height'] >= 44
               and h['scrollWidth'] <= h['innerWidth'], h)
+        if key == 'long-list':
+            b = h['back']
+            check('at 320 px the list back control is 44 x 44 px or more and shows its whole label',
+                  b['width'] >= 44 and b['height'] >= 44 and h['backLabel'] == 'Pages' and not h['labelCut'], h)
+            check('at 320 px the long title is cut on one line', h['titleCut'], h)
         print('info: at 320 px on {} the back control is {:.0f} x {:.0f} px'.format(key, h['back']['width'], h['back']['height']))
 
 
