@@ -85,6 +85,7 @@ harold tool watch resume --all               # resumed 2
 - **Pause and resume type no line**, because a person or an agent asked for it.
 - **`pause` refuses** `unknown_watch`, `not_running` and `budget_day`. **`resume` refuses** `unknown_watch`, `not_paused` and `budget_day`. At the CLI these print `unknown watch <name>`, `<name> is not running`, `<name> is not paused` and `<name> is capped by the daily budget`.
 - **The count line of `--all`** is `paused N` or `resumed N`, and when a capped watch was skipped, `, skipped <names> (budget)`.
+- **The CLI prints what the daemon changed.** `paused <name>` and `resumed <name>` come only when the daemon names the watch in its answer. Otherwise the line is `paused 0` or `resumed 0`.
 - **The service's `caller`** is `cli` or `control_tower`. It goes to the log only (`how` in `watch paused` and `watch resumed`). It does not change what the call does. A pause or resume from a timer logs `timed`.
 
 ### The capped watch
@@ -96,6 +97,7 @@ When a daily budget is spent, a watch with an end stops, as before. An open-ende
 - **Harold types one line** when the watch is capped (see The lines Harold types). `list` shows `paused (budget) until 00:00`.
 - **If the first run of the new day could pass the budget again**, the same check pauses the watch until the day after.
 - **`start` is refused** with `daily budget spent`, for any name, while a capped watch holds.
+- **Limit: the day of a daylight-saving change.** The tool takes each local day as 24 hours. On the day of a change, the day boundary of the daily budget is one hour off before or after the change. A watch that caps in the first hours of that day can resume one hour early or late. From the next day, the boundary is right.
 
 ## Reminders
 
@@ -113,7 +115,7 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 | `--in` | The wait before the line is typed | A time, 1 minute to 24 hours |
 | `--at` | The next time the local clock reads this time, today or tomorrow | `HH:MM`, 24 hours |
 | `--report-to` | Who gets the line | `chief`, or `self` for the folder where the command ran. `self` when left out |
-| `"<text>"` | The text of the reminder | At least one visible character. Harold removes control characters and cuts it to 300 characters |
+| `"<text>"` | The text of the reminder | At least one visible character. Harold removes control characters, escape sequences and Unicode format characters (for example a right-to-left override), and cuts it to 300 characters |
 
 - **Give `--in` or `--at`, not both.** A text that starts with `-` goes after `--`.
 - **The output** is `reminder <name> at HH:MM`, the due time in local time.
@@ -126,6 +128,8 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 ## The clock
 
 The watch tool reads the local offset from `/bin/date` (`+%Y-%m-%d %H:%M:%S %z`) at each use, as the timed prompts do. It does not read it once at the start of Harold. After a daylight-saving change, the day of the daily budget, the clock times in `list` and the due time of a `--at` reminder are right with no restart. When `/bin/date` fails, the tool uses the last offset that it read.
+
+Tokio's clock stops while the Mac sleeps, and the wall clock does not. So a waiting watch wakes at least once a minute and reads the wall clock again. After a sleep, a run time, the end of a pause, the next day of a capped watch or the end of a watch that passed during the sleep takes effect within a minute of the wake. A waiting reminder wakes the same way.
 
 ## Settings
 
@@ -262,6 +266,7 @@ No line carries the text of a reminder or any of the skill's text, its `allowed-
 | A report or closing line is typed | info | `watch report typed` | `watch`, `run`, `pane`, `insert_pressed` |
 | A watch is paused | info | `watch paused` | `watch`, `how` (`cli`, `control_tower`, `timed` or `budget_day`), `paused_until` (local time; left out when the pause has no end) |
 | A watch resumes from a pause | info | `watch resumed` | `watch`, `how` (as for `watch paused`) |
+| The store fails on a pause or a resume of `--all`, at the timed end of a pause, or at a cap | warn | `watch not paused` or `watch not resumed` | `watch`, `reason` (`store_failed`). A timed resume tries again after 5 seconds |
 | A reminder is set | info | `reminder set` | `reminder`, `due_at` |
 | A reminder is typed | info | `reminder typed` | `reminder`, `late_s` |
 | A reminder is dropped or cancelled | info | `reminder ended` | `reminder`, `reason` (`dropped` or `cancelled`) |
@@ -309,6 +314,12 @@ The migration copies every row of the old table, with the old column names. The 
 
 ## Rollback
 
-An older Harold ignores `tools/watch/`. Deleting the folder empties the tool. After migration 003, the old columns of `watches` keep their names.
+An older Harold does not know migration `003_controls`. When it opens a `watch.db` that has this migration, it refuses the database. Its watch tool does not start, and Harold logs `tool failed to start` with `reason` = `store_open_failed`. The other tools work.
 
-Warning: a database with an open-ended or a paused watch is not safe for an older Harold. Such a row has an empty `ends_at_ms` or the state `paused`, and the older code does not read them.
+To use the watch tool with an older Harold:
+
+1. Stop Harold.
+2. Move `<store folder>/tools/watch/watch.db` (and its `-wal` and `-shm` files, if they are there) to a different folder.
+3. Start the older Harold. It makes a new, empty `watch.db`.
+
+This loses the watch history, the day's spend and the waiting reminders. To go back to the new Harold, stop Harold and move the old files back.
