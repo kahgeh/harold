@@ -1136,6 +1136,8 @@ async fn a_budget_stop_survives_a_restart_for_that_day_only() {
 
 #[tokio::test(start_paused = true)]
 async fn day_bounds_and_end_time_follow_a_changed_offset() {
+    // Pin the wall clock: at the real time, the two offsets can fall on different dates.
+    set_wall_clock(instant("2026-11-02 12:00", UtcOffset::UTC));
     let plus_eleven = UtcOffset::from_hms(11, 0, 0).unwrap();
     let plus_ten = UtcOffset::from_hms(10, 0, 0).unwrap();
     let local = ScriptedOffset::at(plus_eleven);
