@@ -53,3 +53,9 @@ pub(crate) mod rex_host_runner;
 #[cfg(test)]
 #[path = "rex_host_runner_tests.rs"]
 mod rex_host_runner_tests;
+
+pub(crate) mod waiting;
+
+#[cfg(test)]
+#[path = "waiting_tests.rs"]
+mod waiting_tests;
