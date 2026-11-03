@@ -40,14 +40,14 @@ const DEFAULT_SLOTS: u32 = 3;
 
 /// The file baton writes in a worktree when it starts a worker there. A worktree holding
 /// it is a busy slot.
-const AGENT_PANE: &str = ".superpowers/baton/agent-pane";
+pub(crate) const AGENT_PANE: &str = ".superpowers/baton/agent-pane";
 
 /// The pod folder of a base checkout, which holds the product's specs.
-const POD_FOLDER: &str = ".superpowers/pod";
+pub(crate) const POD_FOLDER: &str = ".superpowers/pod";
 
 /// Why a product's facts, or the registry, could not be read. Each is fixed text: the
 /// `reason` field is exported.
-const NO_ANSWER: &str = "git gave no answer";
+pub(crate) const NO_ANSWER: &str = "git gave no answer";
 const GIT_FAILED: &str = "git failed";
 const REGISTRY_UNREADABLE: &str = "registry unreadable";
 const POD_UNREADABLE: &str = "pod folder unreadable";
@@ -779,7 +779,7 @@ pub(crate) struct SpecRead {
 
 /// The creation time of the file at `path`, or its modification time where the file
 /// system keeps no creation time. None when there is no such file.
-fn file_time(path: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
+pub(crate) fn file_time(path: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() {
         return None;

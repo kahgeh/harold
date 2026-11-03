@@ -15,6 +15,11 @@ mod classify;
     not(test),
     expect(dead_code, reason = "the service calls them in a later task")
 )]
+mod gather;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the service calls them in a later task")
+)]
 mod model;
 mod service;
 mod title;

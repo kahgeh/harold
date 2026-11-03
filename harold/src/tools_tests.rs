@@ -24,10 +24,10 @@ const WORK: &str = "harold.tools.work.v1.WorkService";
 const DAY: &str = "2026-10-14";
 
 /// A folder under the system's temporary folder, removed when dropped.
-struct TempFolder(PathBuf);
+pub(super) struct TempFolder(pub(super) PathBuf);
 
 impl TempFolder {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("harold-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
