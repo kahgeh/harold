@@ -383,8 +383,45 @@ pub struct PaletteState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteEntry {
     pub label: &'static str,
+    pub key: char,
     pub effect: Effect,
 }
+
+/// One command of the palette: its key, and its label before and after it acts.
+struct CommandRow {
+    key: char,
+    off: &'static str,
+    on: &'static str,
+}
+
+/// The commands in palette order: voice, messaging, call.
+const COMMAND_TABLE: [CommandRow; 3] = [
+    CommandRow {
+        key: 'm',
+        off: "Voice: mute",
+        on: "Voice: unmute",
+    },
+    CommandRow {
+        key: 'p',
+        off: "Messaging: pause",
+        on: "Messaging: resume",
+    },
+    CommandRow {
+        key: 'C',
+        off: "Call: start",
+        on: "Call: end",
+    },
+];
+
+/// The keys that run a command from the list. They come from `COMMAND_TABLE`.
+pub const COMMAND_KEYS: [char; 3] = [
+    COMMAND_TABLE[0].key,
+    COMMAND_TABLE[1].key,
+    COMMAND_TABLE[2].key,
+];
+
+/// Keys other parts of the control-tower use, so no command takes them.
+pub const KEPT_KEYS: [char; 2] = ['v', 'w'];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -1014,50 +1051,57 @@ impl App {
             .filter(|health| health.state == MonitorHealthState::Degraded)
     }
 
-    pub fn palette_entries(&self) -> Vec<PaletteEntry> {
-        let Some(palette) = &self.palette else {
-            return Vec::new();
-        };
+    /// The commands that show now, in table order. Empty when the connection is not live.
+    /// It ignores the palette and its query.
+    pub fn commands(&self) -> Vec<PaletteEntry> {
         if self.connection != ConnectionState::Live {
             return Vec::new();
         }
-        let query = normalize_search(&palette.query);
+        let [voice, messaging, call] = &COMMAND_TABLE;
         let mut all = match self.voice() {
             VoiceState::On => vec![PaletteEntry {
-                label: "Voice: mute",
+                label: voice.off,
+                key: voice.key,
                 effect: Effect::SetTtsMuted(true),
             }],
             VoiceState::Muted => vec![PaletteEntry {
-                label: "Voice: unmute",
+                label: voice.on,
+                key: voice.key,
                 effect: Effect::SetTtsMuted(false),
             }],
             VoiceState::Unknown => Vec::new(),
         };
         if self.has_snapshot {
-            all.push(if self.snapshot.messaging_paused {
-                PaletteEntry {
-                    label: "Messaging: resume",
-                    effect: Effect::SetMessagingPaused(false),
-                }
-            } else {
-                PaletteEntry {
-                    label: "Messaging: pause",
-                    effect: Effect::SetMessagingPaused(true),
-                }
+            let paused = self.snapshot.messaging_paused;
+            all.push(PaletteEntry {
+                label: if paused { messaging.on } else { messaging.off },
+                key: messaging.key,
+                effect: Effect::SetMessagingPaused(!paused),
             });
         }
         match self.call_press() {
             Some(CallAction::Start) => all.push(PaletteEntry {
-                label: "Call: start",
+                label: call.off,
+                key: call.key,
                 effect: Effect::Call(CallAction::Start),
             }),
             Some(CallAction::Stop) => all.push(PaletteEntry {
-                label: "Call: end",
+                label: call.on,
+                key: call.key,
                 effect: Effect::Call(CallAction::Stop),
             }),
             Some(CallAction::TalkNow | CallAction::Status) | None => {}
         }
-        all.into_iter()
+        all
+    }
+
+    pub fn palette_entries(&self) -> Vec<PaletteEntry> {
+        let Some(palette) = &self.palette else {
+            return Vec::new();
+        };
+        let query = normalize_search(&palette.query);
+        self.commands()
+            .into_iter()
             .filter(|entry| normalize_search(entry.label).contains(&query))
             .collect()
     }
@@ -1243,6 +1287,11 @@ impl App {
                         .is_some_and(|call| call.state == CallState::Speaking) =>
             {
                 return Effect::Call(CallAction::TalkNow);
+            }
+            KeyCode::Char(character) if COMMAND_KEYS.contains(&character) => {
+                if let Some(entry) = self.commands().into_iter().find(|e| e.key == character) {
+                    return entry.effect;
+                }
             }
             KeyCode::Char('n') => self.select_waiting(true),
             KeyCode::Char('N') => self.select_waiting(false),
@@ -2584,6 +2633,148 @@ mod tests {
         let mut app = live_voice_app(false);
         app.snapshot.messaging_paused = paused;
         app
+    }
+
+    #[test]
+    fn key_m_mutes_and_unmutes_the_voice() {
+        let mut app = live_voice_app(false);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('m')),
+            Effect::SetTtsMuted(true)
+        );
+        let mut app = live_voice_app(true);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('m')),
+            Effect::SetTtsMuted(false)
+        );
+    }
+
+    #[test]
+    fn key_p_pauses_and_resumes_messaging() {
+        let mut app = live_messaging_app(false);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('p')),
+            Effect::SetMessagingPaused(true)
+        );
+        let mut app = live_messaging_app(true);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('p')),
+            Effect::SetMessagingPaused(false)
+        );
+    }
+
+    #[test]
+    fn key_capital_c_starts_and_ends_a_call() {
+        let mut app = call_app(CallState::Off);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('C')),
+            Effect::Call(CallAction::Start)
+        );
+        let mut app = call_app(CallState::Listening);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('C')),
+            Effect::Call(CallAction::Stop)
+        );
+        let mut app = live_voice_app(false);
+        assert!(app.call_press().is_none());
+        assert_eq!(app.handle_key(KeyCode::Char('C')), Effect::None);
+    }
+
+    #[test]
+    fn lowercase_c_still_needs_the_chief_row() {
+        let mut app = call_app(CallState::Off);
+        select_pane(&mut app, "%1");
+        assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+    }
+
+    #[test]
+    fn command_keys_do_nothing_when_the_command_is_hidden() {
+        let mut app = App::new(
+            ConnectionState::Connecting,
+            Snapshot {
+                harold_version: None,
+                through_event_version: 0,
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                rows: Vec::new(),
+                tts_muted: false,
+                messaging_paused: false,
+            },
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        );
+        app.connection = ConnectionState::Live;
+        assert_eq!(app.voice(), VoiceState::Unknown);
+        assert_eq!(app.handle_key(KeyCode::Char('m')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('p')), Effect::None);
+
+        let mut stale = live_voice_app(false);
+        stale.mark_disconnected();
+        for key in COMMAND_KEYS {
+            assert_eq!(stale.handle_key(KeyCode::Char(key)), Effect::None);
+        }
+    }
+
+    #[test]
+    fn command_keys_are_text_in_the_palette() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        assert_eq!(app.handle_key(KeyCode::Char('m')), Effect::None);
+        assert_eq!(app.palette.as_ref().unwrap().query, "m");
+    }
+
+    #[test]
+    fn command_keys_are_text_in_the_search() {
+        let mut app = call_app(CallState::Off);
+        app.handle_key(KeyCode::Char('f'));
+        for key in ['m', 'p', 'C'] {
+            assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None);
+        }
+        assert_eq!(app.search.query, "mpC");
+    }
+
+    #[test]
+    fn command_keys_do_nothing_in_the_answer_editor() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        open_revise_note(&mut app);
+        for key in COMMAND_KEYS {
+            assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None);
+        }
+        assert_eq!(
+            app.questions.view().unwrap().mode,
+            Mode::Note {
+                kind: crate::questions::NoteKind::Revise,
+                text: "mpC".into()
+            }
+        );
+    }
+
+    #[test]
+    fn no_command_key_is_used_twice() {
+        let mut keys: Vec<char> = COMMAND_TABLE.iter().map(|row| row.key).collect();
+        let table_keys = keys.clone();
+        keys.extend("jklhgG/cnNqfostxrabzyduKJ".chars());
+        keys.push(' ');
+        let mut seen = std::collections::HashSet::new();
+        for key in &keys {
+            assert!(seen.insert(*key), "key {key:?} is used twice");
+        }
+        for key in table_keys {
+            assert!(!KEPT_KEYS.contains(&key), "key {key:?} is kept");
+        }
+        assert_eq!(COMMAND_KEYS.to_vec(), keys[..3]);
+    }
+
+    #[test]
+    fn commands_follow_the_palette_entries() {
+        let mut app = call_app(CallState::Off);
+        app.handle_key(KeyCode::Char('/'));
+        assert_eq!(app.palette_entries(), app.commands());
+        assert_eq!(app.commands().len(), 3);
     }
 
     #[test]
