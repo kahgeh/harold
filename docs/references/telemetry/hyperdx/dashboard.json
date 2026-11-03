@@ -1376,7 +1376,7 @@
         "displayType": "number",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "sqlTemplate": "SELECT sum(rise) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName = 'harold.telemetry.calls' AND Attributes['outcome'] != 'ok' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 1 DAY"
+        "sqlTemplate": "SELECT sum(rise) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName = 'harold.telemetry.calls' AND Attributes['outcome'] != 'ok' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now())) WHERE TimeUnix >= now() - INTERVAL 1 DAY"
       }
     }
   ]

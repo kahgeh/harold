@@ -2026,6 +2026,7 @@ const METRICS: &[&str] = &[
     "harold.work.checked",
     "harold.work.lead_time",
     "harold.work.slices",
+    "harold.telemetry.calls",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -2819,6 +2820,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("agents-multiplexer", false),
         // The work cards read the work metrics, which carry no product.
         ("work", false),
+        // The calls card reads `harold.telemetry.calls`, which carries no product.
+        ("agent-signals", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -2915,7 +2918,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // The recap card makes one more.
     // The work waiting card makes one more.
     // The work group adds two: time at each status and the check mismatches.
-    assert_eq!(counted, 32);
+    // The agent signals group adds one: the refusals of the telemetry tool.
+    assert_eq!(counted, 33);
 }
 
 #[test]
