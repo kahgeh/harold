@@ -5341,6 +5341,41 @@ fn the_reminders_counter_is_registered_for_each_outcome_with_only_that_attribute
 }
 
 #[test]
+fn allowed_fields_include_collection() {
+    assert!(ALLOWED_FIELDS.contains(&"collection"));
+}
+
+#[test]
+fn register_collection_counters_seeds_unknown_and_each_name() {
+    test_support::install();
+    register_collection_counters(&["notes-seeded", "plans-seeded"]);
+    assert_eq!(
+        COLLECTION_RESULTS,
+        ["ok", "not_found", "refused", "too_big", "unreadable"]
+    );
+    for name in ["notes-seeded", "plans-seeded", "unknown"] {
+        for result in COLLECTION_RESULTS {
+            let point = test_support::exact_counter_value(
+                "harold.web_app.collection_pages",
+                &[("collection", name), ("result", result)],
+            );
+            assert!(point.is_some(), "{name} {result}");
+        }
+    }
+}
+
+#[test]
+fn count_collection_page_adds_one_for_its_collection_and_result() {
+    test_support::install();
+    count_collection_page("counted-collection", "ok");
+    let point = test_support::exact_counter_value(
+        "harold.web_app.collection_pages",
+        &[("collection", "counted-collection"), ("result", "ok")],
+    );
+    assert!(point.is_some());
+}
+
+#[test]
 fn new_log_fields_are_allowed() {
     for field in [
         "record",

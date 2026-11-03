@@ -159,6 +159,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "how",
     "late_s",
     "reminder",
+    "collection",
     "paused_until",
     "agent",
     "seconds",
@@ -360,6 +361,8 @@ pub(crate) struct Instruments {
     pub notifications: Counter<u64>,
     /// `harold.web_app.pushes`, `{push}`, by `outcome`.
     pub web_app_pushes: Counter<u64>,
+    /// `harold.web_app.collection_pages`, `{page}`, by `collection` and `result`.
+    pub web_app_collection_pages: Counter<u64>,
     /// `harold.app_spans.not_forwarded`, `{span}`, by `reason`.
     pub app_spans_not_forwarded: Counter<u64>,
     /// `harold.multiplexer.calls`, `{call}`, by `multiplexer`, `host`, `operation`, `outcome`.
@@ -452,6 +455,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         watch_reminders: counter("watch.reminders", "{reminder}"),
         notifications: counter("harold.notifications", "{notification}"),
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
+        web_app_collection_pages: counter("harold.web_app.collection_pages", "{page}"),
         app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
         multiplexer_calls: counter("harold.multiplexer.calls", "{call}"),
         multiplexer_call_duration: milliseconds(
@@ -1213,6 +1217,39 @@ pub(crate) fn register_reminder_counters() {
     for outcome in REMINDER_OUTCOMES {
         reminders.add(0, &[KeyValue::new("outcome", outcome)]);
     }
+}
+
+/// Every `result` of `harold.web_app.collection_pages`.
+pub(crate) const COLLECTION_RESULTS: [&str; 5] =
+    ["ok", "not_found", "refused", "too_big", "unreadable"];
+
+/// Records 0 once for each configured collection name and for `unknown`, for each result.
+/// The web app calls it at its start.
+pub(crate) fn register_collection_counters(names: &[&str]) {
+    let pages = &instruments().web_app_collection_pages;
+    for name in names.iter().copied().chain(["unknown"]) {
+        for result in COLLECTION_RESULTS {
+            pages.add(
+                0,
+                &[
+                    KeyValue::new("collection", name.to_string()),
+                    KeyValue::new("result", result),
+                ],
+            );
+        }
+    }
+}
+
+/// Counts one page request for `collection` with its `result`. A name that is not a
+/// configured collection must be passed as `unknown`.
+pub(crate) fn count_collection_page(collection: &str, result: &str) {
+    instruments().web_app_collection_pages.add(
+        1,
+        &[
+            KeyValue::new("collection", collection.to_string()),
+            KeyValue::new("result", result.to_string()),
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------

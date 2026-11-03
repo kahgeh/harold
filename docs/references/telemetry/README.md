@@ -372,6 +372,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_requests.wrong` | counter, `{request}` | `channel`, `resolved_by` |
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
+| `harold.web_app.collection_pages` | counter, `{page}` | `collection` (a name from `[[web_app.collections]]`, or `unknown`; never a path), `result` (`ok`, `not_found`, `refused`, `too_big`, `unreadable`) |
 | `harold.app_spans.not_forwarded` | counter, `{span}` | `reason` (`collector_unreachable`, `collector_refused`, `timed_out`, `queue_full`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
@@ -782,6 +783,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`, and for `channel = web_app` with `resolved_by = none` only;
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by` of `imessage` and `unknown`, never `web_app`;
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
+- `harold.web_app.collection_pages`, for each configured `collection` and for `unknown`, with each `result`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
 - `harold.agent.blocked_long`, for each configured provider;
