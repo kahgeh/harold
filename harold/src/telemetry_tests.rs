@@ -2008,6 +2008,9 @@ const METRICS: &[&str] = &[
     "harold.work.status.duration",
     "harold.work.check.mismatches",
     "harold.work.rotations",
+    "harold.work.checked",
+    "harold.work.lead_time",
+    "harold.work.slices",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -5323,6 +5326,11 @@ fn new_log_fields_are_allowed() {
         "open_records",
         "decisions",
         "links",
+        "record",
+        "phase",
+        "lead_s",
+        "slices",
+        "imported",
     ] {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
@@ -5340,6 +5348,10 @@ fn work_counters_are_seeded_at_zero() {
     }
     assert_eq!(WORK_OPEN_STATUSES.len(), 9);
     for priority in WORK_PRIORITIES {
+        // Another test may have counted a check, so the value is 0 or more.
+        let checked =
+            test_support::exact_counter_value("harold.work.checked", &[("priority", priority)]);
+        assert!(checked.is_some(), "{priority}");
         for status in WORK_OPEN_STATUSES {
             let read = test_support::gauge_value(
                 "harold.work.records",
@@ -5421,6 +5433,16 @@ fn the_work_status_duration_has_the_spec_unit_and_buckets() {
 }
 
 #[test]
+fn the_work_lead_time_records_seconds_by_phase() {
+    test_support::install();
+    record_work_lead_time("lead_probe", 5400.0);
+    assert_eq!(
+        test_support::histogram_sum("harold.work.lead_time", &[("phase", "lead_probe")]),
+        Some(5400.0)
+    );
+}
+
+#[test]
 fn a_work_mismatch_counts_by_record_and_kind() {
     test_support::install();
     let record = format!("probe-{}", uuid::Uuid::new_v4());
@@ -5445,6 +5467,9 @@ fn the_work_metrics_are_noted_on_the_thread_that_made_them() {
     }]);
     note_work_waiting_long(vec![("next", 1)]);
     count_work_rotation("done");
+    count_work_checked("focus");
+    record_work_lead_time("whole", 90.0);
+    record_work_slices(3);
     assert_eq!(
         take_noted_work(),
         vec![
@@ -5455,6 +5480,12 @@ fn the_work_metrics_are_noted_on_the_thread_that_made_them() {
             }]),
             WorkNoted::WaitingLong(vec![("next", 1)]),
             WorkNoted::Rotation("done"),
+            WorkNoted::Checked("focus"),
+            WorkNoted::LeadTime {
+                phase: "whole",
+                seconds: 90.0,
+            },
+            WorkNoted::Slices(3),
         ]
     );
 }

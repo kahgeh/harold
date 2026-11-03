@@ -398,6 +398,7 @@ The work tool logs its rotation. Harold logs `work rotation failed` once when a 
 |---|---|
 | `work rotation done` (`info`) | `open_records`, `decisions`, `links` (the counts that were copied), `file` (the old current file), `new_file` |
 | `work rotation failed` (`warn`) | `file`, `reason` (`count_mismatch`, `write_failed` or `rename_failed`), `since` (the UTC date and time when the failure began) |
+| `work record closed` (`info`) | `record`, `lead_s` (the lead time in seconds), `slices` (the number of `spec:` links), `imported` (true when the history began at the import) |
 
 The counter `harold.work.check.mismatches` has the attributes `record` (the work record's name) and `kind` (the mismatch rule).
 

@@ -245,6 +245,9 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "top_processes",
     "minutes",
     "record",
+    "lead_s",
+    "slices",
+    "imported",
     "new_file",
     "since",
     "open_records",
@@ -371,6 +374,12 @@ pub(crate) struct Instruments {
     pub work_check_mismatches: Counter<u64>,
     /// `harold.work.rotations`, `{rotation}`, by `outcome`.
     pub work_rotations: Counter<u64>,
+    /// `harold.work.checked`, `{record}`, by `priority`.
+    pub work_checked: Counter<u64>,
+    /// `harold.work.lead_time`, seconds, by `phase`.
+    pub work_lead_time: Histogram<f64>,
+    /// `harold.work.slices`, `{slice}`.
+    pub work_slices: Histogram<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -462,6 +471,18 @@ fn build_instruments(meter: &Meter) -> Instruments {
         ),
         work_check_mismatches: counter("harold.work.check.mismatches", "{mismatch}"),
         work_rotations: counter("harold.work.rotations", "{rotation}"),
+        work_checked: counter("harold.work.checked", "{record}"),
+        work_lead_time: seconds(
+            "harold.work.lead_time",
+            &[
+                3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 345600.0, 604800.0, 1209600.0,
+            ],
+        ),
+        work_slices: meter
+            .u64_histogram("harold.work.slices")
+            .with_unit("{slice}")
+            .with_boundaries(vec![1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0])
+            .build(),
     }
 }
 
@@ -2889,6 +2910,37 @@ pub(crate) fn count_work_rotation(outcome: &'static str) {
         .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
+/// Counts one work record that a check looked at, by its `priority`.
+// Task 5 calls this; until then it has no caller.
+#[allow(dead_code)]
+pub(crate) fn count_work_checked(priority: &'static str) {
+    #[cfg(test)]
+    note_work(WorkNoted::Checked(priority));
+    instruments()
+        .work_checked
+        .add(1, &[KeyValue::new("priority", priority)]);
+}
+
+/// Records the seconds a work record took in `phase`.
+// Task 5 calls this; until then it has no caller.
+#[allow(dead_code)]
+pub(crate) fn record_work_lead_time(phase: &'static str, seconds: f64) {
+    #[cfg(test)]
+    note_work(WorkNoted::LeadTime { phase, seconds });
+    instruments()
+        .work_lead_time
+        .record(seconds, &[KeyValue::new("phase", phase)]);
+}
+
+/// Records how many slices a finished work record had.
+// Task 5 calls this; until then it has no caller.
+#[allow(dead_code)]
+pub(crate) fn record_work_slices(slices: u64) {
+    #[cfg(test)]
+    note_work(WorkNoted::Slices(slices));
+    instruments().work_slices.record(slices, &[]);
+}
+
 /// Records 0 once on `harold.work.rotations` for each `outcome`, and sets both work
 /// gauges to 0 for each priority and open status. HyperDX reads the first point of a
 /// running total as 0, so without this the first failed rotation after a start would
@@ -2898,6 +2950,11 @@ pub(crate) fn register_work_counters() {
         instruments()
             .work_rotations
             .add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+    for priority in WORK_PRIORITIES {
+        instruments()
+            .work_checked
+            .add(0, &[KeyValue::new("priority", priority)]);
     }
     set_work_records(&[]);
     set_work_waiting_long(&[]);
@@ -2919,6 +2976,12 @@ pub(crate) enum WorkNoted {
         kind: String,
     },
     Rotation(&'static str),
+    Checked(&'static str),
+    LeadTime {
+        phase: &'static str,
+        seconds: f64,
+    },
+    Slices(u64),
 }
 
 #[cfg(test)]
