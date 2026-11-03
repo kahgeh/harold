@@ -1293,11 +1293,15 @@ fn print_help() {
     );
     println!("  harold tool knowledge graph void SEQUENCE --reason WORD");
     println!("                          Pass the one record the graph refused");
-    println!("  harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES");
+    println!(
+        "  harold tool watch start NAME --skill SKILL (--every MINUTES | --cron \"EXPR\") --for MINUTES"
+    );
     println!("                          [--report-to chief|self] [--run-budget USD] [--every-run]");
     println!(
         "                          Run a skill from ./.claude/skills on a schedule and report"
     );
+    println!("  harold tool watch remind NAME (--in TIME | --at HH:MM | --cron \"EXPR\") \"TEXT\"");
+    println!("                          Type one line once, at the time or at the next cron match");
     println!("  harold tool watch stop NAME   Stop a watch at once; types no closing line");
     println!(
         "  harold tool watch list        List the watches running or ended today, with the spend"
