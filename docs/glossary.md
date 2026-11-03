@@ -39,7 +39,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | NORMAL mode | Claude Code's Vim editor mode in which keys are commands. Harold presses `i` to return to INSERT mode before it types | — |
 | pane resolve | The look-up of one pane by its id (`resolve_pane` in the code), which runs its own scan after it waits for the monitor's current tick. Harold logs a slow one as `agent pane resolve slow` | "pane lookup" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at `unknown` | — |
-| the chief, chief of pods | The first agent pane in the chief's session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator", "main agent" |
+| the chief, chief of pods | The first agent pane in the chief's session among the agents in the chief's folder, which talks to the user and asks them questions. `role` = `chief` on `pod.agents` counts every pane in the chief's folder | "coordinator" for the chief (the Coordinator row is the pod's agent), "main agent" |
 | the chief's row | The chief's row in the control-tower's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
 | pod session | A pod-coordination or PnEM pane | — |
@@ -320,7 +320,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 
 ## Not yet consistent
 
-Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
+Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "coordinator" for the chief, "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
 
 - `tmux_target` holds the pane label, for tmux and Rex. "Target" is a word the pane entry says not to use. It would become: `pane_label`. Where: `harold/src/agent/domain.rs`, `store.rs`, `store/migrations/001_initial.sql`, `harold-api/proto/harold.proto`, `inbound/tmux.rs`, `outbound/left_out.rs`, `agent/runtime.rs`, `voice_input/answerer.rs`, `tools/watch/facts.rs`, `main.rs` and their tests.
 - `tmux_ms` in `agent inventory scan slow` is the time of the tmux listing, and `rex_ms` is its Rex twin. The pair would read better as one `listing_ms` with a `multiplexer` field. Where: `harold/src/agent/inventory.rs`, `harold/src/telemetry.rs` (`ALLOWED_FIELDS`), `docs/references/telemetry/README.md`.

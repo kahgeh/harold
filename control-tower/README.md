@@ -72,17 +72,19 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 
 ## Row names
 
-A row of an agent with a role shows the role in place of the folder name: `Chief`,
-`Coordinator` or `PnEM`. A row of any other agent keeps its folder name. Harold sends the
-role in the `role` field of each row, and the product of the pod in the `pod_product`
-field. The group is still the first word of the session name. The harold pod shows the group
-`harold`, with the rows `Coordinator` and `PnEM` under it.
+A row of an agent with a role shows the role in place of the folder name. The roles are
+`Chief`, `Coordinator` and `PnEM`. A row of any other agent keeps its folder name.
+
+Harold sends the role in the `role` field of each row. It sends the product of the pod in
+the `pod_product` field. The group is still the first word of the session name. The harold
+pod shows the group `harold`, with the rows `Coordinator` and `PnEM` under it.
 
 ## The remote control
 
 `harold start-control-tower --remote` starts the remote control. It is a small numbered list
-for a floating Rex layer. One key in Rex opens the layer and runs this command. The key
-itself is the job of the keymap pod, and this program does not set it.
+for a floating Rex layer. One key in Rex opens the layer and runs this command.
+
+The key itself is the job of the keymap pod. This program does not set it.
 
 The list shows the chief as 0 and each running PnEM after it. A row shows the number, the
 role and the product. It shows no state word. When Harold finds no chief, the first listed
