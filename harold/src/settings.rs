@@ -6,6 +6,8 @@ use config::{Config, ConfigError, File, FileFormat};
 use serde::Deserialize;
 use tracing::warn;
 
+use crate::cron::Cron;
+
 static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
 
 pub(crate) fn expand_tilde(path: &str) -> String {
@@ -1556,6 +1558,9 @@ pub(crate) struct TimedPromptSettings {
     /// Local time of day, `HH:MM`.
     #[serde(default)]
     pub at: String,
+    /// A five-field cron expression, used in place of `at`.
+    #[serde(default)]
+    pub cron: Option<String>,
     /// An absolute path, compared as text with a pane's working directory.
     #[serde(default)]
     pub folder: String,
@@ -1605,11 +1610,24 @@ fn timed_prompts_errors(prompts: &[TimedPromptSettings]) -> Vec<String> {
                 "timed_prompts[{index}].name \"{name}\" is already used by timed_prompts[{earlier}]"
             ));
         }
-        if minute_of_day(&prompt.at).is_none() {
-            errors.push(format!(
-                "timed_prompts[{index}].at must be a time of day \"HH:MM\" from 00:00 to 23:59, got \"{}\"",
-                prompt.at
-            ));
+        match (prompt.at.is_empty(), prompt.cron.as_deref()) {
+            (false, Some(_)) => errors.push(format!(
+                "timed_prompts[{index}]: use either at or cron, not both"
+            )),
+            (true, None) => errors.push(format!("timed_prompts[{index}]: set at or cron")),
+            (true, Some(cron)) => {
+                if let Err(error) = Cron::parse(cron) {
+                    errors.push(format!("timed_prompts[{index}].cron: {error}"));
+                }
+            }
+            (false, None) => {
+                if minute_of_day(&prompt.at).is_none() {
+                    errors.push(format!(
+                        "timed_prompts[{index}].at must be a time of day \"HH:MM\" from 00:00 to 23:59, got \"{}\"",
+                        prompt.at
+                    ));
+                }
+            }
         }
         if !prompt.folder.starts_with('/') {
             errors.push(format!(
@@ -3956,6 +3974,7 @@ encryption_key_file = "/work/key"
             [super::TimedPromptSettings {
                 name: "digest".into(),
                 at: "09:00".into(),
+                cron: None,
                 folder: "/work/chief-of-pods".into(),
                 text: "digest".into(),
                 give_up_after_minutes: 120,
@@ -3967,6 +3986,51 @@ encryption_key_file = "/work/key"
         assert_eq!(
             default_settings_with(&own).timed_prompts[0].give_up_after_minutes,
             30
+        );
+    }
+
+    /// One valid entry as TOML with the `at` line replaced by `schedule`.
+    fn digest_entry_scheduled_by(schedule: &str) -> String {
+        format!(
+            "[[timed_prompts]]\nname = \"digest\"\n{schedule}\nfolder = \"/work/chief-of-pods\"\ntext = \"digest\"\n"
+        )
+    }
+
+    #[test]
+    fn timed_prompt_accepts_cron_in_place_of_at() {
+        let overrides = digest_entry_scheduled_by("cron = \"50 7 * * 1-5\"");
+        assert!(timed_prompt_errors(&overrides).is_empty());
+        let settings = default_settings_with(&overrides);
+        assert_eq!(
+            settings.timed_prompts[0].cron.as_deref(),
+            Some("50 7 * * 1-5")
+        );
+        assert_eq!(settings.timed_prompts[0].at, "");
+    }
+
+    #[test]
+    fn timed_prompt_refuses_both_at_and_cron() {
+        let overrides = digest_entry_scheduled_by("at = \"09:00\"\ncron = \"50 7 * * 1-5\"");
+        assert_eq!(
+            timed_prompt_errors(&overrides),
+            ["timed_prompts[0]: use either at or cron, not both"]
+        );
+    }
+
+    #[test]
+    fn timed_prompt_refuses_neither() {
+        assert_eq!(
+            timed_prompt_errors(&digest_entry_scheduled_by("")),
+            ["timed_prompts[0]: set at or cron"]
+        );
+    }
+
+    #[test]
+    fn timed_prompt_cron_error_names_the_key() {
+        let overrides = digest_entry_scheduled_by("cron = \"75 * * * *\"");
+        assert_eq!(
+            timed_prompt_errors(&overrides),
+            ["timed_prompts[0].cron: minute 75 is out of range: use 0 to 59"]
         );
     }
 

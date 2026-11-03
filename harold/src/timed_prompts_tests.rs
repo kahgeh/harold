@@ -718,6 +718,7 @@ fn entry(name: &str, at: &str) -> TimedPromptSettings {
     TimedPromptSettings {
         name: name.into(),
         at: at.into(),
+        cron: None,
         folder: CHIEF.into(),
         text: "digest".into(),
         give_up_after_minutes: 120,
