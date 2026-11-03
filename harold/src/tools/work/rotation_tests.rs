@@ -111,6 +111,7 @@ async fn rotates_at_14_days_and_moves_open_only() {
                 open_records: 1,
                 decisions: 2,
                 links: 1,
+                moves: 1,
             },
         }
     );
@@ -256,6 +257,7 @@ async fn a_working_retry_returns_done_and_clears_failure() {
                 open_records: 1,
                 decisions: 2,
                 links: 1,
+                moves: 1,
             },
         }
     );
@@ -277,6 +279,7 @@ async fn dry_run_changes_nothing() {
                 open_records: 1,
                 decisions: 2,
                 links: 1,
+                moves: 1,
             },
             records: vec!["a".into()],
             target: name_of("2026-11-15"),

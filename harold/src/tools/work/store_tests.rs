@@ -114,7 +114,7 @@ async fn name_in_use_by_open_record_is_refused() {
     // A copy cannot take a name that an open record holds.
     let copy = file.get("a").await.unwrap().unwrap();
     assert_eq!(
-        file.insert_copy(&copy).await.unwrap(),
+        file.insert_copy(&copy, &[]).await.unwrap(),
         Err(Refusal::NameInUse)
     );
     // A put of the same name replaces the open record.
@@ -274,7 +274,7 @@ async fn read_only_file_refuses_every_write() {
     );
     let copy = record("c");
     assert_eq!(
-        file.insert_copy(&copy).await.unwrap().unwrap_err(),
+        file.insert_copy(&copy, &[]).await.unwrap().unwrap_err(),
         Refusal::ReadOnly
     );
     assert_eq!(Refusal::ReadOnly.reason(), "read_only");
@@ -328,7 +328,8 @@ async fn counts_match_content() {
         Counts {
             open_records: 2,
             decisions: 2,
-            links: 1
+            links: 1,
+            moves: 2
         }
     );
 }
@@ -357,7 +358,13 @@ async fn insert_copy_keeps_every_field() {
     let target = WorkFile::open(&folder.file("work-2026-11-17.db"))
         .await
         .unwrap();
-    target.insert_copy(&original).await.unwrap().unwrap();
+    let moves = source.moves("a").await.unwrap();
+    target
+        .insert_copy(&original, &moves)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.moves("a").await.unwrap(), moves);
     assert_eq!(target.get("a").await.unwrap().unwrap(), original);
     assert_eq!(
         target.counts().await.unwrap(),
@@ -423,4 +430,168 @@ async fn put_new_all_stores_all_or_none() {
     let got = file.get("new-one").await.unwrap().unwrap();
     assert_eq!((got.decisions.len(), got.links.len()), (1, 1));
     assert_eq!(got.created_in, FILE);
+}
+
+fn mv(from: &str, to: &str, at_ms: i64) -> Move {
+    Move {
+        from_status: from.into(),
+        to_status: to.into(),
+        at_ms,
+    }
+}
+
+fn status_patch(status: Status) -> Patch {
+    Patch {
+        status: Some(status),
+        ..Patch::default()
+    }
+}
+
+#[tokio::test]
+async fn new_record_writes_one_move() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    let mut rec = record("a");
+    rec.status = Status::Idea;
+    file.put(rec, 10).await.unwrap().unwrap();
+    assert_eq!(file.moves("a").await.unwrap(), [mv("", "idea", 10)]);
+}
+
+#[tokio::test]
+async fn each_status_change_writes_one_move() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    let mut rec = record("a");
+    rec.status = Status::Idea;
+    file.put(rec.clone(), 10).await.unwrap().unwrap();
+    file.set("a", status_patch(Status::Discovery), 20)
+        .await
+        .unwrap()
+        .unwrap();
+    rec.status = Status::SpecDrafted;
+    file.put(rec, 30).await.unwrap().unwrap();
+    assert_eq!(
+        file.moves("a").await.unwrap(),
+        [
+            mv("", "idea", 10),
+            mv("idea", "discovery", 20),
+            mv("discovery", "spec drafted", 30)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn same_status_writes_no_move() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    let mut rec = record("a");
+    rec.status = Status::Idea;
+    file.put(rec.clone(), 10).await.unwrap().unwrap();
+    file.put(rec, 20).await.unwrap().unwrap();
+    let patch = Patch {
+        title: Some("New".into()),
+        ..Patch::default()
+    };
+    file.set("a", patch, 30).await.unwrap().unwrap();
+    assert_eq!(file.moves("a").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn refused_write_leaves_no_move() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    put(&file, "first", Priority::Focus, Status::Idea).await;
+    put(&file, "second", Priority::Focus, Status::Idea).await;
+    let mut third = record("third");
+    third.priority = Priority::Focus;
+    assert_eq!(file.put(third, 20).await.unwrap(), Err(Refusal::FocusFull));
+    assert!(file.moves("third").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn move_and_record_commit_together() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    put(&file, "a", Priority::Later, Status::Idea).await;
+    file.set("a", status_patch(Status::Discovery), 20)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        file.get("a").await.unwrap().unwrap().status,
+        Status::Discovery
+    );
+    assert_eq!(file.moves("a").await.unwrap().len(), 2);
+
+    put(&file, "f1", Priority::Focus, Status::Idea).await;
+    put(&file, "f2", Priority::Focus, Status::Idea).await;
+    let patch = Patch {
+        priority: Some(Priority::Focus),
+        status: Some(Status::Building),
+        ..Patch::default()
+    };
+    assert_eq!(
+        file.set("a", patch, 30).await.unwrap(),
+        Err(Refusal::FocusFull)
+    );
+    assert_eq!(
+        file.get("a").await.unwrap().unwrap().status,
+        Status::Discovery
+    );
+    assert_eq!(file.moves("a").await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn put_new_all_writes_one_move_each() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    let mut a = record("a");
+    a.status = Status::Building;
+    let mut b = record("b");
+    b.status = Status::Idea;
+    file.put_new_all(&[a, b], 50).await.unwrap().unwrap();
+    assert_eq!(file.moves("a").await.unwrap(), [mv("", "building", 50)]);
+    assert_eq!(file.moves("b").await.unwrap(), [mv("", "idea", 50)]);
+}
+
+#[tokio::test]
+async fn unknown_migration_is_refused() {
+    let folder = TempFolder::new();
+    let path = folder.file(FILE);
+    drop(WorkFile::open(&path).await.unwrap());
+    {
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES ('999_future', 'x', 0)",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    let error = WorkFile::open(&path).await.err().expect("refused");
+    assert!(
+        error.to_string().contains("incompatible work schema"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn counts_include_moves() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    put(&file, "a", Priority::Later, Status::Idea).await;
+    file.set("a", status_patch(Status::Discovery), 20)
+        .await
+        .unwrap()
+        .unwrap();
+    put(&file, "c", Priority::Later, Status::Idea).await;
+    file.set("c", status_patch(Status::CheckedByTheUser), 20)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file.counts().await.unwrap().moves, 2);
 }

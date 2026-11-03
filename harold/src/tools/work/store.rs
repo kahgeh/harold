@@ -9,7 +9,10 @@ use turso::Connection;
 
 use super::schema::{Decision, Mark, Priority, Record, Status, valid_name};
 
-const MIGRATIONS: [(&str, &str); 1] = [("001_work", include_str!("migrations/001_work.sql"))];
+const MIGRATIONS: [(&str, &str); 2] = [
+    ("001_work", include_str!("migrations/001_work.sql")),
+    ("002_moves", include_str!("migrations/002_moves.sql")),
+];
 
 /// The most open work records in `focus`.
 const FOCUS_MAX: i64 = 2;
@@ -74,6 +77,15 @@ pub(super) struct Counts {
     pub(super) open_records: u32,
     pub(super) decisions: u32,
     pub(super) links: u32,
+    pub(super) moves: u32,
+}
+
+/// One change of status. A new record has one move with an empty `from_status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Move {
+    pub(super) from_status: String,
+    pub(super) to_status: String,
+    pub(super) at_ms: i64,
 }
 
 pub(super) struct WorkFile {
@@ -333,11 +345,12 @@ impl WorkFile {
         .await
     }
 
-    /// Stores a record as it is, with its times, decisions and links. A rotation
+    /// Stores a record as it is, with its times, decisions, links and moves. A rotation
     /// uses it. A name that the file holds already is `NameInUse`.
     pub(super) async fn insert_copy(
         &self,
         record: &Record,
+        moves: &[Move],
     ) -> Result<std::result::Result<(), Refusal>> {
         let guard = match self.begin_write().await? {
             Ok(guard) => guard,
@@ -352,6 +365,9 @@ impl WorkFile {
                 }
                 insert_record(conn, record).await?;
                 insert_parts(conn, record).await?;
+                for m in moves {
+                    insert_move(conn, &record.name, &m.from_status, &m.to_status, m.at_ms).await?;
+                }
                 Ok(Ok(()))
             }
             .await,
@@ -428,6 +444,31 @@ impl WorkFile {
         self.list(false).await
     }
 
+    /// The moves of a record, oldest first. A file from before the moves
+    /// table has none.
+    pub(super) async fn moves(&self, name: &str) -> Result<Vec<Move>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        if !has_moves_table(&conn).await? {
+            return Ok(Vec::new());
+        }
+        let mut moves = Vec::new();
+        let mut rows = conn
+            .query(
+                "SELECT from_status, to_status, at_ms FROM moves WHERE record = ?1 ORDER BY rowid",
+                [name],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            moves.push(Move {
+                from_status: text(&row, 0)?,
+                to_status: text(&row, 1)?,
+                at_ms: integer(&row, 2)?,
+            });
+        }
+        Ok(moves)
+    }
+
     pub(super) async fn counts(&self) -> Result<Counts> {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
@@ -444,6 +485,15 @@ impl WorkFile {
                 &format!("SELECT COUNT(*) FROM links WHERE record IN ({open})"),
             )
             .await?,
+            moves: if has_moves_table(&conn).await? {
+                count(
+                    &conn,
+                    &format!("SELECT COUNT(*) FROM moves WHERE record IN ({open})"),
+                )
+                .await?
+            } else {
+                0
+            },
         })
     }
 
@@ -713,6 +763,31 @@ async fn insert_decision(conn: &Connection, name: &str, n: i64, d: &Decision) ->
     Ok(())
 }
 
+async fn has_moves_table(conn: &Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'moves'",
+            (),
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+async fn insert_move(
+    conn: &Connection,
+    record: &str,
+    from: &str,
+    to: &str,
+    at_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO moves (record, from_status, to_status, at_ms) VALUES (?1, ?2, ?3, ?4)",
+        (record, from, to, at_ms),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn insert_record(conn: &Connection, r: &Record) -> Result<()> {
     conn.execute(
         &format!(
@@ -787,6 +862,7 @@ async fn put_in(
             new.status_since_ms = now_ms;
             insert_record(conn, &new).await?;
             insert_parts(conn, &new).await?;
+            insert_move(conn, &new.name, "", new.status.as_str(), now_ms).await?;
             Ok(Ok(PutOutcome::Created))
         }
         // A closed record keeps its name for life.
@@ -818,6 +894,14 @@ async fn replace_in(
     let (outcome, since) = if stored.status == record.status {
         (PutOutcome::Replaced, stored.status_since_ms)
     } else {
+        insert_move(
+            conn,
+            &record.name,
+            stored.status.as_str(),
+            record.status.as_str(),
+            now_ms,
+        )
+        .await?;
         (
             PutOutcome::StatusChanged {
                 from: stored.status,

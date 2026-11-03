@@ -258,7 +258,7 @@ impl Rotator {
         let tmp = with_suffix(target, ".tmp");
         remove_tmp(&tmp);
         let checked = async {
-            write_copy(&tmp, &records)
+            write_copy(&tmp, old, &records)
                 .await
                 .map_err(|_| FailReason::WriteFailed)?;
             let new_counts = count_closed(&tmp)
@@ -312,12 +312,13 @@ impl Rotator {
     }
 }
 
-/// Writes the records to a new file at `tmp`, then closes it, so that the
-/// file alone holds every row.
-async fn write_copy(tmp: &Path, records: &[Record]) -> Result<(), StoreError> {
+/// Writes the records, with their moves from `old`, to a new file at `tmp`,
+/// then closes it, so that the file alone holds every row.
+async fn write_copy(tmp: &Path, old: &WorkFile, records: &[Record]) -> Result<(), StoreError> {
     let new = WorkFile::open(tmp).await?;
     for record in records {
-        new.insert_copy(record)
+        let moves = old.moves(&record.name).await?;
+        new.insert_copy(record, &moves)
             .await?
             .map_err(|refusal| StoreError::Data(refusal.reason().into()))?;
     }
