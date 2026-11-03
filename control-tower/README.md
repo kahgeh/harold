@@ -188,7 +188,9 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   also run the command from the list with the palette closed. The keys `v` and `w`
   are kept for later and no command uses them.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
-  the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
+  the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). After
+  them it adds `m voice  p pause  C call` for the commands that show now, where they fit;
+  they drop first on a narrow screen. On a
   todo row, under a `TODO` label, it lists the row's own keys first, then `j/k` move,
   `n/N` todo, `o` link (only when the todo has a web link), `Esc` close, `^L` retry and
   `^Q` quit. The first keys depend on the row: `l` open on a closed todo and on another

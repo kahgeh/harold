@@ -425,7 +425,7 @@ pub const COMMAND_KEYS: [char; 3] = [
     COMMAND_TABLE[2].key,
 ];
 
-/// Keys other parts of the control-tower use, so no command takes them.
+/// Keys kept for later work (`v` for a select mode, `w` for a view). Nothing uses them now, and no command may take them.
 pub const KEPT_KEYS: [char; 2] = ['v', 'w'];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
