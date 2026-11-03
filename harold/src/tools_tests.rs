@@ -77,6 +77,7 @@ pub(crate) fn no_extras() -> Extras {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        pod_registry: None,
     }
 }
 
@@ -248,7 +249,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     // `tools` is a file, so no tool's data folder `<folder>/tools/<name>` can be made.
     std::fs::write(folder.0.join("tools"), "not a folder").unwrap();
     let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
-    let (_shutdown, shutdown_rx) = watch::channel(());
+    let (shutdown, shutdown_rx) = watch::channel(());
 
     let tools = start_with(
         &folder.store_path(),
@@ -261,7 +262,8 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     )
     .await;
 
-    assert!(tools.tasks.is_empty());
+    // The release tool keeps no folder, so it starts; the other three fail.
+    assert_eq!(tools.tasks.len(), 1);
     let text = logs.text();
     let failed: Vec<&str> = text
         .lines()
@@ -295,9 +297,11 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     )
     .await;
     assert_eq!(listed.unwrap_err(), "12 ");
+    // The release tool runs until shutdown, so the host stops once the sender is dropped.
+    drop(shutdown);
     tokio::time::timeout(Duration::from_secs(30), tools.stopped())
         .await
-        .expect("a host with no tool stops at once");
+        .expect("a host with only the release tool stops at shutdown");
     println!("evidence: log lines: {failed:?}");
 }
 
@@ -548,6 +552,7 @@ fn the_backlog_tool_is_given_no_typing() {
         (second, backlog),
         (third, work_ctx),
         (fourth, watch_ctx),
+        (fifth, release_ctx),
     ] = contexts(
         "/Users/me/.harold/store",
         typing,
@@ -559,12 +564,13 @@ fn the_backlog_tool_is_given_no_typing() {
     );
 
     assert_eq!(
-        (first, second, third, fourth),
+        (first, second, third, fourth, fifth),
         (
             questions::NAME,
             backlog::NAME,
             crate::tools::work::NAME,
-            crate::tools::watch::NAME
+            crate::tools::watch::NAME,
+            crate::tools::release::NAME
         )
     );
     assert!(questions.typing.is_some());
@@ -575,6 +581,7 @@ fn the_backlog_tool_is_given_no_typing() {
         PathBuf::from("/Users/me/.harold/tools/work")
     );
     assert!(watch_ctx.typing.is_some());
+    assert!(release_ctx.typing.is_none());
     assert_eq!(
         backlog.data_folder,
         PathBuf::from("/Users/me/.harold/tools/backlog")
@@ -1030,6 +1037,7 @@ async fn the_question_tool_refuses_to_start_without_typing() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        pod_registry: None,
     })
     .await;
 

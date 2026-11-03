@@ -4805,6 +4805,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            pod_registry: None,
             shutdown,
         })
         .await
@@ -4886,6 +4887,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            pod_registry: None,
             shutdown,
         })
         .await
@@ -5557,6 +5559,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            pod_registry: None,
             shutdown,
         })
         .await
@@ -6041,6 +6044,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "claude".into(),
             grpc_addr: None,
+            pod_registry: None,
             shutdown,
         })
         .await
@@ -6407,6 +6411,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "/usr/bin/true".into(),
             grpc_addr: None,
+            pod_registry: None,
             shutdown,
         })
         .await

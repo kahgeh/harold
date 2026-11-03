@@ -1,0 +1,43 @@
+// The release tool: what each product's next release holds.
+//
+//   Next   for each product (or the one named), the work merged since the last release,
+//          in progress, approved, parked, awaiting approval and not clear.
+syntax = "proto3";
+
+package harold.tools.release.v1;
+
+service ReleaseService {
+  rpc Next(NextRequest) returns (NextResponse);
+}
+
+message NextRequest {
+  // A product name; empty means every product.
+  string product = 1;
+}
+
+message NextResponse {
+  repeated ProductNext products = 1;
+}
+
+message ProductNext {
+  string name = 1;
+  bool paused = 2;
+  // The newest release tag; empty means no release.
+  string release = 3;
+  repeated Line merged = 4;
+  repeated Line in_progress = 5;
+  repeated Line approved = 6;
+  repeated Line parked = 7;
+  repeated Line awaiting = 8;
+  repeated Line not_clear = 9;
+  uint32 other_commits = 10;
+  // A reason when git gave no answer.
+  string unavailable = 11;
+}
+
+message Line {
+  string id = 1;
+  string title = 2;
+  // Used in in_progress only.
+  uint32 commits = 3;
+}

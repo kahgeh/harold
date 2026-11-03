@@ -936,6 +936,7 @@ async fn start_creates_questions_db_and_serves() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        pod_registry: None,
         shutdown: shutdown_rx,
     })
     .await
@@ -994,6 +995,7 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
         model_environment: Vec::new(),
         cli_path: "claude".into(),
         grpc_addr: None,
+        pod_registry: None,
         shutdown: shutdown_rx,
     })
     .await;

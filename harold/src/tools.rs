@@ -29,6 +29,7 @@ use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPo
 pub(crate) mod backlog;
 pub(crate) mod knowledge;
 pub(crate) mod questions;
+pub(crate) mod release;
 pub(crate) mod watch;
 pub(crate) mod work;
 
@@ -144,6 +145,8 @@ pub(crate) struct ToolContext {
     /// Harold's own gRPC address on loopback, the one the CLI calls. A tool reads
     /// another tool through it. `None` when the `[grpc]` setting gives no address.
     pub(crate) grpc_addr: Option<std::net::SocketAddr>,
+    /// The path of `products.toml`; `None` when no pod registry is set.
+    pub(crate) pod_registry: Option<PathBuf>,
     pub(crate) shutdown: tokio::sync::watch::Receiver<()>,
 }
 
@@ -157,6 +160,8 @@ pub(crate) struct Extras {
     pub(crate) watch_settings: WatchSettings,
     pub(crate) model_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     pub(crate) cli_path: String,
+    /// The path of `products.toml`, for the release tool.
+    pub(crate) pod_registry: Option<PathBuf>,
     /// The knowledge tool's launch; `None` unless `[knowledge] vault` is set.
     pub(crate) knowledge: Option<knowledge::Launch>,
     /// Harold's own gRPC address, for `ToolContext::grpc_addr`.
@@ -238,6 +243,7 @@ pub(crate) async fn start(
         watch_settings: cfg.watch.clone(),
         model_environment: cfg.activity_summary.environment.0.clone(),
         cli_path: cfg.activity_summary.cli_path.clone(),
+        pod_registry: cfg.telemetry.pod_registry_path(),
         knowledge: cfg.knowledge.enabled().then(|| knowledge::Launch {
             settings: cfg.knowledge.clone(),
             machine_name: cfg.machine_name.clone(),
@@ -278,6 +284,7 @@ async fn start_with(
         (backlog_name, backlog_ctx),
         (work_name, work_ctx),
         (watch_name, watch_ctx),
+        (release_name, release_ctx),
     ] = contexts(
         store_path,
         typing,
@@ -295,6 +302,7 @@ async fn start_with(
     start_tool(backlog_name, backlog::start(backlog_ctx).await, &mut tools);
     start_tool(work_name, work::start(work_ctx).await, &mut tools);
     start_tool(watch_name, watch::start(watch_ctx).await, &mut tools);
+    start_tool(release_name, release::start(release_ctx).await, &mut tools);
     if let Some(launch) = knowledge_launch {
         start_tool(
             knowledge::NAME,
@@ -334,6 +342,7 @@ fn contexts(
         model_environment: extras.model_environment.clone(),
         cli_path: extras.cli_path.clone(),
         grpc_addr: extras.grpc_addr,
+        pod_registry: extras.pod_registry.clone(),
         shutdown: shutdown.clone(),
     };
     [
@@ -344,6 +353,7 @@ fn contexts(
             watch::NAME,
             context(watch::NAME, Some(Arc::clone(&extras.watch_typing))),
         ),
+        (release::NAME, context(release::NAME, None)),
     ]
 }
 
