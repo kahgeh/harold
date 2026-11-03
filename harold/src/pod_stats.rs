@@ -1854,6 +1854,8 @@ pub(crate) struct PodStats<G: Git> {
     /// The warnings about a spec's merges that were logged, so each is logged once, also
     /// across restarts.
     warned: PodNotices,
+    /// The large specs already logged as `large spec approved`, kept in memory only.
+    warned_large: HashSet<String>,
     /// The pod files that did not parse and were logged: (product, file) -> what the file
     /// held then.
     unreadable: HashMap<(String, String), String>,
@@ -1901,6 +1903,7 @@ impl<G: Git> PodStats<G> {
             agents,
             chief,
             warned,
+            warned_large: HashSet::new(),
             unreadable: HashMap::new(),
         }
     }
@@ -2167,7 +2170,10 @@ impl<G: Git> PodStats<G> {
             if spec.size != SpecSize::Large || !approved {
                 continue;
             }
-            if self.warned.insert(format!("{product}\0large\0{}", spec.id)) {
+            if self
+                .warned_large
+                .insert(format!("{product}\0large\0{}", spec.id))
+            {
                 warn!(
                     pod.product = %product,
                     spec.id = %spec.id,

@@ -3955,7 +3955,6 @@ fn an_approval_at_the_cutoff_counts() {
     assert_eq!(lists["approved_not_started"].items, 1);
 }
 
-
 // --- pod notices: the warnings kept across restarts ---
 
 /// The notices file the `stats` of `pod`'s registry use: `<data folder>/pod-notices.json`.
