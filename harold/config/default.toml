@@ -44,7 +44,7 @@ model = "haiku"
 # skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 
 [work]
-# Days to keep work records before they rotate out. From 0 to 365; 0 rotates at once.
+# Days to keep work records before they rotate out. From 0 to 365; 0 turns rotation off (old files stay readable).
 # rotation_days = 14
 
 # The knowledge tool indexes the organisation's vault of Markdown notes by meaning. It is

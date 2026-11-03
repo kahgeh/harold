@@ -198,11 +198,12 @@ impl ActivitySummarySettings {
 const MAX_ROTATION_DAYS: u32 = 365;
 
 /// The `[work]` table: how long Harold keeps work records before it rotates them.
-/// `0` means rotate at once.
+/// `0` turns rotation off: no more rotation, and old files stay readable.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct WorkSettings {
-    /// Days to keep a record. From 0 to 365.
+    /// Days to keep a record. From 0 to 365. The load step refuses negatives, because it
+    /// reads an `i64`. `validate` refuses values above 365.
     #[serde(deserialize_with = "rotation_days_from_signed")]
     pub rotation_days: u32,
 }
