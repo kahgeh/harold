@@ -109,6 +109,7 @@ pub(super) enum ResumeRefusal {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RemindRefusal {
     NameInUse,
+    TooMany,
     Unavailable,
 }
 

@@ -307,6 +307,69 @@ async fn stop_cancels_a_waiting_reminder_and_types_nothing() {
     assert_eq!(h.typing.typed(), ["REMIND r: again"]);
 }
 
+/// Sets `count` reminders named `r1`..`rN`. The first one is due in `first_minutes`.
+async fn fill(h: &Harness, count: usize, first_minutes: u32) {
+    for n in 1..=count {
+        let minutes = if n == 1 { first_minutes } else { 100 };
+        h.scheduler
+            .remind(remind_in(h, &format!("r{n}"), minutes, "x"))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_21st_waiting_reminder_is_refused() {
+    let (h, _local) = harness_utc().await;
+    fill(&h, 20, 100).await;
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "r21", 100, "x")).await,
+        Err(RemindRefusal::TooMany)
+    );
+    assert!(h.store.reminder("r21").await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typed_or_cancelled_reminder_frees_a_place() {
+    let (h, _local) = harness_utc().await;
+    let self_folder = h.folder.0.to_string_lossy().into_owned();
+    h.agents
+        .agents
+        .lock()
+        .unwrap()
+        .push(agent(SELF_PANE, &self_folder, EffectiveAgentState::Idle));
+    fill(&h, 20, 5).await;
+
+    // A cancelled reminder frees a place.
+    h.scheduler.stop("r2").await.unwrap();
+    h.scheduler
+        .remind(remind_in(&h, "r21", 100, "x"))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "r22", 100, "x")).await,
+        Err(RemindRefusal::TooMany)
+    );
+
+    // A reminder that fires frees a place.
+    pass(6 * MINUTE).await;
+    assert_eq!(state_of(&h, "r1").await, ReminderState::Typed);
+    h.scheduler
+        .remind(remind_in(&h, "r22", 100, "x"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_name_in_use_is_refused_before_the_cap() {
+    let (h, _local) = harness_utc().await;
+    fill(&h, 20, 100).await;
+    assert_eq!(
+        h.scheduler.remind(remind_in(&h, "r1", 100, "again")).await,
+        Err(RemindRefusal::NameInUse)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_name_in_use_is_refused_both_ways() {
     let budget = WatchSettings {

@@ -2211,6 +2211,9 @@ fn watch_refusal_line(status: &tonic::Status, command: &WatchCommand) -> String 
             format!("{which} is capped by the daily budget")
         }
         (tonic::Code::FailedPrecondition, "name_in_use") => format!("name {subject} is in use"),
+        (tonic::Code::FailedPrecondition, "too_many_reminders") => {
+            "20 reminders are waiting: stop one first".into()
+        }
         (tonic::Code::FailedPrecondition, "daily_budget_unset") => "daily budget not set".into(),
         (tonic::Code::FailedPrecondition, "too_many_watches") => "too many watches".into(),
         (tonic::Code::FailedPrecondition, "daily_budget_spent") => "daily budget spent".into(),
@@ -7316,6 +7319,11 @@ mod tests {
                 tonic::Status::failed_precondition("name_in_use"),
                 &remind,
                 "name release-check is in use",
+            ),
+            (
+                tonic::Status::failed_precondition("too_many_reminders"),
+                &remind,
+                "20 reminders are waiting: stop one first",
             ),
             (
                 tonic::Status::not_found("unknown_watch"),

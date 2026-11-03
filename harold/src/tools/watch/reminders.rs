@@ -23,6 +23,9 @@ use super::scheduler::{RemindRefusal, interrupted};
 use super::store::{NewReminder, ReminderRow, ReminderState, StoreError, WatchStore};
 use super::validate::{CheckedRemind, ReportTo};
 
+/// The most reminders that may wait at one time.
+pub(super) const MAX_REMINDERS: usize = 20;
+
 const MINUTE_MS: i64 = 60_000;
 
 /// A reminder not typed this long after its time is dropped: the timed prompts' give-up
@@ -124,6 +127,14 @@ impl Reminders {
             .map_err(|_| RemindRefusal::Unavailable)?;
         if waiting.is_some_and(|row| row.state == ReminderState::Waiting) {
             return Err(RemindRefusal::NameInUse);
+        }
+        let waiting = self
+            .store
+            .waiting_reminders()
+            .await
+            .map_err(|_| RemindRefusal::Unavailable)?;
+        if waiting.len() >= MAX_REMINDERS {
+            return Err(RemindRefusal::TooMany);
         }
         let offset = self.local.offset().await;
         let due_at_ms = match (req.in_minutes, &req.due_local) {

@@ -81,6 +81,7 @@ fn resume_status(refusal: ResumeRefusal) -> Status {
 fn remind_status(refusal: RemindRefusal) -> Status {
     match refusal {
         RemindRefusal::NameInUse => Status::failed_precondition("name_in_use"),
+        RemindRefusal::TooMany => Status::failed_precondition("too_many_reminders"),
         RemindRefusal::Unavailable => unavailable(),
     }
 }

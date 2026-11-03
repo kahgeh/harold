@@ -321,6 +321,11 @@ fn every_scheduler_refusal_maps_to_its_code_and_message() {
             "name_in_use",
         ),
         (
+            remind_status(RemindRefusal::TooMany),
+            FailedPrecondition,
+            "too_many_reminders",
+        ),
+        (
             remind_status(RemindRefusal::Unavailable),
             Unavailable,
             "store_failed",
