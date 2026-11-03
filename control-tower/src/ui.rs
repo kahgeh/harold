@@ -8137,6 +8137,8 @@ mod agent_view_golden {
             recap_at_ms: 0,
             state,
             last_transition_at_ms: 40_000,
+            waiting: false,
+            waiting_since_ms: 0,
         }
     }
 
@@ -8189,6 +8191,7 @@ mod agent_view_golden {
         let mut app = App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -8361,6 +8364,7 @@ mod work_view_tests {
         App::new(
             ConnectionState::Live,
             Snapshot {
+                focus_known: None,
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
