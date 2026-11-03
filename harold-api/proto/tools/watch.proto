@@ -12,24 +12,27 @@
 //   Pause        holds a running watch. `name` or `all` (not both). `for_minutes` (1 to 1440)
 //                resumes it by itself; absent means it waits for Resume. `caller` is "cli",
 //                "control_tower" or empty (meaning "cli"). `paused` names the watches held.
-//                `skipped` names the watches that were not running.
+//                `skipped` names the capped watches (paused by the daily budget). With
+//                `all`, a watch that is not running is skipped and not named.
 //   Resume       releases a paused watch. `name` or `all` (not both). `resumed` names the
 //                watches released. `skipped` names the capped watches, which stay paused.
 //   Remind       types one line to `report_to` when it is due. Give `in_minutes` (1 to 1440)
 //                or `at_local` ("HH:MM", 24 hours, the next time the local clock reads it).
-//                The line is "REMIND <name>: <text>", cut to 300 characters.
+//                The line is "REMIND <name>: <text>". The text is cut to 300 characters.
 //                The response holds the due time.
 //   ListWatches  every watch running or paused, every watch that ended today, and every
 //                reminder that waits.
 //
 // Refusals:
-//   InvalidArgument      message "invalid <field>" (including "invalid folder").
+//   InvalidArgument      message "invalid <field>" (including "invalid folder"). A Remind
+//                        with no `in_minutes` and no `at_local` is "invalid when".
 //   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch, Pause,
 //                        Resume).
 //   FailedPrecondition   "too_many_watches", "daily_budget_spent", "daily_budget_unset"
 //                        (StartWatch with no end), "not_running" (StopWatch, Pause),
 //                        "not_paused" (Resume), "budget_day" (Pause, Resume: the watch
-//                        waits for the budget day), "name_in_use" (Remind).
+//                        waits for the budget day), "name_in_use" (StartWatch,
+//                        Remind).
 //   Unavailable          the database write failed.
 //
 // The server trusts local callers: there is no token (ADR 0002).

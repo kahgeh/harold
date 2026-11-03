@@ -280,11 +280,25 @@ fn next_local(at: &str, now: &LocalNow) -> Result<String, Refusal> {
 }
 
 /// A reminder's text without control characters or escape sequences, cut to 300
-/// characters. It uses the same cleaning as a watch report.
+/// characters. It uses the same cleaning as a watch report. Then it removes the Unicode
+/// format characters that change the order or the look of a line (for example a
+/// right-to-left override), so the typed line reads as stored.
 pub(super) fn clean_text(text: &str) -> String {
     sanitize_bounded_metadata(text, MAX_TEXT_CHARS)
+        .chars()
+        .filter(|c| !is_format_character(*c))
+        .collect::<String>()
         .trim()
         .to_owned()
+}
+
+/// Zero-width characters, direction marks, embeddings, overrides and isolates, and the
+/// byte order mark.
+fn is_format_character(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 fn report_to(text: &str) -> Result<ReportTo, Refusal> {

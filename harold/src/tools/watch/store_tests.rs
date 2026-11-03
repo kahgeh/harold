@@ -533,3 +533,26 @@ async fn a_reminder_with_no_time_is_refused() {
     reminder.due_at_ms = Some(9_000);
     store.put_reminder(&reminder, 2_000).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_watch_row_with_an_unknown_state_is_a_data_error() {
+    let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+    let conn = database.connect().unwrap();
+    // The columns of `COLUMNS`, in order, with a state no watch has.
+    let row_with = |state: &str| {
+        format!(
+            "SELECT 'w', '/work', 'pod-watch', 'chief', 10, 0, NULL, '{state}', 1000, NULL, \
+             1000, 0, 0, 0, 0, NULL, NULL, NULL, 120, NULL, NULL"
+        )
+    };
+    let mut rows = conn.query(&row_with("stopped"), ()).await.unwrap();
+    let stopped = to_watch(&rows.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(stopped.state, WatchState::Stopped);
+
+    let mut rows = conn.query(&row_with("sleeping"), ()).await.unwrap();
+    let read = to_watch(&rows.next().await.unwrap().unwrap());
+    assert!(
+        matches!(&read, Err(StoreError::Data(text)) if text == "unknown watch state sleeping"),
+        "{read:?}"
+    );
+}

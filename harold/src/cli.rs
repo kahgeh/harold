@@ -1017,7 +1017,7 @@ fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
     lines.join("\n")
 }
 
-const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES [--for TIME] [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list | pause (NAME | --all) [--for TIME] | resume (NAME | --all) | remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] \"TEXT\"";
+const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES [--for TIME] [--report-to chief|self] [--run-budget USD] [--run-limit SECONDS] [--every-run] | stop NAME | list | pause (NAME | --all) [--for TIME] | resume (NAME | --all) | remind NAME (--in TIME | --at HH:MM) [--report-to chief|self] [--] \"TEXT\"";
 
 /// A `harold tool watch` command. The numbers stay text here: the daemon checks the
 /// ranges, and the CLI only needs them to be numbers.
@@ -2267,6 +2267,34 @@ fn watch_reminder_line(reminder: &watch_api::Reminder, offset: time::UtcOffset) 
 
 /// The count line for `pause --all` and `resume --all`. The daemon skips only the
 /// watches that the daily budget caps.
+/// The line for a pause. It names only what the daemon paused: a named watch that the
+/// daemon did not pause gives `paused 0`.
+fn watch_pause_line(
+    name: Option<&str>,
+    for_minutes: Option<u32>,
+    paused: &watch_api::PauseResponse,
+) -> String {
+    let mut line = match name {
+        Some(name) if paused.paused.iter().any(|done| done == name) => format!("paused {name}"),
+        _ => watch_count_line("paused", &paused.paused, &paused.skipped),
+    };
+    if let Some(minutes) = for_minutes.filter(|_| !paused.paused.is_empty()) {
+        line.push_str(&format!(" for {minutes} minutes"));
+    }
+    line
+}
+
+/// The line for a resume. It names only what the daemon resumed: a named watch that the
+/// daemon did not resume gives `resumed 0`.
+fn watch_resume_line(name: Option<&str>, resumed: &watch_api::ResumeResponse) -> String {
+    match name {
+        Some(name) if resumed.resumed.iter().any(|done| done == name) => {
+            format!("resumed {name}")
+        }
+        _ => watch_count_line("resumed", &resumed.resumed, &resumed.skipped),
+    }
+}
+
 fn watch_count_line(verb: &str, done: &[String], skipped: &[String]) -> String {
     let mut line = format!("{verb} {}", done.len());
     if !skipped.is_empty() {
@@ -2415,14 +2443,7 @@ pub(crate) async fn watch_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
-                let mut line = match name {
-                    Some(name) => format!("paused {name}"),
-                    None => watch_count_line("paused", &paused.paused, &paused.skipped),
-                };
-                if let Some(minutes) = for_minutes {
-                    line.push_str(&format!(" for {minutes} minutes"));
-                }
-                Ok(line)
+                Ok(watch_pause_line(name.as_deref(), *for_minutes, &paused))
             }
             WatchCommand::Resume { name, all } => {
                 let resumed = client
@@ -2434,10 +2455,7 @@ pub(crate) async fn watch_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
-                Ok(match name {
-                    Some(name) => format!("resumed {name}"),
-                    None => watch_count_line("resumed", &resumed.resumed, &resumed.skipped),
-                })
+                Ok(watch_resume_line(name.as_deref(), &resumed))
             }
             WatchCommand::Remind {
                 name,
@@ -6769,6 +6787,49 @@ mod tests {
         assert!(WATCH_USAGE_LINE.contains("pause (NAME | --all) [--for TIME]"));
         assert!(WATCH_USAGE_LINE.contains("resume (NAME | --all)"));
         assert!(WATCH_USAGE_LINE.contains("remind NAME (--in TIME | --at HH:MM)"));
+        assert!(WATCH_USAGE_LINE.ends_with("[--report-to chief|self] [--] \"TEXT\""));
+    }
+
+    #[test]
+    fn a_pause_or_resume_line_comes_from_the_response_not_the_request() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let paused = |done: &[&str]| watch_api::PauseResponse {
+            paused: names(done),
+            skipped: vec![],
+        };
+        assert_eq!(
+            watch_pause_line(Some("pods"), None, &paused(&["pods"])),
+            "paused pods"
+        );
+        assert_eq!(
+            watch_pause_line(Some("pods"), Some(30), &paused(&["pods"])),
+            "paused pods for 30 minutes"
+        );
+        // The daemon changed nothing: no claim that pods is paused.
+        assert_eq!(
+            watch_pause_line(Some("pods"), None, &paused(&[])),
+            "paused 0"
+        );
+        assert_eq!(
+            watch_pause_line(Some("pods"), Some(30), &paused(&[])),
+            "paused 0"
+        );
+        assert_eq!(
+            watch_pause_line(None, Some(30), &paused(&["a", "b"])),
+            "paused 2 for 30 minutes"
+        );
+        assert_eq!(watch_pause_line(None, Some(30), &paused(&[])), "paused 0");
+
+        let resumed = |done: &[&str]| watch_api::ResumeResponse {
+            resumed: names(done),
+            skipped: vec![],
+        };
+        assert_eq!(
+            watch_resume_line(Some("pods"), &resumed(&["pods"])),
+            "resumed pods"
+        );
+        assert_eq!(watch_resume_line(Some("pods"), &resumed(&[])), "resumed 0");
+        assert_eq!(watch_resume_line(None, &resumed(&["a"])), "resumed 1");
     }
 
     #[test]
@@ -7114,7 +7175,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let pause = |name: Option<&str>, all, for_minutes| WatchCommand::Pause {
+        let pause_of = |name: Option<&str>, all, for_minutes| WatchCommand::Pause {
             name: name.map(Into::into),
             all,
             for_minutes,
@@ -7124,7 +7185,7 @@ mod tests {
             all,
         };
         assert_eq!(
-            run(pause(Some("pods"), false, None)).await,
+            run(pause_of(Some("pods"), false, None)).await,
             Ok("paused pods".into())
         );
         let listed = run(WatchCommand::List).await.unwrap();
@@ -7141,12 +7202,12 @@ mod tests {
             Err("pods is not paused".into())
         );
         assert_eq!(
-            run(pause(Some("pods"), false, Some(30))).await,
+            run(pause_of(Some("pods"), false, Some(30))).await,
             Ok("paused pods for 30 minutes".into())
         );
         assert_eq!(run(resume(None, true)).await, Ok("resumed 1".into()));
         assert_eq!(run(resume(None, true)).await, Ok("resumed 0".into()));
-        assert_eq!(run(pause(None, true, None)).await, Ok("paused 1".into()));
+        assert_eq!(run(pause_of(None, true, None)).await, Ok("paused 1".into()));
 
         let reminder = run(WatchCommand::Remind {
             name: "release-check".into(),

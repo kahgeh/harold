@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::*;
 use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::InputBox;
+use crate::tools::watch::clock;
 use crate::tools::watch::store::WatchState;
 use crate::tools::watch::test_support::{
     FakeAgents, FakeChief, FakePods, FakeRunner, FakeTyping, ScriptedOffset, Step, TempFolder,
@@ -1806,4 +1807,149 @@ async fn a_capped_watch_stays_paused_over_a_restart_and_resumes_at_the_next_day_
     assert_eq!(resumed.len(), 1, "{text}");
     assert!(resumed[0].contains("how=\"budget_day\""), "{}", resumed[0]);
     assert_eq!(h.row("pods").await.pause_how.as_deref(), None);
+}
+
+// ---------------------------------------------------------------------------
+// A computer sleep: the wall clock jumps and tokio's clock does not
+// ---------------------------------------------------------------------------
+
+/// One task wake-up and a few seconds more, so a task that wakes every minute sees a jump.
+const AFTER_A_WAKE: Duration = Duration::from_secs(65);
+
+#[tokio::test(start_paused = true)]
+async fn pause_for_resumes_at_its_wall_clock_end_after_a_computer_sleep() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    h.start_open("pods", 10).await;
+    pass(5 * MINUTE).await;
+    h.pause("pods", Some(30)).await;
+    pass(MINUTE).await;
+
+    clock::jump_wall_clock(40 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+
+    let row = h.row("pods").await;
+    assert_eq!(row.state, WatchState::Running);
+    assert_eq!(h.runner.calls(), 2, "a run at once at the end of the pause");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_watch_resumes_at_the_next_local_day_after_a_computer_sleep() {
+    let h = harness(with_daily(0.5), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    h.start_capped("pods").await;
+    let day_end = next_day_start();
+
+    clock::jump_wall_clock(day_end - clock_ms() + MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+
+    let resumed = log_lines(&logs.text(), "watch resumed", "pods").len();
+    assert_eq!(resumed, 1, "it resumed at the new day");
+    // Its run could still pass the new day's budget: it caps again until the day after.
+    let pods = h.row("pods").await;
+    assert_eq!(pods.paused_until_ms, Some(day_end + 86_400_000));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_with_an_end_ends_while_paused_after_a_computer_sleep() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 60).await;
+    pass(15 * MINUTE).await;
+    h.pause("w", None).await;
+    pass(MINUTE).await;
+
+    clock::jump_wall_clock(60 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+
+    let row = h.row("w").await;
+    assert_eq!(
+        (row.state, row.stop_reason.as_deref()),
+        (WatchState::Stopped, Some("ended"))
+    );
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w ended: 2 runs, 0 reports, $0.02"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_running_watch_runs_at_its_wall_clock_time_after_a_computer_sleep() {
+    let h = harness(with_daily(100.0), vec![answer("QUIET", 0.01)]).await;
+    h.start_open("pods", 240).await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1);
+
+    clock::jump_wall_clock(240 * MINUTE_MS);
+    pass(AFTER_A_WAKE).await;
+
+    assert_eq!(h.runner.calls(), 2, "the run at 240 minutes is not late");
+}
+
+// ---------------------------------------------------------------------------
+// A pause or a resume that loses a race
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_named_pause_that_loses_a_race_is_not_running_and_all_skips_it() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    // The row as pause read it; then the watch stops before the pause is stored.
+    let read = h.row("w").await;
+    h.scheduler.stop("w").await.unwrap();
+
+    assert_eq!(
+        h.scheduler
+            .pause_rows(vec![read.clone()], true, None, How::Cli)
+            .await,
+        Err(PauseRefusal::NotRunning)
+    );
+    assert_eq!(
+        h.scheduler
+            .pause_rows(vec![read], false, None, How::Cli)
+            .await,
+        Ok(vec![])
+    );
+    assert_eq!(h.row("w").await.state, WatchState::Stopped);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_named_resume_that_loses_a_race_is_not_paused_and_all_skips_it() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    h.pause("w", None).await;
+    // The row as resume read it; then another resume comes first.
+    let read = h.row("w").await;
+    h.resume("w").await;
+
+    assert_eq!(
+        h.scheduler
+            .resume_rows(vec![read.clone()], true, How::Cli)
+            .await,
+        Err(ResumeRefusal::NotPaused)
+    );
+    assert_eq!(
+        h.scheduler.resume_rows(vec![read], false, How::Cli).await,
+        Ok(vec![])
+    );
+    assert_eq!(h.row("w").await.state, WatchState::Running);
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_now_is_the_local_date_and_seconds_of_day_at_the_offset_now() {
+    for (hours, minutes) in [(5, 30), (-3, 0), (14, 0)] {
+        let offset = UtcOffset::from_hms(hours, minutes, 0).unwrap();
+        let local = ScriptedOffset::at(offset);
+        let h = harness_with_offset(&local).await;
+
+        let now = h.scheduler.local_now().await;
+
+        let local_secs = clock_ms().div_euclid(1000) + i64::from(offset.whole_seconds());
+        let seconds_of_day = local_secs.rem_euclid(86_400) as u32;
+        assert_eq!(now.seconds_of_day, seconds_of_day, "{offset}");
+        let day = local_text(clock_ms(), offset)[..10].to_owned();
+        assert_eq!(now.day, day, "{offset}");
+        assert_eq!(now.day.len(), 10, "YYYY-MM-DD");
+    }
 }

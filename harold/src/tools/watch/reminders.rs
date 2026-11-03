@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::sync::watch as signal;
 
-use super::clock::{LocalOffset, clock_ms, local_ms, local_text};
+use super::clock::{LocalOffset, WAKE_EVERY, clock_ms, local_ms, local_text};
 use super::obs::{self, ReminderEnd, ReportObs};
 use super::report::{ReportSlot, Target, Typist};
 use super::scheduler::{RemindRefusal, interrupted};
@@ -31,11 +31,6 @@ const GIVE_UP_MS: i64 = 120 * MINUTE_MS;
 fn too_late(now_ms: i64, due_ms: i64) -> bool {
     now_ms - due_ms >= GIVE_UP_MS
 }
-
-/// A waiting task wakes at least this often. It reads the local offset again, so a `--at`
-/// time follows a change of daylight saving time, and it sees the wall clock jump after
-/// the computer sleeps.
-const WAKE_EVERY: Duration = Duration::from_secs(60);
 
 /// A waiting reminder as `list` shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]

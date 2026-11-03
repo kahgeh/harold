@@ -2,12 +2,19 @@
 
 use std::future::Future;
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use time::{Date, OffsetDateTime, Time, UtcOffset};
 
 use crate::tools::BoxFuture;
 
 const MS_PER_DAY: i64 = 86_400_000;
+
+/// A waiting task wakes at least this often. Tokio's clock stops while the computer
+/// sleeps, so a task reads the wall clock again at each wake-up and sees the jump. A
+/// reminder also reads the local offset again, so a `--at` time follows a change of
+/// daylight saving time.
+pub(super) const WAKE_EVERY: Duration = Duration::from_secs(60);
 
 #[cfg(not(test))]
 pub(super) fn clock_ms() -> i64 {
@@ -188,18 +195,34 @@ mod offset_tests {
 
     #[tokio::test]
     async fn an_unreadable_date_keeps_the_last_good_offset() {
-        let plus_eleven = UtcOffset::from_hms(11, 0, 0).unwrap();
+        // Two offsets that differ from each other, so no machine offset (the first
+        // value) can make every check pass when the reader is not used.
+        let plus_ten = UtcOffset::from_hms(10, 0, 0).unwrap();
+        let plus_five_thirty = UtcOffset::from_hms(5, 30, 0).unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&reads);
         let clock = DateClock::with_reader(move || {
-            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
-            async move { first.then_some(plus_eleven) }
+            let read = match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => Some(plus_ten),
+                1 => Some(plus_five_thirty),
+                _ => None,
+            };
+            async move { read }
         });
 
-        assert_eq!(clock.offset().await, plus_eleven);
-        assert_eq!(clock.offset().await, plus_eleven);
-        assert_eq!(clock.offset().await, plus_eleven);
-        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        assert_eq!(clock.offset().await, plus_ten);
+        assert_eq!(clock.offset().await, plus_five_thirty);
+        assert_eq!(
+            clock.offset().await,
+            plus_five_thirty,
+            "the last good offset"
+        );
+        assert_eq!(
+            clock.offset().await,
+            plus_five_thirty,
+            "the last good offset"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
     }
 }
 

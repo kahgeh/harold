@@ -644,7 +644,7 @@ fn bad_times_are_refused() {
         );
     }
     for at in [
-        "25:00", "16:3", "1630", "16:60", "4:30", "ab:cd", "", "16:30:00", "-1:30",
+        "25:00", "16:3", "1630", "16:60", "4:30", "ab:cd", "", "16:30:00", "-1:30", "24:00", "7:05",
     ] {
         assert_eq!(
             remind_check(&temp.0, Some(When::AtLocal(at.into()))),
@@ -724,4 +724,29 @@ fn clean_text_drops_control_characters_and_cuts_to_300() {
     assert_eq!(clean_text(&"x".repeat(400)).chars().count(), 300);
     assert_eq!(clean_text("\x1b[31mhi\x07"), "hi");
     assert_eq!(clean_text("é".repeat(301).as_str()).chars().count(), 300);
+}
+
+#[test]
+fn clean_text_drops_line_breaks_and_tabs() {
+    assert_eq!(clean_text("a\nb\r\tc"), "abc");
+}
+
+#[test]
+fn clean_text_drops_escape_sequences_and_unicode_format_characters() {
+    // A right-to-left override can make the typed line read in a false order.
+    assert_eq!(clean_text("\x1b[31mok\u{202E}gnp.exe"), "okgnp.exe");
+    for format in [
+        '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}',
+        '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        '\u{FEFF}',
+    ] {
+        assert_eq!(
+            clean_text(&format!("a{format}b")),
+            "ab",
+            "{:X}",
+            format as u32
+        );
+    }
+    // Ordinary letters of any script stay.
+    assert_eq!(clean_text("café שלום 日本"), "café שלום 日本");
 }

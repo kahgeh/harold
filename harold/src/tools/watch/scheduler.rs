@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tracing::Instrument as _;
 
 use super::answer::{self, Answer, Cause, Failure};
-use super::clock::{LocalOffset, clock_ms, day_bounds, local_text};
+use super::clock::{LocalOffset, WAKE_EVERY, clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
 use super::obs::{self, EndReason, How, RunObs, Timing};
 use super::reminders::{ReminderInfo, Reminders};
@@ -353,6 +353,7 @@ impl Scheduler {
         let how = asked_by(checked.caller);
         let store = &self.deps.store;
         let mut changed = Changed::default();
+        let named = matches!(checked.target, Aim::Name(_));
         let rows = match checked.target {
             Aim::Name(name) => {
                 let row = store
@@ -381,12 +382,31 @@ impl Scheduler {
                 running
             }
         };
+        changed.done = self.pause_rows(rows, named, until, how).await?;
+        Ok(changed)
+    }
+
+    /// Pauses each row and returns the names it paused. For a named watch, a store error
+    /// is `Unavailable` and a watch that stopped running meanwhile is `NotRunning`. For
+    /// `--all`, such a watch is skipped, and a store error is logged.
+    async fn pause_rows(
+        self: &Arc<Self>,
+        rows: Vec<WatchRow>,
+        named: bool,
+        until: Option<i64>,
+        how: How,
+    ) -> Result<Vec<String>, PauseRefusal> {
+        let mut done = Vec::new();
         for row in rows {
-            if self.hold(&row, until, how).await.is_some() {
-                changed.done.push(row.name);
+            match self.hold(&row, until, how).await {
+                Ok(Some(_)) => done.push(row.name),
+                Ok(None) if named => return Err(PauseRefusal::NotRunning),
+                Err(_) if named => return Err(PauseRefusal::Unavailable),
+                Ok(None) => {}
+                Err(_) => store_failed(&row.name, true),
             }
         }
-        Ok(changed)
+        Ok(done)
     }
 
     /// Releases a paused watch, or every paused watch. A capped watch is never resumed by
@@ -399,6 +419,7 @@ impl Scheduler {
         let how = asked_by(checked.caller);
         let store = &self.deps.store;
         let mut changed = Changed::default();
+        let named = matches!(checked.target, Aim::Name(_));
         let rows = match checked.target {
             Aim::Name(name) => {
                 let row = store
@@ -424,14 +445,34 @@ impl Scheduler {
                 paused
             }
         };
+        changed.done = self.resume_rows(rows, named, how).await?;
+        Ok(changed)
+    }
+
+    /// Resumes each row and returns the names it resumed. For a named watch, a store error
+    /// is `Unavailable` and a watch that is no longer paused is `NotPaused`. For `--all`,
+    /// such a watch is skipped, and a store error is logged.
+    async fn resume_rows(
+        self: &Arc<Self>,
+        rows: Vec<WatchRow>,
+        named: bool,
+        how: How,
+    ) -> Result<Vec<String>, ResumeRefusal> {
+        let mut done = Vec::new();
         for row in rows {
-            if self.release(&row, how).await.is_some() {
-                // A new task runs the first check at once.
-                self.spawn_task(&row);
-                changed.done.push(row.name);
+            match self.release(&row, how).await {
+                Ok(Some(_)) => {
+                    // A new task runs the first check at once.
+                    self.spawn_task(&row);
+                    done.push(row.name);
+                }
+                Ok(None) if named => return Err(ResumeRefusal::NotPaused),
+                Err(_) if named => return Err(ResumeRefusal::Unavailable),
+                Ok(None) => {}
+                Err(_) => store_failed(&row.name, false),
             }
         }
-        Ok(changed)
+        Ok(done)
     }
 
     /// Stores a reminder. Returns the time it is due, in milliseconds. A live watch or a
@@ -566,35 +607,37 @@ impl Scheduler {
         row: &WatchRow,
         until: Option<i64>,
         how: How,
-    ) -> Option<Arc<ReportSlot>> {
-        let paused = self
+    ) -> Result<Option<Arc<ReportSlot>>, StoreError> {
+        let Some(paused) = self
             .deps
             .store
             .pause(&row.name, row.started_at_ms, until, how.as_str())
-            .await
-            .ok()
-            .flatten()?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let slot = self.spawn_task(&paused);
         let until_text = match until {
             Some(at) => Some(local_text(at, self.offset().await)),
             None => None,
         };
         obs::watch_paused(&row.name, how, until_text.as_deref());
-        Some(slot)
+        Ok(Some(slot))
     }
 
     /// Stores a paused watch as running, due at once. Returns the watch, or `None` when it
     /// was not paused.
-    async fn release(&self, row: &WatchRow, how: How) -> Option<WatchRow> {
-        let resumed = self
+    async fn release(&self, row: &WatchRow, how: How) -> Result<Option<WatchRow>, StoreError> {
+        let Some(resumed) = self
             .deps
             .store
             .resume(&row.name, row.started_at_ms, clock_ms())
-            .await
-            .ok()
-            .flatten()?;
+            .await?
+        else {
+            return Ok(None);
+        };
         obs::watch_resumed(&row.name, how);
-        Some(resumed)
+        Ok(Some(resumed))
     }
 
     async fn watch_task(
@@ -612,6 +655,10 @@ impl Scheduler {
             let Ok(Some(row)) = self.deps.store.get(&name).await else {
                 return;
             };
+            // A resume or a stop can cancel this task while it reads the store.
+            if *cancelled.borrow() {
+                return;
+            }
             if !row.is_live() || row.started_at_ms != started_at_ms {
                 return;
             }
@@ -633,7 +680,9 @@ impl Scheduler {
                 let until = row
                     .ends_at_ms
                     .map_or(row.next_run_at_ms, |end| row.next_run_at_ms.min(end));
-                let wait = Duration::from_millis((until - now) as u64);
+                // Tokio's clock stops while the computer sleeps: wake often and read the
+                // wall clock again.
+                let wait = Duration::from_millis((until - now) as u64).min(WAKE_EVERY);
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     () = interrupted(&mut cancelled, &mut shutdown) => return,
@@ -649,6 +698,8 @@ impl Scheduler {
 
     /// Waits while `row` is paused: until its pause ends, or its end comes, or the task is
     /// cancelled. A pause that ends resumes the watch, and its first check runs at once.
+    /// One wait is at most `WAKE_EVERY`, because tokio's clock stops while the computer
+    /// sleeps. The caller then reads the row again and checks the wall clock.
     async fn wait_while_paused(
         &self,
         row: &WatchRow,
@@ -664,18 +715,27 @@ impl Scheduler {
             interrupted(cancelled, shutdown).await;
             return Flow::Over;
         };
-        let wait = Duration::from_millis((wake - clock_ms()).max(0) as u64);
+        let wait = Duration::from_millis((wake - clock_ms()).max(0) as u64).min(WAKE_EVERY);
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
             () = interrupted(cancelled, shutdown) => return Flow::Over,
         }
-        if row.paused_until_ms.is_some_and(|until| clock_ms() >= until) {
-            let how = if is_capped(row) {
-                How::BudgetDay
-            } else {
-                How::Timed
-            };
-            self.release(row, how).await;
+        if !row.paused_until_ms.is_some_and(|until| clock_ms() >= until) {
+            return Flow::Continue;
+        }
+        let how = if is_capped(row) {
+            How::BudgetDay
+        } else {
+            How::Timed
+        };
+        if self.release(row, how).await.is_err() {
+            store_failed(&row.name, false);
+            // Wait before the next try, so a store that fails at once is not asked in a
+            // tight loop.
+            tokio::select! {
+                () = tokio::time::sleep(self.retry) => {}
+                () = interrupted(cancelled, shutdown) => return Flow::Over,
+            }
         }
         Flow::Continue
     }
@@ -1011,8 +1071,13 @@ impl Scheduler {
                     .await;
                 continue;
             }
-            let Some(slot) = self.hold(&row, Some(next_day), How::BudgetDay).await else {
-                continue;
+            let slot = match self.hold(&row, Some(next_day), How::BudgetDay).await {
+                Ok(Some(slot)) => slot,
+                Ok(None) => continue,
+                Err(_) => {
+                    store_failed(&row.name, true);
+                    continue;
+                }
             };
             let line = format!(
                 "WATCH {} paused: daily budget of {} spent, resumes at {}",
@@ -1030,6 +1095,16 @@ fn report_line(name: &str, run: u32, total: Option<u32>, text: &str) -> String {
     match total {
         Some(total) => format!("WATCH {name} {run}/{total}: {text}"),
         None => format!("WATCH {name} {run}: {text}"),
+    }
+}
+
+/// Logs a store error that left the watch `name` as it was: not paused (`paused` false:
+/// not resumed).
+fn store_failed(name: &str, paused: bool) {
+    if paused {
+        tracing::warn!(watch = name, reason = "store_failed", "watch not paused");
+    } else {
+        tracing::warn!(watch = name, reason = "store_failed", "watch not resumed");
     }
 }
 

@@ -625,7 +625,8 @@ fn to_watch(row: &turso::Row) -> Result<WatchRow> {
     let state = match text(row, 7)?.as_str() {
         "running" => WatchState::Running,
         "paused" => WatchState::Paused,
-        _ => WatchState::Stopped,
+        "stopped" => WatchState::Stopped,
+        other => return Err(StoreError::Data(format!("unknown watch state {other}"))),
     };
     let count = |index| {
         u32::try_from(integer(row, index)?)
