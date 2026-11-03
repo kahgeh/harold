@@ -3,7 +3,7 @@
 ## Download release builds
 
 Publishing a GitHub release triggers the **Build** workflow. After
-its tests and build succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
+its build and checks succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
 and its `.sha256` checksum to that release. The archive contains `harold`,
 `control-tower`, configuration templates, the gRPC schema, the source
 revision and the release version. Draft releases, pushes, and pull requests do not trigger builds.
@@ -11,14 +11,14 @@ Re-running a release workflow replaces its matching assets.
 
 The workflow has two jobs. The `build` job builds and uploads the macOS package. The `linux` job builds, packages and smoke-tests Harold on Linux, and uploads the Linux package. If the `linux` job fails, the run fails, and `make release` does not mark the release latest. The release run only builds, checks the binaries and uploads them: the tests run on each push to `main`, and the release run keeps no cache.
 
-Each long step has its own `timeout-minutes` limit: 20 for `Build release binaries`. A hung step fails in minutes, and the 30-minute job limit of each job is the outer bound.
+The macOS `Build release binaries` step has a `timeout-minutes` limit of 20, so a hung build step fails in minutes. Each job has a 30-minute job limit as the outer bound.
 
 The **push checks** are the **Linux tests** workflow (`linux-tests.yml`) and the **macOS checks** workflow (`macos-checks.yml`). Both run on each push to `main`, with a cache of the compiled dependencies. `make release` makes a release only when both workflows have a push run with the conclusion `success` for the exact commit it releases ([ADR 0033](../adr/0033-a-release-trusts-the-checks-of-each-push.md), which supersedes the gate of [ADR 0026](../adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)). So a failure on either system stops a release before anything is public.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The
-bootstrap ([install or reinstall Harold](setup.md)) installs these together without Rust or a source checkout. Linux
-builds are not provided. A published release containing the installer is required.
+bootstrap ([install or reinstall Harold](setup.md)) installs these together without Rust or a source checkout. The release also
+attaches a Linux package, `harold-x86_64-unknown-linux-gnu.tar.gz`, which the Mac installer does not use. A published release containing the installer is required.
 
 ### Cut a release
 
