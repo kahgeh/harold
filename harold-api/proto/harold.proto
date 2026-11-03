@@ -74,6 +74,16 @@ message TurnCompleteRequest {
   string turn_started_at = 7;
   // The agent's transcript file, when the hook has one; empty otherwise.
   string transcript_path = 8;
+  // Input tokens the turn used, not counting the cache; 0 when unknown.
+  uint64 input_tokens = 9;
+  // Output tokens the turn produced; 0 when unknown.
+  uint64 output_tokens = 10;
+  // Input tokens the turn read from the cache; 0 when unknown.
+  uint64 cache_read_tokens = 11;
+  // Input tokens the turn wrote to the cache; 0 when unknown.
+  uint64 cache_write_tokens = 12;
+  // The model that ran the turn; empty when unknown.
+  string model = 13;
 }
 
 message TurnCompleteResponse {

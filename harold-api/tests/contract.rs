@@ -221,8 +221,33 @@ fn turn_complete_preserves_legacy_wire_fields() {
             ("session_id".to_string(), 6),
             ("turn_started_at".to_string(), 7),
             ("transcript_path".to_string(), 8),
+            ("input_tokens".to_string(), 9),
+            ("output_tokens".to_string(), 10),
+            ("cache_read_tokens".to_string(), 11),
+            ("cache_write_tokens".to_string(), 12),
+            ("model".to_string(), 13),
         ]
     );
+}
+
+#[test]
+fn turn_complete_request_carries_turn_tokens() {
+    let request = TurnCompleteRequest {
+        input_tokens: 11,
+        output_tokens: 22,
+        cache_read_tokens: 33,
+        cache_write_tokens: 44,
+        model: "claude-test-1".to_string(),
+        ..Default::default()
+    };
+
+    let decoded = round_trip(&request);
+
+    assert_eq!(decoded.input_tokens, 11);
+    assert_eq!(decoded.output_tokens, 22);
+    assert_eq!(decoded.cache_read_tokens, 33);
+    assert_eq!(decoded.cache_write_tokens, 44);
+    assert_eq!(decoded.model, "claude-test-1");
 }
 
 #[test]
