@@ -10,6 +10,7 @@ A pod keeps one revisions file for each spec: `specs/<id>.revisions.md`. Each `#
 
 - The time is local time. Harold reads it as the time of the revision.
 - A heading with a date only counts from that date's local midnight. The old files still parse.
+- A heading counts as dated only when it starts with a readable date, or a date and a time, and a comma. A heading with no readable date has no time. It counts as a revision, but it is never redo and it is not counted as revised after approval.
 - The tags are the comma-separated words in the last parenthesis.
 - A heading with no tags is a revision of unknown class. It is never redo.
 - The PnEM must write the time on each `direction` or `defect` revision.
@@ -32,4 +33,4 @@ A revision with no readable time, or with other tags only, is never redo.
 
 ## Revised after approval
 
-This is the count of entries dated after the approval. Any tag counts, except `first`. A spec with no approval has a count of 0.
+This is the count of dated entries with a time after the approval. Any tag counts, except `first`. A heading with no readable time does not count. A spec with no approval has a count of 0.

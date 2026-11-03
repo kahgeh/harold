@@ -120,6 +120,7 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 | Line | Fields |
 |---|---|
 | `pod file unreadable` | `pod.product`, `spec.id`, `file` (the file's name inside the pod folder) |
+| `large spec approved` | `pod.product`, `spec.id`. Level warn. Logged once for each large spec that has an approval (the `**Size.** large` line) |
 | `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
 
 **A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
@@ -140,6 +141,23 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 **Spec size** is the word count of `specs/<id>.md`, leaving out lines that start with `<`, which hold drawn charts.
 
 **Effort per spec** (`pod.spec.effort`) is a gauge for each spec, each poll. Its `measure` attribute is `revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours` or `revised_after_approval`. It also carries `spec.size`. A withdrawn spec also carries `withdrawn.reason` and `withdrawn.reached` (`open`, `approved` or `in_progress`, from the files that exist). Build worker hours run from `started:` (or the agent-pane file's time) to `merged:` or `withdrawn:`, or to now. Model cost is left out, because Harold records no build worker cost. Only specs that are not `completed` or `withdrawn`, and specs that entered one of those states in the last 30 days, send a value. An older spec sends nothing.
+
+**Redo and revisions.** `redo_hours` is build work after a `direction` or `defect` revision that is dated after the spec's started time. With several such revisions, it runs from the earliest one to the end of the spec, or to now for a spec not yet complete. `revised_after_approval` is the count of revisions of any tag, except `first`, dated after the approval. The headings and tags are in [Revision tags](revision-tags.md).
+
+**Spec size.** `spec.size` comes from the `**Size.**` line under the spec's title: `small` (under half a day of build), `medium` (up to a day) or `large` (split before approval). A spec with no size line is `unsized`.
+
+**Free slots with work waiting** (`pod.slots.idle_with_work`) is a gauge for each product, each poll (60 s). Its value is the product's free slots while at least one of its specs is approved and not started, on or after the cutoff of ADR 0021. Otherwise its value is 0. `pod.slots.free` and the `slot-idle` alert stay as they are, and count every free slot.
+
+**Work waiting** has three gauges for each product and `list`: `pod.inventory.items` (the number of specs), `pod.inventory.oldest_hours` (the age of the oldest spec, in hours) and `pod.inventory.item_days` (the sum of the ages, in days). The lists are:
+
+| `list` | A spec is in it when | Age counts from | Recorded by |
+|---|---|---|---|
+| `awaiting_approval` | It is open and its first line is `Waiting for your approval.` | the time it opened | pod stats, each poll |
+| `approved_not_started` | It is approved, not started, on or after the cutoff | the approval | pod stats, each poll |
+| `in_progress` | It is in progress | the time it started | pod stats, each poll |
+| `merged_not_released` | It is merged and not in the newest release | the merge | the release tool, every 10 minutes |
+
+The release tool is the only reader of the release tag. It publishes its own series on instruments with the same three names and units, which pod stats exports as constants. A paused product, or a product with no git answer, has no `merged_not_released` series. A product that leaves the registry ends its series. A failed read keeps the last numbers. The pods port stays read-only, and pod stats never calls the release tool.
 
 **Steps** (`pod.spec.lead_time`) are recorded once per spec, when it first becomes `completed` from its `merged/<id>.md`. The `phase` attribute is:
 
@@ -319,6 +337,10 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
 | `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.slots.idle_with_work` | gauge, `{slot}` | `pod.product` |
+| `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`) |
+| `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |
+| `pod.inventory.item_days` | gauge, `d` | `pod.product`, `list` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `pod.product` for the pod roles |
@@ -697,6 +719,17 @@ Special cases:
 The SQL panels read the time range's points and, for the counter rule, the day before it.
 
 The "Spec size" panel cannot show lines merged per spec: `pod.merged_lines` carries `pod.product` and `change` but no `spec.id`, so the two cannot be joined. Read a merged spec's lines from "Merges to main" at the time of its merge.
+
+### Pod signals cards
+
+Four cards read the pod signals. Each card is a query on ClickHouse. Their definition files are not yet in [`hyperdx/`](hyperdx/), so the table gives the reading for each one. Use the last value of each measure for each spec, as the "Withdrawn and wasted" panel does.
+
+| Card | The question | Reads | Weekly comparison | Note (info only, no alert) | Diagnosis |
+|---|---|---|---|---|---|
+| Waste | Where do slot hours and build hours go? | `pod.slots.idle_with_work` (free slots with work waiting) in hours; `pod.spec.effort` `redo_hours`; `pod.spec.effort` `revised_after_approval` beside them; the hours of failed release attempts (release-attempts) | The week's hours and counts against last week | More than 2 hours of free slots with work waiting in a day. Any spec over 2 redo hours. A spec with 3 or more revisions after approval: the spec was not ready. The `slot-idle` alert stays | The approved, not started specs at that time, and `status.md`. For redo, the spec's revisions file: its tagged, timed headings give the reason |
+| Slicing and sizing | Do the specs match their size? | `pod.spec.effort` `build_worker_hours` by `spec.size`: for each size, the share of specs over its limit (4 hours for small, 8 hours for medium), beside `harold.work.slices` | The share this week against last week | Over a third of medium specs over 8 hours in a week | The other effort measures of those specs |
+| Now | Which agents work now? | `pod.agents` with `state` = `working`, over all pods and by pod | The share of working build workers while approved work waits | None needed: `pod.slots.idle_with_work` catches the waste | The control-tower |
+| Work waiting | How much work waits, and for how long? | `pod.inventory.items`, `pod.inventory.oldest_hours` and `pod.inventory.item_days`, by `pod.product` and `list` | The week's item-days against last week | The oldest `awaiting_approval` spec is over 72 hours old. This is the time the user takes to approve. The reading is `max(pod.inventory.oldest_hours) WHERE list = 'awaiting_approval'` over the last hour | `harold tool release next <product>` |
 
 ### Counters in HyperDX
 

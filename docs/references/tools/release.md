@@ -78,6 +78,15 @@ The tool never reads the approval, started, merged and withdrawn files with rule
 
 `read_specs` takes an input `Sources.gone`, the worktrees that the pod poller saw go. The tool has no poller, so it passes an empty map. The result differs from the pod metrics only where the poller's record of worktrees seen to go shows a merge.
 
+## The merged_not_released series
+
+The release tool also publishes the work waiting in its "merged since the release" list. This is the one list that only the release tool can build, because only it reads the release tag.
+
+- Every 10 minutes the tool reads the lists of all products. For each product it records three gauges with `list` = `merged_not_released`: the number of specs (`pod.inventory.items`), the age of the oldest one in hours (`pod.inventory.oldest_hours`) and the sum of the ages in days (`pod.inventory.item_days`). The age counts from the merge.
+- The names and units are the constants that `harold/src/pod_stats.rs` exports. Pod stats records the other three lists (`awaiting_approval`, `approved_not_started` and `in_progress`) under the same names. See [Work waiting](../telemetry/README.md#spec-states).
+- A paused product, and a product with no git answer, has no series. A product that leaves the registry ends its series. A failed read keeps the last numbers.
+- The tool still only reads. It writes nothing in the pod folder and keeps no database. Pod stats does not call the release tool (ADR 0004).
+
 ## The paused key
 
 A product is paused when its entry in `products.toml` has `paused = true`. The tool prints one line for it and reads no spec.

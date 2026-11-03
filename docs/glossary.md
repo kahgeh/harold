@@ -63,6 +63,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | awaiting approval | The open specs whose first line is `Waiting for your approval.` It differs from open spec, which also holds specs under the small-fix waiver, and from waiting, which is never used alone | "waiting for you" |
 | not clear (a spec) | An in-progress spec with no branch and no parked handoff file | "stale", "lost" |
 | direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
+| free slot with work waiting | A free slot while an approved spec of its pod is not started. A free slot alone (`pod.slots.free`, the `slot-idle` alert, "idle slots" in the telemetry README) counts every free slot. This counts only the free slots that work waits for, which is waste. `pod.slots.idle_with_work` stays as the signal name | "idle slot with work", "idle slot" for this one |
+| redo | Build work after a `direction` or `defect` revision of a spec that had started | "rework", "rejected" |
+| spec size | Small (under half a day of build), medium (up to a day) or large (split before approval), in the spec's `**Size.**` line | "estimate", "points" |
+| item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |
+| wording (revision tag) | A revision that changes words only: it counts as a revision and is never redo | "typo fix" for the tag |
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
 | pod coordination | A pod's session that starts build workers and merges their work. The control-tower names its row Coordinator. `role` = `pod_coordination` on `pod.agents` names it | "baton" for the session, "orchestrator" |
 | browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |
