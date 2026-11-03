@@ -60,8 +60,6 @@ mod browser_traces_tests;
 pub(crate) mod browser_traces;
 pub(crate) mod call;
 pub(crate) mod chief;
-// Used from Task 4 (routes and handlers); remove this allow there.
-#[allow(dead_code)]
 pub(crate) mod collections;
 #[cfg(feature = "calls")]
 pub(crate) mod echo_test;
@@ -430,6 +428,8 @@ pub(crate) struct AppState {
     pub notes: Option<notes::Notes>,
     /// The registry's spec files, which the spec pages show.
     pub specs: Arc<specs::Specs>,
+    /// The page collections, read from the settings at the start.
+    pub collections: Arc<collections::Collections>,
     /// Bumped by each todo post, so every open page reads the todos again at once.
     pub todos_changed: Arc<watch::Sender<u64>>,
     /// The echo test's runs, sample and recent silent runs.
@@ -477,6 +477,7 @@ impl AppState {
             questions: todos::Questions::lazy(&idle_grpc()),
             notes: None,
             specs: Arc::new(specs::Specs::new(None)),
+            collections: Arc::new(collections::Collections::new(Vec::new())),
             todos_changed: Arc::new(watch::channel(0).0),
             #[cfg(feature = "calls")]
             echo_test: Arc::new(echo_test::EchoTest::new(
@@ -596,6 +597,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/notes", get(notes::get_notes))
         .route("/notes/search", get(notes::get_search))
         .route("/notes/{*name}", get(notes::get_note))
+        .route("/c", get(collections::get_index))
+        .route("/c/{collection}", get(collections::get_list))
+        .route("/c/{collection}/{file}", get(collections::get_page))
+        .route("/c/{collection}/{file}/raw", get(collections::get_raw))
         .route("/specs", get(specs::get_list))
         .route("/specs/{product}/{id}", get(specs::get_spec))
         .route("/specs/{product}/{id}/share", post(specs::post_share))
@@ -724,6 +729,8 @@ pub(crate) async fn start(
     pair::warn_when_off(&pairing);
 
     prune(&store).await;
+    let collections = Arc::new(collections::Collections::new(settings.collections.clone()));
+    crate::telemetry::register_collection_counters(&collections.names());
     let state = AppState {
         store: Arc::clone(&store),
         allowed_login: Arc::from(settings.allowed_login.as_str()),
@@ -740,6 +747,7 @@ pub(crate) async fn start(
         specs: Arc::new(specs::Specs::new(
             agents.pod_registry.map(Path::to_path_buf),
         )),
+        collections: Arc::clone(&collections),
         todos_changed: Arc::new(watch::channel(0).0),
         #[cfg(feature = "calls")]
         echo_test: Arc::new(echo_test::EchoTest::new(

@@ -8,11 +8,19 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
+use askama::Template;
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path as UrlPath, State};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use time::{OffsetDateTime, UtcOffset};
+use tracing::info;
 
-use super::specs::encode_segment;
+use super::specs::{Listener, encode_segment, render_markdown};
+use super::{AppState, WebAppIdentity};
 use crate::settings::CollectionSettings;
 
 /// A file larger than this is not listed and not served.
@@ -122,6 +130,8 @@ impl Collections {
 /// One row of the list. The texts are raw: the template escapes them.
 #[derive(Debug)]
 pub(crate) struct Row {
+    /// The file name; the page does not show it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub file: String,
     pub title: String,
     pub when: String,
@@ -339,6 +349,356 @@ fn format_when(at: SystemTime, offset: UtcOffset) -> String {
         local.hour(),
         local.minute()
     )
+}
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+/// One row of the Pages screen.
+struct IndexRow {
+    title: String,
+    href: String,
+    /// The page count; none for Specs and Notes, and for a collection that cannot be counted.
+    badge: Option<usize>,
+}
+
+#[derive(Template)]
+#[template(path = "web_app/collections_index.html")]
+struct IndexPage {
+    app_name: String,
+    web_app: bool,
+    has_icon: bool,
+    rows: Vec<IndexRow>,
+}
+
+#[derive(Template)]
+#[template(path = "web_app/collections.html")]
+struct ListPage {
+    app_name: String,
+    web_app: bool,
+    has_icon: bool,
+    title: String,
+    rows: Vec<Row>,
+    message: &'static str,
+    more: String,
+}
+
+#[derive(Template)]
+#[template(path = "web_app/collection_page.html")]
+struct PagePage {
+    app_name: String,
+    web_app: bool,
+    has_icon: bool,
+    title: String,
+    collection_title: String,
+    collection_path: String,
+    file: String,
+    markdown: bool,
+    frame_src: String,
+    html: String,
+}
+
+fn page_response(template: &impl Template, status: StatusCode) -> Response {
+    match template.render() {
+        Ok(html) => (status, Html(html)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn status_of(outcome: Outcome) -> StatusCode {
+    match outcome {
+        Outcome::Ok => StatusCode::OK,
+        Outcome::Unreadable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::NOT_FOUND,
+    }
+}
+
+/// A calm page for a list or a page that cannot be shown. It names no path.
+fn gone(identity: &WebAppIdentity, listener: Listener, outcome: Outcome) -> Response {
+    let message = match outcome {
+        Outcome::Unreadable => "Harold can't read this folder right now.",
+        _ => "No such page.",
+    };
+    let page = ListPage {
+        app_name: identity.name.clone(),
+        web_app: listener == Listener::WebApp,
+        has_icon: listener == Listener::WebApp && identity.icon.is_some(),
+        title: "Pages".to_owned(),
+        rows: Vec::new(),
+        message,
+        more: String::new(),
+    };
+    page_response(&page, status_of(outcome))
+}
+
+/// Logs `app page shown` and counts the request once. `collection` is a configured name or
+/// `unknown`, so no text from the URL reaches the log or the counter.
+fn finish(
+    started: Instant,
+    listener: Listener,
+    collection: &str,
+    outcome: Outcome,
+    response: Response,
+) -> Response {
+    let ms = started.elapsed().as_millis() as u64;
+    let listener = listener.word();
+    let result = outcome.word();
+    info!(listener, collection, result, ms, "app page shown");
+    crate::telemetry::count_collection_page(collection, result);
+    response
+}
+
+/// The collection for a request, or the outcome that answers it: `refused` when the name did
+/// not decode, `not_found` when no collection has it.
+fn find<'a>(collections: &'a Collections, name: Option<&str>) -> Result<&'a Collection, Outcome> {
+    let name = name.ok_or(Outcome::Refused)?;
+    collections.get(name).ok_or(Outcome::NotFound)
+}
+
+async fn load(c: &Collection, file: &str) -> Result<LoadedFile, Outcome> {
+    let (c, file) = (c.clone(), file.to_owned());
+    tokio::task::spawn_blocking(move || load_blocking(&c, &file))
+        .await
+        .unwrap_or(Err(Outcome::Unreadable))
+}
+
+/// The Pages screen: each listed collection with its page count, then Specs, then Notes when
+/// they are on. It logs and counts nothing.
+pub(crate) async fn index_response(
+    collections: &Arc<Collections>,
+    identity: &WebAppIdentity,
+    listener: Listener,
+    notes_on: bool,
+) -> Response {
+    let all = Arc::clone(collections);
+    let counted = tokio::task::spawn_blocking(move || {
+        all.listed()
+            .map(|c| (c.title.clone(), c.name.clone(), count_files(c).ok()))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let mut rows: Vec<IndexRow> = counted
+        .into_iter()
+        .map(|(title, name, badge)| IndexRow {
+            title,
+            href: format!("/c/{}", encode_segment(&name)),
+            badge,
+        })
+        .collect();
+    rows.push(IndexRow {
+        title: "Specs".to_owned(),
+        href: "/specs".to_owned(),
+        badge: None,
+    });
+    if notes_on {
+        rows.push(IndexRow {
+            title: "Notes".to_owned(),
+            href: "/notes".to_owned(),
+            badge: None,
+        });
+    }
+    let page = IndexPage {
+        app_name: identity.name.clone(),
+        web_app: listener == Listener::WebApp,
+        has_icon: listener == Listener::WebApp && identity.icon.is_some(),
+        rows,
+    };
+    page_response(&page, StatusCode::OK)
+}
+
+/// One collection's list, newest first. `name` is none when the request's name did not decode.
+pub(crate) async fn list_response(
+    collections: &Arc<Collections>,
+    identity: &WebAppIdentity,
+    listener: Listener,
+    name: Option<&str>,
+) -> Response {
+    let started = Instant::now();
+    let c = match find(collections, name) {
+        Ok(c) => c,
+        Err(outcome) => {
+            let response = gone(identity, listener, outcome);
+            return finish(started, listener, "unknown", outcome, response);
+        }
+    };
+    let folder = c.clone();
+    let listed = tokio::task::spawn_blocking(move || list_blocking(&folder))
+        .await
+        .unwrap_or(Err(Outcome::Unreadable));
+    let (outcome, response) = match listed {
+        Err(outcome) => (outcome, gone(identity, listener, outcome)),
+        Ok(listing) => {
+            let more = if listing.total > listing.rows.len() {
+                format!("{} newest of {}", listing.rows.len(), listing.total)
+            } else {
+                String::new()
+            };
+            let page = ListPage {
+                app_name: identity.name.clone(),
+                web_app: listener == Listener::WebApp,
+                has_icon: listener == Listener::WebApp && identity.icon.is_some(),
+                title: c.title.clone(),
+                message: if listing.rows.is_empty() {
+                    "No pages in this collection"
+                } else {
+                    ""
+                },
+                rows: listing.rows,
+                more,
+            };
+            (Outcome::Ok, page_response(&page, StatusCode::OK))
+        }
+    };
+    finish(started, listener, &c.name, outcome, response)
+}
+
+/// One collection page at `/c/{collection}/{file}`: the shell with a sandboxed frame for an
+/// `.html` file, the spec page's template for an `.md` file.
+pub(crate) async fn page_response_for(
+    collections: &Arc<Collections>,
+    identity: &WebAppIdentity,
+    listener: Listener,
+    request: Option<(&str, &str)>,
+) -> Response {
+    let started = Instant::now();
+    let found = find(collections, request.map(|r| r.0));
+    let (c, file) = match (found, request) {
+        (Ok(c), Some((_, file))) => (c, file),
+        (found, _) => {
+            let outcome = found.err().unwrap_or(Outcome::Refused);
+            let response = gone(identity, listener, outcome);
+            return finish(started, listener, "unknown", outcome, response);
+        }
+    };
+    let (outcome, response) = match load(c, file).await {
+        Err(outcome) => (outcome, gone(identity, listener, outcome)),
+        Ok(loaded) => {
+            let text = String::from_utf8_lossy(&loaded.bytes);
+            let markdown = loaded.ext == Ext::Md;
+            let head = &text[..text.floor_char_boundary(TITLE_BYTES as usize)];
+            let title = if markdown {
+                title_of_md(&text)
+            } else {
+                title_of_html(head)
+            };
+            let page = PagePage {
+                app_name: identity.name.clone(),
+                web_app: listener == Listener::WebApp,
+                has_icon: listener == Listener::WebApp && identity.icon.is_some(),
+                title: title.unwrap_or_else(|| file.to_owned()),
+                collection_title: c.title.clone(),
+                collection_path: encode_segment(&c.name),
+                file: file.to_owned(),
+                markdown,
+                frame_src: format!(
+                    "/c/{}/{}/raw",
+                    encode_segment(&c.name),
+                    encode_segment(file)
+                ),
+                html: if markdown {
+                    render_markdown(&text)
+                } else {
+                    String::new()
+                },
+            };
+            (Outcome::Ok, page_response(&page, StatusCode::OK))
+        }
+    };
+    finish(started, listener, &c.name, outcome, response)
+}
+
+/// The file of an `.html` page at `/c/{collection}/{file}/raw`, as it is. An `.md` file has no
+/// raw form.
+pub(crate) async fn raw_response(
+    collections: &Arc<Collections>,
+    listener: Listener,
+    request: Option<(&str, &str)>,
+) -> Response {
+    let started = Instant::now();
+    let found = find(collections, request.map(|r| r.0));
+    let (c, file) = match (found, request) {
+        (Ok(c), Some((_, file))) => (c, file),
+        (found, _) => {
+            let outcome = found.err().unwrap_or(Outcome::Refused);
+            let response = status_of(outcome).into_response();
+            return finish(started, listener, "unknown", outcome, response);
+        }
+    };
+    let (outcome, response) = match load(c, file).await {
+        Err(outcome) => (outcome, status_of(outcome).into_response()),
+        Ok(loaded) if loaded.ext == Ext::Md => {
+            (Outcome::NotFound, StatusCode::NOT_FOUND.into_response())
+        }
+        Ok(loaded) => (
+            Outcome::Ok,
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                ],
+                loaded.bytes,
+            )
+                .into_response(),
+        ),
+    };
+    finish(started, listener, &c.name, outcome, response)
+}
+
+/// `GET /c` on the web app.
+pub(crate) async fn get_index(State(state): State<AppState>) -> Response {
+    index_response(
+        &state.collections,
+        &state.identity,
+        Listener::WebApp,
+        state.notes.is_some(),
+    )
+    .await
+}
+
+/// `GET /c/{collection}` on the web app.
+pub(crate) async fn get_list(
+    State(state): State<AppState>,
+    name: Result<UrlPath<String>, PathRejection>,
+) -> Response {
+    let name = name.ok().map(|UrlPath(name)| name);
+    list_response(
+        &state.collections,
+        &state.identity,
+        Listener::WebApp,
+        name.as_deref(),
+    )
+    .await
+}
+
+/// `GET /c/{collection}/{file}` on the web app.
+pub(crate) async fn get_page(
+    State(state): State<AppState>,
+    request: Result<UrlPath<(String, String)>, PathRejection>,
+) -> Response {
+    let request = request.ok().map(|UrlPath(request)| request);
+    page_response_for(
+        &state.collections,
+        &state.identity,
+        Listener::WebApp,
+        request.as_ref().map(|(c, f)| (c.as_str(), f.as_str())),
+    )
+    .await
+}
+
+/// `GET /c/{collection}/{file}/raw` on the web app.
+pub(crate) async fn get_raw(
+    State(state): State<AppState>,
+    request: Result<UrlPath<(String, String)>, PathRejection>,
+) -> Response {
+    let request = request.ok().map(|UrlPath(request)| request);
+    raw_response(
+        &state.collections,
+        Listener::WebApp,
+        request.as_ref().map(|(c, f)| (c.as_str(), f.as_str())),
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -70,7 +70,7 @@ pub(crate) enum Listener {
 }
 
 impl Listener {
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Self::WebApp => "web_app",
             Self::Specs => "specs",

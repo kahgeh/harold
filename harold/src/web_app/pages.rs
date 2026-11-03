@@ -28,6 +28,15 @@ pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src
 /// `<style>` into each diagram. Scripts stay Harold's own.
 pub(crate) const SPEC_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
+/// The policy of a collection page's own file, sent at `/c/{collection}/{file}/raw`: a
+/// sandbox with an opaque origin, no script and nothing from outside. Only Harold's own shell
+/// may frame it.
+pub(crate) const COLLECTION_PAGE_CONTENT_SECURITY_POLICY: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+
+/// The policy of the shell around an `.html` collection page: the app's own, and a frame of
+/// its own origin, which the app's policy otherwise refuses.
+pub(crate) const COLLECTION_SHELL_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
 /// The name of the vendored Mermaid bundle, which `scripts/build_web_mermaid.sh` prints and
 /// `specs.js` imports. It changes whenever the bundle's bytes do.
 pub(crate) const MERMAID_JS_NAME: &str = "mermaid-12.1.0-9918635a.js";
@@ -419,10 +428,32 @@ fn is_spec_page(request: &Request) -> bool {
     request.method() == axum::http::Method::GET && request.uri().path().starts_with("/specs/")
 }
 
-/// Sets the content security policy on every response that passes through: the spec pages'
-/// own on a spec page, and the app's on every other.
+/// The policy for a `GET` of a collection path: `/c/{a}/{b}/raw` gets the page policy,
+/// `/c/{a}/{b}` of an `.md` file the spec pages' policy, and any other file the shell policy.
+/// None for every other path.
+fn collection_policy(request: &Request) -> Option<&'static str> {
+    if request.method() != axum::http::Method::GET {
+        return None;
+    }
+    let rest = request.uri().path().strip_prefix("/c/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [_, _, "raw"] => Some(COLLECTION_PAGE_CONTENT_SECURITY_POLICY),
+        [_, file] if file.to_ascii_lowercase().ends_with(".md") => {
+            Some(SPEC_CONTENT_SECURITY_POLICY)
+        }
+        [_, _] => Some(COLLECTION_SHELL_CONTENT_SECURITY_POLICY),
+        _ => None,
+    }
+}
+
+/// Sets the content security policy on every response that passes through: the collection
+/// pages' own on a collection page, the spec pages' on a spec page, and the app's on every
+/// other.
 pub(crate) async fn add_policy(request: Request, next: Next) -> Response {
-    let policy = if is_spec_page(&request) {
+    let policy = if let Some(policy) = collection_policy(&request) {
+        policy
+    } else if is_spec_page(&request) {
         SPEC_CONTENT_SECURITY_POLICY
     } else {
         CONTENT_SECURITY_POLICY

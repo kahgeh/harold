@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+{% if web_app %}<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+{% endif %}<title>{{ title }}</title>
+{% if web_app %}<link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}{% endif %}<link rel="stylesheet" href="/static/app.css">
+{% if markdown %}<script type="module" src="/static/specs.js"></script>
+{% endif %}</head>
+<body class="notes">
+<header class="bar top">
+<div class="row">
+<a href="/c/{{ collection_path }}" id="to-list" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ collection_title }}</a>
+</div>
+</header>
+{% if markdown %}<main class="notes-page vault-note spec-page">
+<p class="note-kind spec-top">{{ collection_title }} · {{ file }}</p>
+<h3>{{ title }}</h3>
+<div class="note-text">{{ html|safe }}</div>
+</main>
+{% else %}<iframe class="collection-frame" sandbox src="{{ frame_src }}" title="{{ title }}"></iframe>
+{% endif %}</body>
+</html>

@@ -1197,3 +1197,28 @@ body:has(#alerts:not([hidden])) {
   background: var(--surface-2);
   text-align: left;
 }
+
+/* The Pages screen and a collection page. */
+
+.badge {
+  flex: none;
+  min-width: 24px;
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: 12px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 24px;
+  text-align: center;
+}
+
+/* The frame fills the screen under the header, 16 px from the left edge. */
+.collection-frame {
+  flex: 1;
+  min-height: 0;
+  width: calc(100% - 16px);
+  margin: var(--header-height) 0 0 16px;
+  border: 0;
+  background: #fff;
+}

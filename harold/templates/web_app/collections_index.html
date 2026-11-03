@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+{% if web_app %}<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+{% endif %}<title>Pages</title>
+{% if web_app %}<link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}{% endif %}<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="notes">
+<header class="bar top">
+<div class="row">
+{% if web_app %}<a href="/" id="to-thread" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+{% endif %}<h2>Pages</h2>
+</div>
+</header>
+<main class="notes-page">
+{% for row in rows %}<a class="note-row" href="{{ row.href }}"><span class="note-title">{{ row.title }}</span>{% if let Some(count) = row.badge %}<span class="badge">{{ count }}</span>{% endif %}</a>
+{% endfor %}</main>
+</body>
+</html>
