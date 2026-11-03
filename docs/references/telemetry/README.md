@@ -404,7 +404,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome`, `purpose` (`state`, `prompt`, `writer`; on `screen_read` only) |
 | `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` (the empty string for Harold's own machine, or the label of a Rex host) |
 | `harold.agent.state.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `state` (the state the agent left), `provider_id`, `multiplexer`, `host` |
-| `harold.agents.waiting` | gauge, `{agent}` | `role` (`chief`, `coordinator`, `pnem`), `pod.product` |
+| `harold.agents.waiting` | gauge, `{agent}` | `role` (`chief`, `coordinator`, `pnem`, or empty for an agent with no pod role and for an agent on a Rex host), `pod.product` |
 | `harold.agent.waiting.duration` | histogram, `s`, buckets 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400 | `role`. Recorded when an agent stops waiting because you looked at it |
 | `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |
@@ -472,8 +472,8 @@ These agent monitor lines carry the fields below:
 | `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
 | `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
 | `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
-| `agent waiting` | `pane_id`, `role` (`chief`, `coordinator`, `pnem`). `info`, once when an agent begins to wait |
-| `agent seen` | `pane_id`, `role` (`chief`, `coordinator`, `pnem`), `waited_s` (the seconds the agent waited before you looked). `info`, once when you look at a waiting agent |
+| `agent waiting` | `pane_id`, `role` (`chief`, `coordinator`, `pnem`, or empty for an agent with no pod role and for an agent on a Rex host). `info`, once when an agent begins to wait |
+| `agent seen` | `pane_id`, `role` (`chief`, `coordinator`, `pnem`, or empty for an agent with no pod role and for an agent on a Rex host), `waited_s` (the seconds the agent waited before you looked). `info`, once when you look at a waiting agent |
 | `focus unknown` | `reason` (`many_sessions`, `rex_unreachable` or `tmux_no_client`). `info`, once each time the focus becomes unknown. To find a waiting pane, read the `agent waiting` lines by `pane_id` and `role`, then `harold.agent.state_observed` for that `pane_id` |
 | `agent screen read slow` | `pane_id`, `elapsed_ms` (the time of the read), `scrollback_bytes` (the `total` of the tail read: the length of the block's whole output). `warn`, only for a Rex read over 500 ms |
 | `agent inventory scan slow` | `ps_ms` (the time of `ps`; with Rex, the time of the start time reads), `tmux_ms` (the time of the tmux pane listing; absent when the scan did not reach it) or `rex_ms` (the time of the Rex listing, in place of `tmux_ms` when the multiplexer is Rex), `outcome` (`ok`, `stopped` or `failed`). `warn`, only for a scan over 1 s or one that does not succeed |
