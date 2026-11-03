@@ -174,8 +174,6 @@ WHERE ServiceName = 'harold'
 GROUP BY 1
 ```
 
-**Revision marks.** `specs/<id>.revisions.md`, written by the PnEM, has one `## ` heading for each entry. The last parenthesis of a heading holds its tags: `first` (the first draft, not a revision), `direction` or `defect`, and `architect` when the architect asked for it, such as `## 2026-10-26, rev 2 (defect, architect)`. A heading with no tags counts as a revision of unknown class. The count of revisions is carried as `spec.revisions`. It replaces the count of `## Revision <n>` headings in `requests/<id>.md`, which stopped on 2026-10-19.
-
 **Repositories with no reflog**, such as `turso-object-store` today, cannot show `merge <id>`. There a spec counts as merged when its busy worktree goes and the commit that worktree last had checked out is in the base branch. Harold asks `git merge-base --is-ancestor` for up to an hour after the worktree goes. This has limits:
 
 - The remembered commit is kept in memory only. A Harold restart between the worktree's removal and the check loses that merge.
