@@ -63,7 +63,7 @@ Three places run tests and builds. Each has one job.
 
 | Place | What it runs |
 | --- | --- |
-| Push checks | On each push to `main`, `linux-tests.yml` and `macos-checks.yml` run the tests and the feature mixes. They use a cache of the compiled dependencies. |
+| Push checks | On each push to `main`, `linux-tests.yml` and `macos-checks.yml` run the tests and the feature mixes. They use a cache of the compiled dependencies: a restore step before the build and a save step after it. The save step runs even when the build step fails or times out. The `Check the feature mixes` step has a limit of 30 minutes. |
 | The Mac | `make release` runs only the timing tests: `cargo test --workspace --locked --features harold/timing-tests,control-tower/timing-tests`. They need the real Mac. |
 | Release run | `build.yml` runs on the published release. It only builds, checks the binaries and uploads them. It uses no cache, so a published binary holds nothing from an old cache. |
 
