@@ -131,6 +131,8 @@ pub(super) struct FakeTyping {
     pub lines: Mutex<Vec<(String, String)>>,
     /// Answers in order; `Typed` once the script is empty.
     pub script: Mutex<VecDeque<Typing>>,
+    /// How long each typing call takes. A line is recorded when its call ends.
+    pub delay: Mutex<Duration>,
 }
 
 impl FakeTyping {
@@ -159,13 +161,27 @@ impl PaneTyping for FakeTyping {
             .unwrap_or(Typing::Typed {
                 insert_pressed: false,
             });
-        if matches!(answer, Typing::Typed { .. } | Typing::EnterFailed) {
-            self.lines
-                .lock()
-                .unwrap()
-                .push((pane_id.to_owned(), text.to_owned()));
+        let typed = matches!(answer, Typing::Typed { .. } | Typing::EnterFailed);
+        let delay = *self.delay.lock().unwrap();
+        if delay.is_zero() {
+            if typed {
+                self.lines
+                    .lock()
+                    .unwrap()
+                    .push((pane_id.to_owned(), text.to_owned()));
+            }
+            return Box::pin(async move { answer });
         }
-        Box::pin(async move { answer })
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            if typed {
+                self.lines
+                    .lock()
+                    .unwrap()
+                    .push((pane_id.to_owned(), text.to_owned()));
+            }
+            answer
+        })
     }
 }
 

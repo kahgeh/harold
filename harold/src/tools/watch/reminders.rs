@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::watch as signal;
-use tokio::time::Instant;
 
 use super::clock::{LocalOffset, clock_ms, local_ms, local_text};
 use super::obs::{self, ReminderEnd, ReportObs};
@@ -26,6 +25,12 @@ const MINUTE_MS: i64 = 60_000;
 /// A reminder not typed this long after its time is dropped: the timed prompts' give-up
 /// time.
 const GIVE_UP_MS: i64 = 120 * MINUTE_MS;
+
+/// True when a reminder due at `due_ms` is too late to type at `now_ms`: from exactly
+/// 120 minutes after its time.
+fn too_late(now_ms: i64, due_ms: i64) -> bool {
+    now_ms - due_ms >= GIVE_UP_MS
+}
 
 /// A waiting task wakes at least this often. It reads the local offset again, so a `--at`
 /// time follows a change of daylight saving time, and it sees the wall clock jump after
@@ -144,12 +149,12 @@ impl Reminders {
     }
 
     /// Cancels a waiting reminder. `false` when no reminder of that name waits.
-    pub(super) async fn cancel(&self, name: &str) -> bool {
-        let Ok(Some(row)) = self.store.reminder(name).await else {
-            return false;
+    pub(super) async fn cancel(&self, name: &str) -> Result<bool, StoreError> {
+        let Some(row) = self.store.reminder(name).await? else {
+            return Ok(false);
         };
         if row.state != ReminderState::Waiting {
-            return false;
+            return Ok(false);
         }
         self.finish(&row, ReminderState::Cancelled, 0).await
     }
@@ -210,14 +215,19 @@ impl Reminders {
 
     /// Stores how a waiting reminder ended, stops its task, and logs it. `due_at_ms` gives
     /// `late_s` for a typed reminder. `false` when the reminder no longer waits.
-    async fn finish(&self, row: &ReminderRow, state: ReminderState, due_at_ms: i64) -> bool {
+    async fn finish(
+        &self,
+        row: &ReminderRow,
+        state: ReminderState,
+        due_at_ms: i64,
+    ) -> Result<bool, StoreError> {
         let now = clock_ms();
         let finished = self
             .store
             .finish_reminder(&row.name, row.created_at_ms, state, now)
-            .await;
-        if !matches!(finished, Ok(Some(_))) {
-            return false;
+            .await?;
+        if finished.is_none() {
+            return Ok(false);
         }
         let task = {
             let mut tasks = self.tasks();
@@ -237,7 +247,7 @@ impl Reminders {
             ReminderState::Cancelled => obs::reminder_ended(&row.name, ReminderEnd::Cancelled),
             ReminderState::Waiting => {}
         }
-        true
+        Ok(true)
     }
 
     /// One reminder: sleeps until it is due, then types it once, or drops it.
@@ -250,7 +260,7 @@ impl Reminders {
             }
             let Some(due) = self.due_at_ms(&row).await else {
                 // The store's checks make this impossible; drop it rather than wait forever.
-                self.finish(&row, ReminderState::Dropped, 0).await;
+                let _ = self.finish(&row, ReminderState::Dropped, 0).await;
                 return;
             };
             let now = clock_ms();
@@ -263,43 +273,38 @@ impl Reminders {
                 () = interrupted(&mut cancelled, &mut shutdown) => return,
             }
         };
-        let left_ms = due + GIVE_UP_MS - clock_ms();
-        if left_ms <= 0 {
-            self.finish(&row, ReminderState::Dropped, due).await;
+        if too_late(clock_ms(), due) {
+            let _ = self.finish(&row, ReminderState::Dropped, due).await;
             return;
         }
         let slot = ReportSlot::new(Arc::clone(&self.typist), target(&row), self.retry);
+        // The slot checks the wall clock before each try, with the same rule as
+        // `too_late`: `clock_ms() >= due + GIVE_UP_MS` gives up.
         let mut typed = slot.last_line(
             format!("REMIND {}: {}", row.name, row.text),
             ReportObs::new(&row.name, 0),
-            Instant::now() + Duration::from_millis(left_ms as u64),
+            due + GIVE_UP_MS,
         );
-        loop {
-            tokio::select! {
-                biased;
-                answer = &mut typed => {
-                    let state = if answer == Ok(true) {
-                        ReminderState::Typed
-                    } else {
-                        ReminderState::Dropped
-                    };
-                    self.finish(&row, state, due).await;
-                    return;
-                }
-                () = interrupted(&mut cancelled, &mut shutdown) => {
-                    // Stopped, or Harold stops: the line is not typed now. A restart
-                    // tries again while the reminder still waits in the store.
-                    slot.close(None);
-                    return;
-                }
-                // The slot's give-up time follows tokio's clock, which may stand still
-                // while the computer sleeps. The wall clock decides.
-                () = tokio::time::sleep(WAKE_EVERY) => {
-                    if clock_ms() - due > GIVE_UP_MS {
-                        slot.close(None);
-                        self.finish(&row, ReminderState::Dropped, due).await;
-                        return;
-                    }
+        tokio::select! {
+            biased;
+            answer = &mut typed => {
+                let state = if answer == Ok(true) {
+                    ReminderState::Typed
+                } else {
+                    ReminderState::Dropped
+                };
+                let _ = self.finish(&row, state, due).await;
+            }
+            () = interrupted(&mut cancelled, &mut shutdown) => {
+                // Stopped, or Harold stops. The slot makes no new try, but a try in
+                // progress can still type the line: wait for its result (one try at
+                // most). After a shutdown the reminder still waits in the store, so a
+                // typed line is stored as typed and a restart does not type it again.
+                // After a stop the store already holds `cancelled`, so `finish` changes
+                // nothing: the outcome stays `cancelled` even when that try typed it.
+                slot.close(None);
+                if (&mut typed).await == Ok(true) {
+                    let _ = self.finish(&row, ReminderState::Typed, due).await;
                 }
             }
         }

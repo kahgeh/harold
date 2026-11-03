@@ -13,7 +13,8 @@ use super::*;
 use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::WatchSettings;
-use crate::tools::watch::clock::{self, clock_ms, day_bounds};
+use crate::telemetry::test_support as telemetry_test;
+use crate::tools::watch::clock::{self, clock_ms, day_bounds, jump_wall_clock};
 use crate::tools::watch::scheduler::tests::{Harness, build_on, harness_on, pass, settings};
 use crate::tools::watch::scheduler::{RemindRefusal, Scheduler, StartRefusal, StopRefusal};
 use crate::tools::watch::store::ReminderState;
@@ -482,4 +483,125 @@ async fn no_text_in_the_log_lines() {
     assert!(line("reminder typed", &typed).contains("late_s=0"));
     assert!(line("reminder ended", &dropped).contains("reason=\"dropped\""));
     assert!(line("reminder ended", &cancelled).contains("reason=\"cancelled\""));
+}
+
+#[test]
+fn too_late_starts_at_exactly_120_minutes() {
+    let due = 1_000_000;
+    assert!(!too_late(due + 120 * MINUTE_MS - 1, due));
+    assert!(too_late(due + 120 * MINUTE_MS, due));
+    assert!(!too_late(due, due));
+}
+
+/// Stops Harold, lets the clock reach `at`, and restarts it.
+async fn restart_at(h: &Harness, local: &Arc<ScriptedOffset>, at: i64) -> signal::Sender<()> {
+    shut_down(h).await;
+    pass(Duration::from_millis((at - clock_ms()) as u64)).await;
+    let (scheduler, stop) = restarted(h, local);
+    scheduler.resume().await;
+    pass(Duration::from_secs(1)).await;
+    stop
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_at_exactly_120_minutes_drops_it_and_one_second_before_types_it() {
+    let (h, local) = harness_utc().await;
+    let due = h
+        .scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    let _stop = restart_at(&h, &local, due + 120 * MINUTE_MS).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Dropped);
+    assert!(h.typing.typed().is_empty());
+
+    let (h, local) = harness_utc().await;
+    let due = h
+        .scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    let _stop = restart_at(&h, &local, due + 120 * MINUTE_MS - 1_000).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Typed);
+    assert_eq!(h.typing.typed(), ["REMIND r: look"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sleep_while_the_pane_is_busy_past_the_window_drops_it() {
+    let (h, _local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+    // Half-way between two of the task's own wake-ups, so only the slot can see the jump.
+    pass(11 * MINUTE + Duration::from_secs(30)).await;
+    assert_eq!(state_of(&h, "r").await, ReminderState::Waiting);
+
+    // The computer sleeps three hours: the wall clock jumps, tokio's clock does not.
+    jump_wall_clock(3 * 60 * MINUTE_MS);
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Idle);
+    pass(Duration::from_secs(6)).await;
+
+    assert!(h.typing.typed().is_empty(), "{:?}", h.typing.typed());
+    assert_eq!(state_of(&h, "r").await, ReminderState::Dropped);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typing_call_in_progress_at_shutdown_ends_typed_and_is_not_typed_again() {
+    let (h, local) = harness_utc().await;
+    h.scheduler
+        .remind(remind_in(&h, "r", 10, "look"))
+        .await
+        .unwrap();
+    *h.typing.delay.lock().unwrap() = Duration::from_secs(10);
+    // The typing call starts at 10 minutes and takes 10 seconds.
+    pass(10 * MINUTE + Duration::from_secs(2)).await;
+    assert!(h.typing.typed().is_empty());
+
+    shut_down(&h).await;
+    pass(Duration::from_secs(30)).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: look"]);
+    assert_eq!(state_of(&h, "r").await, ReminderState::Typed);
+
+    *h.typing.delay.lock().unwrap() = Duration::ZERO;
+    let (scheduler, _stop) = restarted(&h, &local);
+    scheduler.resume().await;
+    pass(30 * MINUTE).await;
+    assert_eq!(h.typing.typed(), ["REMIND r: look"], "typed once only");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_reminders_counter_starts_at_0_and_counts_each_outcome() {
+    let count = |outcome: &str| {
+        telemetry_test::exact_counter_value("watch.reminders", &[("outcome", outcome)])
+    };
+    let (h, _local) = harness_utc().await;
+    let mut before = Vec::new();
+    for outcome in ["typed", "dropped", "cancelled"] {
+        let value = count(outcome);
+        assert!(value.is_some(), "{outcome} is registered");
+        before.push(value.unwrap());
+    }
+
+    h.scheduler
+        .remind(remind_in(&h, "typed", 1, "x"))
+        .await
+        .unwrap();
+    pass(2 * MINUTE).await;
+    h.scheduler
+        .remind(remind_in(&h, "cancelled", 10, "x"))
+        .await
+        .unwrap();
+    h.scheduler.stop("cancelled").await.unwrap();
+    h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Working);
+    h.scheduler
+        .remind(remind_in(&h, "dropped", 1, "x"))
+        .await
+        .unwrap();
+    pass(125 * MINUTE).await;
+
+    for (outcome, before) in ["typed", "dropped", "cancelled"].into_iter().zip(before) {
+        assert!(count(outcome).unwrap() > before, "{outcome}");
+    }
 }

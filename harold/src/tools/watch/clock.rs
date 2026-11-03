@@ -14,6 +14,12 @@ pub(super) fn clock_ms() -> i64 {
     (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Milliseconds the test wall clock is ahead of tokio's clock: a computer sleep.
+    static WALL_JUMP: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
 /// Under test the wall clock is read once per test thread and tokio's clock moves it, so
 /// paused time ages a watch the way real time does.
 #[cfg(test)]
@@ -28,7 +34,14 @@ pub(super) fn clock_ms() -> i64 {
         wall + tokio::time::Instant::now()
             .duration_since(*start)
             .as_millis() as i64
-    })
+    }) + WALL_JUMP.with(std::cell::Cell::get)
+}
+
+/// Moves the test wall clock forward by `ms` and leaves tokio's clock where it is, as a
+/// computer sleep does on macOS.
+#[cfg(test)]
+pub(super) fn jump_wall_clock(ms: i64) {
+    WALL_JUMP.with(|jump| jump.set(jump.get() + ms));
 }
 
 /// The local zone offset at this moment. It is read at each use, so a change of daylight

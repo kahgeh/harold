@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::clock::clock_ms;
 use super::obs::{ReportObs, Why};
 use crate::outbound::left_out::same_folder;
 use crate::timed_prompts::InputBox;
@@ -88,9 +89,15 @@ struct Waiting {
     generation: u64,
     /// A closing line gives up at this time; a report waits as long as its watch runs.
     give_up_at: Option<Instant>,
+    /// A last line gives up at this wall-clock time, in milliseconds. Tokio's clock can
+    /// stand still while the computer sleeps; the wall clock does not.
+    give_up_ms: Option<i64>,
     /// Told `true` when the line is typed and `false` when it is given up. A line that
     /// is dropped drops it, with no value.
     done: Option<oneshot::Sender<bool>>,
+    /// `close(None)` came while a try could be in progress: no new try is made, but the
+    /// result of that try still goes to `done`.
+    cancelled: bool,
 }
 
 #[derive(Default)]
@@ -125,20 +132,21 @@ impl ReportSlot {
 
     /// Offers a run's report. It replaces a waiting one, which is never typed.
     pub(super) fn offer(self: &Arc<Self>, line: String, obs: ReportObs) {
-        self.put(line, obs, None, false, None);
+        self.put(line, obs, None, None, false, None);
     }
 
-    /// One last line, tried until `give_up_at`, as for a reminder. The slot takes nothing
-    /// after it. The answer is `true` when the line is typed and `false` when it is
-    /// given up. It has no value when the line is dropped, for example by `close(None)`.
+    /// One last line, as for a reminder. It is not tried from the wall-clock time
+    /// `give_up_ms` on. The slot takes nothing after it. The answer is `true` when the line
+    /// is typed and `false` when it is given up. It has no value when the line is dropped,
+    /// for example by `close(None)` with no try in progress.
     pub(super) fn last_line(
         self: &Arc<Self>,
         line: String,
         obs: ReportObs,
-        give_up_at: Instant,
+        give_up_ms: i64,
     ) -> oneshot::Receiver<bool> {
         let (done, answer) = oneshot::channel();
-        self.put(line, obs, Some(give_up_at), true, Some(done));
+        self.put(line, obs, None, Some(give_up_ms), true, Some(done));
         answer
     }
 
@@ -147,11 +155,19 @@ impl ReportSlot {
     pub(super) fn close(self: &Arc<Self>, closing: Option<(String, ReportObs)>) {
         let give_up_at = Some(Instant::now() + CLOSING_LINE_PATIENCE);
         match closing {
-            Some((line, obs)) => self.put(line, obs, give_up_at, true, None),
+            Some((line, obs)) => self.put(line, obs, give_up_at, None, true, None),
             None => {
                 let mut inner = self.lock();
                 inner.closed = true;
-                if let Some(old) = inner.waiting.take() {
+                let Some(mut old) = inner.waiting.take() else {
+                    return;
+                };
+                if inner.delivering && old.done.is_some() {
+                    // A try can be in progress. Keep the line, so its result still goes
+                    // to `done`, but make no new try.
+                    old.cancelled = true;
+                    inner.waiting = Some(old);
+                } else {
                     old.obs.left(Why::WatchEnded);
                 }
             }
@@ -163,6 +179,7 @@ impl ReportSlot {
         line: String,
         obs: ReportObs,
         give_up_at: Option<Instant>,
+        give_up_ms: Option<i64>,
         closing: bool,
         done: Option<oneshot::Sender<bool>>,
     ) {
@@ -185,7 +202,9 @@ impl ReportSlot {
             obs,
             generation,
             give_up_at,
+            give_up_ms,
             done,
+            cancelled: false,
         });
         if !inner.delivering {
             inner.delivering = true;
@@ -198,13 +217,19 @@ impl ReportSlot {
         loop {
             let (line, generation) = {
                 let mut inner = self.lock();
-                match &inner.waiting {
-                    Some(waiting) => (waiting.line.clone(), waiting.generation),
-                    None => {
-                        inner.delivering = false;
-                        return;
+                let Some(waiting) = &inner.waiting else {
+                    inner.delivering = false;
+                    return;
+                };
+                let past = waiting.give_up_ms.is_some_and(|at| clock_ms() >= at);
+                if waiting.cancelled || past {
+                    if let Some(waiting) = inner.waiting.take() {
+                        give_up(waiting);
                     }
+                    inner.delivering = false;
+                    return;
                 }
+                (waiting.line.clone(), waiting.generation)
             };
             let tried = self.typist.try_type(&self.target, &line).await;
             {
@@ -227,15 +252,15 @@ impl ReportSlot {
                     (Ok(_), false) => continue,
                     (Err(reason), true) => {
                         let expired = inner.waiting.as_mut().is_some_and(|waiting| {
+                            if waiting.cancelled {
+                                return true;
+                            }
                             waiting.obs.waiting(reason);
                             waiting.give_up_at.is_some_and(|at| Instant::now() >= at)
                         });
                         if expired {
                             if let Some(waiting) = inner.waiting.take() {
-                                waiting.obs.left(Why::WatchEnded);
-                                if let Some(done) = waiting.done {
-                                    let _ = done.send(false);
-                                }
+                                give_up(waiting);
                             }
                             inner.delivering = false;
                             return;
@@ -246,5 +271,16 @@ impl ReportSlot {
             }
             tokio::time::sleep(self.retry).await;
         }
+    }
+}
+
+/// A line that is not typed. A cancelled line drops `done` with no value; a line past its
+/// give-up time tells `done` `false`.
+fn give_up(waiting: Waiting) {
+    waiting.obs.left(Why::WatchEnded);
+    if let Some(done) = waiting.done
+        && !waiting.cancelled
+    {
+        let _ = done.send(false);
     }
 }

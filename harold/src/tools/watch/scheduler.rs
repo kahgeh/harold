@@ -459,7 +459,12 @@ impl Scheduler {
             self.end(row, EndReason::Stopped, None).await;
             return Ok(());
         }
-        if self.reminders.cancel(name).await {
+        if self
+            .reminders
+            .cancel(name)
+            .await
+            .map_err(|_| StopRefusal::Unavailable)?
+        {
             return Ok(());
         }
         match row {
