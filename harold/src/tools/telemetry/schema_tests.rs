@@ -12,7 +12,7 @@ fn declaration(kind: Kind, meaning: &str, attrs: Vec<Attr>) -> Declaration {
         meaning: meaning.into(),
         attrs,
         created_ms: 1,
-        last_value: None,
+        last_values: LastValues::new(),
     }
 }
 

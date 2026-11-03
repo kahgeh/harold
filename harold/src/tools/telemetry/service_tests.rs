@@ -713,7 +713,7 @@ async fn a_write_of_another_kind_is_wrong_kind() {
         refused(
             Code::FailedPrecondition,
             "wrong_kind",
-            "harold.release.attempts is a counter, not a event"
+            "harold.release.attempts is a counter, not an event"
         )
     );
 }
@@ -961,6 +961,29 @@ async fn the_same_declaration_twice_is_ok_and_changes_nothing() {
 }
 
 #[tokio::test]
+async fn two_declarations_at_once_of_one_name_let_exactly_one_win() {
+    let s = Setup::new().await;
+    let service = s.service();
+    let counter = declare(
+        &service,
+        HAROLD_PANE,
+        ATTEMPTS,
+        pb::Kind::Counter,
+        vec![attr("result", &["ok", "failed"])],
+    );
+    let gauge = declare(&service, HAROLD_PANE, ATTEMPTS, pb::Kind::Gauge, vec![]);
+    let (counter, gauge) = tokio::join!(counter, gauge);
+    let stored = s.store.get(ATTEMPTS).await.unwrap().unwrap();
+    let (winner, loser, kind) = match counter.is_ok() {
+        true => (counter, gauge, Kind::Counter),
+        false => (gauge, counter, Kind::Gauge),
+    };
+    winner.unwrap();
+    assert_eq!(refusal(loser).1, "declaration_differs");
+    assert_eq!(stored.kind, kind);
+}
+
+#[tokio::test]
 async fn a_different_declaration_is_declaration_differs() {
     let s = Setup::new().await;
     let service = s.service();
@@ -1097,8 +1120,8 @@ async fn a_gauge_sets_its_value_and_keeps_the_last_one() {
             .await
             .unwrap()
             .unwrap()
-            .last_value,
-        Some(4.25)
+            .last_values,
+        LastValues::from([(String::new(), 4.25)])
     );
     assert_eq!(
         s.signals.records(),
@@ -1106,6 +1129,49 @@ async fn a_gauge_sets_its_value_and_keeps_the_last_one() {
             Sent::Gauge("harold.depth".into(), 3.5, vec![]),
             Sent::Gauge("harold.depth".into(), 4.25, vec![]),
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_gauge_with_two_series_keeps_both_values_after_reopen() {
+    let s = Setup::new().await;
+    let service = s.service();
+    declare(
+        &service,
+        HAROLD_PANE,
+        "harold.depth",
+        pb::Kind::Gauge,
+        vec![attr("queue", &["now", "parked"]), attr("host", &["a", "b"])],
+    )
+    .await
+    .unwrap();
+    for (queue, host, value) in [("now", "a", 1.0), ("parked", "b", 2.5), ("now", "a", 3.0)] {
+        gauge(
+            &service,
+            HAROLD_PANE,
+            "harold.depth",
+            value,
+            vec![pair("host", host), pair("queue", queue)],
+        )
+        .await
+        .unwrap();
+    }
+    drop(service);
+    let folder = s.tmp.0.join("db");
+    let Setup { store, .. } = s;
+    drop(store);
+    let reopened = TursoTelemetryStore::open(&folder).await.unwrap();
+    assert_eq!(
+        reopened
+            .get("harold.depth")
+            .await
+            .unwrap()
+            .unwrap()
+            .last_values,
+        LastValues::from([
+            ("host=a,queue=now".to_string(), 3.0),
+            ("host=b,queue=parked".to_string(), 2.5),
+        ])
     );
 }
 

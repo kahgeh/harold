@@ -1,10 +1,25 @@
 //! A declaration: what the store keeps for one name.
 
+use std::collections::BTreeMap;
+
 use super::name::{
     Attr, Kind, MAX_MEANING, MAX_SERIES, Refused, check_keys, parse_name, series_count,
 };
 
-/// One declared name. `last_value` is a gauge's last value; `put` ignores it.
+/// A gauge's last values, by series key (see `series_key`).
+pub(crate) type LastValues = BTreeMap<String, f64>;
+
+/// The key of one series: its `key=value` pairs, sorted and joined by a comma.
+/// A series with no attributes has the empty key. A declared key or value
+/// holds no `,` and no `=`, so the key is not ambiguous.
+pub(crate) fn series_key(pairs: &[(String, String)]) -> String {
+    let mut parts: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    parts.sort();
+    parts.join(",")
+}
+
+/// One declared name. `last_values` holds a gauge's last value for each
+/// series; `put` ignores it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Declaration {
     pub name: String,
@@ -12,7 +27,7 @@ pub(crate) struct Declaration {
     pub meaning: String,
     pub attrs: Vec<Attr>,
     pub created_ms: i64,
-    pub last_value: Option<f64>,
+    pub last_values: LastValues,
 }
 
 impl Declaration {

@@ -196,6 +196,15 @@ fn the_texts_are_the_spec_texts() {
             "harold.release.attempts is a counter, not a gauge",
         ),
         (
+            Refused::WrongKind {
+                name: p("harold.release.attempts"),
+                declared: Kind::Event,
+                asked: Kind::Counter,
+            },
+            "wrong_kind",
+            "harold.release.attempts is an event, not a counter",
+        ),
+        (
             Refused::Undeclared {
                 name: p("harold.release.attempts"),
             },

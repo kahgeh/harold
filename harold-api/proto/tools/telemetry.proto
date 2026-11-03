@@ -12,7 +12,8 @@
 // name prefixes the caller may write.
 //
 // Refusals (gRPC code): PermissionDenied, InvalidArgument,
-// FailedPrecondition, ResourceExhausted. The message is a reason word.
+// FailedPrecondition, ResourceExhausted. The message is the plain text, and
+// the reason word is in the `reason` metadata key.
 //
 // The server trusts local callers: there is no token.
 syntax = "proto3";

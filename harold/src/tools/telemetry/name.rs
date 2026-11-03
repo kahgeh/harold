@@ -36,6 +36,15 @@ impl Kind {
         }
     }
 
+    /// The word with its article: `a counter`, `a gauge`, `an event`.
+    pub(crate) fn with_article(self) -> &'static str {
+        match self {
+            Kind::Counter => "a counter",
+            Kind::Gauge => "a gauge",
+            Kind::Event => "an event",
+        }
+    }
+
     pub(crate) fn parse(word: &str) -> Option<Self> {
         match word {
             "counter" => Some(Kind::Counter),
@@ -146,9 +155,9 @@ impl Refused {
                 asked,
             } => {
                 format!(
-                    "{name} is a {}, not a {}",
-                    declared.as_str(),
-                    asked.as_str()
+                    "{name} is {}, not {}",
+                    declared.with_article(),
+                    asked.with_article()
                 )
             }
             Refused::Undeclared { name } => {

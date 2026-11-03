@@ -14,9 +14,9 @@ use tracing::info;
 
 use super::guard::{CHIEF, Guard, REGISTRY_UNREADABLE};
 use super::name::{Attr, Kind, Refused, ValueList, parse_attr, parse_name};
-use super::schema::Declaration;
+use super::schema::{Declaration, LastValues, series_key};
 use super::signals::Signals;
-use super::store::{StoreError, TelemetryStore};
+use super::store::{Declared, StoreError, TelemetryStore};
 
 /// The most a `count` adds at once.
 pub(crate) const MAX_COUNT: u64 = 1_000_000;
@@ -148,27 +148,24 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
             meaning: request.meaning,
             attrs,
             created_ms: now_ms(),
-            last_value: None,
+            last_values: LastValues::new(),
         };
         declaration.validate()?;
-        if let Some(existing) = self.store.get(&declaration.name).await? {
-            return match existing.same_shape(&declaration) {
-                true => Ok(()),
-                false => Err(Refused::DeclarationDiffers {
+        let prefix = parse_name(&declaration.name)?.prefix;
+        // One transaction compares, checks the caps and stores, so two
+        // declarations at once cannot both pass.
+        match self.store.declare(&declaration).await? {
+            Declared::Added => {}
+            Declared::Same => return Ok(()),
+            Declared::Differs => {
+                return Err(Refused::DeclarationDiffers {
                     name: declaration.name,
                 }
-                .into()),
-            };
+                .into());
+            }
+            Declared::TooManyNames => return Err(Refused::TooManyNames { prefix }.into()),
+            Declared::TooManyEvents => return Err(Refused::TooManyEvents { prefix }.into()),
         }
-        let prefix = parse_name(&declaration.name)?.prefix;
-        let (names, events) = self.store.count_for_prefix(&prefix).await?;
-        if names >= super::name::MAX_NAMES {
-            return Err(Refused::TooManyNames { prefix }.into());
-        }
-        if kind == Kind::Event && events >= super::name::MAX_EVENTS {
-            return Err(Refused::TooManyEvents { prefix }.into());
-        }
-        self.store.put(&declaration).await?;
         if kind == Kind::Counter {
             seed_counter(self.signals.as_ref(), &declaration);
         }
@@ -195,7 +192,9 @@ impl<S: TelemetryStore> TelemetryToolService<S> {
         if !request.value.is_finite() {
             return Err(Refused::Invalid(BAD_GAUGE).into());
         }
-        self.store.set_last_value(&name, request.value).await?;
+        self.store
+            .set_last_value(&name, &series_key(&pairs), request.value)
+            .await?;
         self.signals.gauge_set(&name, request.value, &pairs);
         Ok(())
     }

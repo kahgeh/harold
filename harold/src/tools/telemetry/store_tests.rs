@@ -29,7 +29,7 @@ fn declaration(name: &str, kind: Kind) -> Declaration {
             parse_attr("step", &["1-60".to_string()]).unwrap(),
         ],
         created_ms: 42,
-        last_value: None,
+        last_values: LastValues::new(),
     }
 }
 
@@ -82,14 +82,31 @@ async fn a_reopened_file_gives_the_data_back() {
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
     let one = declaration("harold.b", Kind::Gauge);
     store.put(&one).await.unwrap();
-    assert!(store.set_last_value("harold.b", 2.5).await.unwrap());
+    assert!(
+        store
+            .set_last_value("harold.b", "result=ok", 2.5)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .set_last_value("harold.b", "result=failed", 1.0)
+            .await
+            .unwrap()
+    );
     drop(store);
 
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
     let got = store.get("harold.b").await.unwrap().unwrap();
     assert_eq!(got.attrs, one.attrs);
     assert_eq!(got.created_ms, 42);
-    assert_eq!(got.last_value, Some(2.5));
+    assert_eq!(
+        got.last_values,
+        LastValues::from([
+            ("result=failed".to_string(), 1.0),
+            ("result=ok".to_string(), 2.5)
+        ])
+    );
 }
 
 #[tokio::test]
@@ -121,28 +138,28 @@ async fn counts_are_for_one_prefix() {
 async fn the_last_value_is_set_and_a_put_clears_it() {
     let folder = TempFolder::new();
     let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
-    assert!(!store.set_last_value("harold.g", 1.0).await.unwrap());
+    assert!(!store.set_last_value("harold.g", "", 1.0).await.unwrap());
     store
         .put(&declaration("harold.g", Kind::Gauge))
         .await
         .unwrap();
     assert_eq!(
-        store.get("harold.g").await.unwrap().unwrap().last_value,
-        None
+        store.get("harold.g").await.unwrap().unwrap().last_values,
+        LastValues::new()
     );
-    store.set_last_value("harold.g", -3.0).await.unwrap();
-    store.set_last_value("harold.g", 7.0).await.unwrap();
+    store.set_last_value("harold.g", "", -3.0).await.unwrap();
+    store.set_last_value("harold.g", "", 7.0).await.unwrap();
     assert_eq!(
-        store.get("harold.g").await.unwrap().unwrap().last_value,
-        Some(7.0)
+        store.get("harold.g").await.unwrap().unwrap().last_values,
+        LastValues::from([(String::new(), 7.0)])
     );
     store
         .put(&declaration("harold.g", Kind::Gauge))
         .await
         .unwrap();
     assert_eq!(
-        store.get("harold.g").await.unwrap().unwrap().last_value,
-        None
+        store.get("harold.g").await.unwrap().unwrap().last_values,
+        LastValues::new()
     );
 }
 
@@ -161,4 +178,53 @@ async fn open_refuses_a_schema_it_does_not_know() {
     }
     drop(store);
     assert!(TursoTelemetryStore::open(&folder.0).await.is_err());
+}
+
+#[tokio::test]
+async fn declare_adds_compares_and_checks_the_caps_in_one_step() {
+    let folder = TempFolder::new();
+    let store = TursoTelemetryStore::open(&folder.0).await.unwrap();
+    let one = declaration("harold.a", Kind::Counter);
+    assert_eq!(store.declare(&one).await.unwrap(), Declared::Added);
+    let mut again = one.clone();
+    again.meaning = "Another meaning".into();
+    assert_eq!(store.declare(&again).await.unwrap(), Declared::Same);
+    assert_eq!(store.get("harold.a").await.unwrap(), Some(one));
+    let other = declaration("harold.a", Kind::Gauge);
+    assert_eq!(store.declare(&other).await.unwrap(), Declared::Differs);
+    for i in 0..20 {
+        let event = declaration(&format!("harold.e{i}"), Kind::Event);
+        assert_eq!(store.declare(&event).await.unwrap(), Declared::Added);
+    }
+    let event = declaration("harold.e20", Kind::Event);
+    assert_eq!(
+        store.declare(&event).await.unwrap(),
+        Declared::TooManyEvents
+    );
+    for i in 0..29 {
+        let counter = declaration(&format!("harold.c{i}"), Kind::Counter);
+        assert_eq!(store.declare(&counter).await.unwrap(), Declared::Added);
+    }
+    let counter = declaration("harold.c29", Kind::Counter);
+    assert_eq!(
+        store.declare(&counter).await.unwrap(),
+        Declared::TooManyNames
+    );
+    assert_eq!(store.count_for_prefix("harold").await.unwrap(), (50, 20));
+}
+
+#[tokio::test]
+async fn a_series_key_is_sorted_pairs_joined_by_a_comma() {
+    use crate::tools::telemetry::schema::series_key;
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(series_key(&[]), "");
+    assert_eq!(series_key(&pairs(&[("result", "ok")])), "result=ok");
+    assert_eq!(
+        series_key(&pairs(&[("step", "2"), ("result", "ok")])),
+        "result=ok,step=2"
+    );
 }
