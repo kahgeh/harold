@@ -379,6 +379,8 @@ pub enum Effect {
     Quit,
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
+    /// `true` pauses every watch. `false` resumes every watch.
+    SetWatchesPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
     SavePicks {
@@ -419,8 +421,8 @@ struct CommandRow {
     on: &'static str,
 }
 
-/// The commands in palette order: voice, messaging, call.
-const COMMAND_TABLE: [CommandRow; 3] = [
+/// The commands in palette order: voice, messaging, call, watches.
+const COMMAND_TABLE: [CommandRow; 4] = [
     CommandRow {
         key: 'm',
         hint: "voice",
@@ -439,13 +441,20 @@ const COMMAND_TABLE: [CommandRow; 3] = [
         off: "Call: start",
         on: "Call: end",
     },
+    CommandRow {
+        key: 'W',
+        hint: "watches",
+        off: "Watches: pause all",
+        on: "Watches: resume all",
+    },
 ];
 
 /// The keys that run a command from the list. They come from `COMMAND_TABLE`.
-pub const COMMAND_KEYS: [char; 3] = [
+pub const COMMAND_KEYS: [char; 4] = [
     COMMAND_TABLE[0].key,
     COMMAND_TABLE[1].key,
     COMMAND_TABLE[2].key,
+    COMMAND_TABLE[3].key,
 ];
 
 /// Keys kept for later work (`v` for a select mode, `w` for a view). Nothing uses them now, and no command may take them.
@@ -1094,7 +1103,7 @@ impl App {
         if self.connection != ConnectionState::Live {
             return Vec::new();
         }
-        let [voice, messaging, call] = &COMMAND_TABLE;
+        let [voice, messaging, call, watches] = &COMMAND_TABLE;
         let mut all = match self.voice() {
             VoiceState::On => vec![PaletteEntry {
                 label: voice.off,
@@ -1133,6 +1142,18 @@ impl App {
                 effect: Effect::Call(CallAction::Stop),
             }),
             Some(CallAction::TalkNow | CallAction::Status) | None => {}
+        }
+        // Capped watches stay capped, so they do not count here.
+        if self.has_snapshot {
+            let running = self.snapshot.watches_running > 0;
+            if running || self.snapshot.watches_paused > 0 {
+                all.push(PaletteEntry {
+                    label: if running { watches.off } else { watches.on },
+                    key: watches.key,
+                    hint: watches.hint,
+                    effect: Effect::SetWatchesPaused(running),
+                });
+            }
         }
         all
     }
@@ -2847,10 +2868,10 @@ mod tests {
     fn command_keys_are_text_in_the_search() {
         let mut app = call_app(CallState::Off);
         app.handle_key(KeyCode::Char('f'));
-        for key in ['m', 'p', 'C'] {
+        for key in ['m', 'p', 'C', 'W'] {
             assert_eq!(app.handle_key(KeyCode::Char(key)), Effect::None);
         }
-        assert_eq!(app.search.query, "mpC");
+        assert_eq!(app.search.query, "mpCW");
     }
 
     #[test]
@@ -2865,7 +2886,7 @@ mod tests {
             app.questions.view().unwrap().mode,
             Mode::Note {
                 kind: crate::questions::NoteKind::Revise,
-                text: "mpC".into()
+                text: "mpCW".into()
             }
         );
     }
@@ -2883,7 +2904,71 @@ mod tests {
         for key in table_keys {
             assert!(!KEPT_KEYS.contains(&key), "key {key:?} is kept");
         }
-        assert_eq!(COMMAND_KEYS.to_vec(), keys[..3]);
+        assert_eq!(COMMAND_KEYS.to_vec(), keys[..4]);
+    }
+
+    fn live_watches_app(running: u32, paused: u32, capped: u32) -> App {
+        let mut app = live_voice_app(false);
+        app.snapshot.watches_running = running;
+        app.snapshot.watches_paused = paused;
+        app.snapshot.watches_capped = capped;
+        app
+    }
+
+    fn watches_label(app: &App) -> Option<&'static str> {
+        app.commands()
+            .into_iter()
+            .find(|entry| entry.key == 'W')
+            .map(|entry| entry.label)
+    }
+
+    #[test]
+    fn watches_row_offers_pause_all_when_a_watch_runs() {
+        let mut app = live_watches_app(2, 0, 0);
+        assert_eq!(watches_label(&app), Some("Watches: pause all"));
+        assert_eq!(
+            app.handle_key(KeyCode::Char('W')),
+            Effect::SetWatchesPaused(true)
+        );
+    }
+
+    #[test]
+    fn watches_row_offers_resume_all_when_none_runs_and_one_is_paused() {
+        let mut app = live_watches_app(0, 1, 0);
+        assert_eq!(watches_label(&app), Some("Watches: resume all"));
+        assert_eq!(
+            app.handle_key(KeyCode::Char('W')),
+            Effect::SetWatchesPaused(false)
+        );
+    }
+
+    #[test]
+    fn watches_row_is_hidden_with_no_watch_or_only_capped_watches() {
+        for (running, paused, capped) in [(0, 0, 0), (0, 0, 2)] {
+            let mut app = live_watches_app(running, paused, capped);
+            assert_eq!(watches_label(&app), None);
+            assert_eq!(app.handle_key(KeyCode::Char('W')), Effect::None);
+        }
+    }
+
+    #[test]
+    fn watches_row_pauses_the_running_watch_when_another_is_capped() {
+        let mut app = live_watches_app(1, 0, 1);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('W')),
+            Effect::SetWatchesPaused(true)
+        );
+    }
+
+    #[test]
+    fn watches_row_needs_a_live_connection_and_a_snapshot() {
+        let mut stale = live_watches_app(1, 0, 0);
+        stale.mark_disconnected();
+        assert_eq!(watches_label(&stale), None);
+        assert_eq!(stale.handle_key(KeyCode::Char('W')), Effect::None);
+        let mut app = live_watches_app(1, 0, 0);
+        app.has_snapshot = false;
+        assert_eq!(watches_label(&app), None);
     }
 
     #[test]

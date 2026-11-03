@@ -179,6 +179,7 @@ where
                 Control::Continue
                 | Control::SetTtsMuted(_)
                 | Control::SetMessagingPaused(_)
+                | Control::SetWatchesPaused(_)
                 | Control::Call(_)
                 | Control::Answer(_)
                 | Control::Tick { .. }
@@ -218,6 +219,7 @@ where
                 Control::Continue
                 | Control::SetTtsMuted(_)
                 | Control::SetMessagingPaused(_)
+                | Control::SetWatchesPaused(_)
                 | Control::Call(_)
                 | Control::Answer(_)
                 | Control::Tick { .. }
@@ -413,6 +415,7 @@ where
                     Control::Continue
                     | Control::SetTtsMuted(_)
                     | Control::SetMessagingPaused(_)
+                | Control::SetWatchesPaused(_)
                     | Control::Call(_)
                     | Control::Answer(_)
                     | Control::Tick { .. }
@@ -667,6 +670,7 @@ async fn wait_for_retry(
                     Control::Continue
                         | Control::SetTtsMuted(_)
                         | Control::SetMessagingPaused(_)
+                | Control::SetWatchesPaused(_)
                         | Control::Call(_)
                         | Control::Answer(_)
                         | Control::Tick { .. }
@@ -1111,6 +1115,7 @@ enum Control {
     Quit,
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
+    SetWatchesPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
     SavePicks {
@@ -1473,6 +1478,7 @@ impl RuntimeCore {
             Effect::Quit => Control::Quit,
             Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
             Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
+            Effect::SetWatchesPaused(paused) => Control::SetWatchesPaused(paused),
             Effect::Call(action) => Control::Call(action),
             Effect::Answer(out) => Control::Answer(out),
             Effect::SavePicks { id, version, picks } => Control::SavePicks { id, version, picks },

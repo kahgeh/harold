@@ -5248,6 +5248,53 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_the_watches_key_after_the_call_key() {
+        let mut app = live_app(Vec::new(), None);
+        app.observe_call(Some(call_off()));
+        app.snapshot.watches_running = 1;
+        let content = rendered(&app, 200, 38, 100_000);
+        assert!(
+            content.contains("m voice  p pause  C call  W watches"),
+            "{content}"
+        );
+        let narrow = rendered(&app, 60, 18, 100_000);
+        assert!(!narrow.contains("W watches"));
+        assert!(narrow.contains("q quit"));
+    }
+
+    #[test]
+    fn palette_shows_the_watches_key_at_the_right_of_its_row() {
+        let mut app = live_app(Vec::new(), None);
+        app.snapshot.watches_running = 1;
+        app.handle_key(crossterm::event::KeyCode::Char('/'));
+        for (running, label) in [(1, "Watches: pause all"), (0, "Watches: resume all")] {
+            app.snapshot.watches_running = running;
+            app.snapshot.watches_paused = 1;
+            for width in [40, 60, 80] {
+                let backend = TestBackend::new(width, 12);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| super::render_palette(frame, frame.area(), &app))
+                    .unwrap();
+                let lines = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .chunks(usize::from(width))
+                    .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let row = lines
+                    .lines()
+                    .find(|line| line.contains(label))
+                    .unwrap_or_else(|| panic!("{label} missing at {width}\n{lines}"));
+                let inner = row.trim_end().trim_end_matches('│').trim_end();
+                assert!(inner.ends_with('W'), "{label} at {width}: {row}");
+            }
+        }
+    }
+
+    #[test]
     fn footer_drops_a_hidden_command() {
         let mut app = live_app(Vec::new(), None);
         app.observe_call(Some(call_off()));
