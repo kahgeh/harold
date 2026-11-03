@@ -1,6 +1,7 @@
-//! Timed prompts: at a set local time each day Harold types a set text into the pane of
-//! the Claude Code agent running in a set folder, only when that agent is idle and its
-//! input box is empty. The list is `[[timed_prompts]]` in the configuration.
+//! Timed prompts: at a set local time each day, or at the local minutes of a cron
+//! expression, Harold types a set text into the pane of the Claude Code agent running in a
+//! set folder, only when that agent is idle and its input box is empty. The list is
+//! `[[timed_prompts]]` in the configuration.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,6 +18,7 @@ use tracing::{error, info, warn};
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::agent::pane_route::{PaneRoute, refuse_write, route_pane};
 use crate::agent::snapshot::AgentSnapshotHub;
+use crate::cron::{Cron, LocalMinute, due_run};
 use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
 use crate::outbound::left_out::{
     Chief, ChiefLookup, PanePosition, lookup_in_folder, resolve_chief, same_folder,
@@ -72,6 +74,8 @@ pub(crate) struct LocalNow {
     pub day: String,
     /// Seconds since local midnight, 0 to 86,399.
     pub seconds_of_day: u32,
+    /// The local date and the minute, from the same read of `/bin/date`.
+    pub local_minute: LocalMinute,
 }
 
 fn two_digits(text: &str) -> Option<u32> {
@@ -98,9 +102,11 @@ pub(crate) fn parse_local_now(text: &str) -> Option<LocalNow> {
     if !day_is_a_date || parts.next().is_some() || hours > 23 || minutes > 59 || seconds > 60 {
         return None;
     }
+    let local_minute = LocalMinute::parse(&format!("{day} {hours:02}:{minutes:02}"))?;
     Some(LocalNow {
         day: day.to_string(),
         seconds_of_day: hours * 3600 + minutes * 60 + seconds.min(59),
+        local_minute,
     })
 }
 
@@ -776,18 +782,22 @@ pub(crate) enum Report {
     Typed {
         name: String,
         pane: String,
-        /// Seconds after the prompt's time.
+        /// Seconds after `at`, or after the minute the cron expression matched.
         late_s: u32,
         insert_pressed: bool,
+        /// `at` or `cron`.
+        schedule: &'static str,
+        /// The count of older cron matches skipped before this run. 0 for `at`.
+        missed: u32,
     },
     /// The prompt is waiting, and for a reason other than the last one reported.
-    Delayed {
-        name: String,
-        reason: Reason,
-    },
+    Delayed { name: String, reason: Reason },
     Skipped {
         name: String,
         reason: Reason,
+        /// The count of cron matches that did not run, the newest one included. 0 for
+        /// `at`.
+        missed: u32,
     },
     /// The text was typed and Enter failed.
     Failed {
@@ -797,15 +807,11 @@ pub(crate) enum Report {
     },
     /// The local time could not be read, so this round did nothing.
     ClockUnreadable,
-    /// The event for a handled prompt could not be stored.
-    RecordFailed {
-        name: String,
-        error: String,
-    },
+    /// The event for a handled prompt, or the checked minute of a cron prompt, could not
+    /// be stored.
+    RecordFailed { name: String, error: String },
     /// On a new store, the prompt's time today had passed, so it counts as handled today.
-    MarkedOnNewStore {
-        name: String,
-    },
+    MarkedOnNewStore { name: String },
 }
 
 pub(crate) fn log_report(report: &Report) {
@@ -815,8 +821,18 @@ pub(crate) fn log_report(report: &Report) {
             pane,
             late_s,
             insert_pressed,
+            schedule,
+            missed,
         } => {
-            info!(name = %name, pane = %pane, late_s, insert_pressed, "timed prompt typed");
+            info!(
+                name = %name,
+                pane = %pane,
+                late_s,
+                insert_pressed,
+                schedule,
+                missed,
+                "timed prompt typed"
+            );
         }
         Report::Delayed {
             name,
@@ -827,8 +843,12 @@ pub(crate) fn log_report(report: &Report) {
         Report::Delayed { name, reason } => {
             info!(name = %name, reason = reason.as_str(), "timed prompt delayed");
         }
-        Report::Skipped { name, reason } => {
-            warn!(name = %name, reason = reason.as_str(), "timed prompt skipped");
+        Report::Skipped {
+            name,
+            reason,
+            missed,
+        } => {
+            warn!(name = %name, reason = reason.as_str(), missed, "timed prompt skipped");
         }
         Report::Failed { name, pane, error } => {
             warn!(name = %name, pane = %pane, error = %error, "timed prompt failed");
@@ -849,11 +869,37 @@ pub(crate) fn log_report(report: &Report) {
 // The round
 // ---------------------------------------------------------------------------
 
+/// When a prompt is due.
+enum Schedule {
+    /// Once a day, in the window from `at`.
+    At(Window),
+    /// At each local minute the expression matches, for `give_up_minutes` after it.
+    Cron { cron: Cron, give_up_minutes: u32 },
+}
+
 struct Prompt {
     name: String,
-    window: Window,
+    schedule: Schedule,
     folder: String,
     text: String,
+}
+
+/// A cron match that is due and not yet typed.
+#[derive(Debug, Clone, Copy)]
+struct CronRun {
+    /// The local minute the expression matched.
+    minute: LocalMinute,
+    /// The count of older matches skipped before this one.
+    missed: u32,
+}
+
+/// What one round tries to type for a prompt.
+struct Due {
+    /// The local date the event is stored with.
+    day: String,
+    late_s: u32,
+    schedule: &'static str,
+    missed: u32,
 }
 
 /// A prompt that was due and not typed, and the reason last reported for it.
@@ -867,6 +913,12 @@ struct Progress {
     /// The last local date the prompt was typed, skipped or failed on.
     handled_day: Option<String>,
     waiting: Option<Waiting>,
+    /// Cron only: the newest local minute checked. It never moves back, so a repeated
+    /// hour (daylight saving ends) is not checked twice.
+    checked: Option<LocalMinute>,
+    /// Cron only: the match that is due and waits to be typed. It is kept here because
+    /// `checked` moves on in each round, so the next round does not find the match again.
+    run: Option<CronRun>,
 }
 
 /// A pane Harold typed into, which counts as busy until a round sees it not idle.
@@ -901,27 +953,43 @@ pub(crate) struct TimedPrompts<P> {
 
 impl<P: Ports> TimedPrompts<P> {
     /// `settings` has passed `Settings::validate`. `last_days` is the last date each
-    /// prompt was handled on, from `HaroldStore::timed_prompt_last_days`.
+    /// prompt was handled on, from `HaroldStore::timed_prompt_last_days`. `checked_locals`
+    /// is the newest local minute checked for each cron prompt, from
+    /// `HaroldStore::timed_prompt_checked_locals`.
     pub(crate) fn new(
         settings: &[TimedPromptSettings],
         last_days: &HashMap<String, String>,
+        checked_locals: &HashMap<String, String>,
         ports: P,
         store: Arc<HaroldStore>,
     ) -> Self {
         let prompts = settings
             .iter()
             .filter_map(|entry| {
-                let at_minute = minute_of_day(&entry.at)?;
                 let give_up_after_minutes = u32::try_from(entry.give_up_after_minutes).ok()?;
+                let schedule = match entry.cron.as_deref() {
+                    Some(text) => Schedule::Cron {
+                        cron: Cron::parse(text).ok()?,
+                        give_up_minutes: give_up_after_minutes,
+                    },
+                    None => Schedule::At(Window::new(
+                        minute_of_day(&entry.at)?,
+                        give_up_after_minutes,
+                    )),
+                };
                 let prompt = Prompt {
                     name: entry.name.clone(),
-                    window: Window::new(at_minute, give_up_after_minutes),
+                    schedule,
                     folder: entry.folder.clone(),
                     text: entry.text.clone(),
                 };
                 let progress = Progress {
                     handled_day: last_days.get(&entry.name).cloned(),
                     waiting: None,
+                    checked: checked_locals
+                        .get(&entry.name)
+                        .and_then(|text| LocalMinute::parse(text)),
+                    run: None,
                 };
                 Some((prompt, progress))
             })
@@ -941,7 +1009,8 @@ impl<P: Ports> TimedPrompts<P> {
 
     /// On a store Harold has just created, counts each prompt whose time today has passed as
     /// handled today, so a restart onto a new store does not type it a second time. A prompt
-    /// whose time is later today still runs. Without a readable clock nothing is marked.
+    /// whose time is later today still runs. Without a readable clock nothing is marked. A
+    /// cron prompt is left alone: with no checked minute it starts from now.
     pub(crate) async fn mark_passed_on_new_store(&mut self) -> Vec<Report> {
         let mut reports = Vec::new();
         let Some(now) = self.ports.now().await else {
@@ -949,7 +1018,10 @@ impl<P: Ports> TimedPrompts<P> {
         };
         let store: &HaroldStore = &self.store;
         for (prompt, progress) in self.prompts.iter_mut() {
-            if matches!(prompt.window.phase(now.seconds_of_day), Phase::Before)
+            let Schedule::At(window) = &prompt.schedule else {
+                continue;
+            };
+            if matches!(window.phase(now.seconds_of_day), Phase::Before)
                 || progress.handled_day.as_deref() == Some(now.day.as_str())
             {
                 continue;
@@ -1008,119 +1080,262 @@ impl<P: Ports> TimedPrompts<P> {
         let store: &HaroldStore = &self.store;
 
         for (prompt, progress) in self.prompts.iter_mut() {
-            // Still waiting from an earlier date: that date's window ran to midnight, so
-            // it never had a moment on its own date when it had ended.
-            if let Some(waiting) = progress.waiting.take_if(|waiting| waiting.day != now.day) {
-                reports.push(Report::Skipped {
-                    name: prompt.name.clone(),
-                    reason: waiting.reason.clone(),
-                });
-                let event = TimedPromptHandled {
-                    name: prompt.name.clone(),
-                    day: waiting.day.clone(),
-                    outcome: TimedPromptOutcome::Skipped,
-                    reason: Some(waiting.reason.as_str().to_string()),
-                    pane_id: None,
-                };
-                record(store, event, &mut reports).await;
-                progress.handled_day = Some(waiting.day);
-            }
-            if progress.handled_day.as_deref() == Some(now.day.as_str()) {
-                continue;
-            }
-            match prompt.window.phase(now.seconds_of_day) {
-                Phase::Before => {}
-                Phase::Ended => {
-                    let reason = progress
+            let due = match &prompt.schedule {
+                Schedule::At(window) => {
+                    // Still waiting from an earlier date: that date's window ran to
+                    // midnight, so it never had a moment on its own date when it had ended.
+                    if let Some(waiting) =
+                        progress.waiting.take_if(|waiting| waiting.day != now.day)
+                    {
+                        reports.push(Report::Skipped {
+                            name: prompt.name.clone(),
+                            reason: waiting.reason.clone(),
+                            missed: 0,
+                        });
+                        let event = TimedPromptHandled {
+                            name: prompt.name.clone(),
+                            day: waiting.day.clone(),
+                            outcome: TimedPromptOutcome::Skipped,
+                            reason: Some(waiting.reason.as_str().to_string()),
+                            pane_id: None,
+                        };
+                        record(store, event, &mut reports).await;
+                        progress.handled_day = Some(waiting.day);
+                    }
+                    if progress.handled_day.as_deref() == Some(now.day.as_str()) {
+                        continue;
+                    }
+                    match window.phase(now.seconds_of_day) {
+                        Phase::Before => continue,
+                        Phase::Ended => {
+                            let reason = progress
+                                .waiting
+                                .take()
+                                .map_or(Reason::WindowPassed, |waiting| waiting.reason);
+                            skip(store, &prompt.name, &now.day, reason, 0, &mut reports).await;
+                            progress.handled_day = Some(now.day.clone());
+                            continue;
+                        }
+                        Phase::Due => Due {
+                            day: now.day.clone(),
+                            late_s: now.seconds_of_day - window.at_s,
+                            schedule: "at",
+                            missed: 0,
+                        },
+                    }
+                }
+                Schedule::Cron {
+                    cron,
+                    give_up_minutes,
+                } => {
+                    let Some(due) = check_cron(
+                        cron,
+                        *give_up_minutes,
+                        &prompt.name,
+                        progress,
+                        &now,
+                        store,
+                        &mut reports,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+                    due
+                }
+            };
+            match attempt(ports, prompt, &view, &typed_into).await {
+                Attempt::Wait(reason) => {
+                    let already_reported = progress
                         .waiting
-                        .take()
-                        .map_or(Reason::WindowPassed, |waiting| waiting.reason);
-                    reports.push(Report::Skipped {
+                        .as_ref()
+                        .is_some_and(|waiting| waiting.reason.as_str() == reason.as_str());
+                    if !already_reported {
+                        reports.push(Report::Delayed {
+                            name: prompt.name.clone(),
+                            reason: reason.clone(),
+                        });
+                    }
+                    progress.waiting = Some(Waiting {
+                        day: now.day.clone(),
+                        reason,
+                    });
+                }
+                Attempt::Typed {
+                    pane,
+                    insert_pressed,
+                } => {
+                    reports.push(Report::Typed {
+                        insert_pressed,
                         name: prompt.name.clone(),
-                        reason: reason.clone(),
+                        pane: pane.clone(),
+                        late_s: due.late_s,
+                        schedule: due.schedule,
+                        missed: due.missed,
                     });
                     let event = TimedPromptHandled {
                         name: prompt.name.clone(),
-                        day: now.day.clone(),
-                        outcome: TimedPromptOutcome::Skipped,
-                        reason: Some(reason.as_str().to_string()),
-                        pane_id: None,
+                        day: due.day.clone(),
+                        outcome: TimedPromptOutcome::Typed,
+                        reason: None,
+                        pane_id: Some(pane.clone()),
                     };
                     record(store, event, &mut reports).await;
-                    progress.handled_day = Some(now.day.clone());
+                    progress.handled_day = Some(due.day);
+                    progress.waiting = None;
+                    progress.run = None;
+                    typed_panes.push(TypedPane {
+                        pane_id: pane.clone(),
+                        rounds_left: TYPED_PANE_HOLD_ROUNDS,
+                    });
+                    typed_into.push(pane);
                 }
-                Phase::Due => match attempt(ports, prompt, &view, &typed_into).await {
-                    Attempt::Wait(reason) => {
-                        let already_reported = progress
-                            .waiting
-                            .as_ref()
-                            .is_some_and(|waiting| waiting.reason.as_str() == reason.as_str());
-                        if !already_reported {
-                            reports.push(Report::Delayed {
-                                name: prompt.name.clone(),
-                                reason: reason.clone(),
-                            });
-                        }
-                        progress.waiting = Some(Waiting {
-                            day: now.day.clone(),
-                            reason,
-                        });
-                    }
-                    Attempt::Typed {
-                        pane,
-                        insert_pressed,
-                    } => {
-                        reports.push(Report::Typed {
-                            insert_pressed,
-                            name: prompt.name.clone(),
-                            pane: pane.clone(),
-                            late_s: now.seconds_of_day - prompt.window.at_s,
-                        });
-                        let event = TimedPromptHandled {
-                            name: prompt.name.clone(),
-                            day: now.day.clone(),
-                            outcome: TimedPromptOutcome::Typed,
-                            reason: None,
-                            pane_id: Some(pane.clone()),
-                        };
-                        record(store, event, &mut reports).await;
-                        progress.handled_day = Some(now.day.clone());
-                        progress.waiting = None;
-                        typed_panes.push(TypedPane {
-                            pane_id: pane.clone(),
-                            rounds_left: TYPED_PANE_HOLD_ROUNDS,
-                        });
-                        typed_into.push(pane);
-                    }
-                    Attempt::EnterFailed { pane, error } => {
-                        reports.push(Report::Failed {
-                            name: prompt.name.clone(),
-                            pane: pane.clone(),
-                            error,
-                        });
-                        let event = TimedPromptHandled {
-                            name: prompt.name.clone(),
-                            day: now.day.clone(),
-                            outcome: TimedPromptOutcome::Failed,
-                            reason: None,
-                            pane_id: Some(pane.clone()),
-                        };
-                        record(store, event, &mut reports).await;
-                        // Not retried: the text is in the box, and typing it again would
-                        // put it there twice.
-                        progress.handled_day = Some(now.day.clone());
-                        progress.waiting = None;
-                        typed_panes.push(TypedPane {
-                            pane_id: pane.clone(),
-                            rounds_left: TYPED_PANE_HOLD_ROUNDS,
-                        });
-                        typed_into.push(pane);
-                    }
-                },
+                Attempt::EnterFailed { pane, error } => {
+                    reports.push(Report::Failed {
+                        name: prompt.name.clone(),
+                        pane: pane.clone(),
+                        error,
+                    });
+                    let event = TimedPromptHandled {
+                        name: prompt.name.clone(),
+                        day: due.day.clone(),
+                        outcome: TimedPromptOutcome::Failed,
+                        reason: None,
+                        pane_id: Some(pane.clone()),
+                    };
+                    record(store, event, &mut reports).await;
+                    // Not retried: the text is in the box, and typing it again would
+                    // put it there twice.
+                    progress.handled_day = Some(due.day);
+                    progress.waiting = None;
+                    progress.run = None;
+                    typed_panes.push(TypedPane {
+                        pane_id: pane.clone(),
+                        rounds_left: TYPED_PANE_HOLD_ROUNDS,
+                    });
+                    typed_into.push(pane);
+                }
             }
         }
         reports
     }
+}
+
+/// One round's check of a cron prompt, at the local minute `now`:
+///
+/// 1. A run that waits and is now more than `give_up_minutes` old is skipped, with the
+///    last reason it waited for.
+/// 2. `due_run` looks at the minutes after `checked`, up to now. A match in the window
+///    becomes the run to type. It replaces an older run that still waits, which then
+///    counts as missed. A newest match outside the window is skipped as `window_passed`.
+/// 3. `checked` moves on to now and is stored. It moves on before the typing, so a stop
+///    between the two never types the run twice after a restart.
+///
+/// Returns the run to try in this round, if any.
+async fn check_cron(
+    cron: &Cron,
+    give_up_minutes: u32,
+    name: &str,
+    progress: &mut Progress,
+    now: &LocalNow,
+    store: &HaroldStore,
+    reports: &mut Vec<Report>,
+) -> Option<Due> {
+    let now_minute = now.local_minute;
+    if let Some(run) = progress
+        .run
+        .take_if(|run| minutes_between(run.minute, now_minute) > i64::from(give_up_minutes))
+    {
+        let reason = progress
+            .waiting
+            .take()
+            .map_or(Reason::WindowPassed, |waiting| waiting.reason);
+        let day = day_of(run.minute);
+        skip(store, name, &day, reason, run.missed + 1, reports).await;
+        progress.handled_day = Some(day);
+    }
+    let found = due_run(cron, progress.checked, now_minute, give_up_minutes);
+    match found.run {
+        Some(minute) => {
+            let older = progress.run.take().map_or(0, |older| older.missed + 1);
+            progress.run = Some(CronRun {
+                minute,
+                missed: found.missed + older,
+            });
+        }
+        None if found.missed > 0 => {
+            skip(
+                store,
+                name,
+                &now.day,
+                Reason::WindowPassed,
+                found.missed,
+                reports,
+            )
+            .await;
+            progress.handled_day = Some(now.day.clone());
+        }
+        None => {}
+    }
+    if progress.checked.is_none_or(|checked| checked < now_minute) {
+        progress.checked = Some(now_minute);
+        if let Err(error) = store
+            .set_timed_prompt_checked_local(name, &now_minute.to_string())
+            .await
+        {
+            // The round goes on: the minute is kept in memory.
+            reports.push(Report::RecordFailed {
+                name: name.to_string(),
+                error: error.to_string(),
+            });
+        }
+    }
+    let run = progress.run?;
+    // The seconds from the matched minute, by the local clock. A repeated hour can put
+    // the clock before the match: that counts as 0.
+    let late_s = minutes_between(run.minute, now_minute) * 60 + i64::from(now.seconds_of_day % 60);
+    Some(Due {
+        day: day_of(run.minute),
+        late_s: u32::try_from(late_s.max(0)).unwrap_or(u32::MAX),
+        schedule: "cron",
+        missed: run.missed,
+    })
+}
+
+/// The minutes from `earlier` to `later` by the local clock.
+fn minutes_between(earlier: LocalMinute, later: LocalMinute) -> i64 {
+    later.total_minutes() - earlier.total_minutes()
+}
+
+/// The local date of a minute, `YYYY-MM-DD`.
+fn day_of(minute: LocalMinute) -> String {
+    let mut text = minute.to_string();
+    text.truncate(10);
+    text
+}
+
+/// Reports and stores a prompt skipped for `reason` on `day`.
+async fn skip(
+    store: &HaroldStore,
+    name: &str,
+    day: &str,
+    reason: Reason,
+    missed: u32,
+    reports: &mut Vec<Report>,
+) {
+    reports.push(Report::Skipped {
+        name: name.to_string(),
+        reason: reason.clone(),
+        missed,
+    });
+    let event = TimedPromptHandled {
+        name: name.to_string(),
+        day: day.to_string(),
+        outcome: TimedPromptOutcome::Skipped,
+        reason: Some(reason.as_str().to_string()),
+        pane_id: None,
+    };
+    record(store, event, reports).await;
 }
 
 /// Runs the seven checks for a due prompt and types it when all pass.
@@ -1627,14 +1842,23 @@ pub(crate) async fn start(
     snapshots: AgentSnapshotHub,
     shutdown: watch::Receiver<()>,
 ) -> store::Result<JoinHandle<()>> {
-    let last_days = if settings.timed_prompts.is_empty() {
-        HashMap::new()
+    let (last_days, checked_locals) = if settings.timed_prompts.is_empty() {
+        (HashMap::new(), HashMap::new())
     } else {
-        store.timed_prompt_last_days().await?
+        (
+            store.timed_prompt_last_days().await?,
+            store.timed_prompt_checked_locals().await?,
+        )
     };
     let ports = TmuxPorts::new(snapshots, settings.agents.0.clone()).with_chief(&settings.notify);
     let is_new = store.is_new();
-    let mut prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
+    let mut prompts = TimedPrompts::new(
+        &settings.timed_prompts,
+        &last_days,
+        &checked_locals,
+        ports,
+        store,
+    );
     for report in mark_passed_if_new_store(&mut prompts, is_new).await {
         log_report(&report);
     }

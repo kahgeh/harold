@@ -37,6 +37,7 @@ fn local_now_is_read_from_the_output_of_date() {
         Some(LocalNow {
             day: "2026-10-14".into(),
             seconds_of_day: 9 * 3600 + 5,
+            local_minute: crate::cron::LocalMinute::parse("2026-10-14 09:00").unwrap(),
         })
     );
     assert_eq!(
@@ -729,6 +730,7 @@ fn prompts(fake: &Fake, store: &TestStore, entries: &[TimedPromptSettings]) -> T
     TimedPrompts::new(
         entries,
         &HashMap::new(),
+        &HashMap::new(),
         fake.clone(),
         Arc::clone(&store.store),
     )
@@ -752,6 +754,7 @@ fn skipped(name: &str, reason: Reason) -> Report {
     Report::Skipped {
         name: name.into(),
         reason,
+        missed: 0,
     }
 }
 
@@ -779,6 +782,8 @@ async fn due_prompt_is_typed_once_into_the_right_pane_and_stored() {
             pane: "%2".into(),
             late_s: 4,
             insert_pressed: false,
+            schedule: "at",
+            missed: 0,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -939,6 +944,8 @@ async fn waiting_prompt_is_typed_once_the_checks_pass() {
             pane: "%2".into(),
             late_s: 422,
             insert_pressed: false,
+            schedule: "at",
+            missed: 0,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -1006,6 +1013,8 @@ async fn prompt_never_seen_due_is_skipped_as_window_passed_and_typed_the_next_da
             pane: "%2".into(),
             late_s: 0,
             insert_pressed: false,
+            schedule: "at",
+            missed: 0,
         }]
     );
     assert_eq!(fake.keys(), digest_keys());
@@ -1031,8 +1040,13 @@ async fn typed_prompt_is_not_typed_again_after_a_restart_and_is_typed_the_next_d
     {}
     let last_days = store.store.timed_prompt_last_days().await.unwrap();
     assert_eq!(last_days.get("digest").map(String::as_str), Some(DAY));
-    let mut restarted =
-        TimedPrompts::new(&entries, &last_days, fake.clone(), Arc::clone(&store.store));
+    let mut restarted = TimedPrompts::new(
+        &entries,
+        &last_days,
+        &HashMap::new(),
+        fake.clone(),
+        Arc::clone(&store.store),
+    );
 
     fake.clock(DAY, "09:05:00");
     assert!(restarted.round().await.is_empty());
@@ -1052,12 +1066,338 @@ async fn renamed_entry_counts_as_a_new_prompt() {
     let mut renamed = TimedPrompts::new(
         &[entry("morning-digest", "09:00")],
         &last_days,
+        &HashMap::new(),
         fake.clone(),
         Arc::clone(&store.store),
     );
 
     assert_eq!(renamed.round().await.len(), 1);
     assert_eq!(fake.keys(), digest_keys());
+}
+
+// --- cron prompts ---
+
+fn cron_entry(name: &str, cron: &str) -> TimedPromptSettings {
+    TimedPromptSettings {
+        at: String::new(),
+        cron: Some(cron.into()),
+        ..entry(name, "")
+    }
+}
+
+/// Prompts built with the checked minutes in `checked`, as `(name, "YYYY-MM-DD HH:MM")`.
+fn cron_prompts(
+    fake: &Fake,
+    store: &TestStore,
+    entries: &[TimedPromptSettings],
+    checked: &[(&str, &str)],
+) -> TimedPrompts<Fake> {
+    let checked: HashMap<String, String> = checked
+        .iter()
+        .map(|(name, minute)| (name.to_string(), minute.to_string()))
+        .collect();
+    TimedPrompts::new(
+        entries,
+        &HashMap::new(),
+        &checked,
+        fake.clone(),
+        Arc::clone(&store.store),
+    )
+}
+
+fn typed_cron(name: &str, late_s: u32, missed: u32) -> Report {
+    Report::Typed {
+        name: name.into(),
+        pane: "%2".into(),
+        late_s,
+        insert_pressed: false,
+        schedule: "cron",
+        missed,
+    }
+}
+
+async fn checked_minute(store: &TestStore, name: &str) -> Option<String> {
+    store
+        .store
+        .timed_prompt_checked_locals()
+        .await
+        .unwrap()
+        .get(name)
+        .cloned()
+}
+
+#[tokio::test]
+async fn cron_prompt_types_at_matching_minute() {
+    let store = TestStore::new().await;
+    // 2026-11-02 is a Monday.
+    let fake = Fake::at("2026-11-02", "07:49:30");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("standup", "50 7 * * 1-5")], &[]);
+
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(
+        checked_minute(&store, "standup").await.as_deref(),
+        Some("2026-11-02 07:49")
+    );
+
+    fake.clock("2026-11-02", "07:50:02");
+    assert_eq!(prompts.round().await, [typed_cron("standup", 2, 0)]);
+    fake.clock("2026-11-02", "07:50:07");
+    assert!(prompts.round().await.is_empty());
+    fake.clock("2026-11-02", "07:51:00");
+    assert!(prompts.round().await.is_empty());
+
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(
+        handled(&store).await,
+        [TimedPromptHandled {
+            name: "standup".into(),
+            day: "2026-11-02".into(),
+            outcome: TimedPromptOutcome::Typed,
+            reason: None,
+            pane_id: Some("%2".into()),
+        }]
+    );
+    assert_eq!(
+        checked_minute(&store, "standup").await.as_deref(),
+        Some("2026-11-02 07:51")
+    );
+}
+
+#[tokio::test]
+async fn cron_prompt_first_start_runs_no_backlog() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:30");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "0 9 * * *")], &[]);
+
+    assert!(prompts.round().await.is_empty());
+    fake.clock(DAY, "09:01:00");
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test]
+async fn cron_prompt_skipped_time_runs_once_at_0300() {
+    // In Sydney on 2026-10-04 the clock goes from 01:59 to 03:00.
+    let store = TestStore::new().await;
+    let fake = Fake::at("2026-10-04", "01:59:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "30 2 * * *")], &[]);
+    assert!(prompts.round().await.is_empty());
+
+    fake.clock("2026-10-04", "03:00:00");
+    let reports = prompts.round().await;
+    assert!(
+        matches!(
+            &reports[..],
+            [Report::Typed {
+                schedule: "cron",
+                missed: 0,
+                ..
+            }]
+        ),
+        "{reports:?}"
+    );
+    fake.clock("2026-10-04", "03:00:05");
+    assert!(prompts.round().await.is_empty());
+    fake.clock("2026-10-04", "03:30:00");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn cron_prompt_repeated_time_runs_once() {
+    // On 2027-04-04 the clock goes from 02:59 back to 02:00.
+    let store = TestStore::new().await;
+    let fake = Fake::at("2027-04-04", "02:29:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "30 2 * * *")], &[]);
+    assert!(prompts.round().await.is_empty());
+
+    fake.clock("2027-04-04", "02:30:00");
+    assert_eq!(prompts.round().await, [typed_cron("digest", 0, 0)]);
+    for time in ["02:59:00", "02:00:00", "02:30:00", "02:59:00", "03:00:00"] {
+        fake.clock("2027-04-04", time);
+        assert!(prompts.round().await.is_empty(), "{time}");
+    }
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(
+        checked_minute(&store, "digest").await.as_deref(),
+        Some("2027-04-04 03:00")
+    );
+}
+
+#[tokio::test]
+async fn cron_prompt_sleep_over_three_matches_runs_newest_once() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "11:05:00");
+    let mut prompts = cron_prompts(
+        &fake,
+        &store,
+        &[cron_entry("digest", "0 9-11 * * *")],
+        &[("digest", "2026-10-14 08:59")],
+    );
+
+    assert_eq!(prompts.round().await, [typed_cron("digest", 300, 2)]);
+    fake.clock(DAY, "11:05:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn cron_prompt_sleep_past_window_runs_nothing() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "11:30:00");
+    let mut prompts = cron_prompts(
+        &fake,
+        &store,
+        &[cron_entry("digest", "0 9 * * *")],
+        &[("digest", "2026-10-14 08:59")],
+    );
+
+    assert_eq!(
+        prompts.round().await,
+        [Report::Skipped {
+            name: "digest".into(),
+            reason: Reason::WindowPassed,
+            missed: 1,
+        }]
+    );
+    fake.clock(DAY, "11:30:05");
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+    assert_eq!(
+        handled(&store).await,
+        [TimedPromptHandled {
+            name: "digest".into(),
+            day: DAY.into(),
+            outcome: TimedPromptOutcome::Skipped,
+            reason: Some("window_passed".into()),
+            pane_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn cron_prompt_restart_keeps_checked_minute() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "08:59:00");
+    let entries = [cron_entry("digest", "0 9 * * *")];
+    let mut prompts = cron_prompts(&fake, &store, &entries, &[]);
+    prompts.round().await;
+    fake.clock(DAY, "09:00:00");
+    assert_eq!(prompts.round().await, [typed_cron("digest", 0, 0)]);
+
+    // A restart: the new task starts from the stored checked minutes.
+    let checked = store.store.timed_prompt_checked_locals().await.unwrap();
+    assert_eq!(
+        checked.get("digest").map(String::as_str),
+        Some("2026-10-14 09:00")
+    );
+    let mut restarted = TimedPrompts::new(
+        &entries,
+        &HashMap::new(),
+        &checked,
+        fake.clone(),
+        Arc::clone(&store.store),
+    );
+    fake.clock(DAY, "09:00:30");
+    assert!(restarted.round().await.is_empty());
+    fake.clock(DAY, "09:01:00");
+    assert!(restarted.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+
+    fake.clock(NEXT_DAY, "09:00:00");
+    assert_eq!(restarted.round().await, [typed_cron("digest", 0, 0)]);
+}
+
+#[tokio::test]
+async fn cron_prompt_late_s_counts_from_matched_minute() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "08:59:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "0 9 * * *")], &[]);
+    prompts.round().await;
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
+    fake.clock(DAY, "09:00:00");
+    assert_eq!(
+        prompts.round().await,
+        [delayed("digest", Reason::AgentBusy)]
+    );
+
+    // The match is kept while the prompt waits, and the checked minute moves on.
+    fake.clock(DAY, "09:07:02");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(
+        checked_minute(&store, "digest").await.as_deref(),
+        Some("2026-10-14 09:07")
+    );
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Idle);
+    fake.clock(DAY, "09:07:07");
+    assert_eq!(prompts.round().await, [typed_cron("digest", 427, 0)]);
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn cron_prompt_waiting_past_window_is_skipped_with_its_reason() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "08:59:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "0 9 * * *")], &[]);
+    prompts.round().await;
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
+    fake.clock(DAY, "09:00:00");
+    prompts.round().await;
+    // The window is 120 minutes: the run is still due at 11:00.
+    fake.clock(DAY, "11:00:59");
+    assert!(prompts.round().await.is_empty());
+
+    fake.clock(DAY, "11:01:00");
+    assert_eq!(
+        prompts.round().await,
+        [Report::Skipped {
+            name: "digest".into(),
+            reason: Reason::AgentBusy,
+            missed: 1,
+        }]
+    );
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Idle);
+    fake.clock(DAY, "11:01:05");
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+    let stored = handled(&store).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].reason.as_deref(), Some("agent_busy"));
+}
+
+#[tokio::test]
+async fn cron_prompt_waiting_run_is_replaced_by_a_newer_match() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "08:59:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "*/5 * * * *")], &[]);
+    prompts.round().await;
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Working);
+    fake.clock(DAY, "09:00:00");
+    prompts.round().await;
+
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Idle);
+    fake.clock(DAY, "09:05:01");
+    assert_eq!(prompts.round().await, [typed_cron("digest", 1, 1)]);
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn at_prompt_late_s_unchanged() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:07:02");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(
+        prompts.round().await,
+        [Report::Typed {
+            name: "digest".into(),
+            pane: "%2".into(),
+            late_s: 422,
+            insert_pressed: false,
+            schedule: "at",
+            missed: 0,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -1656,6 +1996,15 @@ async fn marking_does_nothing_before_any_prompt_time() {
     let store = TestStore::new().await;
     let fake = Fake::at("2026-10-16", "06:00:00");
     let mut prompts = prompts(&fake, &store, &[entry("digest", "07:50")]);
+    assert!(prompts.mark_passed_on_new_store().await.is_empty());
+    assert!(handled(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn marking_leaves_a_cron_prompt_alone() {
+    let store = TestStore::new().await;
+    let fake = Fake::at("2026-10-16", "10:00:00");
+    let mut prompts = cron_prompts(&fake, &store, &[cron_entry("digest", "0 9 * * *")], &[]);
     assert!(prompts.mark_passed_on_new_store().await.is_empty());
     assert!(handled(&store).await.is_empty());
 }

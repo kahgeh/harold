@@ -1,6 +1,6 @@
 # Timed prompts
 
-A timed prompt is a text Harold types into an agent's pane at a set local time each day. Harold types it only when the agent is idle and its input box is empty. Otherwise it waits, and after a set time it gives up for that day.
+A timed prompt is a text Harold types into an agent's pane at a set local time each day, or at the local minutes of a cron expression. Harold types it only when the agent is idle and its input box is empty. Otherwise it waits, and after a set time it gives up.
 
 ## Problem
 
@@ -19,15 +19,24 @@ at = "07:50"
 folder = "/Users/you/Dev/chief-of-pods"
 text = "digest"
 # give_up_after_minutes = 120
+
+[[timed_prompts]]
+name = "standup"
+cron = "50 7 * * 1-5"
+folder = "/Users/you/Dev/chief-of-pods"
+text = "standup"
 ```
+
+Each entry has exactly one of `at` or `cron`.
 
 | Key | Meaning | Valid values |
 |---|---|---|
 | `name` | Names the prompt in the log and in Harold's stored record | 1 to 64 characters from letters, digits, `-` and `_`; no two entries share a name |
-| `at` | Time of day, in the Mac's local time, 24-hour | `HH:MM`, `00:00` to `23:59` |
+| `at` | Time of day, in the Mac's local time, 24-hour. Set `at` or `cron`, not both | `HH:MM`, `00:00` to `23:59` |
+| `cron` | A cron expression: five fields, `minute hour day month weekday`, that name the local minutes the prompt is due. Set `at` or `cron`, not both | See [Cron expressions](#cron-expressions) |
 | `folder` | The folder whose agent gets the text | An absolute path starting with `/`; one trailing `/` is ignored |
 | `text` | What is typed, followed by Enter. Harold adds nothing to it; two of the [limits](#limits) say when tmux types less | 1 to 2,000 characters on one line, with no control characters |
-| `give_up_after_minutes` | How long after `at` the prompt stays due | 1 to 1439; 120 when left out |
+| `give_up_after_minutes` | How long after `at`, or after the minute `cron` matched, the prompt stays due | 1 to 1439; 120 when left out |
 
 `folder` is compared as text with the working directory tmux reports for a pane. Symbolic links are not resolved, and a subfolder is another folder.
 
@@ -35,6 +44,8 @@ Harold refuses to start on an invalid entry, and `harold --check-config` fails. 
 
 ```
 timed_prompts[0].at must be a time of day "HH:MM" from 00:00 to 23:59, got "9am"
+timed_prompts[1].cron: minute 75 is out of range: use 0 to 59
+timed_prompts[2]: use either at or cron, not both
 ```
 
 Harold reads the configuration only at startup. A changed list takes effect at the next restart. Renaming an entry makes it a new prompt with no record, so it can be typed again on the day it is renamed.
@@ -43,15 +54,48 @@ Changing an entry's `at` after Harold has a record for today takes effect the ne
 
 ## When a prompt is due
 
-Every 5 seconds Harold reads the Mac's local date and time and goes through the list of prompts once. This page calls one such pass a round. A prompt is due when all three hold:
+Every 5 seconds Harold reads the Mac's local date and time and goes through the list of prompts once. This page calls one such pass a round. An `at` prompt is due when all three hold:
 
 - the local time is at or after its `at`;
 - the local time is before the end of its window, which is `at` plus `give_up_after_minutes`, or midnight if that comes first;
 - Harold has no record of handling it on this local date.
 
-Harold compares the clock with `at` in each round and counts nothing, so sleep and a clock change need no special handling. A Mac that wakes at 09:40 finds a 09:00 prompt still due. A Mac that wakes at 11:30 finds its window ended and skips it for the day.
+Harold compares the clock with `at` in each round and counts nothing, so sleep and a clock change need no special handling for an `at` prompt. A Mac that wakes at 09:40 finds a 09:00 prompt still due. A Mac that wakes at 11:30 finds its window ended and skips it for the day.
 
 After a restart a prompt is still due by the same three rules, and the first round comes about 14 seconds after Harold starts. A prompt due at the moment Harold starts is typed about 14 seconds later. Harold waits because the list of panes it starts with is the one from before it stopped. The wait gives the [agent monitor](../agent-monitor/README.md), the part of Harold that lists the tmux panes running agents and reads their screens, time for two listings of the panes and one reading of their screens when each read works at its first try. A listing that fails is retried by the next one, so each failed listing adds one more listing, which the wait does not cover. Its length is twice the sum of `inventory_interval_ms` and `inventory_timeout_ms`, plus `screen_interval_ms`, plus 2 seconds, with all three keys from `[agent_monitor]`: 14 seconds with the shipped settings. After the first round, a round runs every 5 seconds.
+
+## Cron expressions
+
+A cron expression has five fields, `minute hour day month weekday`, in the Mac's local time:
+
+| Field | Values | Names |
+|---|---|---|
+| minute | 0 to 59 | |
+| hour | 0 to 23 | |
+| day | 1 to 31 | |
+| month | 1 to 12 | `jan` to `dec` |
+| weekday | 0 to 7; 0 and 7 are Sunday | `sun` to `sat` |
+
+Each field takes `*`, a number, a range `a-b`, a list `a,b,c`, and a step `*/n` or `a-b/n`. Names can be in any case. When the day and the weekday are both not `*`, a date matches when either one matches. There are no `@daily` forms, no seconds field and no year field.
+
+## When a cron prompt is due
+
+Harold keeps, for each cron prompt, the newest local minute it has checked. It stores that minute, so it stays across a restart. In each round Harold looks at each local minute after the checked minute, up to now:
+
+- When those minutes hold one or more matches, Harold makes the prompt due once, for the newest match. Older matches are skipped, never typed as a backlog. The `missed` field gives their count.
+- The newest match is due only while it is at most `give_up_after_minutes` old. A newest match that is older than that is skipped, with `window_passed`.
+- Then the checked minute moves on to now. It never moves back.
+
+A due cron prompt goes through [the seven checks](#the-seven-checks), as an `at` prompt does. While it waits, Harold keeps the matched minute in memory, and the prompt stays due until its window ends. A newer match replaces a match that still waits, and the older one counts in `missed`.
+
+Some examples:
+
+- **The first start.** A cron prompt with no checked minute starts from now. A match before Harold first saw the prompt is not typed.
+- **A sleep.** With `0 9-11 * * *`, a Mac that sleeps from 08:59 to 11:05 types the prompt once, for 11:00, with `missed = 2`.
+- **A skipped hour (daylight saving starts).** In Sydney on 2026-10-04 the clock goes from 01:59 to 03:00. `30 2 * * *` has no 02:30 that day, but 02:30 lies between the two checks. So Harold types the prompt once, at 03:00.
+- **A repeated hour (daylight saving ends).** On 2027-04-04 the clock goes from 02:59 back to 02:00. The checked minute stays 02:59, so Harold does not check 02:00 to 02:59 again, and `30 2 * * *` is typed once.
+
+The checked minute moves on before Harold types. So a stop between the two never types a match twice after a restart.
 
 ## The seven checks
 
@@ -124,12 +168,12 @@ Harold writes one line when a prompt is typed, one when it is skipped, and one e
 
 | Moment | Level | Line | Fields |
 |---|---|---|---|
-| Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`), `insert_pressed` (`true` when Harold pressed `i` first, for a Vim input box in NORMAL mode) |
+| Typed | info | `timed prompt typed` | `name`, `pane`, `late_s` (seconds after `at`, or after the minute `cron` matched), `insert_pressed` (`true` when Harold pressed `i` first, for a Vim input box in NORMAL mode), `schedule` (`at` or `cron`), `missed` (the count of older cron matches skipped before this one; 0 for `at`) |
 | Waiting, for a reason other than the last one logged for this prompt | info | `timed prompt delayed` | `name`, `reason`, and `agents` (the count) for `several_agents_in_folder` |
 | Harold took its own `i` out of the box | info | `stray insert key removed` | `pane_id`, `state` (`insert` when Harold sent `BSpace`, `normal` when it sent `x`) |
-| Window ended | warn | `timed prompt skipped` | `name`, `reason`: the last reason it waited for, or `window_passed` when Harold never saw it due |
+| Window ended | warn | `timed prompt skipped` | `name`, `reason`: the last reason it waited for, or `window_passed` when Harold never saw it due, `missed` (the count of cron matches that were not typed, the newest one included; 0 for `at`) |
 | Enter failed after the text was typed | warn | `timed prompt failed` | `name`, `pane`, `error` |
-| The event could not be stored | error | `timed prompt record not stored` | `name`, `error` |
+| The event, or the checked minute of a cron prompt, could not be stored | error | `timed prompt record not stored` | `name`, `error` |
 | `/bin/date` could not be read, or took more than 2 seconds | warn | `timed prompts cannot read the local time from /bin/date` | none |
 
 A prompt whose window runs to midnight and is still waiting then is logged as skipped in the first round of the next date.
@@ -149,7 +193,7 @@ When a prompt is typed, skipped or failed, Harold appends one `TimedPromptHandle
 | Field | Value |
 |---|---|
 | `name` | The entry's `name` |
-| `day` | The local date the prompt was due on. For a prompt still waiting at midnight, that is the earlier date, not the date the event is written on |
+| `day` | The local date the prompt was due on. For a prompt still waiting at midnight, that is the earlier date, not the date the event is written on. For a cron prompt, the date of the matched minute, or the date of the check when a match is skipped with `window_passed` |
 | `outcome` | `typed`, `skipped` or `failed` |
 | `reason` | The reason for `skipped`; null otherwise |
 | `pane_id` | The pane typed into; null for `skipped` |
@@ -158,13 +202,17 @@ The store's projection keeps the last `day` for each prompt in the `settings` ta
 
 If the event cannot be stored after a prompt was typed, Harold logs the error and still does not type the prompt again while it keeps running. A restart on the same day would type it again.
 
+For a cron prompt, Harold also writes the newest checked minute, `YYYY-MM-DD HH:MM`, to the `settings` table under the key `timed_prompt.<name>.checked_local`. It writes the row once a minute at most, and an older minute never replaces a newer one. Harold reads those rows at startup. If the write fails, Harold logs the error, keeps the minute in memory and goes on with the round.
+
 ## Limits
 
 - **Claude Code only.** Harold must read the input box to know it is empty, and it knows how for Claude Code's screen only. A prompt whose folder holds an agent whose provider uses another screen adapter, such as Codex or OpenCode, waits with `input_box_unreadable` and is skipped when its window ends. A custom agent whose provider is configured with `screen_adapter = "claude-v1"` passes check 4, and Harold reads its screen as Claude Code's.
 - **A gap of about half a second.** If you start typing between Harold's read of the screen and its typing, the text is added to yours. Nothing in tmux closes that gap.
 - **A text that starts with `-` is never typed.** Harold runs `tmux send-keys -t <pane> -l <text>` with nothing between `-l` and the text, and by tmux's rules a text that starts with `-` is read as options. Most such texts are refused, and the prompt then waits with `typing_failed` and is skipped when its window ends. A text made only of letters tmux accepts as options, such as `-R` or `-l`, is accepted with nothing typed. Harold then presses Enter and records the prompt as typed.
 - **A `;` at the end of `text` is not typed.** By tmux's rules a `;` at the end of an argument ends the tmux command. A `text` that is only `;` types nothing.
-- **One time a day for each entry.** There are no days of the week, dates or intervals.
+- **An `at` entry is typed once a day.** For days of the week, dates or intervals, use `cron`.
+- **A cron match that waits is in memory only.** A restart while a match waits for the pane drops that match, because the checked minute has moved on.
+- **`late_s` uses the local clock.** After a skipped hour, a match at 02:30 that is typed at 03:00 shows `late_s = 1800`, though no time went by.
 - **Nothing is sent to the phone** when a prompt is typed or skipped. Pausing messages to the phone has no effect on timed prompts.
 - **Not on the control-tower.** The log is where to see what happened to a prompt.
 

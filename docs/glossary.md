@@ -178,8 +178,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | ringback | The phone-call ring, "ring-ring", Harold plays from the tap until it picks up, one whole 3 s cycle after another | "ringtone", "connecting tone", "tick" (the tick is the chief-thinking sound) |
 | pick-up | The short rising two-note sound that ends the ringback; the call is listening when it ends | "answer", "beep" |
 | metered | Harold's guess that the Mac is on the iPhone's Personal Hotspot, from the default gateway, which holds back a speech model download | "cellular", "expensive", "offline" |
-| timed prompt | Text Harold types into a pane at a set time each day | — |
+| timed prompt | Text Harold types into a pane at a set time each day, or at the minutes of a cron expression | — |
 | restart reminder | The one line Harold types into the chief's pane when its session is old or has compacted often, asking it to hand off and restart | "reminder" alone, for this or for a watch reminder |
+| cron expression | Five fields, minute hour day month weekday, that name the local minutes a schedule runs | "crontab" (there is no file), "cron job", "day-of-week" for the fifth field |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
 | dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |
 | photo | An image you attach to a web app reply, kept by Harold in `app-photos/` and named in the line typed to the chief | "attachment" alone, "image upload", "media" |

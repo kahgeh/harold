@@ -1548,14 +1548,14 @@ fn default_give_up_after_minutes() -> i64 {
 }
 
 /// One `[[timed_prompts]]` entry: a text Harold types into the pane of the agent running
-/// in `folder` at `at` each day. Every key defaults to empty when the entry is read, so
+/// in `folder` at `at` each day, or at each minute that `cron` matches. Every key defaults to empty when the entry is read, so
 /// `validate` reports a missing key by the entry's position like any other invalid value.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct TimedPromptSettings {
     /// Names the prompt in the log and in the stored record.
     #[serde(default)]
     pub name: String,
-    /// Local time of day, `HH:MM`.
+    /// Local time of day, `HH:MM`. Empty when `cron` is set.
     #[serde(default)]
     pub at: String,
     /// A five-field cron expression, used in place of `at`.
@@ -1567,7 +1567,7 @@ pub(crate) struct TimedPromptSettings {
     /// What is typed, followed by Enter.
     #[serde(default)]
     pub text: String,
-    /// How long after `at` the prompt stays due.
+    /// How long after `at`, or after the minute `cron` matched, the prompt stays due.
     #[serde(default = "default_give_up_after_minutes")]
     pub give_up_after_minutes: i64,
 }

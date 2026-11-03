@@ -404,6 +404,13 @@ fn the_machine_stats_fields_are_allowed() {
 }
 
 #[test]
+fn the_schedule_fields_are_allowed() {
+    for field in ["schedule", "late_s", "missed"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
 fn insert_pressed_is_an_allowed_field() {
     assert!(ALLOWED_FIELDS.contains(&"insert_pressed"));
 }

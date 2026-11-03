@@ -829,8 +829,6 @@ impl HaroldStore {
 
     /// The newest local minute (`YYYY-MM-DD HH:MM`) checked for each cron schedule, by
     /// prompt name.
-    // Task 4 uses this.
-    #[allow(dead_code)]
     pub(crate) async fn timed_prompt_checked_locals(
         &self,
     ) -> Result<std::collections::HashMap<String, String>> {
@@ -852,8 +850,6 @@ impl HaroldStore {
 
     /// Keep `value` (`YYYY-MM-DD HH:MM`) as the checked minute of the prompt `name`.
     /// An older value does not replace a newer one. The text order is the time order.
-    // Task 4 uses this.
-    #[allow(dead_code)]
     pub(crate) async fn set_timed_prompt_checked_local(
         &self,
         name: &str,

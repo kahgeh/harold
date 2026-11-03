@@ -1,7 +1,5 @@
 //! A five-field cron expression: minute, hour, day, month and weekday.
 //! All times are local minutes. This module does not read the clock.
-// Task 4 uses these items. Remove this allow when it lands.
-#![allow(dead_code)]
 
 use std::fmt;
 
@@ -53,6 +51,8 @@ pub(crate) enum CronError {
 
 impl CronError {
     /// The name of the field with the fault, or `cron` for the whole expression.
+    // The watch tool uses this in a later task.
+    #[allow(dead_code)]
     pub(crate) fn field(&self) -> &'static str {
         match self {
             CronError::TooLong
@@ -322,6 +322,8 @@ impl Cron {
         Ok(cron)
     }
 
+    // The watch tool uses this in a later task.
+    #[allow(dead_code)]
     pub(crate) fn source(&self) -> &str {
         &self.source
     }
@@ -354,6 +356,8 @@ impl Cron {
         self.hours & (1 << hour) != 0 && self.minutes & (1u64 << minute) != 0
     }
 
+    // The watch tool uses this in a later task.
+    #[allow(dead_code)]
     pub(crate) fn matches(&self, minute: LocalMinute) -> bool {
         self.day_matches(minute.year, minute.month, minute.day)
             && self.time_matches(minute.hour, minute.minute)
@@ -392,6 +396,8 @@ impl Cron {
 
     /// The smallest gap in minutes between two runs, or `None` if the schedule
     /// has fewer than two runs in 8 years.
+    // The watch tool uses this in a later task.
+    #[allow(dead_code)]
     pub(crate) fn min_gap_minutes(&self) -> Option<u32> {
         let times: Vec<u64> = (0..1440u64)
             .filter(|time| self.time_matches((*time / 60) as u32, (*time % 60) as u32))
@@ -498,11 +504,14 @@ impl LocalMinute {
     }
 
     /// 0 is Sunday.
+    // The watch tool uses this in a later task.
+    #[allow(dead_code)]
     pub(crate) fn weekday(self) -> u32 {
         weekday_of(self.year, self.month, self.day)
     }
 
-    fn total_minutes(self) -> i64 {
+    /// The minutes since 1970-01-01 00:00 by this local clock.
+    pub(crate) fn total_minutes(self) -> i64 {
         days_from_civil(self.year, self.month, self.day) * 1440
             + i64::from(self.hour * 60 + self.minute)
     }

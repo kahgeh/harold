@@ -405,6 +405,13 @@ The work tool logs its rotation. Harold logs `work rotation failed` once when a 
 
 The counter `harold.work.check.mismatches` has the attributes `record` (the work record's name) and `kind` (the mismatch rule).
 
+**Timed prompts.** These lines answer the question: did my schedule run when I expected? `late_s` gives how late the typing was. `missed` above 0 means a sleep or a restart came over more than one match. The prompt's `name` stays in `harold.log`. See the [timed prompts reference](../timed-prompts/README.md#log-lines).
+
+| Line | Fields |
+|---|---|
+| `timed prompt typed` (`info`) | `pane`, `late_s` (seconds after `at`, or after the minute the cron expression matched), `insert_pressed`, `schedule` (`at` or `cron`), `missed` (the count of older cron matches skipped before this one; 0 for `at`) |
+| `timed prompt skipped` (`warn`) | `reason`, `missed` (the count of cron matches that were not typed, the newest one included; 0 for `at`) |
+
 **Remote order unreadable.** The card "Remote order unreadable, by day" in the Pods group counts `remote order unreadable` lines (warn) for each day, with their `reason` values: `missing`, `malformed` or `unreadable`. It is a card, not an alert. A count above 0 in a day means: look at `remote-order.json` in Harold's data folder. Harold logs `remote order saved` (info, with `products`) at each change of the order. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-remote-order).
 
 **A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
