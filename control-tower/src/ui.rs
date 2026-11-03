@@ -16,13 +16,13 @@ use crate::questions::{
 };
 use crate::text::{HostMarker, display_work_summary, host_mark, sanitize_display};
 
-const BOARD: Color = Color::Rgb(20, 20, 16);
+pub(crate) const BOARD: Color = Color::Rgb(20, 20, 16);
 const PANEL: Color = Color::Rgb(25, 25, 21);
-const INK: Color = Color::Rgb(237, 231, 216);
-const MUTED: Color = Color::Rgb(143, 138, 127);
-const AMBER: Color = Color::Rgb(224, 174, 85);
+pub(crate) const INK: Color = Color::Rgb(237, 231, 216);
+pub(crate) const MUTED: Color = Color::Rgb(143, 138, 127);
+pub(crate) const AMBER: Color = Color::Rgb(224, 174, 85);
 const GREEN: Color = Color::Rgb(125, 200, 139);
-const CORAL: Color = Color::Rgb(224, 114, 98);
+pub(crate) const CORAL: Color = Color::Rgb(224, 114, 98);
 /// The face of a key-cap button: the call button with no call, and talk now.
 const KEY_CAP: Color = Color::Rgb(58, 58, 48);
 const MIN_WIDTH: u16 = 60;

@@ -1,15 +1,21 @@
 //! The remote control. Tasks 6 to 8 fill this module.
 //!
-//! This part is the model: the list of entries and the keys. It has no drawing
-//! and no I/O, so tests can check every rule.
+//! This part is the model (the list of entries and the keys) and the drawing.
+//! The model has no I/O, so tests can check every rule.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::api::AgentStateSource;
 use crate::app::AgentRow;
 use crate::cli::Options;
 use crate::navigation::TmuxNavigator;
 use crate::runtime::AppError;
+use crate::ui::{AMBER, BOARD, CORAL, INK, MUTED};
 
 /// One line of the remote control.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +202,70 @@ impl Model {
             _ => Action::None,
         }
     }
+}
+
+/// Draw the remote control in the whole area of the frame.
+///
+/// The Rex layer is already the small window, so the box fills the area. Text
+/// is cut at the width and never wraps.
+pub fn draw(frame: &mut Frame, model: &Model) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MUTED))
+        .title(Line::styled(
+            "\u{2500} Harold: remote control ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(BOARD));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let ink = Style::default().fg(INK);
+    let marked = Style::default().fg(AMBER).add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(MUTED);
+
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    for (index, entry) in model.entries.iter().enumerate() {
+        let selected = index == model.selected;
+        let mark = if selected { '\u{25b8}' } else { ' ' };
+        let style = if selected { marked } else { ink };
+        lines.push(Line::styled(
+            format!("{mark} {index}   {}", entry.label),
+            style,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  0-9 jump   j/k select   J/K move row",
+        muted,
+    ));
+    lines.push(match &model.notice {
+        Some(notice) => Line::styled(
+            format!("  {notice}"),
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        ),
+        None => Line::styled("  Enter jump   n next waiting   Esc close", muted),
+    });
+
+    // Draw the hint lines at the bottom of the box; the rows and the blank
+    // line above them are cut first when the area is short.
+    let hint_start = lines.len().saturating_sub(2);
+    let height = usize::from(inner.height);
+    let (body, hints) = lines.split_at(hint_start);
+    let hint_rows = hints.len().min(height);
+    let body_rows = height - hint_rows;
+    let body_area = Rect {
+        height: body_rows as u16,
+        ..inner
+    };
+    let hint_area = Rect {
+        y: inner.y + body_rows as u16,
+        height: hint_rows as u16,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(body.to_vec()), body_area);
+    frame.render_widget(Paragraph::new(hints.to_vec()), hint_area);
 }
 
 /// Run the remote control. It is a stub until Task 8.
@@ -529,5 +599,114 @@ mod tests {
         let mut release = ch('0');
         release.kind = KeyEventKind::Release;
         assert_eq!(m.key(release), Action::None);
+    }
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render(model: &Model, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, model)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn sample() -> Model {
+        let mut m = model(&["harold", "keymap", "buckwal"]);
+        m.selected = 1;
+        m
+    }
+
+    #[test]
+    fn draw_matches_the_mock_at_60_columns() {
+        let rows = render(&sample(), 60, 10);
+        let inner = |text: &str| format!("\u{2502}{text:<58}\u{2502}");
+        assert_eq!(rows[0].chars().count(), 60);
+        assert!(rows[0].starts_with("\u{250c}\u{2500} Harold: remote control \u{2500}"));
+        assert!(rows[0].ends_with('\u{2510}'));
+        assert_eq!(rows[1], inner(""));
+        assert_eq!(rows[2], inner("  0   Chief"));
+        assert_eq!(rows[3], inner("\u{25b8} 1   PnEM \u{b7} harold"));
+        assert_eq!(rows[4], inner("  2   PnEM \u{b7} keymap"));
+        assert_eq!(rows[5], inner("  3   PnEM \u{b7} buckwal"));
+        assert_eq!(rows[6], inner(""));
+        assert_eq!(rows[7], inner("  0-9 jump   j/k select   J/K move row"));
+        assert_eq!(rows[8], inner("  Enter jump   n next waiting   Esc close"));
+    }
+
+    #[test]
+    fn the_box_fills_a_taller_area() {
+        let rows = render(&sample(), 60, 12);
+        assert!(rows[11].starts_with('\u{2514}'));
+        assert!(rows[10].contains("Enter jump"));
+    }
+
+    #[test]
+    fn draw_works_at_40_and_80_columns() {
+        for width in [40u16, 80] {
+            let rows = render(&sample(), width, 12);
+            assert!(rows[0].contains("Harold: remote control"));
+            assert!(rows[3].contains("\u{25b8} 1   PnEM \u{b7} harold"));
+            assert!(rows.iter().all(|r| r.chars().count() == width as usize));
+        }
+    }
+
+    #[test]
+    fn only_the_selected_row_has_the_marker() {
+        let text = render(&sample(), 60, 12).join("\n");
+        assert_eq!(text.matches('\u{25b8}').count(), 1);
+    }
+
+    #[test]
+    fn a_row_shows_no_state_word() {
+        let text = render(&sample(), 60, 12).join("\n");
+        for word in ["idle", "working", "blocked"] {
+            assert!(!text.contains(word), "found {word}");
+        }
+    }
+
+    #[test]
+    fn the_notice_replaces_the_last_line() {
+        let mut m = sample();
+        m.notice = Some("jump failed: no pane".into());
+        let text = render(&m, 60, 12).join("\n");
+        assert!(text.contains("jump failed: no pane"));
+        assert!(!text.contains("Enter jump"));
+        assert!(text.contains("0-9 jump"));
+    }
+
+    #[test]
+    fn long_labels_are_cut_at_40_columns() {
+        let mut m = sample();
+        m.entries[1].label = "PnEM \u{b7} a-product-with-a-very-long-name-indeed".into();
+        let rows = render(&m, 40, 12);
+        assert!(rows.iter().all(|r| r.chars().count() == 40));
+        assert!(rows[3].starts_with("\u{2502}\u{25b8} 1   PnEM \u{b7} a-product"));
+        assert!(rows[3].ends_with('\u{2502}'));
+        assert!(!rows.join("\n").contains("indeed"));
+        assert_eq!(rows[8].chars().count(), 40);
+    }
+
+    #[test]
+    fn an_empty_list_draws_no_rows_and_the_hint() {
+        let m = Model::new(Vec::new());
+        let rows = render(&m, 60, 9);
+        assert_eq!(rows[2], format!("\u{2502}{:<58}\u{2502}", ""));
+        let text = rows.join("\n");
+        assert!(text.contains("0-9 jump"));
+        assert!(text.contains("Esc close"));
+    }
+
+    #[test]
+    fn a_very_small_area_does_not_panic() {
+        for (w, h) in [(20, 5), (1, 1), (3, 2), (40, 3), (0, 0)] {
+            let _ = render(&sample(), w, h);
+        }
     }
 }
