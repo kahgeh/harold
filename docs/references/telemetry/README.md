@@ -461,7 +461,7 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 
 | Line | Fields |
 |---|---|
-| `agent event` (`info`) | `agent.name` (the signal's name, such as `harold.release.attempts`), `agent.attr.<key>` for each declared attribute |
+| `agent event` (`info`) | `agent.name` (the signal's name, such as `harold.release.attempts`), `agent.attr.<key>` for each declared attribute. The line goes to the collector only, not to `harold.log` |
 | `telemetry call refused` (`info`) | `prefix`, `kind`, `reason` |
 
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
@@ -739,6 +739,9 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Agents and multiplexer | Recap reads, found and none, by day | `harold.agent.recap_read` with `result` `found` or `none` | SQL: the counter rule. Shows how often Harold finds a recap in a transcript |
 | Agents and multiplexer | Slow inventory scans against load, by hour | the `agent inventory scan slow` lines for each hour, beside the hour's mean `system.cpu.load_average.1m`, one series for each machine | SQL over `otel.otel_logs` and the gauge table. Shows whether slow inventory scans follow the load of the Mac. After the scan pool, an hour under load 30 with more than 20 slow scans needs a look: read `rex_ms` and `ps_ms` on each line, and `harold.multiplexer.call.duration` by `operation` for the same hour. Info, not an alert |
 | Agents and multiplexer | Unreadable blocks, last 24 h, by pane | the `agent pane unreadable` lines of the last 24 hours, with `pane_id` and `reason` | SQL over `otel.otel_logs`. The card has a fixed 24-hour range and ignores the dashboard range. It counts the lines for each pane, whatever the reason, and lists the reasons in a column. A pane with more than one line in a day needs a look. Info, not an alert |
+| Agent signals | Agent signals: calls and refusals | `harold.telemetry.calls` with `outcome` not `ok`, as a rise over the last 24 hours | SQL: the counter rule, one number tile with no earlier tile. Above 10 in a day is an info note: a script uses a wrong prefix or loops. The `telemetry call refused` line gives the `prefix`, `kind` and `reason`. See the [telemetry tool](../tools/telemetry.md) |
+
+The group "Agent signals" holds one number tile, "Agent signals: calls and refusals". The named queries for agent counters are in [`queries/`](queries/README.md).
 
 The page collection counter `harold.web_app.collection_pages` has no card yet. The card "Web app errors per day" reads `browser.error` spans, and it does not read this counter. To see `refused` and `unreadable`, query the counter in HyperDX by `collection` and `result`, or read the `app page shown` lines. More than 0 of either in a day means look.
 

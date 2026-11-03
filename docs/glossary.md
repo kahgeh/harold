@@ -316,6 +316,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | slice | One spec that a work record links to. A work record split into three specs has three slices | "stage" (a stage is a part of a spec, as in linux-satellite stage 2b) |
 | phase (of a lead time) | A named part of a lead time. For a spec (`pod.spec.lead_time`): `open_to_approved`, `approved_to_started`, `started_to_completed`. For a work record (`harold.work.lead_time`): `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check` and `whole` | "stage" |
 | rotation | Harold's move of the open work records to a new work file every `rotation_days` days | "archive" for the move |
+| agent signal | A counter, gauge or event that a pane records with `harold tool telemetry`, exported as `agent.<name>`. It is not an agent's state | "custom metric" |
+| agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
+| signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
+| named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
 
 ## Storing and delivering
 

@@ -53,6 +53,11 @@
       "id": "work",
       "title": "Work records",
       "collapsed": false
+    },
+    {
+      "id": "agent-signals",
+      "title": "Agent signals",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -1356,6 +1361,22 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(TimeUnix) AS day, Attributes['kind'] AS kind, sum(rise) AS mismatches FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.work.check.mismatches') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY day, kind HAVING mismatches > 0 ORDER BY day DESC, kind"
+      }
+    },
+    {
+      "id": "agent-signals-calls-and-refusals",
+      "name": "Agent signals: calls and refusals",
+      "x": 0,
+      "y": 88,
+      "w": 3,
+      "h": 3,
+      "containerId": "agent-signals",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT sum(rise) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName = 'harold.telemetry.calls' AND Attributes['outcome'] != 'ok' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() AND $__filters)) WHERE TimeUnix >= now() - INTERVAL 1 DAY"
       }
     }
   ]

@@ -2471,6 +2471,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         ])
         .chain(AGENT_CARDS.map(str::to_string))
         .chain(WORK_CARDS.map(str::to_string))
+        .chain(["Agent signals: calls and refusals".to_string()])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2490,6 +2491,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
     assert_eq!(
         groups,
         [
+            "Agent signals",
             "Agents and multiplexer",
             "Knowledge index",
             "Notifications (leave the product filter empty)",
