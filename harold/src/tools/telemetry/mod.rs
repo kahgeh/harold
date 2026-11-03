@@ -5,6 +5,10 @@
 // Nothing outside the tests uses these modules until the service is added.
 #![allow(dead_code)]
 
+pub(crate) mod guard;
 pub(crate) mod name;
 pub(crate) mod schema;
 pub(crate) mod store;
+
+#[cfg(test)]
+mod test_support;

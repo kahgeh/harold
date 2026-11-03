@@ -8,6 +8,8 @@ pub(crate) const MAX_NAME: usize = 64;
 pub(crate) const MAX_SERIES: u64 = 100;
 /// The most attribute keys for a name.
 pub(crate) const MAX_KEYS: usize = 3;
+/// The most writes for one prefix in a sliding minute.
+pub(crate) const WRITES_PER_MINUTE: u64 = 60;
 /// The most characters in a meaning.
 pub(crate) const MAX_MEANING: usize = 80;
 /// The most names for one prefix.
@@ -153,7 +155,7 @@ impl Refused {
                 format!("{name} is not declared: declare it first")
             }
             Refused::RateLimited { prefix } => {
-                format!("{prefix}. wrote 60 times this minute: wait")
+                format!("{prefix}. wrote {WRITES_PER_MINUTE} times this minute: wait")
             }
             Refused::MeaningTooLong { length } => {
                 format!("the meaning has {length} characters: the most is {MAX_MEANING}")
