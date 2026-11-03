@@ -380,7 +380,9 @@ impl Scheduler {
             let capped = live
                 .iter()
                 .any(|row| is_capped(row) && row.paused_until_ms.is_some_and(|at| at > now));
-            if spent >= daily || stopped || capped {
+            // The first run must fit in what is left of the day, as the run's own check needs.
+            let first_run = checked.run_budget_usd_micros.unwrap_or(0);
+            if spent >= daily || spent + first_run > daily || stopped || capped {
                 return Err(StartRefusal::DailyBudgetSpent);
             }
         }

@@ -873,3 +873,47 @@ fn reminder_cron_with_in_or_at_cannot_be_asked() {
     assert_eq!(checked.in_minutes, None);
     assert!(checked.cron.is_some());
 }
+
+fn with_daily_budget(
+    daily: Option<f64>,
+    configured: Option<f64>,
+    asked: f64,
+) -> Result<Checked, Refusal> {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let cfg = WatchSettings {
+        daily_budget_usd: daily,
+        run_budget_usd: configured,
+        ..WatchSettings::default()
+    };
+    let mut request = request(&temp.0);
+    request.run_budget_usd = asked;
+    check_start(&request, &cfg)
+}
+
+#[test]
+fn a_run_budget_above_the_daily_budget_is_refused() {
+    assert_eq!(
+        with_daily_budget(Some(1.0), None, 2.0).map(|_| ()),
+        Err(Refusal::RunBudgetAboveDaily(1.0))
+    );
+}
+
+#[test]
+fn a_run_budget_equal_to_the_daily_budget_is_accepted() {
+    let checked = with_daily_budget(Some(1.0), None, 1.0).unwrap();
+    assert_eq!(checked.run_budget_usd_micros, Some(1_000_000));
+}
+
+#[test]
+fn no_daily_budget_means_no_check() {
+    let checked = with_daily_budget(None, None, 2.0).unwrap();
+    assert_eq!(checked.run_budget_usd_micros, Some(2_000_000));
+}
+
+#[test]
+fn a_configured_run_budget_above_the_daily_budget_is_refused() {
+    assert_eq!(
+        with_daily_budget(Some(1.0), Some(2.0), 0.0).map(|_| ()),
+        Err(Refusal::RunBudgetAboveDaily(1.0))
+    );
+}

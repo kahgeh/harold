@@ -1102,9 +1102,10 @@ async fn a_budget_stop_survives_a_restart_for_that_day_only() {
     .await;
     start_just_after_midnight().await;
     let mut first = h.checked("a", 10, 120);
-    first.run_budget_usd_micros = Some(60_000);
+    first.run_budget_usd_micros = Some(50_000);
     h.scheduler.start(first).await.unwrap();
-    pass(Duration::from_secs(30)).await;
+    // The first run spends $0.03. The second run could pass $0.05, so the watch stops.
+    pass(Duration::from_secs(11 * 60)).await;
     assert_eq!(
         h.row("a").await.stop_reason.as_deref(),
         Some("daily_budget_spent")
@@ -1240,17 +1241,49 @@ impl Harness {
             .unwrap();
     }
 
-    /// Starts an open-ended watch whose run budget is over the daily budget: the budget
-    /// check pauses it before its first run.
+    /// Puts an open-ended watch in the store and spawns it, with a run budget over the
+    /// daily budget: the budget check pauses it before its first run. `start` refuses
+    /// such a budget now, so this stands for a watch that an older version stored.
     async fn start_capped(&self, name: &str) {
-        let mut checked = self.open(name, 10);
-        checked.run_budget_usd_micros = Some(600_000);
-        self.scheduler.start(checked).await.unwrap();
+        let checked = self.open(name, 10);
+        let now = clock_ms();
+        let watch = NewWatch {
+            name: name.into(),
+            folder: checked.folder.to_string_lossy().into_owned(),
+            skill: checked.skill.clone(),
+            report_to: checked.report_to.as_str().to_owned(),
+            every_minutes: checked.every_minutes,
+            every_run: false,
+            run_budget_usd_micros: Some(600_000),
+            run_limit_secs: checked.run_limit_secs,
+            started_at_ms: now,
+            ends_at_ms: None,
+            next_run_at_ms: now,
+            cron: None,
+        };
+        self.store.put_watch(&watch).await.unwrap();
+        let row = self.row(name).await;
+        self.scheduler.spawn_watch(&row, How::Started).await;
         pass(Duration::from_secs(5)).await;
         assert_eq!(
             self.row(name).await.pause_how.as_deref(),
             Some("budget_day")
         );
+    }
+
+    /// Records `micros` of spend today, as a run of a watch that is gone.
+    async fn spend_today(&self, micros: i64) {
+        let record = RunRecord {
+            started_at_ms: clock_ms(),
+            outcome: "quiet".into(),
+            cost_usd_micros: Some(micros),
+            streak: Streak::Worked,
+            next_run_at_ms: NO_RUN_DUE,
+        };
+        self.store
+            .record_orphan_run("spent", "/x", 1, &record)
+            .await
+            .unwrap();
     }
 }
 
@@ -1327,10 +1360,8 @@ async fn a_spent_budget_stops_a_watch_with_an_end_and_pauses_an_open_ended_one_u
     h.scheduler.start(ending).await.unwrap();
     pass(Duration::from_secs(5)).await;
     assert_eq!(h.runner.calls(), 1, "a spent $0.60");
-    let mut open = h.open("pods", 10);
-    open.run_budget_usd_micros = Some(600_000);
-    h.scheduler.start(open).await.unwrap();
-    pass(Duration::from_secs(5)).await;
+    // `start` refuses a $0.60 run budget now, so pods is stored as an older version did.
+    h.start_capped("pods").await;
 
     // pods' run could pass $1.00: a stops, pods pauses until the next day.
     let mut typed = h.typing.typed();
@@ -2569,4 +2600,37 @@ async fn a_stored_cron_that_does_not_parse_is_logged_and_runs_nothing() {
     assert!(lines[0].contains("reason=\"bad_cron\""), "{}", lines[0]);
     assert!(!lines[0].contains("not a cron"), "the expression stays out");
     assert!(lines.len() <= 16, "at most once a minute: {}", lines.len());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_of_a_capped_watch_is_refused_when_its_first_run_would_cap_it_again() {
+    let h = harness(with_daily(1.0), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.spend_today(600_000).await;
+    let mut again = h.open("pods", 10);
+    again.run_budget_usd_micros = Some(500_000);
+    assert_eq!(
+        h.scheduler.start(again).await,
+        Err(StartRefusal::DailyBudgetSpent)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_with_room_starts() {
+    let h = harness(with_daily(1.0), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.spend_today(400_000).await;
+    let mut again = h.open("pods", 10);
+    again.run_budget_usd_micros = Some(500_000);
+    assert!(h.scheduler.start(again).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn spend_plus_run_budget_equal_to_daily_starts() {
+    let h = harness(with_daily(1.0), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
+    h.spend_today(500_000).await;
+    let mut again = h.open("pods", 10);
+    again.run_budget_usd_micros = Some(500_000);
+    assert!(h.scheduler.start(again).await.is_ok());
 }

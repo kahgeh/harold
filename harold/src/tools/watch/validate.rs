@@ -62,12 +62,14 @@ pub(super) struct Checked {
     pub run_limit_secs: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum Refusal {
     /// The field named in `invalid <field>`.
     Invalid(&'static str),
     /// `run_limit_secs` is above `[watch] max_run_limit_secs`, which is the value.
     RunLimitAboveMax(u32),
+    /// The run budget is above `[watch] daily_budget_usd`, which is the value in dollars.
+    RunBudgetAboveDaily(f64),
     UnknownSkill,
     /// `start` gave both `every_minutes` and `cron`, or neither.
     EveryOrCron,
@@ -367,7 +369,9 @@ fn run_limit(asked: u32, cfg: &WatchSettings) -> Result<u32, Refusal> {
 fn run_budget(asked: f64, cfg: &WatchSettings) -> Result<Option<i64>, Refusal> {
     const INVALID: Refusal = Refusal::Invalid("run_budget_usd");
     if asked == 0.0 {
-        return Ok(cfg.run_budget_usd.map(to_micros));
+        let configured = cfg.run_budget_usd.map(to_micros);
+        above_daily(configured, cfg)?;
+        return Ok(configured);
     }
     if !asked.is_finite() || asked < 0.0 {
         return Err(INVALID);
@@ -380,7 +384,19 @@ fn run_budget(asked: f64, cfg: &WatchSettings) -> Result<Option<i64>, Refusal> {
     {
         return Err(INVALID);
     }
+    above_daily(Some(micros), cfg)?;
     Ok(Some(micros))
+}
+
+/// Refuses a run budget that is above `[watch] daily_budget_usd`. A run budget equal to
+/// the daily budget is accepted.
+fn above_daily(budget_micros: Option<i64>, cfg: &WatchSettings) -> Result<(), Refusal> {
+    match (budget_micros, cfg.daily_budget_usd) {
+        (Some(budget), Some(daily)) if budget > to_micros(daily) => {
+            Err(Refusal::RunBudgetAboveDaily(daily))
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(super) fn to_micros(usd: f64) -> i64 {

@@ -39,6 +39,9 @@ fn invalid_status(refusal: Refusal) -> Status {
         Refusal::RunLimitAboveMax(max) => Status::invalid_argument(format!(
             "run_limit_secs is above [watch] max_run_limit_secs ({max})"
         )),
+        Refusal::RunBudgetAboveDaily(daily) => Status::invalid_argument(format!(
+            "run_budget_usd is above [watch] daily_budget_usd ({daily:.2})"
+        )),
         Refusal::UnknownSkill => Status::not_found("unknown_skill"),
         Refusal::EveryOrCron => {
             Status::invalid_argument("give exactly one of every_minutes and cron")

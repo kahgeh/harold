@@ -159,6 +159,20 @@ async fn start_refuses_with_the_codes_and_messages_the_proto_names() {
         (invalid, "invalid run_budget_usd".into())
     );
     let mut asked = request(&h, "w");
+    asked.run_budget_usd = 2.0;
+    let capped = crate::settings::WatchSettings {
+        daily_budget_usd: Some(1.0),
+        ..settings()
+    };
+    let capped_service = WatchToolService::new(Arc::clone(&h.scheduler), capped);
+    assert_eq!(
+        refusal(&capped_service, asked).await,
+        (
+            invalid,
+            "run_budget_usd is above [watch] daily_budget_usd (1.00)".into()
+        )
+    );
+    let mut asked = request(&h, "w");
     asked.skill = "nope".into();
     assert_eq!(
         refusal(&service, asked).await,
