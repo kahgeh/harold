@@ -380,8 +380,8 @@ Transport and agent monitor health describe different system-level conditions:
 
 Rows are grouped by project (the first word of the tmux session name) and
 ordered by name (the last component of the working directory), then window and pane
-number; state never changes a row's position. Each row shows the name (the
-window and pane number, such as `:1.2`, is added only when two names in a group collide, and a long name is
+number; state never changes a row's position. Each row shows its text (its
+role, else its window name, else its folder, else its pane label; the `:window.pane` suffix, such as `:1.2`, is added only when two rows in a group show the same text, and a long text is
 truncated before that number, never the number itself; panes of different
 sessions in one group are told apart by the session's second word, or the full
 `session:window.pane` name), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the

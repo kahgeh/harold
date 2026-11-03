@@ -509,7 +509,7 @@ impl App {
     }
 
     /// The row label split into its name and the disambiguating suffix (empty
-    /// unless the name collides). Renderers truncate the name, never the suffix.
+    /// unless the shown text collides). Renderers truncate the name, never the suffix.
     pub fn label_parts<'a>(&'a self, row: &'a AgentRow) -> (&'a str, &'a str) {
         self.row_label(row).map_or_else(
             || (row.shown_name(), ""),
