@@ -1,8 +1,47 @@
-# The Rex calls of the remote control
+# The remote control: calls, order file and Rex calls
 
 The remote control (`control-tower --remote`) runs in a floating Rex layer. Before it exits, it closes its own layer. This page records the two Rex API calls that it uses for that, as the installed Rex describes them.
 
 The names and parameters come from `rex api describe session.view` and `rex api describe session.close_layer` on 2026-11-03. The sample below is a shortened `rex api call session.view` result from a real session on that day.
+
+## The Harold calls
+
+Two calls on the `Harold` service serve the remote. Both are bound to loopback, like every other call. They follow ADR 0002: the tool services trust local callers.
+
+| Call | Input | Result | Note |
+| --- | --- | --- | --- |
+| `GetRemoteOrder` | none | The product names in the remote order. | Read only. |
+| `SetRemoteOrder` | `products`: the product names in the new order | An empty reply. | Not read only. It writes `remote-order.json`. |
+
+`AgentPaneState` has two fields for the remote: `role` (21) and `pod_product` (22). `role` is `chief`, `coordinator` or `pnem`, and it is empty for any other agent. `pod_product` is the product whose pod holds the pane, and it is empty for any other agent. The roles of the pod panes come from the `agent-panes` file of each product, which also feeds the pod metrics. On `pod.agents`, the role of the Coordinator stays `pod_coordination`.
+
+## The remote order
+
+Harold keeps the order in `remote-order.json` in its data folder, beside `restart-reminder.json`. The file has the file mode 0600. It holds the product names, as a JSON array. Harold writes the file at each `SetRemoteOrder`.
+
+`GetRemoteOrder` builds the order from the file and the pod registry each time:
+
+1. The products of the file that are in the registry come first, in the order of the file.
+2. A product that is not in the file joins at the end. The new products follow the registry's own order, which is alphabetical by product name (`read_registry`). It is not the order of the lines in `products.toml`.
+3. A product that is no longer in the registry drops out.
+
+The chief is not in the file. The chief is always 0.
+
+Two log lines show the state of the file:
+
+| Log line | Level | Field | Meaning |
+| --- | --- | --- | --- |
+| `remote order saved` | info | `products`: the number of products saved | `SetRemoteOrder` wrote the file. |
+| `remote order unreadable` | warn | `reason`: `missing`, `malformed` or `unreadable` | Harold could not read the file. It uses the registry order, and the next change writes a good file. |
+
+The Harold dashboard has a card, "Remote order unreadable, by day". It counts `remote order unreadable` lines for each day. It is for information and is not an alert. A count above 0 means: look at the file, and use `reason` to find the cause.
+
+## Limits of the remote
+
+- `n` finds only the agents that finish while the remote is open. Each control-tower program keeps its `◆` marks in memory, and the remote starts with none. Just after the remote opens, `n` usually shows `no waiting agent`.
+- The remote does not reconnect when Harold is down.
+- The remote never closes a tiled block. Closing a layer needs Rex v0.72.0 or later.
+- The key that opens the remote is the job of the keymap pod.
 
 ## How the remote finds and closes its layer
 

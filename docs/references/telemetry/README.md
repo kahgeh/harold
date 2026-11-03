@@ -387,6 +387,8 @@ These agent monitor lines carry the fields below:
 
 **Rex reads slow.** The card "Rex reads slow, by day" in the Pods group counts `agent inventory scan slow` lines with `rex_ms` and `agent screen read slow` lines for each day. It is a card, not an alert. A day with more than 20 needs a look. `scrollback_bytes` on the screen line shows whether a long scrollback caused the slow read.
 
+**Remote order unreadable.** The card "Remote order unreadable, by day" in the Pods group counts `remote order unreadable` lines (warn) for each day, with their `reason` values: `missing`, `malformed` or `unreadable`. It is a card, not an alert. A count above 0 in a day means: look at `remote-order.json` in Harold's data folder. Harold logs `remote order saved` (info, with `products`) at each change of the order. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-remote-order).
+
 **A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
 
 ```

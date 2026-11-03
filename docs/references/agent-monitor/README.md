@@ -232,6 +232,8 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 | `GetHaroldState` | Empty request | Unary and read-only; responds with the Harold state in `GetHaroldStateResponse`. See [GetHaroldState](#getharoldstate). An older Harold answers `Unimplemented`. |
+| `GetRemoteOrder` | Empty request | Unary and read-only; responds with the product names in the remote order. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-harold-calls). |
+| `SetRemoteOrder` | `products = 1` | Unary; saves the product names as the new remote order in `remote-order.json`. It is not read-only. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-harold-calls). |
 
 `AgentStateSnapshot.tts_muted` is a plain proto3 `bool`. Proto3 does not write a `false` scalar on the wire, so a client such as `grpcurl` omits it unless it uses `-emit-defaults`. An absent `tts_muted` means `false`: the voice mute is off. To read the voice mute without this rule, run `harold get voice`. It calls `GetHaroldState`, which always writes both flags.
 
@@ -294,6 +296,10 @@ The two flags are `optional`, so Harold writes them on the wire also when they a
 | `host` | 18 | `string`: the Rex host label, empty for this Mac |
 | `host_icon` | 19 | `string`: the host's mark name, empty for this Mac and for a host with no icon |
 | `window_name` | 20 | `string`: the name of the window that holds the pane, empty when the window has no name |
+| `role` | 21 | `string`: `chief`, `coordinator` or `pnem`, empty for any other agent |
+| `pod_product` | 22 | `string`: the product whose pod holds the pane, empty for any other agent |
+
+`role` and `pod_product` come from the chief lookup and from each product's `agent-panes` file, and they are in memory only. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-harold-calls). An older control-tower skips both fields.
 
 `window_name` comes from the `label` of the window in Rex's `session.view` (not the label of a pane), or from the tmux format field `#{window_name}`. It is in memory only: no event and no schema holds it. An older control-tower skips the field.
 

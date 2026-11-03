@@ -1034,6 +1034,22 @@
       }
     },
     {
+      "id": "remote-order-unreadable-by-day",
+      "name": "Remote order unreadable, by day",
+      "x": 12,
+      "y": 6,
+      "w": 12,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS unreadable, arrayStringConcat(groupUniqArray(LogAttributes['reason']), ', ') AS reasons FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'remote order unreadable' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
       "id": "agents-by-state",
       "name": "Agents by state",
       "x": 0,

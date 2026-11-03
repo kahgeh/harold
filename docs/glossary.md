@@ -55,7 +55,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | merged file | The file `merged/<id>.md` in a pod folder, which pod coordination writes when it sends `MERGED` for a spec's last stage | — |
 | direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
-| pod coordination | A pod's session that starts build workers and merges their work. `role` = `pod_coordination` on `pod.agents` names it | "coordinator", "baton" for the session, "orchestrator" |
+| pod coordination | A pod's session that starts build workers and merges their work. The control-tower names its row Coordinator. `role` = `pod_coordination` on `pod.agents` names it | "baton" for the session, "orchestrator" |
 | browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |
 | collector | The OpenTelemetry collector at `http://localhost:4317` and `http://localhost:4318`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC on 4317, and browser spans, which Harold forwards, as OTLP JSON on 4318, and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
 | local stack | The services in `~/code/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |
@@ -197,6 +197,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Now line | The dim `NOW` line under the masthead with the chief's Now item | — |
 | detail panel | The panel beside the agent list, on a wide terminal, about the agent under the cursor | — |
 | held keys | Keys the control-tower ignores after a question changed under a note, until Esc | "held" alone |
+| remote control | The small numbered list that one key opens over your Rex window: the chief as 0 and each running PnEM after it, in your order. A digit jumps there. `harold start-control-tower --remote` starts it, and its title is `Harold: remote control`. Here "remote" means a control at a distance. It never means an agent on a Rex host | "switcher", "picker" |
+| remote order | The order of the PnEMs in the remote control, which you set with `J` and `K` and Harold keeps. The flag `--remote`, the calls `GetRemoteOrder` and `SetRemoteOrder`, and the file `remote-order.json` use "remote" in the same sense, never for a Rex host | "harpoon list" |
 
 ## Questions
 
@@ -318,7 +320,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 
 ## Not yet consistent
 
-Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "coordinator", "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
+Each place in code, log lines, setting names, proto names and tests that uses a word this glossary says not to use, found with a search for each such word (`git grep -i`, leaving out docs). This change renames none of them; each is for a later change, which removes its entry. A search for the other "Not to use" words ("TUI", "main agent", "kill switch", "poller", "completion notification", "delivery worker", "away app", "pane address") found no use in code. `sqlite3` in `harold/src/channels/imessage.rs` is the macOS command that reads Apple's `chat.db`, not Harold's state database, so it stays.
 
 - `tmux_target` holds the pane label, for tmux and Rex. "Target" is a word the pane entry says not to use. It would become: `pane_label`. Where: `harold/src/agent/domain.rs`, `store.rs`, `store/migrations/001_initial.sql`, `harold-api/proto/harold.proto`, `inbound/tmux.rs`, `outbound/left_out.rs`, `agent/runtime.rs`, `voice_input/answerer.rs`, `tools/watch/facts.rs`, `main.rs` and their tests.
 - `tmux_ms` in `agent inventory scan slow` is the time of the tmux listing, and `rex_ms` is its Rex twin. The pair would read better as one `listing_ms` with a `multiplexer` field. Where: `harold/src/agent/inventory.rs`, `harold/src/telemetry.rs` (`ALLOWED_FIELDS`), `docs/references/telemetry/README.md`.

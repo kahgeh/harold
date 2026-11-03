@@ -58,7 +58,8 @@ Select a different endpoint explicitly:
 cargo run -- --endpoint http://127.0.0.1:6000
 ```
 
-The command accepts the optional `--remote`, `--endpoint` and `--host-marker` arguments, each one time. The `--remote` flag takes no value. It starts the remote switcher. The
+The command accepts the optional `--remote`, `--endpoint` and `--host-marker` arguments, each one time. The `--remote` flag takes no value. It starts the remote control. See
+[The remote control](#the-remote-control). The
 `--endpoint` value must be an absolute `http://` URI with an authority. There is no
 environment-variable or configuration-file override.
 
@@ -68,6 +69,46 @@ The `--host-marker` value is `glyph` (the default), `emoji` or `text`. Harold pa
 The loopback default is the intended local security boundary. An explicitly
 configured non-loopback endpoint is accepted, but transport authentication is
 outside this MVP; use a trusted deployment boundary for remote connections.
+
+## Row names
+
+A row of an agent with a role shows the role in place of the folder name: `Chief`,
+`Coordinator` or `PnEM`. A row of any other agent keeps its folder name. Harold sends the
+role in the `role` field of each row, and the product of the pod in the `pod_product`
+field. The group is still the first word of the session name. The harold pod shows the group
+`harold`, with the rows `Coordinator` and `PnEM` under it.
+
+## The remote control
+
+`harold start-control-tower --remote` starts the remote control. It is a small numbered list
+for a floating Rex layer. One key in Rex opens the layer and runs this command. The key
+itself is the job of the keymap pod, and this program does not set it.
+
+The list shows the chief as 0 and each running PnEM after it. A row shows the number, the
+role and the product. It shows no state word. When Harold finds no chief, the first listed
+entry is 0. The remote reads the same `WatchAgentStates` stream as the control-tower.
+
+| Key | Action |
+| --- | --- |
+| A digit | Jump to the entry with that number, and close the remote. |
+| Enter | Jump to the selected entry, and close the remote. |
+| `j` / `k` | Select the next or the previous entry. |
+| `J` / `K` | Move the selected PnEM down or up, and save the new order. The chief never moves. |
+| `n` | Jump to the next waiting entry, and close the remote. |
+| Esc, Ctrl+C | Close the remote with no jump. |
+
+Harold keeps the order in `remote-order.json`. See the
+[remote control reference](../docs/references/control-tower/remote-control-rex-calls.md#the-remote-order).
+A failed jump shows on the last line of the remote, with the step that failed.
+
+Limits:
+
+- `n` finds only the agents that finish while the remote is open. The `◆` marks are kept
+  in memory by each control-tower program, and the remote starts with none. Just after the
+  remote opens, `n` usually shows `no waiting agent`.
+- The remote does not reconnect. When Harold is down, the remote stays down.
+- Before it exits, the remote closes its own floating layer. Closing needs Rex v0.72.0 or
+  later. The remote never closes a tiled block.
 
 ## Agents on other Rex hosts
 
