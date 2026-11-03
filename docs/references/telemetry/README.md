@@ -600,6 +600,8 @@ A reminder also writes the lines of its report slot: `watch report waiting`, `wa
 
 | Field | Meaning |
 |---|---|
+| `cache_read_tokens` | The cache-read tokens of one turn |
+| `cache_write_tokens` | The cache-write tokens of one turn |
 | `reminder` | The name of a reminder. A short name the user or an agent chose, never the text |
 | `paused_until` | The local time a pause ends, as `YYYY-MM-DD HH:MM` |
 | `how` | On `watch paused` and `watch resumed`: `cli`, `control_tower`, `timed` or `budget_day`. On `watch started`: `started`, `replaced` or `resumed` |
