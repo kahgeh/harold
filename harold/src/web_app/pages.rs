@@ -428,6 +428,31 @@ fn is_spec_page(request: &Request) -> bool {
     request.method() == axum::http::Method::GET && request.uri().path().starts_with("/specs/")
 }
 
+/// True when the percent-decoded path part ends in `.md`, in any case. A part that does not
+/// decode to UTF-8 is not Markdown, as the handler refuses it.
+fn decoded_ends_with_md(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+            && let Some(byte) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).is_ok_and(|text| text.to_ascii_lowercase().ends_with(".md"))
+}
+
 /// The policy for a `GET` of a collection path: `/c/{a}/{b}/raw` gets the page policy,
 /// `/c/{a}/{b}` of an `.md` file the spec pages' policy, and any other file the shell policy.
 /// None for every other path.
@@ -439,9 +464,7 @@ fn collection_policy(request: &Request) -> Option<&'static str> {
     let parts: Vec<&str> = rest.split('/').collect();
     match parts.as_slice() {
         [_, _, "raw"] => Some(COLLECTION_PAGE_CONTENT_SECURITY_POLICY),
-        [_, file] if file.to_ascii_lowercase().ends_with(".md") => {
-            Some(SPEC_CONTENT_SECURITY_POLICY)
-        }
+        [_, file] if decoded_ends_with_md(file) => Some(SPEC_CONTENT_SECURITY_POLICY),
         [_, _] => Some(COLLECTION_SHELL_CONTENT_SECURITY_POLICY),
         _ => None,
     }

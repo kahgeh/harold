@@ -656,11 +656,20 @@ struct SpecsListener {
     addr: std::net::SocketAddr,
 }
 
+/// True when the specs listener opens: a pod registry is set or a collection is configured.
+fn specs_listener_wanted(
+    pod_registry: Option<&Path>,
+    collections: &collections::Collections,
+) -> bool {
+    pod_registry.is_some() || !collections.names().is_empty()
+}
+
 /// Binds `[web_app] specs_listen` and serves the spec pages there until shutdown. None, with a
 /// warning, when it cannot bind: the web app then runs without the specs listener.
 async fn start_specs_listener(
     settings: &WebAppSettings,
     specs: Arc<specs::Specs>,
+    collections: Arc<collections::Collections>,
     identity: Arc<WebAppIdentity>,
     shutdown: watch::Receiver<()>,
 ) -> Option<SpecsListener> {
@@ -679,6 +688,7 @@ async fn start_specs_listener(
     let router = specs::specs_router(specs::SpecsState {
         specs,
         identity,
+        collections,
         hosts: Arc::from(specs::listener_hosts(settings.specs_listen(), bound)),
     });
     let mut shutdown = shutdown;
@@ -767,18 +777,19 @@ pub(crate) async fn start(
     let route: Arc<dyn AppRoute> =
         Arc::new(WebAppRoute::new(Arc::clone(&store), pusher).with_pages(Arc::clone(&state.pages)));
 
-    // The spec pages are shown on the Mac only with a pod registry.
-    let specs_listener = match agents.pod_registry {
-        Some(_) => {
-            start_specs_listener(
-                settings,
-                Arc::clone(&state.specs),
-                Arc::clone(&state.identity),
-                shutdown.clone(),
-            )
-            .await
-        }
-        None => None,
+    // The listener opens with a pod registry or with at least one collection. Without a
+    // registry, its `/specs` routes answer an empty list.
+    let specs_listener = if specs_listener_wanted(agents.pod_registry, &state.collections) {
+        start_specs_listener(
+            settings,
+            Arc::clone(&state.specs),
+            Arc::clone(&state.collections),
+            Arc::clone(&state.identity),
+            shutdown.clone(),
+        )
+        .await
+    } else {
+        None
     };
     let specs_addr = specs_listener.as_ref().map(|listener| listener.addr);
     let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));

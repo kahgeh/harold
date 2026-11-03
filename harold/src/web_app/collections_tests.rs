@@ -526,6 +526,15 @@ mod pages {
         collections: Vec<crate::settings::CollectionSettings>,
         notes_on: bool,
     ) -> Served {
+        serve_with(collections, notes_on, false).await
+    }
+
+    /// The web app; with `paired` the device check is on and no device is paired.
+    async fn serve_with(
+        collections: Vec<crate::settings::CollectionSettings>,
+        notes_on: bool,
+        paired: bool,
+    ) -> Served {
         crate::telemetry::test_support::install();
         let store_dir = Folder::new();
         let store = Arc::new(
@@ -546,6 +555,16 @@ mod pages {
             WebAppIdentity::default(),
         );
         state.collections = Arc::new(Collections::new(collections));
+        if paired {
+            let pairing = crate::web_app::pair::Pairing::load(
+                store_dir.root.join("devices.json"),
+                store_dir.root.join("pairing.env"),
+                true,
+                Arc::new(std::time::Instant::now),
+            )
+            .unwrap();
+            state = state.with_pairing(pairing);
+        }
         if notes_on {
             state.notes = Some(Notes::lazy(&GrpcSettings {
                 host: "127.0.0.1".into(),
@@ -762,6 +781,14 @@ mod pages {
             .iter()
             .map(|r| counted(r))
             .collect();
+        let unknown = || {
+            crate::telemetry::test_support::counter_value(
+                "harold.web_app.collection_pages",
+                &[("collection", "unknown"), ("result", "not_found")],
+            )
+            .unwrap_or(0)
+        };
+        let unknown_before = unknown();
         let logs = CapturedLogs::start();
         for (path, status) in [
             ("/c/count-bad/out-link.html", 404),
@@ -813,6 +840,8 @@ mod pages {
         assert_eq!(after[0] - before[0], 2);
         assert_eq!(after[1] - before[1], 1);
         assert_eq!(after[2] - before[2], 1);
+        // Other tests share the global counter, so check for at least the two requests.
+        assert!(unknown() >= unknown_before + 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -985,5 +1014,125 @@ mod pages {
         let body = get(&server, "/c/explainers").await.text().await.unwrap();
         assert!(body.contains("&#60;img src=x"), "{body}");
         assert!(!body.contains("<img"), "{body}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_app_collection_routes_need_the_login_and_the_device() {
+        let dir = Folder::new();
+        dir.write("a.html", b"<title>A</title>");
+        dir.write("n.md", b"# N\n");
+        let paths = [
+            "/c",
+            "/c/explainers",
+            "/c/explainers/a.html",
+            "/c/explainers/n.md",
+            "/c/explainers/a.html/raw",
+        ];
+        // No login header: refused as `/specs` is.
+        let open = one(&dir).await;
+        for path in paths {
+            let response = reqwest::get(format!("http://{}{path}", open.addr))
+                .await
+                .unwrap();
+            assert_ne!(response.status(), 200, "{path}");
+            assert!(
+                !response.text().await.unwrap().contains("explainers"),
+                "{path}"
+            );
+        }
+        let spec = reqwest::get(format!("http://{}/specs", open.addr))
+            .await
+            .unwrap()
+            .status();
+        let none = reqwest::get(format!("http://{}/c", open.addr))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(none, spec);
+        // A login but no paired device: refused, with no page.
+        let paired = serve_with(
+            vec![settings("explainers", &dir.pages(), true)],
+            false,
+            true,
+        )
+        .await;
+        for path in paths {
+            let response = get(&paired, path).await;
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert!(
+                !body.contains("A</title>") && !body.contains("<h3>N</h3>"),
+                "{path}"
+            );
+            assert!(!body.contains("explainers"), "{path}: {body}");
+            if path != "/c" {
+                assert_eq!(status, 401, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_index_lists_collections_specs_and_notes() {
+        let dir = Folder::new();
+        dir.write("a.html", b"x");
+        let hidden = Folder::new();
+        let both = vec![
+            settings("explainers", &dir.pages(), true),
+            settings("secret", &hidden.pages(), false),
+        ];
+        let server = serve(both.clone(), false).await;
+        let body = get(&server, "/c").await.text().await.unwrap();
+        assert!(body.contains("href=\"/c/explainers\""), "{body}");
+        assert!(!body.contains("secret"), "{body}");
+        assert!(body.contains("href=\"/specs\""), "{body}");
+        assert!(!body.contains("href=\"/notes\""), "{body}");
+        let server = serve(both, true).await;
+        let body = get(&server, "/c").await.text().await.unwrap();
+        let (s, n) = (
+            body.find("href=\"/specs\"").unwrap(),
+            body.find("href=\"/notes\"").unwrap(),
+        );
+        assert!(
+            body.find("href=\"/c/explainers\"").unwrap() < s && s < n,
+            "{body}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_thread_header_is_unchanged() {
+        let dir = Folder::new();
+        let server = one(&dir).await;
+        let body = get(&server, "/").await.text().await.unwrap();
+        let header = &body[body.find("id=\"to-todos\"").expect("Todos button")..];
+        let header = &header[..header.find("id=\"to-thread\"").expect("thread button")];
+        assert!(header.contains("Todos"), "{header}");
+        assert!(!header.contains("href=\"/c\""), "{header}");
+        assert!(!header.contains("Pages"), "{header}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_encoded_md_name_gets_the_spec_policy() {
+        let dir = Folder::new();
+        dir.write("n.md", b"# Note title\n");
+        let server = one(&dir).await;
+        let response = get(&server, "/c/explainers/n%2Emd").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            header(&response, "content-security-policy"),
+            SPEC_CONTENT_SECURITY_POLICY
+        );
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("<h3>Note title</h3>")
+        );
+        // A name that does not decode to UTF-8 is not Markdown.
+        let response = get(&server, "/c/explainers/n%FF%2Emd").await;
+        assert_eq!(
+            header(&response, "content-security-policy"),
+            COLLECTION_SHELL_CONTENT_SECURITY_POLICY
+        );
     }
 }

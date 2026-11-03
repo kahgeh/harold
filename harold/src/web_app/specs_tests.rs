@@ -131,6 +131,7 @@ async fn specs_listener(specs: Arc<Specs>) -> Served {
     let router = specs_router(SpecsState {
         specs,
         identity: Arc::new(WebAppIdentity::default()),
+        collections: Arc::new(crate::web_app::collections::Collections::new(Vec::new())),
         hosts: Arc::from(listener_hosts("127.0.0.1:4331", addr)),
     });
     let handle = tokio::spawn(async move {
@@ -780,6 +781,124 @@ async fn the_specs_listener_opens_only_with_a_pod_registry() {
     drop(shutdown);
     with.handle.await.unwrap();
     without.handle.await.unwrap();
+}
+
+fn one_collection(folder: &Path) -> Vec<crate::settings::CollectionSettings> {
+    vec![crate::settings::CollectionSettings {
+        name: "explainers".into(),
+        title: "Explainers".into(),
+        folder: folder.to_string_lossy().into_owned(),
+        extensions: vec!["html".into(), "md".into()],
+        listed: true,
+    }]
+}
+
+#[test]
+fn the_specs_listener_is_wanted_with_a_registry_or_a_collection() {
+    use crate::web_app::collections::Collections;
+    let some = Collections::new(one_collection(Path::new("/nonexistent")));
+    let none = Collections::new(Vec::new());
+    let registry = Path::new("/nonexistent/products.toml");
+    assert!(crate::web_app::specs_listener_wanted(Some(registry), &none));
+    assert!(crate::web_app::specs_listener_wanted(None, &some));
+    assert!(crate::web_app::specs_listener_wanted(Some(registry), &some));
+    assert!(!crate::web_app::specs_listener_wanted(None, &none));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn specs_listener_starts_with_collections_and_no_registry() {
+    let directory = Repo::new();
+    let store = store(&directory.root).await;
+    let store_path = directory.root.join("store");
+    let grpc = crate::web_app::idle_grpc();
+    let pages = directory.root.join("pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(pages.join("a.html"), "<title>Alpha</title>").unwrap();
+    let mut with_collections = settings();
+    with_collections.collections = one_collection(&pages);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let running = crate::web_app::start(
+        &with_collections,
+        store,
+        &store_path,
+        shutdown_rx,
+        None,
+        crate::web_app::idle_agents(&grpc),
+    )
+    .await
+    .unwrap();
+    let addr = running.specs_addr.expect("the specs listener is open");
+    let list = reqwest::get(format!("http://{addr}/c/explainers"))
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    assert!(list.text().await.unwrap().contains("Alpha"));
+    // The specs routes answer an empty list when there is no registry.
+    let specs = reqwest::get(format!("http://{addr}/specs")).await.unwrap();
+    assert_eq!(specs.status(), 200);
+    assert!(
+        specs
+            .text()
+            .await
+            .unwrap()
+            .contains("No specs on this machine")
+    );
+    drop(shutdown);
+    running.handle.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn specs_listener_serves_collections_for_get_only() {
+    let directory = Repo::new();
+    let pages = directory.root.join("pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(pages.join("a.html"), "<title>Alpha</title>").unwrap();
+    std::fs::write(pages.join("n.md"), "# Note\n").unwrap();
+    let (shutdown, _) = watch::channel(());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = specs_router(SpecsState {
+        specs: Arc::new(Specs::new(None)),
+        identity: Arc::new(WebAppIdentity::default()),
+        collections: Arc::new(crate::web_app::collections::Collections::new(
+            one_collection(&pages),
+        )),
+        hosts: Arc::from(listener_hosts("127.0.0.1:4331", addr)),
+    });
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let server = Served {
+        addr,
+        handle,
+        _shutdown: shutdown,
+    };
+    let client = reqwest::Client::new();
+    for path in [
+        "/c",
+        "/c/explainers",
+        "/c/explainers/a.html",
+        "/c/explainers/n.md",
+        "/c/explainers/a.html/raw",
+    ] {
+        let response = client.get(server.url(path)).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        let post = client.post(server.url(path)).send().await.unwrap();
+        assert_eq!(post.status(), 404, "POST {path}");
+        let foreign = client
+            .get(server.url(path))
+            .header("Host", "evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), 403, "Host {path}");
+    }
+    let shell = client
+        .get(server.url("/c/explainers/a.html"))
+        .send()
+        .await
+        .unwrap();
+    assert!(!shell.text().await.unwrap().contains("href=\"/notes\""));
 }
 
 #[test]

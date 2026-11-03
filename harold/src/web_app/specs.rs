@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use askama::Template;
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
@@ -711,13 +712,15 @@ pub(crate) async fn post_share(
 pub(crate) struct SpecsState {
     pub specs: Arc<Specs>,
     pub identity: Arc<WebAppIdentity>,
+    /// The page collections, which this listener serves beside the specs.
+    pub collections: Arc<super::collections::Collections>,
     /// The Hosts answered: the listen address as written, as bound, and `localhost` with the
     /// port. Anything else is refused, which stops DNS rebinding.
     pub hosts: Arc<[String]>,
 }
 
-/// The specs listener's routes: `GET /specs`, `GET /specs/{product}/{id}` and three static
-/// files. There is no login or pairing check, because a browser on the Mac sends no Tailscale
+/// The specs listener's routes: `GET /specs`, `GET /specs/{product}/{id}`, three static
+/// files and the four `/c` collection routes. There is no login or pairing check, because a browser on the Mac sends no Tailscale
 /// login; the Host check and the absence of any write take their place. Every other path, and
 /// every method but `GET` and `HEAD`, gives `404`.
 pub(crate) fn specs_router(state: SpecsState) -> Router {
@@ -725,6 +728,10 @@ pub(crate) fn specs_router(state: SpecsState) -> Router {
         .route("/specs", get(listener_list))
         .route("/specs/{product}/{id}", get(listener_spec))
         .route("/static/{name}", get(listener_static))
+        .route("/c", get(listener_collections_index))
+        .route("/c/{collection}", get(listener_collection_list))
+        .route("/c/{collection}/{file}", get(listener_collection_page))
+        .route("/c/{collection}/{file}/raw", get(listener_collection_raw))
         .fallback(listener_not_found)
         // The last layer added runs first: the policy, then the Host check, then the method.
         .layer(middleware::from_fn(reads_only))
@@ -747,6 +754,53 @@ async fn listener_spec(
         Listener::Specs,
         &product,
         &id,
+    )
+    .await
+}
+
+async fn listener_collections_index(State(state): State<SpecsState>) -> Response {
+    // Notes are not served here, so the index shows no Notes row.
+    super::collections::index_response(&state.collections, &state.identity, Listener::Specs, false)
+        .await
+}
+
+async fn listener_collection_list(
+    State(state): State<SpecsState>,
+    name: Result<Path<String>, PathRejection>,
+) -> Response {
+    let name = name.ok().map(|Path(name)| name);
+    super::collections::list_response(
+        &state.collections,
+        &state.identity,
+        Listener::Specs,
+        name.as_deref(),
+    )
+    .await
+}
+
+async fn listener_collection_page(
+    State(state): State<SpecsState>,
+    request: Result<Path<(String, String)>, PathRejection>,
+) -> Response {
+    let request = request.ok().map(|Path(request)| request);
+    super::collections::page_response_for(
+        &state.collections,
+        &state.identity,
+        Listener::Specs,
+        request.as_ref().map(|(c, f)| (c.as_str(), f.as_str())),
+    )
+    .await
+}
+
+async fn listener_collection_raw(
+    State(state): State<SpecsState>,
+    request: Result<Path<(String, String)>, PathRejection>,
+) -> Response {
+    let request = request.ok().map(|Path(request)| request);
+    super::collections::raw_response(
+        &state.collections,
+        Listener::Specs,
+        request.as_ref().map(|(c, f)| (c.as_str(), f.as_str())),
     )
     .await
 }
