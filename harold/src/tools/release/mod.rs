@@ -7,6 +7,7 @@ use tonic::service::Routes;
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
 mod service;
+mod title;
 
 pub(crate) const NAME: &str = "release";
 
