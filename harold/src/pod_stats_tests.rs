@@ -3725,3 +3725,55 @@ fn the_first_merged_file_is_the_earliest_md_file() {
     let found = first_merged_file(&dir, UtcOffset::UTC).unwrap();
     assert_eq!(found, created(&dir.join("merged/a.md")));
 }
+
+#[tokio::test]
+async fn a_poll_reports_the_three_lists_from_fake_pod_folders() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(
+        &files.join("specs/wait-1.md"),
+        "Waiting for your approval.\n# Spec\n",
+    );
+    write(
+        &files.join("specs/wait-2.md"),
+        "Waiting for your approval.\n# Spec\n",
+    );
+    approve(&repo, "ready");
+    put_spec(&files, "going");
+    put_approval(&files, "going");
+    let started = rfc(OffsetDateTime::now_utc() - time::Duration::days(2));
+    put_started(&files, "going", &started);
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let snapshot = snapshot.lock().unwrap();
+    let lists = &snapshot.inventory[&pod.name];
+    let near = |actual: f64, expected: f64| {
+        assert!((actual - expected).abs() < 0.1, "{actual} vs {expected}");
+    };
+    let waiting = lists["awaiting_approval"];
+    assert_eq!(waiting.items, 2);
+    near(waiting.oldest_hours, 0.0);
+    near(waiting.item_days, 0.0);
+    let ready = lists["approved_not_started"];
+    assert_eq!(ready.items, 1);
+    near(ready.oldest_hours, 0.0);
+    near(ready.item_days, 0.0);
+    let going = lists["in_progress"];
+    assert_eq!(going.items, 1);
+    near(going.oldest_hours, 48.0);
+    near(going.item_days, 2.0);
+}
+
+#[test]
+fn an_approval_at_the_cutoff_counts() {
+    let now = at("2026-11-03T00:00:00Z");
+    let cutoff = now - time::Duration::days(1);
+    let specs = [SpecFacts {
+        approved_at: Some(cutoff),
+        ..spec_in("edge", SpecState::Approved, now)
+    }];
+    let (idle, lists) = work_waiting(&specs, 2, Some(cutoff), now);
+    assert_eq!(idle, 2);
+    assert_eq!(lists["approved_not_started"].items, 1);
+}
