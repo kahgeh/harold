@@ -194,6 +194,50 @@ impl ActivitySummarySettings {
     }
 }
 
+/// The most days a work record stays in the active file before it rotates out.
+const MAX_ROTATION_DAYS: u32 = 365;
+
+/// The `[work]` table: how long Harold keeps work records before it rotates them.
+/// `0` means rotate at once.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct WorkSettings {
+    /// Days to keep a record. From 0 to 365.
+    #[serde(deserialize_with = "rotation_days_from_signed")]
+    pub rotation_days: u32,
+}
+
+impl Default for WorkSettings {
+    fn default() -> Self {
+        Self { rotation_days: 14 }
+    }
+}
+
+/// Read the value as a signed number, so `-1` is an error and does not wrap.
+fn rotation_days_from_signed<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    u32::try_from(value).map_err(|_| {
+        serde::de::Error::custom(format!(
+            "work.rotation_days must be from 0 to {MAX_ROTATION_DAYS}, not {value}"
+        ))
+    })
+}
+
+impl WorkSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.rotation_days > MAX_ROTATION_DAYS {
+            errors.push(format!(
+                "work.rotation_days must be from 0 to {MAX_ROTATION_DAYS}"
+            ));
+        }
+        errors
+    }
+}
+
 /// The `[watch]` table: the model every watch runs, and the user's optional budgets. A
 /// budget is enforced only when set; an absent one is never treated as 0.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1608,6 +1652,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) watch: WatchSettings,
     #[serde(default)]
+    pub(crate) work: WorkSettings,
+    #[serde(default)]
     pub(crate) knowledge: KnowledgeSettings,
     #[serde(default)]
     pub(crate) call_answerer: CallAnswererSettings,
@@ -1647,6 +1693,7 @@ impl Settings {
         errors.extend(self.control_tower.validate());
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
+        errors.extend(self.work.validate());
         errors.extend(self.knowledge.validate());
         errors.extend(tts_errors(&self.tts));
         errors.extend(self.call_answerer.validate());
@@ -2292,6 +2339,61 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             .and_then(Config::try_deserialize::<WatchFixture>)
             .expect("watch fixture should deserialize")
             .watch
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WorkFixture {
+        #[serde(default)]
+        work: super::WorkSettings,
+    }
+
+    fn try_parse_work(source: &str) -> Result<super::WorkSettings, config::ConfigError> {
+        Config::builder()
+            .add_source(File::from_str(source, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize::<WorkFixture>)
+            .map(|fixture| fixture.work)
+    }
+
+    #[test]
+    fn work_rotation_days_defaults_to_14() {
+        assert_eq!(try_parse_work("").expect("empty loads").rotation_days, 14);
+        let shipped = try_parse_work(include_str!("../config/default.toml")).expect("shipped");
+        assert_eq!(shipped.rotation_days, 14);
+        assert!(shipped.validate().is_empty());
+    }
+
+    #[test]
+    fn work_rotation_days_zero_loads() {
+        let settings = try_parse_work("[work]\nrotation_days = 0\n").expect("0 loads");
+        assert_eq!(settings.rotation_days, 0);
+        assert!(settings.validate().is_empty());
+    }
+
+    #[test]
+    fn work_rotation_days_minus_one_is_refused() {
+        let error = try_parse_work("[work]\nrotation_days = -1\n")
+            .expect_err("-1 must not load")
+            .to_string();
+        assert!(error.contains("work.rotation_days"), "{error}");
+    }
+
+    #[test]
+    fn work_rotation_days_366_is_refused() {
+        let settings = try_parse_work("[work]\nrotation_days = 366\n").expect("366 parses");
+        let errors = settings.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("work.rotation_days"), "{errors:?}");
+    }
+
+    #[test]
+    fn work_rotation_days_365_and_1_load() {
+        for days in [1, 365] {
+            let settings = try_parse_work(&format!("[work]\nrotation_days = {days}\n"))
+                .expect("in range loads");
+            assert_eq!(settings.rotation_days, days);
+            assert!(settings.validate().is_empty());
+        }
     }
 
     #[test]

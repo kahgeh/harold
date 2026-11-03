@@ -43,6 +43,10 @@ model = "haiku"
 # .claude/skills/ (absolute paths; a skill is linked into .claude/skills/ from one of them):
 # skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 
+[work]
+# Days to keep work records before they rotate out. From 0 to 365; 0 rotates at once.
+# rotation_days = 14
+
 # The knowledge tool indexes the organisation's vault of Markdown notes by meaning. It is
 # off until `vault` is set. Put these in config/local.toml:
 #   vault = "/Users/you/code/your-organisation/vault/knowledge"
