@@ -122,7 +122,7 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 | `pod file unreadable` | `pod.product`, `spec.id`, `file` (the file's name inside the pod folder) |
 | `large spec approved` | `pod.product`, `spec.id`. Level warn. Logged once for each large spec in the approved state, with an approval on or after the cutoff of ADR 0021 (the `**Size.** large` line). A started or completed spec is not logged |
 | `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
-| `spec completed without merged file` | `pod.product`, `spec.id`, `merged_at` (RFC 3339 time of the newest merge) |
+| `spec completed without merged file` | `pod.product`, `spec.id`, `merged_at` (RFC 3339 time of the newest merge), `commit` (the full commit hash of that merge, or `unknown` when Harold saw the merge only from a worktree that went; kept in `harold.log` only and not exported) |
 | `pod notices unreadable` | `reason` (`parse`, `permission` or `io`) |
 | `pod notices not saved` | `reason` (`permission` or `io`), `error` |
 

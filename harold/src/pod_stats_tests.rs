@@ -4235,3 +4235,65 @@ fn retain_product_removes_only_that_products_keys_that_were_not_seen() {
     assert!(notices.contains("pq\0completed\0a"));
     assert!(notices.contains("q\0completed\0a"));
 }
+
+#[tokio::test]
+async fn the_completed_warning_names_the_merge_time_and_commit() {
+    let pod = Pod::new();
+    let (registry, repo) = completed_without_file(&pod).await;
+    // The newest entry of the base branch's reflog is the merge: its full commit and its
+    // time, as Harold reads them.
+    let newest = git(
+        &repo,
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H%x09%gd",
+            "-1",
+            "main",
+        ],
+    );
+    let (commit, selector) = newest.split_once('\t').unwrap();
+    let seconds: i64 = selector
+        .trim_start_matches("main@{")
+        .trim_end_matches('}')
+        .parse()
+        .unwrap();
+    let merged_at = rfc(OffsetDateTime::from_unix_timestamp(seconds).unwrap());
+    let logs = CapturedLogs::start();
+
+    let (mut stats, _) = stats(registry);
+    stats.poll().await;
+
+    let text = logs.text();
+    let line = format!(
+        "{} merged_at={merged_at} commit={commit}",
+        completed_line(&pod)
+    );
+    assert_eq!(commit.len(), 40, "{commit}");
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
+
+#[test]
+fn a_merge_seen_only_from_a_gone_worktree_logs_an_unknown_commit() {
+    let pod = Pod::new();
+    let (mut stats, _) = stats(pod.root.join("products.toml"));
+    let merged_at = at("2026-10-20T08:30:00Z");
+    let logs = CapturedLogs::start();
+
+    stats.log_notices(
+        &pod.name,
+        &[Notice::CompletedWithoutFile {
+            id: "s".into(),
+            merged_at,
+            commit: None,
+        }],
+    );
+
+    let text = logs.text();
+    let line = format!(
+        "{} merged_at=2026-10-20T08:30:00Z commit=unknown",
+        completed_line(&pod)
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
