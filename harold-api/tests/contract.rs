@@ -1,10 +1,10 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, AgentStateSnapshot, CallAction, CallRequest, CallResponse,
-    CallResult, CallState, GetHaroldStateResponse, ReportAgentStateRequest,
-    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
-    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest,
-    SpeakLineResponse, TurnCompleteRequest,
+    AgentPaneState, AgentSeenRequest, AgentSeenResponse, AgentState, AgentStateSnapshot,
+    CallAction, CallRequest, CallResponse, CallResult, CallState, GetHaroldStateResponse,
+    ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
+    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -323,6 +323,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "GetHaroldState".to_string(),
             "GetRemoteOrder".to_string(),
             "SetRemoteOrder".to_string(),
+            "AgentSeen".to_string(),
         ]
     );
 }
@@ -837,4 +838,34 @@ fn the_old_golden_row_decodes_with_no_waiting() {
     let pane = AgentPaneState::decode(bytes.as_slice()).expect("the old row");
     assert!(!pane.waiting);
     assert_eq!(pane.waiting_since_ms, 0);
+}
+
+/// A control-tower tells Harold it jumped to a pane. The request has only the pane id,
+/// field 1, and the answer is empty.
+#[test]
+fn agent_seen_has_pane_id_1_and_an_empty_response() {
+    let methods: Vec<String> = harold_file_descriptor()
+        .service
+        .into_iter()
+        .find(|service| service.name.as_deref() == Some("Harold"))
+        .expect("Harold service descriptor")
+        .method
+        .into_iter()
+        .map(|method| method.name.expect("method name"))
+        .collect();
+    assert!(methods.contains(&"AgentSeen".to_string()));
+    assert_eq!(
+        message_fields("AgentSeenRequest"),
+        [("pane_id".to_string(), 1)]
+    );
+    assert_eq!(
+        message_fields("AgentSeenResponse"),
+        Vec::<(String, i32)>::new()
+    );
+    let request = AgentSeenRequest {
+        pane_id: "%7".to_owned(),
+    };
+    assert_eq!(request.encode_to_vec(), [0x0a, 0x02, b'%', b'7']);
+    assert_eq!(round_trip(&request).pane_id, "%7");
+    assert_eq!(AgentSeenResponse {}.encode_to_vec(), Vec::<u8>::new());
 }

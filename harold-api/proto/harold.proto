@@ -20,6 +20,10 @@ service Harold {
   rpc GetRemoteOrder (GetRemoteOrderRequest) returns (GetRemoteOrderResponse);
   // Replaces the remote order with the products in the request.
   rpc SetRemoteOrder (SetRemoteOrderRequest) returns (SetRemoteOrderResponse);
+  // A control-tower tells Harold that it jumped to a pane. Harold clears the waiting mark of
+  // that pane and records the time the agent waited. It changes nothing else. For a pane
+  // that does not wait, or that Harold does not know, it does nothing and does not fail.
+  rpc AgentSeen (AgentSeenRequest) returns (AgentSeenResponse);
 }
 
 // The web app's paired devices and its pairing lock, for `harold app`.
@@ -217,6 +221,14 @@ message SetTtsMutedRequest {
 message SetTtsMutedResponse {
   bool muted = 1;
 }
+
+// The pane that a control-tower jumped to.
+message AgentSeenRequest {
+  string pane_id = 1;
+}
+
+// Empty: the call has no result.
+message AgentSeenResponse {}
 
 message SetMessagingPausedRequest {
   bool paused = 1;

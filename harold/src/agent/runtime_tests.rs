@@ -1533,6 +1533,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         state_view: crate::HaroldStateView::default(),
         watch_counts: tokio::sync::watch::channel(crate::tools::WatchCounts::default()).1,
         waiting: tokio::sync::watch::channel(crate::agent::waiting::WaitingView::default()).1,
+        seen_calls: tokio::sync::mpsc::channel(1).0,
     };
     crate::test_logs::keep_second_dispatcher();
     let captured_logs = Arc::new(Mutex::new(Vec::new()));
@@ -1685,6 +1686,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         state_view: crate::HaroldStateView::default(),
         watch_counts: tokio::sync::watch::channel(crate::tools::WatchCounts::default()).1,
         waiting: tokio::sync::watch::channel(crate::agent::waiting::WaitingView::default()).1,
+        seen_calls: tokio::sync::mpsc::channel(1).0,
     };
 
     fixture.handle.inventory_tick().await.unwrap();
@@ -5472,6 +5474,7 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the
         state_view: crate::HaroldStateView::default(),
         watch_counts: tokio::sync::watch::channel(crate::tools::WatchCounts::default()).1,
         waiting: tokio::sync::watch::channel(crate::agent::waiting::WaitingView::default()).1,
+        seen_calls: tokio::sync::mpsc::channel(1).0,
     };
 
     // The first scan runs until its 1.5 s deadline stops it; both calls queue behind it.

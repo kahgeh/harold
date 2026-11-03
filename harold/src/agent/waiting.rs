@@ -167,7 +167,6 @@ impl WaitingTracker {
 
     /// The user saw this pane by a way other than focus. Clear its wait.
     /// Return `None` if the pane does not wait.
-    #[allow(dead_code)] // Task 2 uses this
     pub(crate) fn seen(&mut self, pane_id: &str, now_ms: i64) -> Option<WaitingEvent> {
         let entry = self.waiting.remove(pane_id)?;
         Some(WaitingEvent::Seen {

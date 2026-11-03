@@ -897,6 +897,13 @@ impl hp::harold_server::Harold for CoreStub {
         Ok(tonic::Response::new(Default::default()))
     }
 
+    async fn agent_seen(
+        &self,
+        _: tonic::Request<harold_api::harold::AgentSeenRequest>,
+    ) -> Result<tonic::Response<harold_api::harold::AgentSeenResponse>, tonic::Status> {
+        Ok(tonic::Response::new(Default::default()))
+    }
+
     async fn set_messaging_paused(
         &self,
         _: Request<hp::SetMessagingPausedRequest>,

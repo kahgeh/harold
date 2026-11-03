@@ -1007,6 +1007,8 @@ fn note_agents_waiting_for(counts: Vec<WaitingCount>) {
 
 /// Records the seconds an agent waited for you to look, on `harold.agent.waiting.duration`.
 pub(crate) fn record_waiting_duration(role: &str, seconds: f64) {
+    #[cfg(test)]
+    WAITING_DURATIONS_NOTED.with(|noted| noted.borrow_mut().push((role.to_owned(), seconds)));
     instruments()
         .agent_waiting_duration
         .record(seconds, &[KeyValue::new("role", role.to_owned())]);
@@ -1198,6 +1200,20 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn take_noted_agent_counts() -> Vec<Vec<AgentCount>> {
     COUNTS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The waiting durations this thread recorded, as (role, seconds), so a test sees its
+    /// own samples beside other tests.
+    static WAITING_DURATIONS_NOTED: std::cell::RefCell<Vec<(String, f64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The waiting durations the current thread recorded since the last call.
+#[cfg(test)]
+pub(crate) fn take_noted_waiting_durations() -> Vec<(String, f64)> {
+    WAITING_DURATIONS_NOTED.with(|noted| std::mem::take(&mut *noted.borrow_mut()))
 }
 
 /// The listings the current thread noted since the last call.

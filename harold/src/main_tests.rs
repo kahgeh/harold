@@ -21,9 +21,10 @@ use super::agent::snapshot::AgentSnapshotHub;
 use super::agent::waiting::{TrackedRow, WaitingView};
 use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, GetHaroldStateRequest, GetRemoteOrderRequest, MonitorHealthState,
-    ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SetMessagingPausedRequest,
-    SetRemoteOrderRequest, SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
+    AgentSeenRequest, AgentSeenResponse, AgentState, GetHaroldStateRequest, GetRemoteOrderRequest,
+    MonitorHealthState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest,
+    SetMessagingPausedRequest, SetRemoteOrderRequest, SetTtsMutedRequest, SpeakLineRequest,
+    WatchAgentStatesRequest,
 };
 use super::{
     HAROLD_VERSION, HaroldService, HaroldStateView, Request, RoleSources, TurnCompleteRequest,
@@ -108,6 +109,7 @@ where
             state_view: HaroldStateView::default(),
             watch_counts: watch::channel(crate::tools::WatchCounts::default()).1,
             waiting: watch::channel(WaitingView::default()).1,
+            seen_calls: tokio::sync::mpsc::channel(1).0,
         },
         shutdown,
         task,
@@ -4198,18 +4200,43 @@ fn waiting_task_stream_with(
     watch::Sender<()>,
     AgentSnapshotHub,
 ) {
+    // No caller sends `AgentSeen` here: the closed channel must not stop the task.
+    let (receiver, shutdown, hub, _seen) =
+        waiting_task_stream_full(port, hosts, RoleSources::default(), || WAITING_CLOCK_MS);
+    (receiver, shutdown, hub)
+}
+
+/// The stream items that a test reads.
+type StreamItems =
+    tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>;
+
+/// Like `waiting_task_stream_with`, with the roles and the clock the task uses. It also
+/// returns the sender of the `AgentSeen` pane ids that the task reads.
+fn waiting_task_stream_full(
+    port: Arc<ScriptedFocus>,
+    hosts: HostAgents,
+    roles: RoleSources,
+    clock: fn() -> i64,
+) -> (
+    StreamItems,
+    watch::Sender<()>,
+    AgentSnapshotHub,
+    tokio::sync::mpsc::Sender<String>,
+) {
     let hub = AgentSnapshotHub::new(populated_snapshot(1, None));
     let (waiting, waiting_rx) = watch::channel(WaitingView::default());
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     let (shutdown, shutdown_rx) = watch::channel(());
+    let (seen, seen_rx) = tokio::sync::mpsc::channel(8);
     spawn_waiting_task(
         hub.subscribe(),
         hosts.clone(),
         port,
-        RoleSources::default(),
+        roles.clone(),
         std::time::Duration::from_millis(20),
-        || WAITING_CLOCK_MS,
+        clock,
         waiting,
+        seen_rx,
         shutdown_rx.clone(),
     );
     tokio::spawn(super::forward_agent_snapshots(
@@ -4219,13 +4246,13 @@ fn waiting_task_stream_with(
         hosts,
         WindowNames::default(),
         String::new(),
-        RoleSources::default(),
+        roles,
         watch::channel(crate::tools::WatchCounts::default()).1,
         waiting_rx,
         sender,
         shutdown_rx,
     ));
-    (receiver, shutdown, hub)
+    (receiver, shutdown, hub, seen)
 }
 
 /// The next stream item that `wanted` accepts.
@@ -4294,6 +4321,7 @@ async fn the_waiting_task_stops_at_shutdown() {
         std::time::Duration::from_millis(20),
         || WAITING_CLOCK_MS,
         waiting,
+        tokio::sync::mpsc::channel(1).1,
         shutdown_rx,
     );
     drop(shutdown);
@@ -4393,4 +4421,289 @@ async fn an_agent_of_a_rex_host_waits_until_it_works_again() {
     let working = item_where(&mut receiver, |item| !host_row(item).waiting).await;
     assert_eq!(host_row(&working).waiting_since_ms, 0);
     assert_eq!(host_row(&working).state, i32::from(AgentState::Working));
+}
+
+/// The waiting task, the stream, and a service whose `AgentSeen` calls reach the task.
+struct SeenRig {
+    receiver: tokio::sync::mpsc::Receiver<Result<super::harold::AgentStateSnapshot, tonic::Status>>,
+    hub: AgentSnapshotHub,
+    service: HaroldService,
+    _shutdown: watch::Sender<()>,
+    _service_shutdown: watch::Sender<()>,
+    _monitor: tokio::task::JoinHandle<()>,
+    _directory: TestDirectory,
+}
+
+impl SeenRig {
+    async fn new(port: Arc<ScriptedFocus>, hosts: HostAgents, clock: fn() -> i64) -> Self {
+        // The chief role makes the `role` field of the lines and the sample not empty.
+        let roles = RoleSources {
+            chief_folder: Some("/work/harold".into()),
+            chief_session: Some("harold".into()),
+            registry: None,
+        };
+        let (receiver, shutdown, hub, seen) = waiting_task_stream_full(port, hosts, roles, clock);
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (mut service, service_shutdown, monitor) =
+            test_service(store, populated_snapshot(1, None));
+        service.seen_calls = seen;
+        Self {
+            receiver,
+            hub,
+            service,
+            _shutdown: shutdown,
+            _service_shutdown: service_shutdown,
+            _monitor: monitor,
+            _directory: directory,
+        }
+    }
+
+    /// Calls `AgentSeen` for `pane_id`. The call never fails.
+    async fn seen(&self, pane_id: &str) {
+        let answer = self
+            .service
+            .agent_seen(Request::new(AgentSeenRequest {
+                pane_id: pane_id.to_owned(),
+            }))
+            .await
+            .expect("AgentSeen never fails the caller");
+        assert_eq!(answer.into_inner(), AgentSeenResponse {});
+    }
+
+    /// The next stream item whose row `pane_id` is waiting (or not, by `waiting`).
+    async fn row_waiting(&mut self, pane_id: &str, waiting: bool) -> super::harold::AgentPaneState {
+        let item = item_where(&mut self.receiver, |item| {
+            item.panes
+                .iter()
+                .any(|pane| pane.pane_id == pane_id && pane.waiting == waiting)
+        })
+        .await;
+        item.panes
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .expect("the row")
+    }
+
+    /// Makes the agent of `STEP_PANE` finish at `revision`, and waits until it waits.
+    async fn finish(&mut self, revision: i64) {
+        self.hub
+            .publish_committed(snapshot_in_state(revision, EffectiveAgentState::Working));
+        // The task reads only the newest snapshot: let it read the working one first.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.hub
+            .publish_committed(snapshot_in_state(revision + 1, EffectiveAgentState::Done));
+        self.row_waiting(STEP_PANE, true).await;
+    }
+}
+
+/// The captured lines that contain `message`.
+fn lines_with(logs: &crate::outbound::fake::CapturedLogs, message: &str) -> Vec<String> {
+    logs.text()
+        .lines()
+        .filter(|line| line.contains(message))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn agent_seen_clears_a_waiting_pane_and_logs_and_records() {
+    static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::take_noted_waiting_durations();
+    let mut rig = SeenRig::new(
+        ScriptedFocus::focused_on("%1"),
+        HostAgents::default(),
+        || CLOCK.load(std::sync::atomic::Ordering::SeqCst),
+    )
+    .await;
+    item_where(&mut rig.receiver, |item| item.focus_known == Some(true)).await;
+
+    rig.hub
+        .publish_committed(snapshot_in_state(2, EffectiveAgentState::Done));
+    let waiting = rig.row_waiting(STEP_PANE, true).await;
+    assert_eq!(waiting.waiting_since_ms, 42_000);
+    let began = lines_with(&logs, "agent waiting");
+    assert_eq!(began.len(), 1, "{began:?}");
+    assert!(began[0].contains("pane_id=%8"), "{}", began[0]);
+    assert!(began[0].contains("role=chief"), "{}", began[0]);
+
+    CLOCK.store(45_500, std::sync::atomic::Ordering::SeqCst);
+    rig.seen(STEP_PANE).await;
+    let seen = rig.row_waiting(STEP_PANE, false).await;
+    assert_eq!(seen.waiting_since_ms, 0);
+    assert_eq!(seen.state, i32::from(AgentState::Done), "the state stays");
+
+    let lines = lines_with(&logs, "agent seen");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    for field in ["pane_id=%8", "role=chief", "waited_s=3.5"] {
+        assert!(lines[0].contains(field), "{field}: {}", lines[0]);
+    }
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![("chief".to_owned(), 3.5)]
+    );
+    // The exported log record carries the same fields.
+    let exported = crate::telemetry::test_support::logs()
+        .into_iter()
+        .any(|log| {
+            let record = &log.record;
+            let attribute = |key: &str| {
+                record
+                    .attributes_iter()
+                    .find(|(name, _)| name.as_str() == key)
+                    .map(|(_, value)| format!("{value:?}"))
+            };
+            format!("{:?}", record.body()).contains("agent seen")
+                && attribute("pane_id").is_some_and(|value| value.contains("%8"))
+                && attribute("role").is_some_and(|value| value.contains("chief"))
+                && attribute("waited_s").is_some_and(|value| value.contains("3.5"))
+        });
+    assert!(exported, "an exported `agent seen` record with its fields");
+}
+
+#[tokio::test]
+async fn agent_seen_for_a_pane_that_does_not_wait_writes_no_line_and_no_sample() {
+    static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::take_noted_waiting_durations();
+    let mut rig = SeenRig::new(
+        ScriptedFocus::focused_on("%1"),
+        HostAgents::default(),
+        || CLOCK.load(std::sync::atomic::Ordering::SeqCst),
+    )
+    .await;
+    item_where(&mut rig.receiver, |item| item.focus_known == Some(true)).await;
+
+    // The agent works: it does not wait. Two calls in a row change nothing.
+    rig.seen(STEP_PANE).await;
+    rig.seen(STEP_PANE).await;
+    rig.finish(2).await;
+    CLOCK.store(44_000, std::sync::atomic::Ordering::SeqCst);
+    // The calls go through one queue in order: when this one clears the mark, the task
+    // took the calls before it.
+    rig.seen(STEP_PANE).await;
+    rig.row_waiting(STEP_PANE, false).await;
+    assert_eq!(lines_with(&logs, "agent seen").len(), 1);
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![("chief".to_owned(), 2.0)]
+    );
+
+    // A second call after the mark is gone changes nothing.
+    rig.seen(STEP_PANE).await;
+    rig.finish(4).await;
+    CLOCK.store(45_000, std::sync::atomic::Ordering::SeqCst);
+    rig.seen(STEP_PANE).await;
+    rig.row_waiting(STEP_PANE, false).await;
+    let lines = lines_with(&logs, "agent seen");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[1].contains("waited_s=1"), "{}", lines[1]);
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![("chief".to_owned(), 1.0)]
+    );
+}
+
+#[tokio::test]
+async fn agent_seen_for_an_unknown_pane_writes_nothing() {
+    static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::take_noted_waiting_durations();
+    let mut rig = SeenRig::new(
+        ScriptedFocus::focused_on("%1"),
+        HostAgents::default(),
+        || CLOCK.load(std::sync::atomic::Ordering::SeqCst),
+    )
+    .await;
+    item_where(&mut rig.receiver, |item| item.focus_known == Some(true)).await;
+    rig.finish(2).await;
+
+    for pane_id in ["", "%404", "rex:nohost/block:x"] {
+        rig.seen(pane_id).await;
+    }
+    CLOCK.store(43_000, std::sync::atomic::Ordering::SeqCst);
+    rig.seen(STEP_PANE).await;
+    rig.row_waiting(STEP_PANE, false).await;
+    let lines = lines_with(&logs, "agent seen");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("pane_id=%8"), "{}", lines[0]);
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![("chief".to_owned(), 1.0)]
+    );
+}
+
+#[tokio::test]
+async fn agent_seen_works_with_an_unknown_focus() {
+    static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::take_noted_waiting_durations();
+    let port = ScriptedFocus::focused_on("%1");
+    port.set(Err("tmux: no server".into()));
+    let mut rig = SeenRig::new(port, HostAgents::default(), || {
+        CLOCK.load(std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
+    item_where(&mut rig.receiver, |item| item.focus_known == Some(false)).await;
+    let unknown = lines_with(&logs, "focus unknown");
+    assert_eq!(unknown.len(), 1, "{unknown:?}");
+    assert!(unknown[0].contains("reason="), "{}", unknown[0]);
+
+    // With an unknown focus, an agent that finishes waits, and only a seen call clears it.
+    rig.finish(2).await;
+    CLOCK.store(52_000, std::sync::atomic::Ordering::SeqCst);
+    rig.seen(STEP_PANE).await;
+    let seen = rig.row_waiting(STEP_PANE, false).await;
+    assert_eq!(seen.waiting_since_ms, 0);
+    let lines = lines_with(&logs, "agent seen");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("waited_s=10"), "{}", lines[0]);
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![("chief".to_owned(), 10.0)]
+    );
+    assert_eq!(
+        lines_with(&logs, "focus unknown").len(),
+        1,
+        "one line each time the focus becomes unknown, not one each tick"
+    );
+}
+
+#[tokio::test]
+async fn agent_seen_clears_an_agent_of_a_rex_host() {
+    const HOST_PANE: &str = "rex:omarchy/block:b1";
+    static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42_000);
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    crate::telemetry::take_noted_waiting_durations();
+    let hosts = HostAgents::new(vec!["omarchy".into()]);
+    hosts.record("omarchy", reached(ObservedAgentState::Working), 9_000);
+    let mut rig = SeenRig::new(ScriptedFocus::focused_on("%1"), hosts.clone(), || {
+        CLOCK.load(std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
+    item_where(&mut rig.receiver, |item| item.focus_known == Some(true)).await;
+
+    hosts.record("omarchy", reached(ObservedAgentState::Done), 9_500);
+    let waiting = rig.row_waiting(HOST_PANE, true).await;
+    assert_eq!(waiting.waiting_since_ms, 42_000);
+
+    CLOCK.store(48_000, std::sync::atomic::Ordering::SeqCst);
+    rig.seen(HOST_PANE).await;
+    let seen = rig.row_waiting(HOST_PANE, false).await;
+    assert_eq!(seen.waiting_since_ms, 0);
+    assert_eq!(seen.state, i32::from(AgentState::Done), "the state stays");
+    let lines = lines_with(&logs, "agent seen");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("pane_id=rex:omarchy/block:b1"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains("waited_s=6"), "{}", lines[0]);
+    // An agent of a Rex host has no role.
+    assert_eq!(
+        crate::telemetry::take_noted_waiting_durations(),
+        vec![(String::new(), 6.0)]
+    );
 }

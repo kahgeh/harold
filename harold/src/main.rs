@@ -45,13 +45,14 @@ pub use harold_api::harold;
 
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
-    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, CallRequest, CallResponse,
-    GetHaroldStateRequest, GetHaroldStateResponse, GetRemoteOrderRequest, GetRemoteOrderResponse,
-    MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse, RexHostIcon,
-    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
-    SetMessagingPausedResponse, SetRemoteOrderRequest, SetRemoteOrderResponse, SetTtsMutedRequest,
-    SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
-    TurnCompleteResponse, WatchAgentStatesRequest,
+    AgentMonitorHealth, AgentPaneState, AgentSeenRequest, AgentSeenResponse, AgentState,
+    AgentStateSnapshot, CallRequest, CallResponse, GetHaroldStateRequest, GetHaroldStateResponse,
+    GetRemoteOrderRequest, GetRemoteOrderResponse, MonitorHealthState, ReportAgentStateRequest,
+    ReportAgentStateResponse, RexHostIcon, SendMessageToAwayDeviceRequest,
+    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetRemoteOrderRequest, SetRemoteOrderResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse,
+    WatchAgentStatesRequest,
 };
 
 /// Release tag compiled in by the release workflow; "source" for any other build.
@@ -94,6 +95,8 @@ struct HaroldService {
     watch_counts: watch::Receiver<tools::WatchCounts>,
     /// The agents that wait for the user, and whether Harold knows the focused pane.
     waiting: watch::Receiver<agent::waiting::WaitingView>,
+    /// Sends the pane id of each `AgentSeen` call to the waiting task.
+    seen_calls: mpsc::Sender<String>,
 }
 
 /// The settings values that `GetHaroldState` reports. It holds no other setting, so a
@@ -214,6 +217,7 @@ fn harold_service(
     state_view: HaroldStateView,
     watch_counts: watch::Receiver<tools::WatchCounts>,
     waiting: watch::Receiver<agent::waiting::WaitingView>,
+    seen_calls: mpsc::Sender<String>,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -231,6 +235,7 @@ fn harold_service(
         state_view,
         watch_counts,
         waiting,
+        seen_calls,
     }
 }
 
@@ -401,6 +406,19 @@ impl Harold for HaroldService {
             return Err(Status::internal("remote order write failed"));
         }
         Ok(Response::new(SetRemoteOrderResponse {}))
+    }
+
+    /// A control-tower jumped to a pane: the waiting task clears its mark. The call never
+    /// fails. For a pane that does not wait or is not known, the task does nothing.
+    async fn agent_seen(
+        &self,
+        request: Request<AgentSeenRequest>,
+    ) -> Result<Response<AgentSeenResponse>, Status> {
+        let pane_id = request.into_inner().pane_id;
+        // A send fails only when the waiting task stopped at shutdown: then there is no
+        // mark to clear.
+        let _ = self.seen_calls.send(pane_id).await;
+        Ok(Response::new(AgentSeenResponse {}))
     }
 
     async fn get_harold_state(
@@ -976,9 +994,9 @@ fn with_waiting(
 }
 
 /// Starts the task that decides the agents that wait for the user. It reads the focused
-/// pane at each `interval` off the async threads, and applies each agent snapshot change
-/// and each Rex host change with the last focus reading. It sends a new view on `views`
-/// only when the view changed.
+/// pane at each `interval` off the async threads, and applies each agent snapshot change,
+/// each Rex host change and each `AgentSeen` pane id from `seen_calls` with the last focus
+/// reading. It sends a new view on `views` only when the view changed.
 #[allow(clippy::too_many_arguments)]
 fn spawn_waiting_task(
     mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
@@ -988,6 +1006,7 @@ fn spawn_waiting_task(
     interval: Duration,
     clock: fn() -> i64,
     views: watch::Sender<agent::waiting::WaitingView>,
+    mut seen_calls: mpsc::Receiver<String>,
     mut shutdown: watch::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     use agent::waiting::{Focus, WaitingTracker};
@@ -1002,6 +1021,9 @@ fn spawn_waiting_task(
         let mut read_unknown = false;
         let mut host_versions = hosts.subscribe();
         let mut hosts_open = true;
+        let mut seen_open = true;
+        // The pane id of the `AgentSeen` call to apply in this pass, if any.
+        let mut seen: Option<String> = None;
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1044,6 +1066,13 @@ fn spawn_waiting_task(
                     }
                     host_versions.borrow_and_update();
                 }
+                call = seen_calls.recv(), if seen_open => {
+                    match call {
+                        Some(pane_id) => seen = Some(pane_id),
+                        // No sender is left: stop reading so the loop does not spin.
+                        None => seen_open = false,
+                    }
+                }
             }
             let snapshot = snapshots.borrow_and_update().clone();
             let rows = tracked_rows(&snapshot, &hosts);
@@ -1052,6 +1081,7 @@ fn spawn_waiting_task(
                 &snapshot,
                 &rows,
                 &focus,
+                seen.take().as_deref(),
                 clock(),
                 &roles,
                 &views,
@@ -1110,13 +1140,17 @@ fn tracked_rows(
     local.chain(remote).collect()
 }
 
-/// Applies the agent rows and the focus to `tracker`. It logs each agent that begins to wait
-/// and each agent the user sees, notes the waiting counts, and sends the view when it changed.
+/// Applies the `AgentSeen` pane id `seen`, then the agent rows and the focus, to `tracker`.
+/// It logs each agent that begins to wait and each agent the user sees, notes the waiting
+/// counts, and sends the view when it changed. A `seen` pane that does not wait writes
+/// nothing.
+#[allow(clippy::too_many_arguments)]
 fn observe_waiting(
     tracker: &mut agent::waiting::WaitingTracker,
     snapshot: &agent::domain::AgentSnapshot,
     rows: &[agent::waiting::TrackedRow],
     focus: &agent::waiting::Focus,
+    seen: Option<&str>,
     now_ms: i64,
     roles: &RoleSources,
     views: &watch::Sender<agent::waiting::WaitingView>,
@@ -1141,7 +1175,11 @@ fn observe_waiting(
     };
     let role_of = |pane_id: &str| role_and_product(pane_id).0;
 
-    for event in tracker.observe(rows, focus, now_ms, &role_of) {
+    let seen_event = seen.and_then(|pane_id| tracker.seen(pane_id, now_ms));
+    let events = seen_event
+        .into_iter()
+        .chain(tracker.observe(rows, focus, now_ms, &role_of));
+    for event in events {
         match event {
             WaitingEvent::Began { pane_id, role } => {
                 info!(pane_id = %pane_id, role = %role, "agent waiting");
@@ -2104,6 +2142,8 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     );
     // One channel: the waiting task sends the waiting agents, the snapshot stream reads them.
     let (waiting_tx, waiting_rx) = watch::channel(agent::waiting::WaitingView::default());
+    // One channel: each `AgentSeen` call sends its pane id, the waiting task reads it.
+    let (seen_tx, seen_rx) = mpsc::channel(64);
     spawn_waiting_task(
         snapshots.subscribe(),
         host_agents.clone(),
@@ -2114,6 +2154,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(1),
         wall_clock_ms,
         waiting_tx,
+        seen_rx,
         shutdown_rx.clone(),
     );
     let service = harold_service(
@@ -2133,6 +2174,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         HaroldStateView::from_settings(cfg),
         watch_counts_rx,
         waiting_rx,
+        seen_tx,
     );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())

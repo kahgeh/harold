@@ -5916,3 +5916,49 @@ fn role_and_waited_s_are_allowed_fields() {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
 }
+
+/// The unit and bounds of the histogram `name` at its data point where `key` is `value`.
+fn histogram_unit_and_bounds(name: &str, key: &str, value: &str) -> Option<(String, Vec<f64>)> {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    test_support::metrics().iter().rev().find_map(|resource| {
+        resource
+            .scope_metrics()
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == name)
+            .find_map(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .find(|p| {
+                        p.attributes()
+                            .any(|kv| kv.key.as_str() == key && kv.value.as_str() == value)
+                    })
+                    .map(|p| (metric.unit().to_string(), p.bounds().collect::<Vec<f64>>())),
+                _ => None,
+            })
+    })
+}
+
+#[test]
+fn the_waiting_duration_has_unit_s_and_the_state_duration_buckets() {
+    test_support::install();
+    record_waiting_duration("waiting_unit_probe", 12.0);
+    record_agent_state_duration_for("tmux", "working", "waiting_unit_probe", 12.0);
+    let waiting = histogram_unit_and_bounds(
+        "harold.agent.waiting.duration",
+        "role",
+        "waiting_unit_probe",
+    );
+    let state = histogram_unit_and_bounds(
+        "harold.agent.state.duration",
+        "provider_id",
+        "waiting_unit_probe",
+    );
+    let spec_buckets = vec![
+        10.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0,
+    ];
+    assert_eq!(waiting, Some(("s".to_string(), spec_buckets)));
+    assert_eq!(
+        waiting, state,
+        "the waiting buckets are the state-duration buckets"
+    );
+}

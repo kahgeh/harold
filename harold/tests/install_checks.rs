@@ -288,6 +288,13 @@ impl Harold for ProbeServer {
         Ok(tonic::Response::new(Default::default()))
     }
 
+    async fn agent_seen(
+        &self,
+        _: tonic::Request<harold_api::harold::AgentSeenRequest>,
+    ) -> Result<tonic::Response<harold_api::harold::AgentSeenResponse>, tonic::Status> {
+        Ok(tonic::Response::new(Default::default()))
+    }
+
     async fn set_messaging_paused(
         &self,
         _: Request<SetMessagingPausedRequest>,
@@ -502,6 +509,13 @@ impl Harold for RecordingServer {
         &self,
         _: tonic::Request<harold_api::harold::SetRemoteOrderRequest>,
     ) -> Result<tonic::Response<harold_api::harold::SetRemoteOrderResponse>, tonic::Status> {
+        Ok(tonic::Response::new(Default::default()))
+    }
+
+    async fn agent_seen(
+        &self,
+        _: tonic::Request<harold_api::harold::AgentSeenRequest>,
+    ) -> Result<tonic::Response<harold_api::harold::AgentSeenResponse>, tonic::Status> {
         Ok(tonic::Response::new(Default::default()))
     }
 
