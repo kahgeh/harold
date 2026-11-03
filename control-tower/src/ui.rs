@@ -124,6 +124,32 @@ fn voice_style(voice: crate::app::VoiceState) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
+/// The watches part of the masthead, with `true` for the paused form. A capped watch counts as
+/// paused. `N OF M` shows only while a watch runs.
+fn watches_part(running: u32, paused: u32, capped: u32) -> Option<(String, bool)> {
+    let paused_all = paused + capped;
+    let total = running + paused_all;
+    if total == 0 {
+        return None;
+    }
+    if paused_all == 0 {
+        return Some((format!("WATCHES {running}"), false));
+    }
+    let mut text = if running > 0 {
+        format!("■ WATCHES {running} OF {total} PAUSED")
+    } else {
+        "■ WATCHES PAUSED".to_owned()
+    };
+    if capped > 0 {
+        if paused == 0 {
+            text.push_str(" (CAP)");
+        } else {
+            text.push_str(&format!(" ({capped} CAP)"));
+        }
+    }
+    Some((text, true))
+}
+
 fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let voice = app.voice();
     let transport_style = transport_style(app.connection).add_modifier(Modifier::BOLD);
@@ -146,6 +172,24 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
         ));
     }
+    let watches = watches_part(
+        app.snapshot.watches_running,
+        app.snapshot.watches_paused,
+        app.snapshot.watches_capped,
+    );
+    // The running form drops with `REV`. The paused form stays at every width.
+    let watches_span = |paused_only: bool| {
+        let (text, paused) = watches.clone()?;
+        if paused_only && !paused {
+            return None;
+        }
+        let style = if paused {
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        };
+        Some([Span::raw("  ·  "), Span::styled(text, style)])
+    };
     let amber = Style::default().fg(AMBER);
     let version_style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
     let control_tower_version = sanitize_display(&app.control_tower_version, HAROLD_VERSION_LIMIT);
@@ -180,6 +224,7 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .chain(std::iter::once(transport.clone()))
                 .chain(with_revision.then(|| revision.clone()))
                 .chain(tail.iter().cloned())
+                .chain(watches_span(!with_revision).into_iter().flatten())
                 .collect::<Vec<_>>(),
         )
     };
@@ -2180,6 +2225,7 @@ fn seconds_ago(now_ms: i64, then_ms: i64) -> String {
 mod tests {
     use std::borrow::Cow;
 
+    use super::watches_part;
     use crate::api::HAROLD_VERSION_LIMIT;
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
@@ -3193,6 +3239,162 @@ mod tests {
         assert!(minimum.contains("v0.9.0  ·  TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
         assert!(!minimum.contains("CONTROL-TOWER"));
         assert!(!minimum.contains("REV #"));
+    }
+
+    #[test]
+    fn watches_part_follows_the_spec_table() {
+        let rows = [
+            ((0, 0, 0), None),
+            ((2, 0, 0), Some(("WATCHES 2", false))),
+            ((1, 1, 0), Some(("■ WATCHES 1 OF 2 PAUSED", true))),
+            ((0, 2, 0), Some(("■ WATCHES PAUSED", true))),
+            ((1, 0, 1), Some(("■ WATCHES 1 OF 2 PAUSED (CAP)", true))),
+            ((0, 1, 1), Some(("■ WATCHES PAUSED (1 CAP)", true))),
+            ((0, 0, 2), Some(("■ WATCHES PAUSED (CAP)", true))),
+        ];
+        for ((running, paused, capped), expected) in rows {
+            assert_eq!(
+                watches_part(running, paused, capped),
+                expected.map(|(text, flag)| (text.to_owned(), flag)),
+                "{running}/{paused}/{capped}"
+            );
+        }
+    }
+
+    fn watches_app(running: u32, paused: u32, capped: u32) -> App {
+        let mut app = versioned_app(None, "v0.74.0", false);
+        app.snapshot.watches_running = running;
+        app.snapshot.watches_paused = paused;
+        app.snapshot.watches_capped = capped;
+        app
+    }
+
+    /// The masthead text row, without the box edges.
+    fn masthead_row(buffer: &Buffer) -> String {
+        let width = buffer.area.width;
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("TRANSPORT"))
+            .expect("a masthead row")
+    }
+
+    #[test]
+    fn masthead_shows_each_watches_case_at_every_width() {
+        let cases = [
+            ((2, 0, 0), "WATCHES 2"),
+            ((1, 1, 0), "■ WATCHES 1 OF 2 PAUSED"),
+            ((0, 2, 0), "■ WATCHES PAUSED"),
+            ((1, 0, 1), "■ WATCHES 1 OF 2 PAUSED (CAP)"),
+            ((0, 1, 1), "■ WATCHES PAUSED (1 CAP)"),
+            ((0, 0, 2), "■ WATCHES PAUSED (CAP)"),
+        ];
+        for ((running, paused, capped), text) in cases {
+            let app = watches_app(running, paused, capped);
+            for (width, height) in [(140, 38), (118, 38), (90, 38)] {
+                let row = masthead_row(&rendered_buffer(&app, width, height, 100_000));
+                assert!(
+                    row.contains(&format!("● VOICE ON  ·  {text}")),
+                    "{text} at {width}: {row}"
+                );
+                // At 90 columns the longest part pushes `REV` out; the part itself stays.
+                if width >= 118 {
+                    assert!(row.contains("REV #00043"), "{text} at {width}");
+                }
+            }
+            let row = masthead_row(&rendered_buffer(&app, 60, 18, 100_000));
+            if running > 0 && paused == 0 && capped == 0 {
+                assert!(!row.contains("WATCHES"), "{row}");
+            } else if text.chars().count() <= 22 {
+                assert!(row.contains(text), "{text} at 60: {row}");
+            } else {
+                // The longest forms do not fit at 60 columns, so the box cuts the end.
+                let kept = if running > 0 {
+                    "■ WATCHES 1 OF 2 PAUSED"
+                } else {
+                    "■ WATCHES PAUSED"
+                };
+                assert!(row.contains(kept), "{text} at 60: {row}");
+            }
+            assert!(!row.contains("REV #"), "{row}");
+        }
+    }
+
+    #[test]
+    fn masthead_puts_the_watches_after_the_messaging_pause() {
+        let mut app = watches_app(0, 2, 0);
+        app.snapshot.messaging_paused = true;
+        let row = masthead_row(&rendered_buffer(&app, 140, 38, 100_000));
+        assert!(
+            row.contains("● VOICE ON  ·  ■ MSG PAUSED  ·  ■ WATCHES PAUSED"),
+            "{row}"
+        );
+    }
+
+    #[test]
+    fn masthead_shows_nothing_about_watches_for_zero_counts() {
+        let app = watches_app(0, 0, 0);
+        for (width, height) in [(140, 38), (60, 18)] {
+            let row = masthead_row(&rendered_buffer(&app, width, height, 100_000));
+            assert!(!row.contains("WATCHES"), "{row}");
+        }
+    }
+
+    #[test]
+    fn masthead_matches_the_spec_lines_at_118_and_60_columns() {
+        let inner = |row: String| {
+            let chars = row.chars().collect::<Vec<_>>();
+            chars[1..chars.len() - 1].iter().collect::<String>()
+        };
+        let running = inner(masthead_row(&rendered_buffer(
+            &watches_app(2, 0, 0),
+            118,
+            38,
+            100_000,
+        )));
+        assert_eq!(
+            running.trim_end(),
+            " HAROLD / CONTROL-TOWER  v0.74.0  ·  TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  WATCHES 2"
+        );
+        let paused = inner(masthead_row(&rendered_buffer(
+            &watches_app(0, 2, 0),
+            118,
+            38,
+            100_000,
+        )));
+        assert_eq!(
+            paused.trim_end(),
+            " HAROLD / CONTROL-TOWER  v0.74.0  ·  TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ WATCHES PAUSED"
+        );
+        let narrow = inner(masthead_row(&rendered_buffer(
+            &watches_app(0, 2, 0),
+            60,
+            18,
+            100_000,
+        )));
+        // The spec line with `v0.74.0` is 63 wide and the inner width is 58, so the version drops.
+        assert_eq!(
+            narrow.trim_end(),
+            " TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ WATCHES PAUSED"
+        );
+    }
+
+    #[test]
+    fn masthead_styles_the_watches_parts() {
+        let coral = Color::Rgb(224, 114, 98);
+        let paused = rendered_buffer(&watches_app(1, 1, 0), 140, 38, 100_000);
+        assert_styled_occurrences(&paused, "■ WATCHES 1 OF 2 PAUSED", coral, 1);
+        let bold = paused
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "■" && cell.fg == coral)
+            .all(|cell| cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        assert!(bold);
+        let running = rendered_buffer(&watches_app(2, 0, 0), 140, 38, 100_000);
+        assert_styled_occurrences(&running, "WATCHES 2", MUTED, 1);
     }
 
     #[test]
