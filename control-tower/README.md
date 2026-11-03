@@ -406,10 +406,13 @@ hides that agent, the filter is cleared.
 - Harold decides the waiting agents and serves them in each snapshot. Every control-tower
   shows the same list.
 - An agent starts waiting when it goes from Working or Blocked to Done, Idle or Error
-  while its pane is not the focused pane. A change to Unknown does not start it.
-- It stops when you visit its pane, when it goes Working or Blocked again, or when it exits.
-  Pressing `Enter` on it jumps to its pane. The agent stops waiting once the jump makes
-  its pane the focused pane.
+  while its pane is not known to be the focused pane. A change to Unknown does not start it.
+  With an unknown focus, a finishing agent is marked, and only being seen clears it.
+- It stops when it is seen, when it goes Working or Blocked again, or when it exits.
+  `Enter` on it jumps to its pane and calls `AgentSeen`. The remote control's jump calls
+  `AgentSeen` too. Harold then clears the mark in every control-tower.
+- With an older Harold (a snapshot with no `focus_known`), the control-tower keeps its
+  own list, probe and poll, as before.
 - Harold keeps the waiting list in memory only. Agents that are already Idle when
   Harold starts do not wait.
 
@@ -427,8 +430,8 @@ client's active pane counts as seen. Focus is sampled once a second, so leaving 
 than about a second before its agent finishes can keep that agent from waiting.
 
 The top border of the agent list shows `(focus tracking off)` when Harold has no reading
-(`focus_known` is false) and before the first snapshot. While it is off, an agent stops
-waiting only when it goes Working again.
+(`focus_known` is false) and before the first snapshot. While it is off, a finishing agent
+is still marked. It stops waiting when it is seen by `AgentSeen` or when it goes Working again.
 
 The detail panel (the `AGENT DETAILS` box) shows the lines `STATE`, `TARGET`, `PANE ID`,
 `DIRECTORY` and `AGE`. Then it shows `CURRENT STEP`, only when the agent reports a step, and then

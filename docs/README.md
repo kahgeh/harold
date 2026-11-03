@@ -40,3 +40,4 @@
 - [26. A release publishes only a commit whose Linux tests passed](adr/0026-a-release-publishes-only-a-commit-whose-linux-tests-passed.md)
 - [27. Harold reads agents on other Rex hosts, read-only, through Rex](adr/0027-harold-reads-agents-on-other-rex-hosts-read-only-through-rex.md)
 - [29. A test run keeps one log in one format](adr/0029-a-test-run-keeps-one-log-in-one-format.md)
+- [0032. Harold decides which agents wait for the user and serves it](adr/0032-harold-decides-which-agents-wait-for-the-user-and-serves-it.md)
