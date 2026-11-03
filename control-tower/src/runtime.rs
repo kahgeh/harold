@@ -12,7 +12,7 @@ use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
-use crate::api::{AgentStateSource, SourceError, SourceStream};
+use crate::api::{AgentStateSource, FocusRead, FocusRecord, SourceError, SourceStream};
 use crate::app::{
     App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
     Snapshot, SnapshotError,
@@ -273,6 +273,9 @@ trait StreamPort: Sized {
     fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("backlog tool unavailable".into())) })
     }
+    fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
+    }
     fn answer_question<'a>(&'a mut self, _out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
         Box::pin(async { SendResult::Unavailable })
     }
@@ -340,6 +343,9 @@ impl StreamPort for SourceStream {
 
     fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
         Box::pin(SourceStream::list_queue_now(self))
+    }
+    fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
+        Box::pin(SourceStream::list_focus(self))
     }
 
     fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
@@ -641,21 +647,36 @@ where
     result
 }
 
-/// The Now read that follows a question read. When the question read timed out,
-/// Harold is not answering, so the Now read is skipped and the line hides, as a failed
-/// read would hide it: a hung Harold holds the keys for one timeout, not two. Any other
-/// question error (an Unimplemented question tool, say) answers at once, so the Now read
-/// still happens.
+/// What the header shows below the fleet: the work records in focus, or, when the
+/// work tool is not there, the first line of the chief's Now item.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NowRead {
+    focus: Vec<FocusRecord>,
+    now: Option<String>,
+}
+
+/// The focus read that follows a question read. When the question read timed out,
+/// Harold is not answering, so the read is skipped and the lines hide, as a failed
+/// read would hide them: a hung Harold holds the keys for one timeout, not two. Any other
+/// question error (an Unimplemented question tool, say) answers at once, so the read
+/// still happens. The queue Now read runs only when the work tool answers Unimplemented.
+/// Any other work failure hides both lines.
 async fn read_now<S: StreamPort>(
     stream: &mut S,
     questions_timed_out: bool,
-) -> Result<Option<String>, SourceError> {
+) -> Result<NowRead, SourceError> {
     if questions_timed_out {
         return Err(SourceError::Transport(
             "skipped after a timed-out question read".into(),
         ));
     }
-    stream.list_queue_now().await
+    match stream.list_focus().await? {
+        FocusRead::Records(focus) => Ok(NowRead { focus, now: None }),
+        FocusRead::Unimplemented => Ok(NowRead {
+            focus: Vec::new(),
+            now: stream.list_queue_now().await?,
+        }),
+    }
 }
 
 async fn wait_for_retry(
@@ -1278,10 +1299,14 @@ impl RuntimeCore {
         listed.changed
     }
 
-    /// Takes a read of the chief's Now item, and reports whether the line changed. A failed
-    /// read hides the line and sets no status, as a failed question read does.
-    fn now_listed(&mut self, result: Result<Option<String>, SourceError>) -> bool {
-        self.app.observe_now(result.ok().flatten())
+    /// Takes a read of the focus records or the chief's Now item, and reports whether
+    /// a line changed. A failed read hides both and sets no status, as a failed question
+    /// read does.
+    fn now_listed(&mut self, result: Result<NowRead, SourceError>) -> bool {
+        let read = result.unwrap_or_default();
+        let focus_changed = self.app.observe_focus_records(read.focus);
+        let now_changed = self.app.observe_now(read.now);
+        focus_changed || now_changed
     }
 
     /// Asks whether Harold serves the knowledge tool; the answer says whether `s` does anything.
@@ -1606,13 +1631,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
-        QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort,
-        SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream,
-        handle_input, merge_exit, open_stream, resolve_client, run_loop, spawn_focus_worker,
-        wait_for_retry,
+        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, NowRead,
+        OpenOutcome, QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort,
+        ShutdownPort, SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval,
+        consume_stream, handle_input, merge_exit, open_stream, resolve_client, run_loop,
+        spawn_focus_worker, wait_for_retry,
     };
-    use crate::api::SourceError;
+    use crate::api::{FocusRead, FocusRecord, SourceError};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
@@ -3105,16 +3130,39 @@ mod tests {
     /// Runs `consume_stream` for `run_for` with the question poll every 20 ms, the
     /// question tool as `questions` and the backlog tool
     /// answering `answers` in order, and returns how often the backlog tool was read.
+    /// Runs the stream with a work tool that is not there (`Unimplemented`), so the
+    /// queue Now read decides the line. Returns the queue Now read count.
     async fn run_now_stream(
         core: &mut RuntimeCore,
         questions: QuestionProbe,
         answers: Vec<Result<Option<String>, SourceError>>,
         run_for: Duration,
     ) -> usize {
+        run_focus_stream(
+            core,
+            questions,
+            vec![Ok(FocusRead::Unimplemented)],
+            answers,
+            run_for,
+        )
+        .await
+        .0
+    }
+
+    /// Returns the queue Now read count and the focus read count.
+    async fn run_focus_stream(
+        core: &mut RuntimeCore,
+        questions: QuestionProbe,
+        focus: Vec<Result<FocusRead, SourceError>>,
+        answers: Vec<Result<Option<String>, SourceError>>,
+        run_for: Duration,
+    ) -> (usize, usize) {
         core.question_poll_interval = Duration::from_millis(20);
         let probe = Arc::new(std::sync::Mutex::new(NowState {
             answers: answers.into(),
             reads: 0,
+            focus: focus.into(),
+            focus_reads: 0,
         }));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
         stream.questions = Some(questions);
@@ -3137,7 +3185,102 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Control::Quit);
-        probe.lock().unwrap().reads
+        let state = probe.lock().unwrap();
+        (state.reads, state.focus_reads)
+    }
+
+    fn now_read(line: &str) -> NowRead {
+        NowRead {
+            focus: Vec::new(),
+            now: Some(line.into()),
+        }
+    }
+
+    fn focus_record(name: &str) -> FocusRecord {
+        FocusRecord {
+            name: name.into(),
+            status: "open".into(),
+            next_step: format!("next of {name}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_focus_lines_replace_the_now_read() {
+        let mut core = connected_core();
+        let (a, b) = (focus_record("a"), focus_record("b"));
+        let (now_reads, focus_reads) = run_focus_stream(
+            &mut core,
+            question_probe(Some(Queue::default())),
+            vec![Ok(FocusRead::Records(vec![a.clone(), b.clone()]))],
+            vec![Ok(Some("x".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(focus_reads >= 1);
+        assert_eq!(now_reads, 0, "the queue Now read does not run");
+        assert_eq!(core.app.focus, vec![a, b]);
+        assert_eq!(core.app.now_line, None);
+    }
+
+    #[tokio::test]
+    async fn an_unimplemented_work_tool_falls_back_to_the_queue_now() {
+        let mut core = connected_core();
+        let (now_reads, _) = run_focus_stream(
+            &mut core,
+            question_probe(Some(Queue::default())),
+            vec![Ok(FocusRead::Unimplemented)],
+            vec![Ok(Some("x".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(now_reads >= 1);
+        assert!(core.app.focus.is_empty());
+        assert_eq!(core.app.now_line.as_deref(), Some("x"));
+    }
+
+    #[tokio::test]
+    async fn another_work_failure_hides_the_lines() {
+        let mut core = connected_core();
+        core.app.observe_now(Some("old".into()));
+        core.app.observe_focus_records(vec![focus_record("old")]);
+        let (now_reads, focus_reads) = run_focus_stream(
+            &mut core,
+            question_probe(Some(Queue::default())),
+            vec![Err(SourceError::Transport("work refused".into()))],
+            vec![Ok(Some("x".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(focus_reads >= 1);
+        assert_eq!(now_reads, 0);
+        assert!(core.app.focus.is_empty());
+        assert_eq!(core.app.now_line, None);
+        assert!(core.app.runtime_status().is_none(), "no status is set");
+    }
+
+    #[tokio::test]
+    async fn no_focus_record_shows_no_line() {
+        let mut core = connected_core();
+        let (now_reads, focus_reads) = run_focus_stream(
+            &mut core,
+            question_probe(Some(Queue::default())),
+            vec![Ok(FocusRead::Records(Vec::new()))],
+            vec![Ok(Some("x".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(focus_reads >= 1);
+        assert_eq!(now_reads, 0);
+        assert!(core.app.focus.is_empty());
+        assert_eq!(core.app.now_line, None);
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_clears_the_focus() {
+        let mut core = connected_core();
+        core.app.observe_focus_records(vec![focus_record("a")]);
+        core.app.mark_disconnected();
+        assert!(core.app.focus.is_empty());
     }
 
     #[tokio::test]
@@ -3180,11 +3323,14 @@ mod tests {
 
         // The read as the stream opens shows the line, and a failed read hides it.
         let mut core = connected_core();
-        assert!(core.now_listed(Ok(Some("a".into()))));
+        assert!(core.now_listed(Ok(now_read("a"))));
         assert_eq!(core.app.now_line.as_deref(), Some("a"));
         assert!(core.now_listed(Err(SourceError::Transport("status: Unimplemented".into()))));
         assert_eq!(core.app.now_line, None);
-        assert!(!core.now_listed(Ok(None)), "no Now item keeps it hidden");
+        assert!(
+            !core.now_listed(Ok(NowRead::default())),
+            "no Now item keeps it hidden"
+        );
     }
 
     #[tokio::test]
@@ -3193,15 +3339,19 @@ mod tests {
         core.app.observe_now(Some("a".into()));
         let questions = question_probe(None);
         questions.lock().unwrap().times_out = true;
-        let reads = run_now_stream(
+        core.app.observe_focus_records(vec![focus_record("a")]);
+        let (reads, focus_reads) = run_focus_stream(
             &mut core,
             questions,
+            vec![Ok(FocusRead::Records(vec![focus_record("a")]))],
             vec![Ok(Some("a".into()))],
             Duration::from_millis(100),
         )
         .await;
         assert_eq!(reads, 0, "no Now read follows a timed-out question read");
+        assert_eq!(focus_reads, 0, "no focus read follows it either");
         assert_eq!(core.app.now_line, None);
+        assert!(core.app.focus.is_empty());
     }
 
     #[tokio::test]
@@ -4605,6 +4755,9 @@ mod tests {
     struct NowState {
         answers: VecDeque<Result<Option<String>, SourceError>>,
         reads: usize,
+        /// The work tool's focus reads, answered in order; the last answer repeats.
+        focus: VecDeque<Result<FocusRead, SourceError>>,
+        focus_reads: usize,
     }
 
     type NowProbe = Arc<std::sync::Mutex<NowState>>;
@@ -4782,6 +4935,20 @@ mod tests {
                 state.answers.pop_front().unwrap()
             } else {
                 state.answers.front().cloned().unwrap()
+            };
+            Box::pin(async move { answer })
+        }
+
+        fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
+            let Some(probe) = &self.now else {
+                return Box::pin(async { Err(SourceError::Transport("no work tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.focus_reads += 1;
+            let answer = if state.focus.len() > 1 {
+                state.focus.pop_front().unwrap()
+            } else {
+                state.focus.front().cloned().unwrap()
             };
             Box::pin(async move { answer })
         }
