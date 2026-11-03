@@ -412,7 +412,8 @@ class CheckTests(ReleaseTestCase):
         self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
         self.assertEqual([tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS], list(release.TESTS))
         self.assertEqual(release.TESTS, (
-            ('cargo', 'test', '--workspace', '--locked'),
+            ('cargo', 'test', '--workspace', '--locked', '--features',
+             'harold/timing-tests,control-tower/timing-tests'),
             ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
             ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
             ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),

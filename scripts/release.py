@@ -27,7 +27,8 @@ PACKAGE = 'harold-aarch64-apple-darwin'
 ARCHIVE = PACKAGE + '.tar.gz'
 CHECKSUM = ARCHIVE + '.sha256'
 # The tests the build workflow runs, in its order.
-TESTS = (('cargo', 'test', '--workspace', '--locked'),
+TESTS = (('cargo', 'test', '--workspace', '--locked', '--features',
+          'harold/timing-tests,control-tower/timing-tests'),
          ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
          ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
          ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),

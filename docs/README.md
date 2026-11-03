@@ -5,6 +5,7 @@
 - [Setup](how-tos/setup.md)
 - [Setup Agent Monitor Hooks](how-tos/setup-agent-monitor-hooks.md)
 - [Release](how-tos/release.md)
+- [Run the timing tests](how-tos/run-the-timing-tests.md)
 
 ## Prerequisites
 
