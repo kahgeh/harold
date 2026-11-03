@@ -180,7 +180,8 @@ body.on-todos .todos-row {
 }
 
 .todos-button,
-.back-button {
+.back-button,
+.harold-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -189,6 +190,23 @@ body.on-todos .todos-row {
   color: var(--brand);
   font-weight: 600;
   text-decoration: none;
+}
+
+.back-button {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.back-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harold-button {
+  flex: none;
+  margin-left: auto;
 }
 
 .todo-count {

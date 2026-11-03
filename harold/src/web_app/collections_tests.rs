@@ -906,13 +906,13 @@ mod pages {
         );
         let list = back_of(&get(&server, "/c/explainers").await.text().await.unwrap());
         assert!(
-            list.contains("href=\"/c\"") && list.ends_with("Pages"),
+            list.contains("href=\"/c\"") && list.ends_with("Pages</span>"),
             "{list}"
         );
         for page in ["/c/explainers/a.html", "/c/explainers/n.md"] {
             let back = back_of(&get(&server, page).await.text().await.unwrap());
             assert!(
-                back.contains("href=\"/c/explainers\"") && back.ends_with("EXPLAINERS"),
+                back.contains("href=\"/c/explainers\"") && back.ends_with("EXPLAINERS</span>"),
                 "{page}: {back}"
             );
         }

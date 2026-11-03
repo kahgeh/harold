@@ -395,3 +395,28 @@ fn markdown_tables_and_code_render() {
     assert!(html.contains("<table>"));
     assert!(html.contains("&lt;b&gt;"));
 }
+
+#[tokio::test]
+async fn the_notes_pages_hold_one_data_back_the_harold_control_and_the_swipe_script() {
+    let app = serve(true).await;
+    app.script().note = Some(pb::VaultNote {
+        name: "references/hyperdx".into(),
+        title: "HyperDX".into(),
+        kind: "reference".into(),
+        text: "text".into(),
+        ..Default::default()
+    });
+    for (path, back) in [("/notes", "/c"), ("/notes/references/hyperdx", "/notes")] {
+        let body = app.get(path).await.text().await.unwrap();
+        assert_eq!(body.matches("data-back=").count(), 1, "{path}");
+        assert!(body.contains(&format!(r#" data-back="{back}""#)), "{path}");
+        assert!(
+            body.contains(r#"<a href="/" id="to-chat" class="harold-button">Harold</a>"#),
+            "{path}"
+        );
+        assert!(
+            body.contains(r#"<script src="/static/back-swipe.js" defer></script>"#),
+            "{path}"
+        );
+    }
+}

@@ -11,12 +11,14 @@
 {% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
 {% endif %}<link rel="stylesheet" href="/static/app.css">
 <script type="module" src="/static/datastar-1.0.2.js"></script>
+<script src="/static/back-swipe.js" defer></script>
 </head>
 <body class="notes">
 <header class="bar top">
 <div class="row">
-<a href="/" id="to-thread" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+<a href="/c" id="to-thread" class="back-button" data-back="/c"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="back-label">Pages</span></a>
 <h2>Notes</h2>
+<a href="/" id="to-chat" class="harold-button">Harold</a>
 </div>
 </header>
 <main class="notes-page">
