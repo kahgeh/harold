@@ -54,6 +54,14 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | withdrawn file | The file `withdrawn/<id>.md` in a pod folder, which the PnEM writes when it withdraws or replaces a spec | — |
 | started file | The file `started/<id>.md` in a pod folder, which baton's `spawn.sh` writes at the first spawn for a spec | — |
 | merged file | The file `merged/<id>.md` in a pod folder, which pod coordination writes when it sends `MERGED` for a spec's last stage | — |
+| approval file | The file `approvals/<id>.md` in a pod folder, which the chief writes when you approve a spec, or when it starts one under a waiver. It sits beside the withdrawn, started and merged files | "approved file" |
+| next release (of a product) | What `harold tool release next` lists for a product: merged since the release, in progress, approved, not started, parked, awaiting approval and not clear | "changelog" (it lists specs, not changes) |
+| merged since the release | The completed specs whose merge commit is not in the product's newest `v*` tag. A completed spec that is in the tag is not listed. Here "merged" names the merge commit, as in merged file, not the state | "unreleased" |
+| in progress (a list) | The in-progress specs that have a branch and no parked handoff file. It differs from in-progress spec, which also holds parked and not clear specs | "building" |
+| approved, not started | The approved specs with no started file and no parked handoff file, approved on or after the product's first merged file. It differs from the approved state, which also holds old approvals, and from queue, the chief's own list | "queued" |
+| parked (a spec) | A spec whose build worker pod coordination stopped, with `parked/<id>-handoff.md` for the next worker | "paused" (a paused product is a registry setting) |
+| awaiting approval | The open specs whose first line is `Waiting for your approval.` It differs from open spec, which also holds specs under the small-fix waiver, and from waiting, which is never used alone | "waiting for you" |
+| not clear (a spec) | An in-progress spec with no branch and no parked handoff file | "stale", "lost" |
 | direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
 | pod coordination | A pod's session that starts build workers and merges their work. The control-tower names its row Coordinator. `role` = `pod_coordination` on `pod.agents` names it | "baton" for the session, "orchestrator" |

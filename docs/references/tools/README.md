@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are five: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md) and the [knowledge tool](knowledge.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are six: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md), the [knowledge tool](knowledge.md) and the [release tool](release.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -21,6 +21,7 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 | `products` | A `Products`: `products()` gives the products of the pod registry (`[telemetry] pod_registry`, the vault's `products.toml`), each as its name and its `repo` folder. It reads the registry on each call, so an edit shows at once. With no `pod_registry` set the list is empty; a registry that is set but can't be read gives `Err("registry_unreadable")`. |
 | `agents` | An `Agents`, read only ([ADR 0004](../../adr/0004-tools-may-read-agents-and-pods.md)): `agents()` gives a copy of Harold's agent list, each pane with its folder, provider, state, when it entered that state and its work summary, and `input_box(pane)` reads the pane's Claude Code input box afresh. |
 | `pods` | A `Pods`, read only: `pods()` gives a copy of pod stats' latest snapshot, the slots and specs of each product. |
+| `pod_registry` | An `Option<PathBuf>`: the path of the pod registry, `products.toml`, from `[telemetry] pod_registry`. It is `None` when no registry is set. Only the release tool reads it; it reads the file on each call. |
 | `watch_settings`, `model_environment`, `cli_path` | The `[watch]` settings, and the environment and program path Harold uses to start Claude Code. Only the watch tool reads them. |
 | `grpc_addr` | An `Option<SocketAddr>`: Harold's own gRPC address on loopback, from `[grpc]`, the one the CLI calls. A tool that reads another tool calls it there. `None` when the setting gives no address. The work tool uses it to read the question states. |
 | `shutdown` | A `watch::Receiver<()>` that fires when Harold stops. |
