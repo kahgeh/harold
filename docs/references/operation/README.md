@@ -57,6 +57,22 @@ Run these from the repository:
 
 Reinstall operates only on the managed bundle. It does not convert database schemas or remove an external store mentioned in a copied configuration. Backups are named uniquely and their locations are printed. A normal install moves retained managed data into the new bundle; its archived previous bundle is not a second copy of that data.
 
+## What runs where in a release
+
+Three places run tests and builds. Each has one job.
+
+| Place | What it runs |
+| --- | --- |
+| Push checks | On each push to `main`, `linux-tests.yml` and `macos-checks.yml` run the tests and the feature mixes. They use a cache of the compiled dependencies. |
+| The Mac | `make release` runs only the timing tests: `cargo test --workspace --locked --features harold/timing-tests,control-tower/timing-tests`. They need the real Mac. |
+| Release run | `build.yml` runs on the published release. It only builds, checks the binaries and uploads them. It uses no cache, so a published binary holds nothing from an old cache. |
+
+The trust rule: `make release` goes on only when HEAD equals `origin/main` and is the commit released. Both `linux-tests.yml` and `macos-checks.yml` must have a `push` run for that exact sha with the conclusion `success`.
+
+Any other conclusion (`failure`, `cancelled`, `skipped`, `timed_out`, `neutral`) counts as failed. A run still in progress stops the release. A commit with `[skip ci]` gets no run and stops as missing. Each stop names the run or the missing workflow, and makes nothing public.
+
+The release run does not test the commit again. See [ADR 33](../../adr/0033-a-release-trusts-the-checks-of-each-push.md).
+
 ## Release attempts
 
 A **release attempt** is one run of `make release`. At its end, `make release` records the attempt with the [telemetry tool](../tools/telemetry.md). Use it to see how long a release takes and how often it fails.
@@ -65,7 +81,7 @@ An attempt has five steps. Each step has a time.
 
 | Step | What it holds |
 | --- | --- |
-| `checks` | The checks before the tests, with the wait for the Linux check of the commit |
+| `checks` | The checks before the tests, with the push checks of the commit (Linux and macOS) |
 | `local_tests` | The local test suites |
 | `publish` | The release notes and the pre-release on GitHub |
 | `github_build` | The wait for the GitHub build |

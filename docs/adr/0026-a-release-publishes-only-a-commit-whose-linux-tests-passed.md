@@ -1,7 +1,7 @@
 # 26. A release publishes only a commit whose Linux tests passed
 
 Date: 2026-11-02
-Status: Accepted (rex-state-stage1-cleanup).
+Status: Accepted (rex-state-stage1-cleanup). Its gate is superseded by ADR 33.
 
 ## Context
 

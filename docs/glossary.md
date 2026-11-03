@@ -323,6 +323,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
 | release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
+| push checks | The Linux and macOS workflows that run on each push to `main`. A release needs both to have passed on its commit | "CI" alone, "pre-release checks" |
+| release run | The GitHub run of `build.yml` on a published release. It only builds, checks the binaries and uploads them | "build" for the whole release |
 
 ## Storing and delivering
 
