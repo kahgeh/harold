@@ -141,14 +141,47 @@ Links:
 - note:The queue stays until the import is applied.
 ```
 
-The heading gives the name and the title. `:`, `-`, `–` or `—` may separate them. A decision line is `- <mark>, <who>, <date>: <text>`. A link line is `- <link>`. Blank lines are skipped.
+### The exact grammar
 
-- **Without `--apply`:** the command prints what it would store, and each line that it cannot place, with its file and line. It stores nothing.
+The parser is strict. It does not guess. The chief converts its own files to this form.
+
+- **Blank lines** are skipped. A leading byte-order mark and a carriage return before the line end are ignored. Each line is trimmed of spaces at both ends before it is read.
+- **The heading** is the first line that is not blank. It must be `# <name>` followed by nothing, or by a separator and the title. The separator is `:`, `-`, `–` or `—`. The name is 1 to 48 characters of `a-z`, `0-9` and `-`. The title may be empty. A second line that starts with `# ` is unplaced.
+- **The field lines** are `Priority:`, `Status:`, `Waits for:` and `Next step:`. The key must have exactly this spelling and capital letters. Each field may appear once. The order is free.
+- **Priority** is `focus`, `next` or `later`. The case of the value does not matter.
+- **Status** is one of `idea`, `discovery`, `spec drafted`, `architect checked`, `waiting for the user`, `approved`, `building`, `merged`, `released` or `checked by the user`. The case of the value does not matter.
+- **`Priority:` and `Status:` are required.** A file without one of them gives no work record.
+- **`Waits for:` and `Next step:`** take one line each. A missing line is an empty value.
+- **`Decisions:` and `Links:`** each stand alone on their line, may appear once, and take no value on the same line. `Links: none` is unplaced. Under them, each item is one line that starts with `- `. An item that follows a field line (not `Decisions:` or `Links:`) is unplaced.
+- **A decision item** is `- <mark>, <who>, <date>: <text>`. The mark is `agreed`, `draft`, `dropped` or `open`. The `who` is not empty and may hold spaces. The date is `YYYY-MM-DD`. The text is not empty.
+- **A link item** is `- spec:<product>/<id>`, `- question:<id>` or `- note:<text>`. A spec or question part holds no spaces.
+
+An unplaced line is any non-blank line that fits none of these rules. A whole file can be unplaced too. A dry run prints each one as `unplaced <file>:<line>: <reason>: <the line>`. For line 0, which means the whole file, it prints `unplaced <file>: <reason>`. The reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `no_heading` | The first line that is not blank is not a `# ` heading. A file without any heading also gives one entry at line 0 |
+| `bad_heading` | The line starts with `# `, but the name or the separator is not valid |
+| `second_heading` | A `# ` line after the heading |
+| `unknown_line` | The line is neither a known field nor a `- ` item |
+| `bad_priority`, `bad_status` | The value is not one of the words above |
+| `second_value` | A field, `Decisions:` or `Links:` appears twice |
+| `bad_decision` | A decision item does not follow the form, or has a wrong mark or date |
+| `bad_link` | A link item is not one of the three link forms |
+| `item_outside_section` | A `- ` line when no `Decisions:` or `Links:` section is open |
+| `inline_value_after_section` | A value on the `Decisions:` or `Links:` line |
+| `missing_priority`, `missing_status` | The file has no `Priority:` or no `Status:` line. The entry is at the heading line |
+| `file_too_large` | The file is larger than 64 KB |
+| `not_utf8` | The file is not UTF-8 text |
+| `unreadable_file` | The file cannot be opened or read |
+| `not_a_file` | The entry is not a plain file, for example a folder or a link |
+| `hidden_or_upper_case_name` | The name starts with `.`, or the extension is `.MD` and not `.md`. The file is skipped and reported |
+| `name_used_by_another_file` | Two files, or a file and a queue item, give the same name |
+
+- **Without `--apply`:** the command prints what it would store, and each unplaced line as shown above. It stores nothing. It exits with code 1 when any line is unplaced, and with code 0 when none is.
 - **With `--apply`:** the command stores all the work records in one transaction, or none. It refuses while any line is unplaced (`unplaced_lines <count>`). It also refuses a name that the current file holds (`name_in_use <name>`). It refuses a work record that would be a third in `focus` (`focus_full <name>`). Nothing is lost silently.
 - **Import is for the chief's files only.** No queue item comes in unless you name it.
 - **`--queue N12,N34`:** imports only the named queue items. Each becomes a work record named `queue-<id>` in lower case. Its status is `idea` and its priority is `later`. The first line of its text is the next step, and the rest of the text is not copied. The queue keeps the full item. The command refuses an id that is not an open queue item (the Now item or a parked item) with `not_open_queue_item <id>`. The queue keeps every item.
-
-An unplaced line with the number 0 is a whole-file problem. It means a file that cannot be read, a file with no heading, or a name that two files use.
 
 ```sh
 harold tool work import ./work --queue N12,N34       # a dry run: prints what it would store
