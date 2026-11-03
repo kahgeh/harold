@@ -350,7 +350,7 @@ pub(crate) trait RemoteSource {
     fn open(&self) -> LocalFuture<'_, Result<Self::Stream, SourceError>>;
 }
 
-/// The Harold stream and the two calls of the remote order.
+/// The Harold stream, the two calls of the remote order and the `AgentSeen` call.
 pub(crate) trait RemoteStream {
     fn receive(&mut self) -> LocalFuture<'_, Option<Result<Snapshot, SourceError>>>;
     fn remote_order(&self) -> LocalFuture<'_, Result<Vec<String>, SourceError>>;
@@ -358,6 +358,7 @@ pub(crate) trait RemoteStream {
         &'a self,
         products: &'a [String],
     ) -> LocalFuture<'a, Result<(), SourceError>>;
+    fn agent_seen<'a>(&'a self, pane_id: &'a str) -> LocalFuture<'a, Result<(), SourceError>>;
 }
 
 /// The terminal keys. `None` means the input stopped.
@@ -391,6 +392,10 @@ impl RemoteStream for SourceStream {
         products: &'a [String],
     ) -> LocalFuture<'a, Result<(), SourceError>> {
         Box::pin(self.set_remote_order(products))
+    }
+
+    fn agent_seen<'a>(&'a self, pane_id: &'a str) -> LocalFuture<'a, Result<(), SourceError>> {
+        Box::pin(self.request_agent_seen(pane_id))
     }
 }
 
@@ -563,6 +568,12 @@ async fn remote_loop<S: RemoteSource>(
                     Action::Close => return Ok(()),
                     Action::Jump(index) => {
                         if jump(&mut model, index, navigator) {
+                            // The remote closes after a jump, so the call is awaited, not
+                            // spawned: a spawned task would end with the runtime. It waits
+                            // at most VOICE_REQUEST_TIMEOUT (2 s). Every error is ignored.
+                            if let (Some(stream), Some(entry)) = (&stream, model.entries.get(index)) {
+                                let _ = stream.agent_seen(&entry.pane_id).await;
+                            }
                             return Ok(());
                         }
                     }
@@ -1103,6 +1114,10 @@ mod tests {
         save: Result<(), SourceError>,
         saved: Rc<RefCell<Vec<Vec<String>>>>,
         drained: Rc<Notify>,
+        /// The pane id of each `AgentSeen` call.
+        seen: Rc<RefCell<Vec<String>>>,
+        /// The answer to each `AgentSeen` call.
+        seen_answer: Result<(), SourceError>,
     }
 
     impl RemoteStream for FakeStream {
@@ -1133,6 +1148,12 @@ mod tests {
             self.saved.borrow_mut().push(products.to_vec());
             let save = self.save.clone();
             Box::pin(async move { save })
+        }
+
+        fn agent_seen<'a>(&'a self, pane_id: &'a str) -> LocalFuture<'a, Result<(), SourceError>> {
+            self.seen.borrow_mut().push(pane_id.to_string());
+            let answer = self.seen_answer.clone();
+            Box::pin(async move { answer })
         }
     }
 
@@ -1207,6 +1228,7 @@ mod tests {
         after_save: Vec<Snapshot>,
         order: Result<Vec<String>, SourceError>,
         save: Result<(), SourceError>,
+        seen_answer: Result<(), SourceError>,
         harold_down: bool,
         keys: Vec<KeyEvent>,
         wait_for_snapshots: bool,
@@ -1224,6 +1246,7 @@ mod tests {
                 after_save: Vec::new(),
                 order: Ok(names(&["a", "b"])),
                 save: Ok(()),
+                seen_answer: Ok(()),
                 harold_down: false,
                 keys: Vec::new(),
                 wait_for_snapshots: true,
@@ -1241,6 +1264,7 @@ mod tests {
         result: Option<Result<(), AppError>>,
         rex: fake_rex::Calls,
         saved: Vec<Vec<String>>,
+        seen: Vec<String>,
         last: Model,
     }
 
@@ -1276,6 +1300,7 @@ mod tests {
     async fn run_case(case: Case) -> Outcome {
         let drained = Rc::new(Notify::new());
         let saved = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
         let stream = FakeStream {
             snapshots: case.snapshots.into(),
             after_save: case.after_save.into(),
@@ -1283,6 +1308,8 @@ mod tests {
             save: case.save,
             saved: Rc::clone(&saved),
             drained: Rc::clone(&drained),
+            seen: Rc::clone(&seen),
+            seen_answer: case.seen_answer,
         };
         let source = FakeSource {
             stream: RefCell::new((!case.harold_down).then_some(stream)),
@@ -1311,10 +1338,12 @@ mod tests {
         .await
         .ok();
         let saved = saved.borrow().clone();
+        let seen = seen.borrow().clone();
         Outcome {
             result,
             rex,
             saved,
+            seen,
             last: screen.shown.last().cloned().expect("the remote draws"),
         }
     }
@@ -1340,6 +1369,51 @@ mod tests {
             calls[4][5],
             r#"{"session_id":"session:01a1","layer_id":"layer:01c3"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn jump_sends_agent_seen() {
+        let outcome = run_case(Case {
+            order: Ok(names(&["b", "a"])),
+            keys: vec![ch('1')],
+            rex: vec![Ok(""), Ok(sessions_named("b")), Ok(""), Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.seen, ["block:b"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_seen_still_jumps_and_closes_the_layer() {
+        let outcome = run_case(Case {
+            keys: vec![ch('1')],
+            seen_answer: Err(SourceError::Transport("status: Unimplemented".into())),
+            rex: vec![Ok(""), Ok(sessions_named("a")), Ok(""), Ok(VIEW), CLOSE],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(matches!(outcome.result, Some(Ok(()))));
+        assert_eq!(outcome.seen, ["block:a"]);
+        assert_eq!(
+            outcome.steps(),
+            ["focus", "ls", "do", "session.view", "session.close_layer"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_jump_sends_no_agent_seen() {
+        let outcome = run_case(Case {
+            keys: vec![ch('1'), ch('5')],
+            rex: vec![Err("no block has this id")],
+            ..Case::default()
+        })
+        .await;
+
+        assert!(outcome.result.is_none(), "the remote stays open");
+        assert!(outcome.seen.is_empty());
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use crate::api::{AgentStateSource, FocusRead, FocusRecord, SourceError, SourceStream};
+use crate::api::{AgentStateSource, FocusRead, FocusRecord, SharedSeen, SourceError, SourceStream};
 use crate::app::{
     App, CallAction, CallView, ConnectionState, Effect, RuntimeStatus, SearchState, Snapshot,
     SnapshotError,
@@ -208,6 +208,7 @@ where
         core.app.hide_questions();
         core.app.close_notes();
         core.notes_backend = None;
+        core.seen = None;
         match outcome {
             Ok(Control::Quit) => return Ok(()),
             Ok(Control::Retry) => {
@@ -299,6 +300,10 @@ trait StreamPort: Sized {
     fn notes_backend(&self) -> Option<SharedBackend> {
         None
     }
+    /// The `AgentSeen` call, for a jump; none when this stream cannot reach it.
+    fn seen_reporter(&self) -> Option<SharedSeen> {
+        None
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -372,6 +377,10 @@ impl StreamPort for SourceStream {
 
     fn notes_backend(&self) -> Option<SharedBackend> {
         SourceStream::notes_backend(self)
+    }
+
+    fn seen_reporter(&self) -> Option<SharedSeen> {
+        SourceStream::seen_reporter(self)
     }
 }
 
@@ -455,6 +464,7 @@ where
     T: ScreenPort,
 {
     core.notes_backend = stream.notes_backend();
+    core.seen = stream.seen_reporter();
     core.probe_notes();
     let result = async {
         // The call's state is asked for as the stream opens, so the button finds the
@@ -1087,6 +1097,8 @@ struct RuntimeCore {
     drop_next_block_key: bool,
     /// The knowledge tool, while a stream is open.
     notes_backend: Option<SharedBackend>,
+    /// The `AgentSeen` call, while a stream is open.
+    seen: Option<SharedSeen>,
     /// The notes search's answers, taken by the stream loop.
     notes_events: mpsc::UnboundedReceiver<NotesEvent>,
     notes_sender: mpsc::UnboundedSender<NotesEvent>,
@@ -1136,6 +1148,7 @@ impl RuntimeCore {
             question_poll_interval: QUESTION_POLL_INTERVAL,
             drop_next_block_key: false,
             notes_backend: None,
+            seen: None,
             notes_events,
             notes_sender,
             notes_latest: Arc::default(),
@@ -1256,6 +1269,19 @@ impl RuntimeCore {
                 });
             }
         }
+    }
+
+    /// Tells Harold, in a spawned task, that the user jumped to `pane_id`. The key does
+    /// not wait for it. Every error (no stream, an older Harold that answers
+    /// `Unimplemented`, a timeout) is ignored: the jump has happened.
+    fn report_seen(&self, pane_id: &str) {
+        let Some(seen) = self.seen.as_ref() else {
+            return;
+        };
+        let call = seen.agent_seen(pane_id.to_owned());
+        tokio::spawn(async move {
+            let _ = call.await;
+        });
     }
 
     /// Takes an answer of the notes search: a list for the view, or a file to open.
@@ -1449,7 +1475,10 @@ impl RuntimeCore {
                     .unwrap_or_default();
                 let label = sanitize_display(host, ERROR_LIMIT);
                 match navigator.focus_host_block(host, &session, block) {
-                    Ok(HostJump::Moved) => self.app.clear_runtime_status(),
+                    Ok(HostJump::Moved) => {
+                        self.app.clear_runtime_status();
+                        self.report_seen(&pane_id);
+                    }
                     Ok(HostJump::NoApp) => self.app.set_runtime_status(RuntimeStatus::OnHost(
                         format!("{label}: no Rex app is connected"),
                     )),
@@ -1478,7 +1507,10 @@ impl RuntimeCore {
                     .map(|row| row.session_name.clone())
                     .unwrap_or_default();
                 match navigator.focus_rex_block(&session, &pane_id) {
-                    Ok(()) => self.app.clear_runtime_status(),
+                    Ok(()) => {
+                        self.app.clear_runtime_status();
+                        self.report_seen(&pane_id);
+                    }
                     Err(error) => self.app.set_runtime_status(RuntimeStatus::NavigationFailed(
                         sanitize_display(&error.to_string(), ERROR_LIMIT),
                     )),
@@ -1492,7 +1524,10 @@ impl RuntimeCore {
                     return Control::Continue;
                 };
                 match navigator.jump_to(client, &pane_id) {
-                    Ok(()) => self.app.clear_runtime_status(),
+                    Ok(()) => {
+                        self.app.clear_runtime_status();
+                        self.report_seen(&pane_id);
+                    }
                     Err(error) => self.app.set_runtime_status(RuntimeStatus::NavigationFailed(
                         sanitize_display(&error.to_string(), ERROR_LIMIT),
                     )),
@@ -1527,7 +1562,7 @@ mod tests {
         SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream,
         handle_input, merge_exit, open_stream, resolve_client, run_loop, wait_for_retry,
     };
-    use crate::api::{FocusRead, FocusRecord, SourceError};
+    use crate::api::{FocusRead, FocusRecord, SeenReporter, SharedSeen, SourceError};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
@@ -2017,6 +2052,217 @@ mod tests {
             core.app.runtime_status(),
             Some(&RuntimeStatus::NavigationUnavailable)
         );
+    }
+
+    /// The `AgentSeen` call as the runtime sees it. `asked` records each call at once;
+    /// the future sends the pane id on `sent` when the spawned task runs it.
+    struct FakeSeen {
+        asked: std::sync::Mutex<Vec<String>>,
+        sent: mpsc::UnboundedSender<String>,
+        fail: bool,
+    }
+
+    impl SeenReporter for FakeSeen {
+        fn agent_seen(
+            &self,
+            pane_id: String,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SourceError>> + Send>> {
+            self.asked.lock().unwrap().push(pane_id.clone());
+            let sent = self.sent.clone();
+            let fail = self.fail;
+            Box::pin(async move {
+                let _ = sent.send(pane_id);
+                if fail {
+                    Err(SourceError::Transport("status: Unimplemented".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    fn fake_seen(fail: bool) -> (Arc<FakeSeen>, mpsc::UnboundedReceiver<String>) {
+        let (sent, receiver) = mpsc::unbounded_channel();
+        let seen = Arc::new(FakeSeen {
+            asked: std::sync::Mutex::new(Vec::new()),
+            sent,
+            fail,
+        });
+        (seen, receiver)
+    }
+
+    /// The next pane id that a spawned `AgentSeen` task sent.
+    async fn next_seen(receiver: &mut mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(Duration::from_secs(60), receiver.recv())
+            .await
+            .expect("the spawned AgentSeen call runs")
+            .expect("the channel is open")
+    }
+
+    fn rex_core() -> RuntimeCore {
+        let mut rex_snapshot = snapshot(1, MonitorHealthState::Healthy);
+        rex_snapshot.rows[0].incarnation.pane_id = "block:abc".into();
+        rex_snapshot.rows[0].session_name = "rexsup-dash".into();
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(rex_snapshot, 1);
+        core
+    }
+
+    fn host_core() -> RuntimeCore {
+        let mut core = RuntimeCore::new(None);
+        core.begin_stream();
+        core.accept_snapshot(host_snapshot(1, false, None), 1);
+        core
+    }
+
+    fn tmux_core(client: Option<&str>) -> RuntimeCore {
+        let mut core = RuntimeCore::new(client.map(Into::into));
+        core.begin_stream();
+        core.accept_snapshot(snapshot(1, MonitorHealthState::Healthy), 1);
+        core
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_row_sends_agent_seen_with_its_pane() {
+        let (seen, mut receiver) = fake_seen(false);
+
+        let mut core = tmux_core(Some("client-7"));
+        core.seen = Some(seen.clone());
+        let navigator = FakeNavigator::successful();
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::Continue
+        );
+        assert_eq!(next_seen(&mut receiver).await, "%7");
+
+        let mut core = rex_core();
+        core.seen = Some(seen.clone());
+        let navigator = RexNavigator {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            fail: false,
+        };
+        core.handle_key(KeyCode::Enter, &navigator);
+        assert_eq!(next_seen(&mut receiver).await, "block:abc");
+
+        let mut core = host_core();
+        core.seen = Some(seen.clone());
+        let navigator = HostNavigator {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            result: Ok(HostJump::Moved),
+        };
+        core.handle_key(KeyCode::Enter, &navigator);
+        assert_eq!(next_seen(&mut receiver).await, "rex:omarchy/block:abc");
+
+        assert_eq!(
+            seen.asked.lock().unwrap().as_slice(),
+            ["%7", "block:abc", "rex:omarchy/block:abc"]
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_when_agent_seen_fails_still_navigates() {
+        let (seen, mut receiver) = fake_seen(true);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let navigator = FakeNavigator {
+            calls: calls.clone(),
+            fail: false,
+        };
+        let mut core = tmux_core(Some("client-7"));
+        core.seen = Some(seen);
+
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::Continue
+        );
+        assert_eq!(next_seen(&mut receiver).await, "%7");
+        // The failed call has run: it leaves no message and no change.
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[("client-7".into(), "%7".into())]
+        );
+        assert_eq!(core.app.runtime_status(), None);
+        assert!(core.notes_events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn enter_does_not_send_agent_seen_when_the_navigation_fails() {
+        let (seen, mut receiver) = fake_seen(false);
+
+        let mut core = tmux_core(Some("client-7"));
+        core.seen = Some(seen.clone());
+        let failing = FakeNavigator {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            fail: true,
+        };
+        core.handle_key(KeyCode::Enter, &failing);
+
+        let mut core = tmux_core(None);
+        core.seen = Some(seen.clone());
+        core.handle_key(KeyCode::Enter, &FakeNavigator::successful());
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+
+        let mut core = rex_core();
+        core.seen = Some(seen.clone());
+        let failing = RexNavigator {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            fail: true,
+        };
+        core.handle_key(KeyCode::Enter, &failing);
+
+        for result in [
+            Ok(HostJump::NoApp),
+            Ok(HostJump::ManyApps),
+            Ok(HostJump::NoMatchingApp),
+            Err(NavigationError::RexNotFound),
+        ] {
+            let mut core = host_core();
+            core.seen = Some(seen.clone());
+            let navigator = HostNavigator {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                result,
+            };
+            core.handle_key(KeyCode::Enter, &navigator);
+        }
+
+        assert!(seen.asked.lock().unwrap().is_empty());
+        tokio::task::yield_now().await;
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stream_gives_enter_its_seen_reporter() {
+        let (seen, mut receiver) = fake_seen(false);
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.seen = Some(seen);
+        let (input_sender, mut input) = InputPump::channel();
+        for key in [KeyCode::Enter, KeyCode::Char('q')] {
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let mut core = tmux_core(Some("client-7"));
+
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, Control::Quit);
+        assert_eq!(next_seen(&mut receiver).await, "%7");
     }
 
     #[test]
@@ -4622,6 +4868,7 @@ mod tests {
         call: Option<CallProbe>,
         questions: Option<QuestionProbe>,
         now: Option<NowProbe>,
+        seen: Option<SharedSeen>,
     }
 
     /// The backlog tool's Now reads, answered in order; the last answer repeats.
@@ -4686,6 +4933,7 @@ mod tests {
                 call: None,
                 questions: None,
                 now: None,
+                seen: None,
             }
         }
 
@@ -4699,11 +4947,16 @@ mod tests {
                 call: None,
                 questions: None,
                 now: None,
+                seen: None,
             }
         }
     }
 
     impl StreamPort for FakeStream {
+        fn seen_reporter(&self) -> Option<SharedSeen> {
+            self.seen.clone()
+        }
+
         fn receive(&mut self) -> BoxFuture<'_, Option<Result<Snapshot, SourceError>>> {
             match &mut self.receive {
                 FakeReceive::Pending => Box::pin(std::future::pending()),

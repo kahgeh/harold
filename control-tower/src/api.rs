@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use harold_api::harold::{
-    AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
-    CallAction as ProtoCallAction, CallRequest, CallResponse, CallResult as ProtoCallResult,
-    CallState as ProtoCallState, GetRemoteOrderRequest,
+    AgentMonitorHealth, AgentPaneState, AgentSeenRequest, AgentState as ProtoAgentState,
+    AgentStateSnapshot, CallAction as ProtoCallAction, CallRequest, CallResponse,
+    CallResult as ProtoCallResult, CallState as ProtoCallState, GetRemoteOrderRequest,
     MonitorHealthState as ProtoMonitorHealthState, SetMessagingPausedRequest,
     SetRemoteOrderRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
@@ -158,6 +158,50 @@ impl From<ProtocolError> for SourceError {
     }
 }
 
+/// Tells Harold that a control-tower jumped to an agent's pane, so Harold clears its
+/// waiting mark. The runtime spawns the future, so a key never waits for Harold.
+pub trait SeenReporter: Send + Sync {
+    fn agent_seen(
+        &self,
+        pane_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SourceError>> + Send>>;
+}
+
+pub type SharedSeen = Arc<dyn SeenReporter>;
+
+/// The `AgentSeen` call on the `Harold` service.
+struct HaroldSeen {
+    client: HaroldClient<Channel>,
+}
+
+impl SeenReporter for HaroldSeen {
+    fn agent_seen(
+        &self,
+        pane_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SourceError>> + Send>> {
+        Box::pin(agent_seen(Some(self.client.clone()), pane_id))
+    }
+}
+
+/// Calls `AgentSeen` for `pane_id`. An older Harold answers `Unimplemented`, which is
+/// an error here; the callers ignore every error.
+async fn agent_seen(
+    client: Option<HaroldClient<Channel>>,
+    pane_id: String,
+) -> Result<(), SourceError> {
+    let Some(mut client) = client else {
+        return Err(SourceError::transport("seen call unavailable"));
+    };
+    tokio::time::timeout(
+        VOICE_REQUEST_TIMEOUT,
+        client.agent_seen(AgentSeenRequest { pane_id }),
+    )
+    .await
+    .map_err(|_| SourceError::transport("seen request timed out"))?
+    .map(|_| ())
+    .map_err(|error| SourceError::transport(error.to_string()))
+}
+
 pub struct SourceStream {
     receiver: mpsc::Receiver<Result<Snapshot, SourceError>>,
     reader: Option<JoinHandle<()>>,
@@ -246,6 +290,18 @@ impl SourceStream {
         .map_err(|_| SourceError::transport("messaging request timed out"))?
         .map(|_| ())
         .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
+    /// Tells Harold that the control-tower jumped to `pane_id`.
+    pub async fn request_agent_seen(&self, pane_id: &str) -> Result<(), SourceError> {
+        agent_seen(self.voice.clone(), pane_id.to_owned()).await
+    }
+
+    /// The `AgentSeen` call for a spawned task; `None` before the stream has a channel.
+    pub fn seen_reporter(&self) -> Option<SharedSeen> {
+        self.voice
+            .clone()
+            .map(|client| Arc::new(HaroldSeen { client }) as SharedSeen)
     }
 
     /// Pauses every watch (`true`) or resumes every watch (`false`) through the watch
@@ -1536,6 +1592,14 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_tts_muted(true).await.unwrap_err();
         assert!(error.detail().contains("voice control unavailable"));
+    }
+
+    #[tokio::test]
+    async fn request_agent_seen_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.request_agent_seen("%7").await.unwrap_err();
+        assert!(error.detail().contains("seen call unavailable"));
+        assert!(stream.seen_reporter().is_none());
     }
 
     #[tokio::test]
