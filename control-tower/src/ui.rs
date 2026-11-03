@@ -3442,6 +3442,15 @@ mod tests {
     }
 
     #[test]
+    fn watches_failure_is_reported_in_the_monitor_line() {
+        let mut app = live_app(Vec::new(), None);
+        app.set_runtime_status(crate::app::RuntimeStatus::WatchesFailed(
+            "pause refused".into(),
+        ));
+        assert!(rendered(&app, 140, 38, 100_000).contains("watches: pause refused"));
+    }
+
+    #[test]
     fn voice_indicator_colour_and_glyph_are_paired_with_the_word() {
         let mut app = live_app(Vec::new(), None);
         app.snapshot.tts_muted = true;

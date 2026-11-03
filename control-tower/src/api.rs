@@ -248,27 +248,11 @@ impl SourceStream {
         let Some(mut client) = self.watch.clone() else {
             return Err(SourceError::transport("watch control unavailable"));
         };
-        let caller = "control_tower".to_owned();
         let call = async {
             if paused {
-                client
-                    .pause(PauseRequest {
-                        name: String::new(),
-                        all: true,
-                        for_minutes: None,
-                        caller,
-                    })
-                    .await
-                    .map(|_| ())
+                client.pause(pause_all_request()).await.map(|_| ())
             } else {
-                client
-                    .resume(ResumeRequest {
-                        name: String::new(),
-                        all: true,
-                        caller,
-                    })
-                    .await
-                    .map(|_| ())
+                client.resume(resume_all_request()).await.map(|_| ())
             }
         };
         tokio::time::timeout(VOICE_REQUEST_TIMEOUT, call)
@@ -449,6 +433,25 @@ impl AgentStateSource {
             source.watch = Some(WatchServiceClient::new(channel));
             Ok(source)
         })
+    }
+}
+
+const WATCH_CALLER: &str = "control_tower";
+
+fn pause_all_request() -> PauseRequest {
+    PauseRequest {
+        name: String::new(),
+        all: true,
+        for_minutes: None,
+        caller: WATCH_CALLER.to_owned(),
+    }
+}
+
+fn resume_all_request() -> ResumeRequest {
+    ResumeRequest {
+        name: String::new(),
+        all: true,
+        caller: WATCH_CALLER.to_owned(),
     }
 }
 
@@ -810,7 +813,7 @@ fn map_monitor_health_state(state: i32) -> MonitorHealthState {
 
 #[cfg(test)]
 mod tests {
-    use super::remote_order_result;
+    use super::{pause_all_request, remote_order_result, resume_all_request};
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
@@ -1506,6 +1509,23 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_messaging_paused(true).await.unwrap_err();
         assert!(error.detail().contains("messaging control unavailable"));
+    }
+
+    #[test]
+    fn pause_all_request_pauses_every_watch_with_no_end_time() {
+        let request = pause_all_request();
+        assert!(request.all);
+        assert_eq!(request.caller, "control_tower");
+        assert!(request.name.is_empty());
+        assert_eq!(request.for_minutes, None);
+    }
+
+    #[test]
+    fn resume_all_request_resumes_every_watch() {
+        let request = resume_all_request();
+        assert!(request.all);
+        assert_eq!(request.caller, "control_tower");
+        assert!(request.name.is_empty());
     }
 
     #[tokio::test]
