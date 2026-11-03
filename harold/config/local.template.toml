@@ -111,6 +111,21 @@ command = "say"
 # icon = "~/code/your-organisation/machines/<this Mac>/icon.png" # a square PNG, 180 to 1024 pixels a side, at most 1 MB; read at start
 # specs_listen = "127.0.0.1:4331"  # loopback only, not the same as listen; serves the spec pages to the browser on this Mac; opened only when [telemetry] pod_registry is set
 
+# Page collections: folders of pages that Harold serves at /c/<name>. One entry for each kind of page.
+# [[web_app.collections]]
+# name = "explainers"          # [a-z0-9-], 1 to 32 characters, unique
+# title = "Explainers"         # 1 to 60 characters
+# folder = "/Users/you/Dev/chief-of-pods/.superpowers/explainers"   # absolute; ~ is not expanded
+# extensions = ["html", "md"]  # from html and md
+# listed = true                # optional, default true: shown on the Pages screen
+#
+# [[web_app.collections]]
+# name = "mocks"
+# title = "Mocks"
+# folder = "/Users/you/Dev/chief-of-pods/.superpowers/mocks"
+# extensions = ["html"]
+# listed = false               # reachable by its URL only
+
 # The knowledge graph: typed relations between vault notes, held in TypeDB. Off unless enabled.
 # It needs [knowledge] vault. Install TypeDB server 3.14.1 yourself; Harold starts it.
 # [knowledge.graph]

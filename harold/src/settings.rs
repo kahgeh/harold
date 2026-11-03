@@ -1169,6 +1169,86 @@ pub(crate) struct WebAppSettings {
     /// The loopback address and port of the specs listener, which serves the spec pages to
     /// the browser on the Mac; `127.0.0.1:4331` when left out.
     pub specs_listen: Option<String>,
+    /// The page collections: folders of pages that Harold serves at `/c/<name>`.
+    #[serde(default)]
+    pub collections: Vec<CollectionSettings>,
+}
+
+/// One `[[web_app.collections]]` entry: a folder of pages that Harold serves at
+/// `/c/<name>`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CollectionSettings {
+    /// The name in the address: 1 to 32 characters from `a-z`, `0-9` and `-`. Unique.
+    pub name: String,
+    /// The name on the Pages screen and in the back control: 1 to 60 characters.
+    pub title: String,
+    /// The absolute path of the folder, `~` not expanded.
+    pub folder: String,
+    /// The file extensions that the collection serves, from `html` and `md`.
+    pub extensions: Vec<String>,
+    /// Whether the Pages screen shows the collection; `true` when left out.
+    #[serde(default = "listed_by_default")]
+    pub listed: bool,
+}
+
+fn listed_by_default() -> bool {
+    true
+}
+
+/// The longest collection name, in characters.
+const COLLECTION_NAME_MAX: usize = 32;
+/// The longest collection title, in characters.
+const COLLECTION_TITLE_MAX: usize = 60;
+
+/// What is wrong with the `web_app.collections` list, one error for each invalid value.
+fn collection_errors(collections: &[CollectionSettings]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, collection) in collections.iter().enumerate() {
+        let prefix = format!("web_app.collections[{index}]");
+        let name = &collection.name;
+        let length = name.chars().count();
+        let is_slug = (1..=COLLECTION_NAME_MAX).contains(&length)
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !is_slug {
+            errors.push(format!(
+                "{prefix}.name must be 1 to 32 characters from a-z, 0-9 and \"-\", got \"{name}\""
+            ));
+        } else if let Some(earlier) = collections[..index].iter().position(|c| c.name == *name) {
+            errors.push(format!(
+                "{prefix}.name \"{name}\" is already used by web_app.collections[{earlier}]"
+            ));
+        }
+        let length = collection.title.chars().count();
+        if length == 0
+            || length > COLLECTION_TITLE_MAX
+            || collection.title.chars().any(char::is_control)
+        {
+            errors.push(format!(
+                "{prefix}.title must be 1 to 60 characters on one line, got {length} characters"
+            ));
+        }
+        if !collection.folder.starts_with('/') {
+            errors.push(format!(
+                "{prefix}.folder must be an absolute path starting with \"/\", got \"{}\"",
+                collection.folder
+            ));
+        }
+        if collection.extensions.is_empty() {
+            errors.push(format!(
+                "{prefix}.extensions must list at least one of \"html\" and \"md\""
+            ));
+        }
+        for extension in &collection.extensions {
+            if !matches!(extension.as_str(), "html" | "md") {
+                errors.push(format!(
+                    "{prefix}.extensions must be from \"html\" and \"md\", got \"{extension}\""
+                ));
+            }
+        }
+    }
+    errors
 }
 
 /// Where the specs listener is unless `[web_app] specs_listen` says otherwise.
@@ -1292,6 +1372,7 @@ fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) 
     if let Err(error) = web_app.load_icon() {
         errors.push(error);
     }
+    errors.extend(collection_errors(&web_app.collections));
     errors
 }
 
@@ -4169,6 +4250,156 @@ encryption_key_file = "/work/key"
                 .iter()
                 .any(|error| error.starts_with("web_app"))
         );
+    }
+
+    /// A web app section followed by `collections` as TOML.
+    fn collections_section(collections: &str) -> String {
+        format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\n{collections}"
+        )
+    }
+
+    /// One collection entry with `key = value` replaced by `replacement`.
+    fn collection_entry_with(key: &str, replacement: &str) -> String {
+        let entry = [
+            ("name", "name = \"explainers\""),
+            ("title", "title = \"Explainers\""),
+            ("folder", "folder = \"/work/explainers\""),
+            ("extensions", "extensions = [\"html\", \"md\"]"),
+        ]
+        .map(|(name, line)| if name == key { replacement } else { line })
+        .join("\n");
+        format!("[[web_app.collections]]\n{entry}\n")
+    }
+
+    fn collection_errors(collections: &str) -> Vec<String> {
+        web_app_validate_errors(&collections_section(collections))
+            .into_iter()
+            .filter(|error| error.starts_with("web_app.collections["))
+            .collect()
+    }
+
+    #[test]
+    fn validate_accepts_a_collection_with_every_key() {
+        let toml = format!(
+            "{}listed = false\n[[web_app.collections]]\nname = \"mocks\"\ntitle = \"Mocks\"\nfolder = \"/work/mocks\"\nextensions = [\"html\"]\n",
+            collection_entry_with("", "")
+        );
+        assert!(collection_errors(&toml).is_empty());
+        let settings = crate::settings::settings_with(&collections_section(&toml));
+        let collections = settings.web_app.unwrap().collections;
+        assert_eq!(collections.len(), 2);
+        assert_eq!(collections[0].name, "explainers");
+        assert_eq!(collections[0].title, "Explainers");
+        assert_eq!(collections[0].folder, "/work/explainers");
+        assert_eq!(collections[0].extensions, ["html", "md"]);
+        assert!(!collections[0].listed);
+        assert!(collections[1].listed);
+    }
+
+    #[test]
+    fn collections_default_to_an_empty_list_and_listed_to_true() {
+        let settings = crate::settings::settings_with(&collections_section(""));
+        assert!(settings.web_app.unwrap().collections.is_empty());
+        let settings =
+            crate::settings::settings_with(&collections_section(&collection_entry_with("", "")));
+        assert!(settings.web_app.unwrap().collections[0].listed);
+    }
+
+    #[test]
+    fn validate_reports_a_collection_name_that_is_not_a_slug_by_position_and_key() {
+        let long_name = "a".repeat(33);
+        for name in ["", "Aa", "a_b", long_name.as_str()] {
+            let toml = format!(
+                "{}{}",
+                collection_entry_with("", ""),
+                collection_entry_with("name", &format!("name = \"{name}\""))
+            );
+            assert_eq!(
+                collection_errors(&toml),
+                [format!(
+                    "web_app.collections[1].name must be 1 to 32 characters from a-z, 0-9 and \"-\", got \"{name}\""
+                )],
+                "{name}"
+            );
+        }
+        let toml = collection_entry_with("name", "name = \"a-1\"");
+        assert!(collection_errors(&toml).is_empty());
+    }
+
+    #[test]
+    fn validate_reports_two_collections_with_one_name() {
+        let toml = format!(
+            "{}{}",
+            collection_entry_with("", ""),
+            collection_entry_with("folder", "folder = \"/work/other\"")
+        );
+        assert_eq!(
+            collection_errors(&toml),
+            [
+                "web_app.collections[1].name \"explainers\" is already used by web_app.collections[0]"
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_relative_collection_folder() {
+        for folder in ["rel/x", "~/x"] {
+            let toml = format!(
+                "{}{}",
+                collection_entry_with("", ""),
+                collection_entry_with("folder", &format!("folder = \"{folder}\""))
+                    .replace("explainers", "other")
+            );
+            assert_eq!(
+                collection_errors(&toml),
+                [format!(
+                    "web_app.collections[1].folder must be an absolute path starting with \"/\", got \"{folder}\""
+                )],
+                "{folder}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_an_unknown_collection_extension() {
+        for extension in ["txt", "HTML"] {
+            let toml = collection_entry_with(
+                "extensions",
+                &format!("extensions = [\"md\", \"{extension}\"]"),
+            );
+            assert_eq!(
+                collection_errors(&toml),
+                [format!(
+                    "web_app.collections[0].extensions must be from \"html\" and \"md\", got \"{extension}\""
+                )],
+                "{extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_empty_extensions() {
+        let toml = collection_entry_with("extensions", "extensions = []");
+        assert_eq!(
+            collection_errors(&toml),
+            ["web_app.collections[0].extensions must list at least one of \"html\" and \"md\""]
+        );
+    }
+
+    #[test]
+    fn validate_reports_an_empty_title() {
+        let long_title = "t".repeat(61);
+        for (title, length) in [("", 0), (long_title.as_str(), 61), ("two\\nlines", 9)] {
+            let toml = collection_entry_with("title", &format!("title = \"{title}\""));
+            assert_eq!(
+                collection_errors(&toml),
+                [format!(
+                    "web_app.collections[0].title must be 1 to 60 characters on one line, got {length} characters"
+                )],
+                "{title}"
+            );
+        }
     }
 
     #[test]

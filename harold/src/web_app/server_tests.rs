@@ -131,6 +131,7 @@ fn settings(listen: &str) -> WebAppSettings {
         require_pairing: false,
         pairing_file: None,
         specs_listen: None,
+        collections: Vec::new(),
     }
 }
 

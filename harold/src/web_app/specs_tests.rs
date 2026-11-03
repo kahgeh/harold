@@ -724,6 +724,7 @@ fn settings() -> crate::settings::WebAppSettings {
         require_pairing: false,
         pairing_file: None,
         specs_listen: Some("127.0.0.1:0".into()),
+        collections: Vec::new(),
     }
 }
 

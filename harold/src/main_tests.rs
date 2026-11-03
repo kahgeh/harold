@@ -3398,6 +3398,7 @@ fn state_settings(with_hosts: bool) -> crate::settings::Settings {
         require_pairing: true,
         pairing_file: Some(SECRET_PAIRING_FILE.to_owned()),
         specs_listen: None,
+        collections: Vec::new(),
     });
     if with_hosts {
         settings.agent_monitor.multiplexer = "rex".to_owned();
