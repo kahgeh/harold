@@ -4,6 +4,9 @@
 // used from Task 4 and Task 6
 #[allow(dead_code)]
 mod files;
+// used from Task 6 and Task 8
+#[allow(dead_code)]
+mod rotation;
 // used from Task 6
 #[allow(dead_code)]
 mod schema;

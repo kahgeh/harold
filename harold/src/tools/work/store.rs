@@ -131,6 +131,26 @@ impl WorkFile {
         })
     }
 
+    /// The file name, for example `work-2026-11-03.db`.
+    pub(super) fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    /// Writes the log into the file and closes it, so that the file alone
+    /// holds every row. A rotation calls it before it renames the file.
+    pub(super) async fn close(self) -> Result<()> {
+        let conn = self.conn.into_inner();
+        roll_back_abandoned(&conn).await?;
+        if !self.read_only {
+            let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+            while rows.next().await?.is_some() {}
+        }
+        // The SDK has no close call: the drop closes the connection, then the
+        // database.
+        drop(conn);
+        Ok(())
+    }
+
     /// Makes a record, or replaces the fields of an open one. A replacement keeps
     /// the decisions, the links, `created_in` and `created_at`.
     pub(super) async fn put(
