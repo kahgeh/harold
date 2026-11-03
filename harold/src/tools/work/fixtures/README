@@ -1,1 +1,1 @@
-These six *.md files are synthetic stand-ins for the chief's six work files. The coordinator may replace them with the real files, then update the EXPECTED table in import_tests.rs.
+These six *.md files are made up on purpose, in the form the import reads. No real chief file goes in this repo. The chief converts its own files to this form and checks the import with a dry run. The EXPECTED table in import_tests.rs holds the values these files must give.

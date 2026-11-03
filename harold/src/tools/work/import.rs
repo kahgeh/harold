@@ -25,8 +25,10 @@ pub(super) const FILES_MAX: usize = 200;
 /// The longest wait for the backlog tool: for the connection, and for the call.
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A line of a chief's file that fits no field. Line 0 is the whole file, for
-/// a file that is not read or that has no heading.
+/// A line of a chief's file that fits no field. Line 0 is the whole file: a
+/// file that is not read, a file that has no heading, or a name that two files
+/// (or a file and a queue item) give. Then `text` is empty, except for a name in
+/// use, where it holds the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Unplaced {
     pub(super) file: String,
@@ -317,8 +319,10 @@ fn wanted_ids(queue_ids: &[String]) -> Result<Vec<String>, ImportError> {
 }
 
 /// The text of each `*.md` file directly inside `folder`, by file name. A file
-/// that cannot be read gives the reason in place of its text. Hidden files,
-/// other files and sub-folders are skipped.
+/// that cannot be read gives the reason in place of its text. Other files are
+/// skipped. A hidden `.md` file, an `.md` file with another case, and an entry
+/// named `*.md` that is not a plain file (a folder or a link) are not read, and
+/// the report lists each as unplaced.
 type FolderFiles = Vec<(String, Result<String, &'static str>)>;
 
 fn read_folder(folder: &Path) -> Result<FolderFiles, ImportError> {

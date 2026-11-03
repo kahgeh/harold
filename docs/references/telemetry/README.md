@@ -390,6 +390,8 @@ These agent monitor lines carry the fields below:
 | `agent pane resolve slow` | `wait_ms` (from the send to the moment the monitor takes the command), `elapsed_ms` (from the send to the answer), `outcome` (`ok`, `not_found` or `inventory_unavailable`). `warn`, only for a resolve over 1 s or one that is not `ok`. The `agent inventory scan slow` line just before it gives the resolve's `ps_ms` |
 | `agent inventory full read` | `reason` (`chain_broken` or `chain_joined`), `pane_id`. `warn`, one line per full read (`ps -ax`) of a scan. On `chain_joined`, `pane_id` is the pane that joined; on `chain_broken`, it is the first pane whose chain stayed broken |
 
+**Rex reads slow.** The card "Rex reads slow, by day" in the Pods group counts `agent inventory scan slow` lines with `rex_ms` and `agent screen read slow` lines for each day. It is a card, not an alert. A day with more than 20 needs a look. `scrollback_bytes` on the screen line shows whether a long scrollback caused the slow read.
+
 The work tool logs its rotation. Harold logs `work rotation failed` once when a failure begins for a file. A retry that fails again logs `work rotation failed again` at `debug` only. A rotation that then works logs `work rotation done`.
 
 | Line | Fields |
@@ -398,8 +400,6 @@ The work tool logs its rotation. Harold logs `work rotation failed` once when a 
 | `work rotation failed` (`warn`) | `file`, `reason` (`count_mismatch`, `write_failed` or `rename_failed`), `since` (the UTC date and time when the failure began) |
 
 The counter `harold.work.check.mismatches` has the attributes `record` (the work record's name) and `kind` (the mismatch rule).
-
-**Rex reads slow.** The card "Rex reads slow, by day" in the Pods group counts `agent inventory scan slow` lines with `rex_ms` and `agent screen read slow` lines for each day. It is a card, not an alert. A day with more than 20 needs a look. `scrollback_bytes` on the screen line shows whether a long scrollback caused the slow read.
 
 **Remote order unreadable.** The card "Remote order unreadable, by day" in the Pods group counts `remote order unreadable` lines (warn) for each day, with their `reason` values: `missing`, `malformed` or `unreadable`. It is a card, not an alert. A count above 0 in a day means: look at `remote-order.json` in Harold's data folder. Harold logs `remote order saved` (info, with `products`) at each change of the order. See the [remote control reference](../control-tower/remote-control-rex-calls.md#the-remote-order).
 

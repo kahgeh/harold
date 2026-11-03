@@ -145,7 +145,7 @@ Links:
 
 The parser is strict. It does not guess. The chief converts its own files to this form.
 
-- **Blank lines** are skipped. A leading byte-order mark and a carriage return before the line end are ignored. Each line is trimmed of spaces at both ends before it is read.
+- **Blank lines** are skipped. A leading byte-order mark and a carriage return before the line end are ignored. Each line is trimmed of white space at both ends before it is read.
 - **The heading** is the first line that is a valid `# <name>` heading. It is `# <name>` alone, or `# <name>` with a separator and the title. The separator is `:`, `-`, `–` or `—`. The name is 1 to 48 characters of `a-z`, `0-9` and `-`. A separator `-` needs a space before it, because `# foo-title` is one name. The title may be empty. A non-blank line before the heading is unplaced. A second line that starts with `# ` is unplaced.
 - **The field lines** are `Priority:`, `Status:`, `Waits for:` and `Next step:`. The key must have exactly this spelling and capital letters. Each field may appear once. The order is free.
 - **Priority** is `focus`, `next` or `later`. The case of the value does not matter.
