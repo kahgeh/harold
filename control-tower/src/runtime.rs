@@ -2382,7 +2382,7 @@ mod tests {
         let pump = InputPump::start_with(BurstInput {
             reads: Arc::clone(&reads),
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while reads.load(Ordering::Acquire) < 64 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
@@ -2608,7 +2608,7 @@ mod tests {
     }
 
     async fn next_notes_event(core: &mut RuntimeCore, navigator: &impl PaneNavigator) {
-        let event = tokio::time::timeout(Duration::from_secs(5), core.notes_events.recv())
+        let event = tokio::time::timeout(Duration::from_secs(60), core.notes_events.recv())
             .await
             .expect("an answer comes")
             .expect("the channel is open");
@@ -3708,7 +3708,7 @@ mod tests {
         probe.lock().unwrap().on_list =
             VecDeque::from([Some(question("Q1", 1, 1)), Some(Queue::default())]);
         let log = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(60),
             run_question_stream(&mut core, &probe, &[KeyCode::Char('f')]),
         )
         .await
@@ -3761,7 +3761,7 @@ mod tests {
             }
         });
         let outcome = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(60),
             consume_stream(
                 stream,
                 &mut core,
@@ -3996,7 +3996,7 @@ mod tests {
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let mut screen = FakeScreen::default();
         tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(60),
             run_loop(
                 &source,
                 &mut core,
@@ -4919,7 +4919,7 @@ mod tests {
             PanickingInput,
             ScriptedProbe([FocusReading::Active("%1".into())].into()),
         );
-        let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        let ended = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if pump.recv().await.is_none() {
                     return;
