@@ -1,0 +1,1 @@
+These six *.md files are synthetic stand-ins for the chief's six work files. The coordinator may replace them with the real files, then update the EXPECTED table in import_tests.rs.

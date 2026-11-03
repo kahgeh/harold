@@ -363,6 +363,37 @@ impl WorkFile {
         .await
     }
 
+    /// Makes all the new records in one transaction, or none. A name that the
+    /// file holds already, open or closed, refuses all with `NameInUse` and
+    /// replaces nothing. The refusal gives the name it is about.
+    pub(super) async fn put_new_all(
+        &self,
+        records: &[Record],
+        now_ms: i64,
+    ) -> Result<std::result::Result<(), (Refusal, String)>> {
+        if let Some(bad) = records.iter().find(|r| !valid_name(&r.name)) {
+            return Ok(Err((Refusal::BadName, bad.name.clone())));
+        }
+        let guard = match self.begin_write().await? {
+            Ok(guard) => guard,
+            Err(refusal) => return Ok(Err((refusal, String::new()))),
+        };
+        let conn: &Connection = &guard;
+        let work = async {
+            for record in records {
+                if exists(conn, &record.name).await? {
+                    return Ok(Err((Refusal::NameInUse, record.name.clone())));
+                }
+                if let Err(refusal) = put_in(conn, &self.file_name, record, now_ms).await? {
+                    return Ok(Err((refusal, record.name.clone())));
+                }
+            }
+            Ok(Ok(()))
+        }
+        .await;
+        finish_refusable(conn, work).await
+    }
+
     pub(super) async fn get(&self, name: &str) -> Result<Option<Record>> {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;

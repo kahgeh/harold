@@ -19,6 +19,7 @@ use tracing::info;
 use super::NAME;
 use super::check::{self, Facts, QuestionFact, SpecFacts};
 use super::files::{WorkFiles, day_of};
+use super::import::{self, ImportDeps, ImportError, OpenQueue};
 use super::rotation::{Clock, Rotator};
 use super::schema::{self, Decision, Mark, Priority, Record, valid_link, valid_name};
 use super::store::{Patch, PutOutcome, Refusal, StoreError};
@@ -203,6 +204,7 @@ pub(super) struct WorkToolService {
     files: WorkFiles,
     guard: Guard,
     questions: Arc<dyn QuestionStates>,
+    queue: Arc<dyn OpenQueue>,
     clock: Arc<dyn Clock>,
 }
 
@@ -212,6 +214,7 @@ impl WorkToolService {
         files: WorkFiles,
         guard: Guard,
         questions: Arc<dyn QuestionStates>,
+        queue: Arc<dyn OpenQueue>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
@@ -219,6 +222,7 @@ impl WorkToolService {
             files,
             guard,
             questions,
+            queue,
             clock,
         }
     }
@@ -264,6 +268,33 @@ fn refused(refusal: Refusal) -> Status {
 
 fn unavailable(_: StoreError) -> Status {
     Status::unavailable("the work database is unavailable")
+}
+
+fn import_refused(error: ImportError) -> Status {
+    match error {
+        ImportError::BadFolder => invalid("folder"),
+        ImportError::BadQueueId => invalid("queue"),
+        ImportError::NotOpenQueueItem(id) => Status::not_found(format!("not_open_queue_item {id}")),
+        ImportError::TooManyFiles => Status::failed_precondition("too_many_files"),
+        ImportError::Unplaced(count) => {
+            Status::failed_precondition(format!("unplaced_lines {count}"))
+        }
+        ImportError::NamesInUse(names) => {
+            Status::failed_precondition(format!("name_in_use {}", names.join(", ")))
+        }
+        ImportError::FocusFull(name) => Status::failed_precondition(format!("focus_full {name}")),
+        ImportError::ReadOnly => refused(Refusal::ReadOnly),
+        ImportError::QueueUnreadable => Status::unavailable("queue_unreadable"),
+        ImportError::Store(error) => unavailable(error),
+    }
+}
+
+fn unplaced_to_proto(unplaced: import::Unplaced) -> pb::Unplaced {
+    pb::Unplaced {
+        file: unplaced.file,
+        line: unplaced.line,
+        text: unplaced.text,
+    }
 }
 
 /// A field of one line: no line break.
@@ -591,10 +622,35 @@ impl WorkService for WorkToolService {
 
     async fn import(
         &self,
-        _request: Request<pb::ImportRequest>,
+        request: Request<pb::ImportRequest>,
     ) -> Result<Response<pb::ImportResponse>, Status> {
-        // Task 7 builds the import. Until then the call is not served.
-        Err(Status::unimplemented("import is not built yet"))
+        let pb::ImportRequest {
+            folder,
+            queue,
+            apply,
+            caller_pane,
+        } = request.into_inner();
+        // An applied import is a write. A dry run is a read and needs no pane.
+        if apply {
+            self.may_write(&caller_pane)?;
+        }
+        let deps = ImportDeps {
+            rotator: &self.rotator,
+            queue: self.queue.as_ref(),
+            now_ms: self.now_ms(),
+        };
+        let report = import::import(Path::new(&folder), &queue, apply, &deps)
+            .await
+            .map_err(import_refused)?;
+        if apply {
+            let count = report.records.len();
+            info!(tool = NAME, count, "work imported");
+        }
+        Ok(Response::new(pb::ImportResponse {
+            records: report.records.into_iter().map(record_to_proto).collect(),
+            unplaced: report.unplaced.into_iter().map(unplaced_to_proto).collect(),
+            in_use: report.in_use,
+        }))
     }
 
     async fn rotate(

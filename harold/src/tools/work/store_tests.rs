@@ -391,3 +391,36 @@ fn dir_names(folder: &TempFolder) -> Vec<String> {
     names.sort();
     names
 }
+
+#[tokio::test]
+async fn put_new_all_stores_all_or_none() {
+    let folder = TempFolder::new();
+    let file = open_file(&folder).await;
+    put(&file, "taken", Priority::Later, Status::Idea).await;
+
+    let mut new = record("new-one");
+    new.links = vec!["note:x".into()];
+    new.decisions = vec![decision("one")];
+    let refused = file
+        .put_new_all(&[new.clone(), record("taken")], 20)
+        .await
+        .unwrap();
+    assert_eq!(refused, Err((Refusal::NameInUse, "taken".to_string())));
+    assert!(file.get("new-one").await.unwrap().is_none(), "none stored");
+    assert_eq!(file.get("taken").await.unwrap().unwrap().updated_at_ms, 10);
+
+    let mut focus = Vec::new();
+    for name in ["f-1", "f-2", "f-3"] {
+        let mut rec = record(name);
+        rec.priority = Priority::Focus;
+        focus.push(rec);
+    }
+    let refused = file.put_new_all(&focus, 20).await.unwrap();
+    assert_eq!(refused, Err((Refusal::FocusFull, "f-3".to_string())));
+    assert!(file.get("f-1").await.unwrap().is_none(), "none stored");
+
+    assert_eq!(file.put_new_all(&[new], 20).await.unwrap(), Ok(()));
+    let got = file.get("new-one").await.unwrap().unwrap();
+    assert_eq!((got.decisions.len(), got.links.len()), (1, 1));
+    assert_eq!(got.created_in, FILE);
+}

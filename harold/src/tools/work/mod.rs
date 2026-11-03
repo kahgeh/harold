@@ -11,6 +11,7 @@ use crate::tools::{ToolContext, ToolError, ToolHandle};
 
 mod check;
 mod files;
+mod import;
 // `Rotator::tick` and its parts are used from Task 8, the daily timer.
 #[allow(dead_code)]
 mod rotation;
@@ -41,8 +42,9 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     })?);
     let guard = Guard::new(ctx.pane_folder, ctx.products, ctx.chief_pane);
     let questions = Arc::new(service::LoopbackQuestions::new(ctx.grpc_addr));
+    let queue = Arc::new(import::LoopbackQueue::new(ctx.grpc_addr));
     let service =
-        service::WorkToolService::new(Arc::clone(&rotator), files, guard, questions, clock);
+        service::WorkToolService::new(Arc::clone(&rotator), files, guard, questions, queue, clock);
     let mut shutdown = ctx.shutdown;
     let task = tokio::spawn(async move {
         // Returns on a shutdown signal and when the sender is dropped.

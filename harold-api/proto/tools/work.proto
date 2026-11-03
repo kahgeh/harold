@@ -12,8 +12,12 @@
 //   Decide   adds a decision, dated today (UTC), and gives its number from 1.
 //   Mark     changes the mark of one decision.
 //   Link     adds a link; Unlink removes one.
-//   Import   reads the chief's files (apply false is a dry run). Not served yet:
-//            it gives Unimplemented.
+//   Import   reads the `*.md` files directly inside `folder` (at most 200, each
+//            at most 64 KB) and the open queue items named in `queue`, through
+//            the backlog tool's ListQueue. It never writes the folder or the
+//            queue. With apply false it is a dry run: it stores nothing and
+//            needs no pane. With apply true it stores every work record in one
+//            transaction, or none.
 //
 // Anyone calls the reads:
 //   List     the open work records of the current file: focus, then next, then
@@ -47,7 +51,17 @@
 //                        "rotation_is_harolds" (Rotate with dry_run false: only
 //                        Harold rotates).
 //   Unavailable          "the work database is unavailable".
-//   Unimplemented        Import, until it is built.
+// Import refusals, in addition (nothing is stored):
+//   InvalidArgument      "invalid folder" (not an absolute path to a folder
+//                        that can be read), "invalid queue" (an empty id).
+//   NotFound             "not_open_queue_item <id>" (the id is not the now item
+//                        or a parked item of the queue).
+//   FailedPrecondition   "too_many_files", "unplaced_lines <count>" (apply with
+//                        unplaced lines), "name_in_use <name>, <name>" (apply
+//                        with names that the current work file holds),
+//                        "focus_full <name>" (the work record that would be a
+//                        third open one in focus), "read_only".
+//   Unavailable          "queue_unreadable" (the backlog tool cannot be read).
 //
 // The server trusts local callers: there is no token (ADR 0002).
 syntax = "proto3";
@@ -205,7 +219,8 @@ message ImportRequest {
 // A line of a chief's file that fits no field.
 message Unplaced {
   string file = 1;
-  // From 1.
+  // From 1. 0 is the whole file: a file that is not read, has no heading, or
+  // has a name that another file or queue item uses.
   uint32 line = 2;
   string text = 3;
 }
@@ -214,6 +229,9 @@ message ImportResponse {
   // What is stored, or with apply false, what would be stored.
   repeated WorkRecord records = 1;
   repeated Unplaced unplaced = 2;
+  // The names of `records` that the current work file holds already, open or
+  // closed. Apply refuses them and overwrites nothing.
+  repeated string in_use = 3;
 }
 
 message RotateRequest {

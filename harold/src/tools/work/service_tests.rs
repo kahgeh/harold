@@ -13,6 +13,7 @@ use tonic::{Code, Request, Response};
 use super::*;
 use crate::tools::backlog::guard::Guard;
 use crate::tools::work::files::WorkFiles;
+use crate::tools::work::import::{OpenQueue, QueueItem, QueueUnreadable};
 use crate::tools::work::rotation::{Clock, Rotator};
 use crate::tools::work::test_support::TempFolder;
 use crate::tools::{BoxFuture, ChiefPane, PaneFolder, Products};
@@ -98,7 +99,14 @@ impl Setup {
             Arc::new(Registry(Ok(vec![("p".into(), self.tmp.0.join("p"))]))),
             Arc::new(Chief),
         );
-        WorkToolService::new(rotator, files, guard, Arc::new(questions), clock)
+        WorkToolService::new(
+            rotator,
+            files,
+            guard,
+            Arc::new(questions),
+            Arc::new(OneItemQueue),
+            clock,
+        )
     }
 
     fn service(&self) -> WorkToolService {
@@ -340,18 +348,180 @@ async fn rotate_without_dry_run_is_refused() {
     assert_eq!(before, after);
 }
 
+/// A queue with one open item, N12.
+struct OneItemQueue;
+
+impl OpenQueue for OneItemQueue {
+    fn open_items(&self) -> BoxFuture<'_, Result<Vec<QueueItem>, QueueUnreadable>> {
+        Box::pin(async {
+            Ok(vec![QueueItem {
+                id: "N12".into(),
+                text: "Fix the bar".into(),
+            }])
+        })
+    }
+}
+
+/// A folder of the chief's files with one file, `good.md`.
+fn chief_folder(setup: &Setup, text: &str) -> String {
+    let folder = setup.tmp.0.join("chief");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("good.md"), text).unwrap();
+    folder.display().to_string()
+}
+
+const GOOD: &str = "# good-one: Good\nPriority: next\nStatus: idea\n";
+
+async fn import_call(
+    service: &WorkToolService,
+    folder: &str,
+    queue: &[&str],
+    apply: bool,
+    pane: &str,
+) -> Result<pb::ImportResponse, tonic::Status> {
+    service
+        .import(Request::new(pb::ImportRequest {
+            folder: folder.into(),
+            queue: queue.iter().map(|id| (*id).to_string()).collect(),
+            apply,
+            caller_pane: pane.into(),
+        }))
+        .await
+        .map(Response::into_inner)
+}
+
 #[tokio::test]
-async fn import_is_not_yet_served() {
+async fn an_applied_import_from_another_pane_or_no_pane_is_refused() {
     let setup = Setup::new();
     let service = setup.service();
-    let result = service
-        .import(Request::new(pb::ImportRequest {
-            folder: "/x".into(),
-            caller_pane: CHIEF.into(),
-            ..pb::ImportRequest::default()
-        }))
-        .await;
-    assert_eq!(refusal(result).0, Code::Unimplemented);
+    let folder = chief_folder(&setup, GOOD);
+    for (pane, reason) in [(OTHER, "not_chief"), ("", "no_pane")] {
+        let result = import_call(&service, &folder, &[], true, pane).await;
+        assert_eq!(
+            refusal(result),
+            (Code::PermissionDenied, reason.to_string())
+        );
+    }
+    assert!(listed(&service, true).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_dry_run_import_needs_no_pane_and_stores_nothing() {
+    let setup = Setup::new();
+    let service = setup.service();
+    let folder = chief_folder(&setup, &format!("{GOOD}Owner: x\n"));
+
+    let dry = import_call(&service, &folder, &["n12"], false, "")
+        .await
+        .unwrap();
+
+    let names: Vec<&str> = dry.records.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["good-one", "queue-n12"]);
+    assert_eq!(dry.records[1].next_step, "Fix the bar");
+    assert_eq!(dry.unplaced.len(), 1);
+    assert_eq!(
+        (dry.unplaced[0].file.as_str(), dry.unplaced[0].line),
+        ("good.md", 4)
+    );
+    assert!(listed(&service, true).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_applied_import_from_the_chief_stores_the_records() {
+    let setup = Setup::new();
+    let service = setup.service();
+    let folder = chief_folder(&setup, GOOD);
+
+    let applied = import_call(&service, &folder, &["N12"], true, CHIEF)
+        .await
+        .unwrap();
+
+    assert_eq!(applied.records.len(), 2);
+    let names: Vec<String> = listed(&service, true)
+        .await
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["good-one", "queue-n12"]);
+
+    // A second apply finds both names in use and stores nothing more.
+    let again = import_call(&service, &folder, &["N12"], true, CHIEF).await;
+    assert_eq!(
+        refusal(again),
+        (
+            Code::FailedPrecondition,
+            "name_in_use good-one, queue-n12".to_string()
+        )
+    );
+    let dry = import_call(&service, &folder, &[], false, "")
+        .await
+        .unwrap();
+    assert_eq!(dry.in_use, ["good-one"]);
+}
+
+#[tokio::test]
+async fn import_refusals_name_their_reason() {
+    let setup = Setup::new();
+    let service = setup.service();
+    let good = chief_folder(&setup, GOOD);
+    let odd = {
+        let folder = setup.tmp.0.join("odd");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("odd.md"), format!("{GOOD}Owner: x\n")).unwrap();
+        folder.display().to_string()
+    };
+    let cases: [(&str, &[&str], bool, Code, &str); 5] = [
+        (
+            "relative",
+            &[],
+            false,
+            Code::InvalidArgument,
+            "invalid folder",
+        ),
+        (&good, &[""], false, Code::InvalidArgument, "invalid queue"),
+        (
+            &good,
+            &["N99"],
+            false,
+            Code::NotFound,
+            "not_open_queue_item N99",
+        ),
+        (
+            &odd,
+            &[],
+            true,
+            Code::FailedPrecondition,
+            "unplaced_lines 1",
+        ),
+        (
+            "/no/such/folder",
+            &[],
+            false,
+            Code::InvalidArgument,
+            "invalid folder",
+        ),
+    ];
+    for (folder, queue, apply, code, message) in cases {
+        let result = import_call(&service, folder, queue, apply, CHIEF).await;
+        assert_eq!(refusal(result), (code, message.to_string()), "{folder}");
+    }
+
+    // A third open work record in focus refuses the whole import.
+    let focus = setup.tmp.0.join("focus");
+    std::fs::create_dir_all(&focus).unwrap();
+    for name in ["f-1", "f-2", "f-3"] {
+        std::fs::write(
+            focus.join(format!("{name}.md")),
+            format!("# {name}: F\nPriority: focus\nStatus: idea\n"),
+        )
+        .unwrap();
+    }
+    let result = import_call(&service, &focus.display().to_string(), &[], true, CHIEF).await;
+    assert_eq!(
+        refusal(result),
+        (Code::FailedPrecondition, "focus_full f-3".to_string())
+    );
+    assert!(listed(&service, true).await.is_empty());
 }
 
 #[tokio::test]
@@ -435,6 +605,7 @@ async fn an_unreadable_registry_gives_no_missing_spec_line() {
         files,
         guard,
         Arc::new(FakeQuestions::default()),
+        Arc::new(OneItemQueue),
         clock,
     );
     put(&service, CHIEF, record("a")).await.unwrap();
