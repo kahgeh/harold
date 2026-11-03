@@ -40,7 +40,19 @@ Each command prints one line. `list` prints one line for each watch and one for 
 - **`stop`** ends a running or paused watch at once. A run in progress is stopped and its report is not typed. No closing line is typed, since an agent asked for it. `stop` also cancels a waiting reminder of that name.
 - **A watch also ends** when its time is up (a watch with an end), when a daily budget is set and spent (a watch with an end), or after 3 failed runs in a row. An open-ended watch never ends by time.
 - **`start` refuses** with `unknown skill <skill>`, `too many watches` (5 are running or paused), `daily budget spent`, `daily budget not set`, `name <name> is in use`, and `invalid <flag>` for a value outside the table. At the service these are `InvalidArgument` `invalid <field>` (`invalid name`, `invalid folder`, `invalid skill`, `invalid every_minutes`, `invalid for_minutes`, `invalid report_to`, `invalid run_budget_usd`, and `run_limit_secs is above [watch] max_run_limit_secs (N)` for a run limit above the setting), `NotFound` `unknown_skill`, and `FailedPrecondition` `too_many_watches`, `daily_budget_spent`, `daily_budget_unset` or `name_in_use`. `stop` refuses `NotFound` `unknown_watch` and `FailedPrecondition` `not_running`.
-- **`list`** shows every running or paused watch, every watch that ended today with why it ended, every waiting reminder, and the day's spend for every watch together.
+- **`list`** shows every running or paused watch, every watch that ended today with why it ended, every waiting reminder, and the day's spend for every watch together. The forms:
+
+```text
+pods running in /Users/you/code/chief-of-pods no end, limit 120 s, 14 runs, 2 reports, $0.06
+after-release paused until 16:30 in /Users/you/code/chief-of-pods, 3 runs, 1 report, $0.03
+after-release paused in /Users/you/code/chief-of-pods, 3 runs, 1 report, $0.03
+pods paused (budget) until 00:00 in /Users/you/code/chief-of-pods, 14 runs, 2 reports, $1.00
+after-release ended (time was up) in /Users/you/code/chief-of-pods, 12 runs, 1 report, $0.11
+reminder release-check due 15:45, reporting to chief
+spent today $1.03
+```
+
+The reason in `ended (…)` is `time was up`, `stopped`, `daily budget spent` or `3 runs in a row failed`.
 - **State is kept** in the tool's own database, so a Harold restart resumes a running or paused watch with its end unchanged. Its next run comes at its stored time, or at once if that has passed, never twice for one slot of time.
 - **After the Mac sleeps, a run can start up to one `--every` late.** The wait for the next run is a timer of at most `--every`, and the timer does not count the time the Mac slept.
 
@@ -50,7 +62,7 @@ A time is a whole number of minutes (`90`), or a number with `m` (`90m`) or `h` 
 
 ## Open-ended watches
 
-A watch started with no `--for` is an **open-ended watch**: it runs until `watch stop` or after 3 failed runs in a row, never by time, and also across a Harold restart.
+A watch started with no `--for` is an **open-ended watch**: it runs until `watch stop` or after 3 failed runs in a row. Time never ends it. A Harold restart does not end it.
 
 - **A daily budget is required.** `start` with no `--for` is refused with `daily budget not set` (`FailedPrecondition` `daily_budget_unset`) unless `[watch] daily_budget_usd` is set. So an open-ended watch always has a daily cap.
 - **The start line** ends with `with no end`. `list` shows `running … no end`.
@@ -73,7 +85,7 @@ harold tool watch resume --all               # resumed 2
 - **Pause and resume type no line**, because a person or an agent asked for it.
 - **`pause` refuses** `unknown_watch`, `not_running` and `budget_day`. **`resume` refuses** `unknown_watch`, `not_paused` and `budget_day`. At the CLI these print `unknown watch <name>`, `<name> is not running`, `<name> is not paused` and `<name> is capped by the daily budget`.
 - **The count line of `--all`** is `paused N` or `resumed N`, and when a capped watch was skipped, `, skipped <names> (budget)`.
-- **The service's `caller`** is `cli` or `control_tower`, and goes to the log only (`how` in `watch paused` and `watch resumed`). It does not change what the call does. A pause or resume from a timer logs `timed`.
+- **The service's `caller`** is `cli` or `control_tower`. It goes to the log only (`how` in `watch paused` and `watch resumed`). It does not change what the call does. A pause or resume from a timer logs `timed`.
 
 ### The capped watch
 
@@ -83,7 +95,7 @@ When a daily budget is spent, a watch with an end stops, as before. An open-ende
 - **`resume --all` skips it and names it**: `resumed 1, skipped pods (budget)`. `pause --all` skips it too.
 - **Harold types one line** when the watch is capped (see The lines Harold types). `list` shows `paused (budget) until 00:00`.
 - **If the first run of the new day could pass the budget again**, the same check pauses the watch until the day after.
-- **`start` with its name is refused** with `daily budget spent` while the cap holds.
+- **`start` is refused** with `daily budget spent`, for any name, while a capped watch holds.
 
 ## Reminders
 
@@ -109,7 +121,7 @@ harold tool watch remind standup --at 09:30 -- "-3 specs wait"
 - **A missed reminder.** A reminder that is not typed within 120 minutes of its time is dropped and logged (`reminder ended`, `reason` = `dropped`). This is the give-up time of the timed prompts. After a sleep or a Harold restart inside those 120 minutes, Harold types it once, late. It never types a reminder twice.
 - **`watch stop <name>`** cancels a waiting reminder. `list` shows each waiting reminder as `reminder <name> due HH:MM, reporting to <chief|self>`.
 - **A name in use** is refused with `name <name> is in use` (`FailedPrecondition` `name_in_use`), when a running or paused watch or a waiting reminder has the name. `start` with the name of a waiting reminder is refused the same way.
-- **A `--at` reminder keeps its local date and time.** It is due when the local clock reaches it, so a change of the local offset moves it with the clock. A time in a spring-forward gap is due at the first instant after the gap. A time that occurs twice is due at its first occurrence.
+- **A `--at` reminder keeps its local date and time.** It is due when the local clock reaches it. A change of the local offset moves it with the clock. A time in a spring-forward gap is due at the first instant after the gap. A time that occurs twice is due at its first occurrence.
 
 ## The clock
 
@@ -205,7 +217,7 @@ REMIND release-check: check the v0.75.0 release
 
 - **The report line of an open-ended watch** is `WATCH <name> <run>: <text>`, with the run number and no total (the third line above).
 - **The paused-budget line** is Harold's own fixed text. Harold types it once, when the daily budget caps an open-ended watch. `resumes at` is the start of the next local day.
-- **The `REMIND` line** carries the text that an agent gave to `remind`. The fixed prefix `REMIND <name>: ` shows the chief that the line is a reminder from an agent, not a request from the user. Harold cuts the text to 300 characters and removes control characters and escape sequences. ADR 0002 covers this: Harold trusts local callers.
+- **The `REMIND` line** carries the text that an agent gave to `remind`. The fixed prefix `REMIND <name>: ` shows the chief that an agent wrote the `REMIND` line. It is not a request from the user. Harold cuts the text to 300 characters and removes control characters and escape sequences. ADR 0002 covers this: Harold trusts local callers.
 
 The typing makes the same checks as timed prompts: the pane listing works, exactly one agent is in the folder, it is Claude Code, it is idle, and its input box is found and empty. Until those pass, the line waits and Harold tries again every 5 seconds. Only the newest report waits: the next run's report replaces a waiting one, which is then never typed. A report still waiting when the watch ends is dropped, and the closing line takes its place. A closing line is tried for up to an hour. A `REMIND` line is tried until 120 minutes after its time.
 
@@ -231,7 +243,7 @@ Three runs in a row that fail stop the watch: `process_failed` (Claude Code miss
 - **Text from other agents can steer a run.** The facts hold every agent's work summary, and a run may read files and, with a command such as `tmux capture-pane -p`, any pane's screen. A steered run can do whatever its skill's `allowed-tools` allows. Its typed output is still one line of at most 300 characters, as a `WATCH` line into the chief's pane or the watch's own folder. The chief reads a `WATCH` line as a report, not as the user's request.
 - **What reaches a hosted model.** The facts, the skill's text, the files the run reads and the output of the commands it runs go to Anthropic's hosted model, as activity summaries' text does today.
 - **No budget by default.** A watch's spending is bounded only by its time, turns and the number of watches: up to 5 watches, one run at a time, each run up to its run limit (120 seconds unless `--run-limit` sets another), all day. The `watch.cost_usd` counter and `list` show what was spent, and the `watch-cost-high` alert fires when a day passes $1.00.
-- **A reminder is text from an agent in the chief's pane.** A local agent can make Harold type up to 300 characters of its own text with `remind`. ADR 0002 covers this, as for every tool service. The limits are the fixed `REMIND <name>: ` prefix and the cut to 300 characters with control characters removed. The chief reads a `REMIND` line as a reminder from an agent, not as a request from the user.
+- **A `REMIND` line is text from an agent in the chief's pane.** A local agent can make Harold type up to 300 characters of its own text with `remind`. ADR 0002 covers this, as for every tool service. The limits are the fixed `REMIND <name>: ` prefix and the cut to 300 characters with control characters removed. The chief reads a `REMIND` line as a reminder from an agent, not as a request from the user.
 - **One shared budget, when set.** One agent's watches can spend the whole day's budget and stop the chief's watch.
 
 ## What is logged
@@ -297,4 +309,6 @@ The migration copies every row of the old table, with the old column names. The 
 
 ## Rollback
 
-An older Harold ignores `tools/watch/`. Deleting the folder empties the tool. An older Harold that opens a database after migration 003 ignores the new columns and the `reminders` table.
+An older Harold ignores `tools/watch/`. Deleting the folder empties the tool. After migration 003, the old columns of `watches` keep their names.
+
+Warning: a database with an open-ended or a paused watch is not safe for an older Harold. Such a row has an empty `ends_at_ms` or the state `paused`, and the older code does not read them.
