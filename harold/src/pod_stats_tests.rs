@@ -1261,6 +1261,35 @@ fn the_revisions_file_gives_the_specs_revisions() {
 }
 
 #[test]
+fn the_revisions_file_gives_redo_and_revised_after_approval() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    put_spec(&dir, "r");
+    put_approval(&dir, "r");
+    put_started(&dir, "r", "2026-11-01T00:00:00Z");
+    // The approval file is new, so headings in the year 2998 are after it.
+    write(
+        &dir.join("specs/r.revisions.md"),
+        "## 2026-10-14, rev 1 (first)\n\
+         ## 2998-01-01 10:00, rev 2 (wording)\n\
+         ## 2998-01-02 10:00, rev 3 (direction)\n",
+    );
+    let now = at("2998-01-02T14:00:00Z");
+
+    let read = read_with(
+        &dir,
+        now,
+        UtcOffset::UTC,
+        &HashMap::new(),
+        &[],
+        &HashMap::new(),
+    );
+
+    assert_eq!(read.specs[0].redo_seconds, 4 * 3600);
+    assert_eq!(read.specs[0].revised_after_approval, 2);
+}
+
+#[test]
 fn the_word_count_skips_drawn_lines() {
     assert_eq!(
         spec_words("# Title here\n<div class=\"x\">lots of words inside</div>\nthree more words\n"),
@@ -3194,4 +3223,135 @@ async fn a_saved_tip_that_is_an_ancestor_but_not_in_the_reflog_counts_nothing() 
         Some(0)
     );
     assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
+
+// --- revision entries and redo ---
+
+/// A local offset of eleven hours east of UTC for the heading tests.
+fn plus_eleven() -> UtcOffset {
+    UtcOffset::from_hms(11, 0, 0).unwrap()
+}
+
+/// A revision entry at `time` with `tags`.
+fn revision(time: Option<OffsetDateTime>, tags: &[&str]) -> RevisionEntry {
+    RevisionEntry {
+        at: time,
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn a_heading_with_a_time_and_one_with_a_date_only_both_parse() {
+    let text = "# Revisions\n\
+        ## 2026-11-02 14:30, rev 2 (direction)\n\
+        ## 2026-11-02, rev 2 (defect)\n";
+
+    let entries = revision_entries(text, plus_eleven());
+
+    assert_eq!(
+        entries,
+        vec![
+            revision(Some(at("2026-11-02T14:30:00+11:00")), &["direction"]),
+            revision(Some(at("2026-11-02T00:00:00+11:00")), &["defect"]),
+        ]
+    );
+}
+
+#[test]
+fn wording_counts_as_a_revision_and_is_never_redo() {
+    let text = "## 2026-11-02 10:00, rev 2 (wording)\n";
+    let marks = revision_marks(text);
+    let started = at("2026-11-01T00:00:00Z");
+
+    assert_eq!(marks.revisions, 1);
+    assert_eq!(marks.direction, 0);
+    let entries = revision_entries(text, UtcOffset::UTC);
+    assert_eq!(
+        redo_seconds(&entries, Some(started), started + time::Duration::days(5)),
+        0
+    );
+}
+
+#[test]
+fn redo_runs_from_the_earliest_direction_or_defect_revision_after_the_start_to_the_end() {
+    let start = at("2026-11-02T00:00:00Z");
+    let entries = [
+        revision(Some(start + time::Duration::hours(3)), &["direction"]),
+        revision(Some(start + time::Duration::hours(1)), &["defect"]),
+    ];
+
+    let seconds = redo_seconds(&entries, Some(start), start + time::Duration::hours(5));
+
+    assert_eq!(seconds, 4 * 3600);
+}
+
+#[test]
+fn a_revision_between_approval_and_start_is_not_redo() {
+    let start = at("2026-11-02T00:00:00Z");
+    let entries = [revision(
+        Some(start - time::Duration::hours(2)),
+        &["direction"],
+    )];
+
+    assert_eq!(
+        redo_seconds(&entries, Some(start), start + time::Duration::hours(5)),
+        0
+    );
+}
+
+#[test]
+fn redo_runs_to_now_for_a_spec_in_progress() {
+    let start = at("2026-11-02T00:00:00Z");
+    let now = start + time::Duration::hours(9);
+    let entries = [revision(
+        Some(start + time::Duration::hours(4)),
+        &["defect"],
+    )];
+
+    assert_eq!(redo_seconds(&entries, Some(start), now), 5 * 3600);
+}
+
+#[test]
+fn a_revision_with_no_time_or_an_unknown_tag_is_never_redo() {
+    let start = at("2026-11-02T00:00:00Z");
+    let end = start + time::Duration::hours(5);
+    let entries = [
+        revision(None, &["direction"]),
+        revision(Some(start + time::Duration::hours(1)), &["mystery"]),
+        revision(Some(start + time::Duration::hours(1)), &[]),
+    ];
+
+    assert_eq!(redo_seconds(&entries, Some(start), end), 0);
+    assert_eq!(redo_seconds(&entries[..1], None, end), 0);
+    let bad_time = revision_entries("## 2026-11-02 25:99, rev 2 (direction)\n", UtcOffset::UTC);
+    assert_eq!(bad_time, vec![revision(None, &["direction"])]);
+}
+
+#[test]
+fn a_revision_dated_after_the_end_gives_0_not_negative() {
+    let start = at("2026-11-02T00:00:00Z");
+    let entries = [revision(
+        Some(start + time::Duration::hours(8)),
+        &["direction"],
+    )];
+
+    assert_eq!(
+        redo_seconds(&entries, Some(start), start + time::Duration::hours(5)),
+        0
+    );
+}
+
+#[test]
+fn revised_after_approval_counts_any_tag_dated_after_the_approval() {
+    let approved = at("2026-11-02T00:00:00Z");
+    let entries = [
+        revision(Some(approved + time::Duration::hours(1)), &["first"]),
+        revision(Some(approved + time::Duration::hours(2)), &["wording"]),
+        revision(Some(approved + time::Duration::hours(3)), &["architect"]),
+        revision(Some(approved - time::Duration::hours(3)), &["direction"]),
+        revision(None, &["direction"]),
+    ];
+
+    assert_eq!(revised_after_approval(&entries, Some(approved)), 2);
+    assert_eq!(revised_after_approval(&entries, None), 0);
 }

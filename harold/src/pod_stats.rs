@@ -732,6 +732,11 @@ pub(crate) struct SpecFacts {
     /// The seconds a build worker was on the spec: from `started:` (or the agent-pane
     /// file's time) to the end of the spec, or to the poll.
     pub build_worker_seconds: i64,
+    /// The seconds of build work after a `direction` or `defect` revision: from the
+    /// earliest one dated after `started_at` to the end of the spec, or to the poll.
+    pub redo_seconds: i64,
+    /// The revisions, with any tag but `first`, dated after the approval.
+    pub revised_after_approval: u32,
 }
 
 impl Default for SpecFacts {
@@ -753,6 +758,8 @@ impl Default for SpecFacts {
             direction_revisions: 0,
             architect_rounds: 0,
             build_worker_seconds: 0,
+            redo_seconds: 0,
+            revised_after_approval: 0,
         }
     }
 }
@@ -1099,8 +1106,14 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let worked_to = withdrawn.map(|(at, _)| at).or(completed).unwrap_or(now);
     let build_worker_seconds =
         in_progress_at.map_or(0, |from| (worked_to - from).whole_seconds().max(0));
-    let marks = read_text(&pod.join("specs").join(format!("{id}.revisions.md")))
-        .map(|text| revision_marks(&text))
+    let revisions_text = read_text(&pod.join("specs").join(format!("{id}.revisions.md")));
+    let marks = revisions_text
+        .as_deref()
+        .map(revision_marks)
+        .unwrap_or_default();
+    let entries = revisions_text
+        .as_deref()
+        .map(|text| revision_entries(text, offset))
         .unwrap_or_default();
     let words = read_text(&spec).map_or(0, |text| spec_words(&text));
     let facts = SpecFacts {
@@ -1118,6 +1131,8 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         direction_revisions: marks.direction,
         architect_rounds: marks.architect,
         build_worker_seconds,
+        redo_seconds: redo_seconds(&entries, started, worked_to),
+        revised_after_approval: revised_after_approval(&entries, approved_at),
     };
     Some((facts, notices))
 }
@@ -1167,6 +1182,92 @@ pub(crate) fn revision_marks(text: &str) -> RevisionMarks {
         }
     }
     marks
+}
+
+/// One `## ` heading of a revisions file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RevisionEntry {
+    /// The time in the heading. A date-only heading gives that date's local midnight.
+    /// None when the date or the time does not parse.
+    pub at: Option<OffsetDateTime>,
+    /// The comma-separated words in the last parenthesis of the heading.
+    pub tags: Vec<String>,
+}
+
+/// Reads each `## ` heading of a revisions file as one entry. The format is
+/// `## YYYY-MM-DD HH:MM, rev N (tags)`. The time is optional. The tags are listed in
+/// `docs/references/telemetry/revision-tags.md`.
+pub(crate) fn revision_entries(text: &str, offset: UtcOffset) -> Vec<RevisionEntry> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| RevisionEntry {
+            at: heading_time(heading, offset),
+            tags: heading
+                .rsplit_once('(')
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(inside, _)| inside.split(',').map(|tag| tag.trim().to_owned()).collect())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// The time at the start of a heading: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`, then a comma.
+fn heading_time(heading: &str, offset: UtcOffset) -> Option<OffsetDateTime> {
+    let mut words = heading.split(',').next()?.split_whitespace();
+    let date = parse_date(words.next()?)?;
+    let time = match words.next() {
+        None => Time::MIDNIGHT,
+        Some(clock) => {
+            let (hour, minute) = clock.split_once(':')?;
+            Time::from_hms(hour.parse().ok()?, minute.parse().ok()?, 0).ok()?
+        }
+    };
+    words
+        .next()
+        .is_none()
+        .then(|| date.with_time(time).assume_offset(offset))
+}
+
+/// The seconds of redo: from the earliest entry tagged `direction` or `defect` and dated
+/// after `started`, to `end`. An entry with no time is never redo. A spec that did not
+/// start has no redo.
+pub(crate) fn redo_seconds(
+    entries: &[RevisionEntry],
+    started: Option<OffsetDateTime>,
+    end: OffsetDateTime,
+) -> i64 {
+    let Some(started) = started else {
+        return 0;
+    };
+    entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .tags
+                .iter()
+                .any(|tag| tag == "direction" || tag == "defect")
+        })
+        .filter_map(|entry| entry.at)
+        .filter(|at| *at > started)
+        .min()
+        .map_or(0, |from| (end - from).whole_seconds().max(0))
+}
+
+/// The entries not tagged `first` and dated after the approval. Zero when the spec has
+/// no approval.
+pub(crate) fn revised_after_approval(
+    entries: &[RevisionEntry],
+    approved_at: Option<OffsetDateTime>,
+) -> u32 {
+    let Some(approved) = approved_at else {
+        return 0;
+    };
+    let count = entries
+        .iter()
+        .filter(|entry| !entry.tags.iter().any(|tag| tag == "first"))
+        .filter(|entry| entry.at.is_some_and(|at| at > approved))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// The withdrawn specs of `rejections.md`: each line `- <id>, <YYYY-MM-DD>, <reason>`
