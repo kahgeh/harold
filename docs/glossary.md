@@ -259,6 +259,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | question version | The count that rises each time the chief puts a question again | "version" alone |
 | answers line | The line starting `ANSWERS` that Harold types into the chief's pane | "batch line" |
 | settle | The 3 seconds Harold waits after the newest answer before typing an answers line, for answers not sent at once | — |
+| page collection | A folder of pages that Harold serves at `/c/<name>`, named in `[[web_app.collections]]`. | "content type", "route" for it |
+| collection page | One file of a page collection, at `/c/<name>/<file>`. | "artifact" (an artifact is published on claude.ai), "explainer" for any page (an explainer is one kind) |
+| Pages | The web app's index at `/c`: each page collection with its page count, then Specs and Notes. | "menu" |
 | spec page | Harold's page that shows one spec, at `/specs/<product>/<id>`, in the web app or on the specs listener. | "spec artifact", "spec link" for the page |
 | specs listener | Harold's second, loopback-only address, `127.0.0.1:4331` by default, that serves the spec pages to the browser on the Mac. | "local server", "localhost app" |
 | share a spec | Ask the chief, with the web app's **Share** button, to publish one spec as a private artifact. | "publish" for the button, "export" |

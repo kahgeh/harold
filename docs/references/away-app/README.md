@@ -266,12 +266,124 @@ A todo's **Open the spec** link opens its spec page. A spec page links to the sp
 
 A second listener serves the browser on the Mac at `http://127.0.0.1:4331` (`[web_app] specs_listen`). The control-tower `o` opens a todo's spec page there. `tailscale serve` does not forward to it.
 
-- It answers only `GET /specs`, `GET /specs/{product}/{id}` and the three files `/static/app.css`, `/static/specs.js` and the Mermaid bundle. Every other path, `POST /specs/{product}/{id}/share` included, answers `404`. It has no **Share** button.
+- It answers only `GET /specs`, `GET /specs/{product}/{id}`, the four [page collection](#page-collections) routes (`GET /c`, `/c/{collection}`, `/c/{collection}/{file}` and `/c/{collection}/{file}/raw`) and the three files `/static/app.css`, `/static/specs.js` and the Mermaid bundle. Every other path, `POST /specs/{product}/{id}/share` included, answers `404`. It has no **Share** button.
 - It has no login or pairing check, because a browser on the Mac sends no Tailscale login. It refuses a request whose `Host` is not its own loopback name (`127.0.0.1:4331` or `localhost:4331`) with `403`, which stops DNS rebinding.
 - Any local user or process can read every spec through it, as it can read the files. [ADR 0002](../../adr/0002-tool-services-trust-local-callers.md) trusts local callers. It answers no `POST`, so no local process can make the chief publish a spec through it. See [ADR 0017](../../adr/0017-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md).
 - Harold opens it when `pod_registry` is set or at least one `[[web_app.collections]]` entry exists, so a machine with neither has no specs listener. With collections and no registry, its `/specs` reads `No specs on this machine`. The todos on such a machine come from the chief on another Mac, so their links point at that Mac's pages.
 
 Harold logs `app spec shown` (INFO) with `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`) and `ms`, and adds `product` and `id` only when the product is in the registry and the id passes the id pattern. It logs `app spec shared` (INFO) with `product`, `id` and `sha` when a **Share** reply is stored. No log line holds a path or a spec's text.
+
+## Page collections
+
+A page collection is a folder of pages that Harold serves at `/c/<name>`. The chief writes the pages, such as explainers, and you read them on the phone or at the desk. A new kind of page needs one `[[web_app.collections]]` entry and a restart of Harold. It needs no new code. See [ADR 0030](../../adr/0030-harold-serves-page-collections-sandboxed.md).
+
+### The `[[web_app.collections]]` setting
+
+Add one entry for each collection to `local.toml`. Harold reads the entries at its start, so a change needs a restart.
+
+```toml
+[[web_app.collections]]
+name = "explainers"
+title = "Explainers"
+folder = "/Users/<you>/code/<organisation>/.superpowers/explainers"
+extensions = ["html", "md"]
+# listed = true
+
+[[web_app.collections]]
+name = "mocks"
+title = "Mocks"
+folder = "/Users/<you>/code/<organisation>/.superpowers/mocks"
+extensions = ["html"]
+listed = false
+```
+
+| Key | Value |
+|---|---|
+| `name` | The collection's name in the address, `/c/<name>`. It holds 1 to 32 characters from `a-z`, `0-9` and `-`, and it is unique. |
+| `title` | The words shown for the collection, on the Pages screen and in the back control of a page. It holds 1 to 60 characters on one line. |
+| `folder` | The absolute path of the folder. Harold does not expand `~`. |
+| `extensions` | The file types the collection serves. The list holds `html`, `md` or both. |
+| `listed` | Optional. `true` when left out: the Pages screen shows the collection. `false` leaves it off the Pages screen on both listeners. Its list and its pages still answer at their addresses, behind the same checks, so you can open them from a link. |
+
+- **Absent:** Harold serves no collection. `/c` still lists Specs, and Notes when notes are on.
+- **Invalid:** a bad `name`, a duplicate `name`, a `title` that is empty, over 60 characters or holds a control character, a relative `folder`, or an `extensions` list that is empty or holds a type other than `html` and `md`, stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`.
+
+### The routes
+
+| Route | Answers |
+|---|---|
+| `GET /c` | The Pages screen: each listed collection with its page count, then Specs, and Notes when notes are on |
+| `GET /c/{collection}` | The list of the collection's pages |
+| `GET /c/{collection}/{file}` | One page. An `.html` file shows in the app's shell, inside a frame. An `.md` file shows rendered. |
+| `GET /c/{collection}/{file}/raw` | For an `.html` file only: the file as it is, for the frame |
+
+There is no `POST` and no **Share** button. The web app serves the routes behind its login, device, host and origin checks, as it serves `/specs`.
+
+### The files
+
+- `{file}` is one path part. It has no `/`, no leading `.`, and an extension of the collection.
+- At each request Harold resolves the file's real path. The path must lie inside the collection's real folder, so a symlink cannot lead out of it.
+- The file must be a plain file of at most 2 MiB.
+- Every bad request answers `404`. No page and no log line shows a path.
+- A hidden file, a file with another extension, a symlink out of the folder and a file over 2 MiB are never listed.
+
+### The list page
+
+The list page (`/c/{collection}`) shows the newest files first, by the file's time. Each row shows the date and time and the title. The title is the HTML `<title>`, or the first `# ` heading of a Markdown file, or else the file name. Harold reads only the first 16 KiB of a file to find it. All text is escaped. The page lists the newest 200 files. When there are more, its last line reads `200 newest of <n>`. The page uses the template and the style of the notes list.
+
+### The Pages screen
+
+The Pages screen (`/c`) lists each listed collection with its page count as a number badge at the right. It then lists Specs, and Notes when notes are on, with no badge. A collection with `listed = false` is not on it.
+
+### Back controls
+
+Each screen goes back one level with the control in its header. The header is part of the app's shell and lies outside the frame, so it always works.
+
+| Screen | Back control | Goes to |
+|---|---|---|
+| Pages | `‹` and the app's name | The thread |
+| A collection list | `‹ Pages` | `/c` |
+| A collection page | `‹` and the collection's `title` | `/c/{collection}` |
+
+The specs listener has no thread, so its Pages screen has no back control. The thread's header does not link to `/c` yet.
+
+### The policies
+
+An `.html` page opens in the app's shell at `/c/{collection}/{file}`: the header, above a frame that fills the rest of the screen. The frame is `<iframe sandbox src="/c/{collection}/{file}/raw">` with no `allow-*` flag. The shell carries the app's policy plus `frame-src 'self'`:
+
+```text
+default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+```
+
+The `…/raw` response sends the file as it is, with `Content-Type: text/html; charset=utf-8` (fixed by the extension, never guessed), `X-Content-Type-Options: nosniff` and this policy:
+
+```text
+sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'
+```
+
+- A page may use its own inline styles, inline SVG, and `data:` images and fonts. It may not load an image from the collection, an outside font, style sheet or image, or run a script or a fetch.
+- `sandbox` gives the page an origin of its own. A script that ran could not use your login, and the origin check would refuse its requests. The same origin is why the page cannot load images from the collection: the device cookie is `SameSite=Lax`.
+- `frame-ancestors 'self'` lets only Harold's own shell frame the page.
+- A page that needs a diagram or a script must be drawn to SVG first.
+- An `.md` page is rendered with the spec pages' Markdown renderer, in the spec page's template and policy, with the spec pages' rules ([ADR 0017](../../adr/0017-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md)): raw HTML shows as text, a link or an image keeps its address only for `http:`, `https:` or a relative address, and a Mermaid diagram draws with Harold's own copy of Mermaid.
+
+### The specs listener
+
+The specs listener serves the four routes too, `GET` only, with its Host check. See [the specs listener](#the-specs-listener). Its Pages screen lists the collections and Specs, with no Notes row. The phone address is `https://<host>/c/<name>/<file>`, and the address at the desk is `http://127.0.0.1:4331/c/<name>/<file>`.
+
+### The log and the counter
+
+Harold logs `app page shown` (INFO) with `listener` (`web_app` or `specs`), `collection`, `result` and `ms`. `collection` is a configured name, or `unknown` for any other name, so a URL cannot add a value. `result` is one of:
+
+| `result` | Meaning |
+|---|---|
+| `ok` | The page, the list or the file was served |
+| `not_found` | No such file, or no such collection |
+| `refused` | A symlink out of the folder, a `..` or `/` in `{file}`, a hidden file or another extension |
+| `too_big` | The file is over 2 MiB |
+| `unreadable` | Harold could not read the folder or the file |
+
+No log line holds a file's name or text. The counter `harold.web_app.collection_pages` counts each request by `collection` and `result`. Harold sets it to 0 at start for each configured collection and for `unknown`, for every `result`. See the [telemetry reference](../telemetry/README.md). More than 0 of `refused` or `unreadable` in a day means look at the `app page shown` lines.
 
 ## What reaches the phone, and by which route
 
@@ -445,6 +557,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
 | `app spec shown` | INFO. `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`), `ms`, and `product` and `id` when the product is in the registry and the id passes the id pattern |
 | `app spec shared` | INFO. `product`, `id` and `sha`, logged when a **Share** reply is stored |
+| `app page shown` | INFO. `listener` (`web_app` or `specs`), `collection` (a configured name, or `unknown`), `result` (`ok`, `not_found`, `refused`, `too_big` or `unreadable`) and `ms`. No file name and no text |
 | `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
 | `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
 | `app speech check not logged` | A warning with `reason` (`not_object`, `unknown_field`, `wrong_type` or `out_of_limit`) and `check_field`, the name of the refused field, or `-` when no field is to blame or the name is not one of the run's own (a name outside the list could hold words). Never a value. `check_field` stays in `harold.log` |
