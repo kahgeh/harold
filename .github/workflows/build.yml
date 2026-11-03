@@ -13,7 +13,7 @@ jobs:
     concurrency:
       group: build-${{ github.workflow }}-${{ github.ref }}-build
       cancel-in-progress: false
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -35,21 +35,6 @@ jobs:
 
       - name: Check no local paths are tracked
         run: ./scripts/check_local_paths.sh
-
-      - name: Test
-        timeout-minutes: 35
-        run: |
-          cargo test --locked --workspace --target aarch64-apple-darwin
-          cargo test --locked -p harold --target aarch64-apple-darwin live_tmux_inventory_roundtrip_without_locale -- --ignored
-          python3 -m unittest discover -s scripts/tests
-          python3 -m unittest hooks.shared.harold_turn_complete_test
-          python3 -m unittest hooks.providers.test_turn_complete
-
-      - name: Check the feature mixes
-        timeout-minutes: 15
-        env:
-          CARGO_BUILD_TARGET: aarch64-apple-darwin
-        run: ./scripts/check_features.sh
 
       - name: Build release binaries
         timeout-minutes: 20
@@ -115,7 +100,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: write
     concurrency:
@@ -148,15 +133,6 @@ jobs:
             exit 1
           fi
           grep -q "needs macOS" guard.log || { cat guard.log >&2; echo "the build failed, but not with 'needs macOS'" >&2; exit 1; }
-
-      - name: Test
-        timeout-minutes: 25
-        run: |
-          cargo test --locked --workspace --no-default-features --features harold/linux-defaults
-          python3 -m unittest discover -s scripts/tests
-          python3 -m unittest hooks.shared.harold_turn_complete_test
-          python3 -m unittest hooks.providers.test_turn_complete
-          python3 -I harold/src/tts/test_tts_workers.py
 
       - name: Build release binaries
         if: github.event_name == 'release'

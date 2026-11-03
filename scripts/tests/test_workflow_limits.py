@@ -64,21 +64,32 @@ def read(name):
 class WorkflowLimitsTest(unittest.TestCase):
     def test_build_job_steps(self):
         text = read("build.yml")
-        self.assertEqual(step_limit(text, "build", "Test"), 35)
-        self.assertEqual(step_limit(text, "build", "Check the feature mixes"), 15)
         self.assertEqual(step_limit(text, "build", "Build release binaries"), 20)
+        with self.assertRaises(LookupError):
+            step_limit(text, "build", "Test")
+        with self.assertRaises(LookupError):
+            step_limit(text, "build", "Check the feature mixes")
 
-    def test_build_linux_test_step(self):
-        self.assertEqual(step_limit(read("build.yml"), "linux", "Test"), 25)
+    def test_macos_checks_steps(self):
+        text = read("macos-checks.yml")
+        self.assertEqual(step_limit(text, "test", "Test"), 35)
+        self.assertEqual(step_limit(text, "features", "Check the feature mixes"), 15)
+
+    def test_build_linux_job_has_no_test_step(self):
+        with self.assertRaises(LookupError):
+            step_limit(read("build.yml"), "linux", "Test")
 
     def test_linux_tests_workflow_test_step(self):
         self.assertEqual(step_limit(read("linux-tests.yml"), "linux", "Test"), 25)
 
-    def test_jobs_keep_sixty(self):
+    def test_job_limits(self):
         build = read("build.yml")
-        self.assertEqual(job_limit(build, "build"), 60)
-        self.assertEqual(job_limit(build, "linux"), 60)
+        self.assertEqual(job_limit(build, "build"), 30)
+        self.assertEqual(job_limit(build, "linux"), 30)
         self.assertEqual(job_limit(read("linux-tests.yml"), "linux"), 60)
+        checks = read("macos-checks.yml")
+        self.assertEqual(job_limit(checks, "test"), 45)
+        self.assertEqual(job_limit(checks, "features"), 45)
 
     def test_step_limit_reads_the_right_step(self):
         text = (
