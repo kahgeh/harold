@@ -165,7 +165,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `gg` / `G` | First / last row | First / last todo | Same | Same | Same | Types |
 | `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected, when Harold serves the knowledge tool) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
-| `m` / `p` / `C` / `W` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call · `W`: pause or resume every watch (it shows when a watch runs or a person or an agent paused one, and it never resumes a watch that the daily budget paused). Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
+| `m` / `p` / `C` / `W` | `m`: mute or unmute the voice · `p`: pause or resume the messaging · `C`: start or end a call · `W`: pause or resume every watch (it never resumes a watch that the daily budget paused). Each key runs its palette command at once, only when that command shows now; otherwise it does nothing | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -218,7 +218,7 @@ iMessage traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
 every connected control-tower shows `■ MSG PAUSED` after the voice state; nothing is shown
-while messaging is running. The masthead also counts the watches after that: `WATCHES 2` while two run, `■ WATCHES PAUSED` when a person or an agent paused them, and `(CAP)` for a watch that the daily budget paused. It shows nothing while there is no watch. The masthead title always shows the control-tower's own release version (`source` for a
+while messaging is running. The masthead also counts the watches. It shows `WATCHES 2` while two run and `■ WATCHES PAUSED` when a person or an agent paused them. It adds `(CAP)` for a watch that the daily budget paused. It shows nothing while there is no watch. The masthead title always shows the control-tower's own release version (`source` for a
 source build), whatever Harold reports and even before the first snapshot or after a
 disconnect. A control-tower left running through an install shows its old version until it is
 restarted. As the line gets tight `HAROLD / CONTROL-TOWER` shortens to `CONTROL-TOWER`, then `CONTROL-TOWER`
