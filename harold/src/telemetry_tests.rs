@@ -6041,7 +6041,8 @@ fn the_telemetry_calls_counter_is_seeded_for_every_prefix_kind_and_outcome() {
     let product = format!("seed{}", uuid::Uuid::new_v4().simple());
     register_telemetry_counters(&[product.clone(), "harold".to_owned()]);
     assert_eq!(TELEMETRY_OUTCOMES[0], "ok");
-    assert_eq!(TELEMETRY_OUTCOMES.len(), 12);
+    assert_eq!(TELEMETRY_OUTCOMES.len(), 13);
+    assert_eq!(TELEMETRY_OUTCOMES[12], "invalid");
     for prefix in [product.as_str(), "harold", "chief"] {
         for kind in TELEMETRY_KINDS {
             for outcome in TELEMETRY_OUTCOMES {

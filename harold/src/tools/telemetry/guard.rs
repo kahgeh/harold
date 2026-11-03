@@ -10,8 +10,10 @@ use crate::tools::backlog::guard::{Guard as BacklogGuard, Refused as BacklogRefu
 use crate::tools::{ChiefPane, PaneFolder, Products};
 
 const WINDOW_MS: i64 = 60_000;
-const CHIEF: &str = "chief";
-const REGISTRY_UNREADABLE: &str = "the product registry cannot be read: try again later";
+/// The prefix of the chief's own signals.
+pub(crate) const CHIEF: &str = "chief";
+/// The text of a refusal when the product registry cannot be read.
+pub(crate) const REGISTRY_UNREADABLE: &str = "the product registry cannot be read: try again later";
 
 /// The time, in milliseconds. A fake stands in for it in tests.
 pub(crate) trait Clock: Send + Sync {

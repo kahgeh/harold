@@ -3022,24 +3022,11 @@ impl<E: PushMetricExporter> PushMetricExporter for HealthWatch<E> {
 // ---------------------------------------------------------------------------
 
 /// Every `kind` of `harold.telemetry.calls`: the calls of the telemetry tool that write.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) const TELEMETRY_KINDS: [&str; 5] = ["declare", "count", "gauge", "event", "remove"];
 
 /// Every `outcome` of `harold.telemetry.calls`: `ok`, or the reason word of a refusal.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
-pub(crate) const TELEMETRY_OUTCOMES: [&str; 12] = [
+/// `invalid` is malformed input, such as a bad name, which has no word of its own.
+pub(crate) const TELEMETRY_OUTCOMES: [&str; 13] = [
     "ok",
     "no_pane",
     "wrong_prefix",
@@ -3052,19 +3039,13 @@ pub(crate) const TELEMETRY_OUTCOMES: [&str; 12] = [
     "rate_limited",
     "meaning_too_long",
     "declaration_differs",
+    "invalid",
 ];
 
 /// The prefix of the chief's signals, seeded with the products' prefixes.
 const CHIEF_PREFIX: &str = "chief";
 
 /// Counts one call of the telemetry tool.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn count_telemetry_call(prefix: &str, kind: &str, outcome: &str) {
     instruments()
         .telemetry_calls
@@ -3086,7 +3067,7 @@ fn telemetry_call_attributes(prefix: &str, kind: &str, outcome: &str) -> [KeyVal
     not(test),
     expect(
         dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
+        reason = "the telemetry tool's start calls it; it comes in a later task"
     )
 )]
 pub(crate) fn register_telemetry_counters(prefixes: &[String]) {
@@ -3212,13 +3193,6 @@ fn ensure_signal_instrument(name: &str, kind: SignalKind) {
 
 /// Adds `n` to the agent counter `name`, exported as `agent.<name>` with each attribute key
 /// as `agent.attr.<key>`. The counter is made on first use.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn signal_counter_add(name: &str, n: u64, attrs: &[(String, String)]) {
     #[cfg(test)]
     test_support::install();
@@ -3240,13 +3214,6 @@ pub(crate) fn signal_counter_add(name: &str, n: u64, attrs: &[(String, String)])
 
 /// Sets the agent gauge `name` to `value`, exported as `agent.<name>` with each attribute key
 /// as `agent.attr.<key>`. The gauge is made on first use and reports the last value.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn signal_gauge_set(name: &str, value: f64, attrs: &[(String, String)]) {
     #[cfg(test)]
     test_support::install();
@@ -3268,13 +3235,6 @@ pub(crate) fn signal_gauge_set(name: &str, value: f64, attrs: &[(String, String)
 /// Writes the log line `agent event` (`info`) with `agent.name` (the signal's name, such as
 /// `harold.release.attempts`) and each attribute as `agent.attr.<key>`. The line goes to the
 /// collector only: `tracing` cannot name a field at run time.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn signal_event(name: &str, attrs: &[(String, String)]) {
     #[cfg(test)]
     test_support::install();
@@ -3298,13 +3258,6 @@ pub(crate) fn signal_event(name: &str, attrs: &[(String, String)]) {
 
 /// Forgets the agent signal `name`: no export after this call holds it. A later write makes
 /// it again from 0.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the telemetry tool calls it; it comes in a later task"
-    )
-)]
 pub(crate) fn signal_forget(name: &str) {
     #[cfg(test)]
     test_support::install();

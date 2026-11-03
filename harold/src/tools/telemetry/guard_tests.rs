@@ -133,6 +133,17 @@ fn an_unreadable_registry_is_a_refusal_not_a_panic() {
 }
 
 #[test]
+fn the_chief_with_an_unreadable_registry_cannot_write_a_product_prefix() {
+    let g = Setup::new().guard_with(Err("broken"));
+    let refused = g.check_prefix("%2", "harold").unwrap_err();
+    assert_eq!(refused.reason(), "invalid");
+    assert_eq!(
+        refused.text(),
+        "the product registry cannot be read: try again later"
+    );
+}
+
+#[test]
 fn the_registry_prefixes_are_the_product_names() {
     assert_eq!(
         Setup::new().guard().registry_prefixes(),
