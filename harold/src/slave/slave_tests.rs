@@ -979,3 +979,67 @@ async fn a_failed_connect_warns_once_with_the_reason_and_never_the_secret() {
     .await;
     assert!(!logs.text().contains(&wrong));
 }
+
+/// The master's turn-end path for the registry test: it keeps each request.
+#[derive(Default)]
+struct KeptTurns(Mutex<Vec<TurnCompleteRequest>>);
+
+impl crate::slave::registry::TurnSink for KeptTurns {
+    fn record(&self, request: TurnCompleteRequest) -> crate::slave::registry::TurnFuture<'_> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(request);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slaves_reports_reach_the_registry_through_the_in_process_link() {
+    use crate::agent::rex_host_runner::HostAgents;
+    use crate::slave::registry::SlaveRegistry;
+    use harold_api::harold::{AgentPaneState, AgentState};
+
+    let secret = new_secret();
+    let data = temp_dir("master");
+    write_secret(&master_secret_path(&data, NAME), &secret).unwrap();
+    let hosts = HostAgents::new(vec![NAME.to_owned()]);
+    let turns = Arc::new(KeptTurns::default());
+    let registry = Arc::new(SlaveRegistry::new(hosts.clone(), turns.clone()));
+    let service = link_service(&data, &[NAME.to_owned()], registry.clone());
+    let master = Master {
+        data,
+        sink: Arc::new(Sink::default()),
+        service,
+    };
+    let connector = TestConnector::new(&master);
+    let source = TestSource::new();
+    source.lock.send_replace(true);
+    source.snapshot.send_replace(AgentStateSnapshot {
+        panes: vec![AgentPaneState {
+            pane_id: "block:7".into(),
+            agent_pid: 70,
+            pane_pid: 70,
+            state: AgentState::Working as i32,
+            ..AgentPaneState::default()
+        }],
+        ..AgentStateSnapshot::default()
+    });
+    let slave = start(&connector, &slave_data(&secret), &source).await;
+
+    until("linked", || registry.is_linked(NAME)).await;
+    until("agent row", || {
+        hosts
+            .snapshot()
+            .iter()
+            .any(|row| row.agent.host_pane_id == "rex:omarchy/block:7")
+    })
+    .await;
+    until("lock", || registry.lock_of(NAME) == Some(true)).await;
+    slave.report_turn(request("block:7", "s-1")).await;
+    until("turn", || turns.0.lock().unwrap().len() == 1).await;
+    assert_eq!(turns.0.lock().unwrap()[0].pane_id, "rex:omarchy/block:7");
+
+    // The link drops: the Rex inventory takes the label back.
+    slave.abort();
+    until("unlinked", || !registry.is_linked(NAME)).await;
+}

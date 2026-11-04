@@ -278,8 +278,30 @@ where
     Ok(!repeat)
 }
 
-impl HaroldService {
-    /// Keeps the session and transcript of the pane's agent for the recap reader.
+impl slave::registry::TurnSink for TurnPath {
+    fn record(&self, request: TurnCompleteRequest) -> slave::registry::TurnFuture<'_> {
+        Box::pin(async move {
+            TurnPath::record(self, request, None)
+                .await
+                .map_err(|status| status.message().to_owned())
+        })
+    }
+}
+
+/// The master's turn-end path: what a turn end does once its pane id is accepted. A hook's
+/// `TurnComplete` call and a slave's `Turn` both go through `record`.
+#[derive(Clone)]
+struct TurnPath {
+    monitor: agent::runtime::AgentMonitorHandle,
+    snapshots: agent::snapshot::AgentSnapshotHub,
+    recaps: agent::recap::Recaps,
+    /// Told of each turn end once it is stored. `None` when `[restart_reminder]` is off.
+    restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
+}
+
+impl TurnPath {
+    /// Keeps the session and transcript of the pane's agent for the recap reader. A pane
+    /// that is not in this machine's snapshot, such as a slave's agent, gets no recap.
     fn note_recap_turn_end(&self, pane_id: &str, session_id: &str, transcript_path: &str) {
         if session_id.is_empty() || transcript_path.is_empty() {
             return;
@@ -320,6 +342,116 @@ impl HaroldService {
                 .insert(pane_id.to_string())
         {
             tracing::warn!(pane_id = %pane_id_log, "turn hook sends no session id");
+        }
+    }
+
+    /// Records one turn end. The caller has checked the pane id: a hook's pane id has a local
+    /// form, a slave's has the host form. `upstream` is the turn that a paired slave sends
+    /// on to its master after it keeps the turn here.
+    async fn record(
+        &self,
+        req: TurnCompleteRequest,
+        upstream: Option<TurnCompleteRequest>,
+    ) -> Result<(), Status> {
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
+        let hook_reached = time::OffsetDateTime::now_utc();
+        // Read before `req` moves into the stored event.
+        let identity = pod_stats::pane_identity(&req.pane_id);
+        let tokens = telemetry::TurnTokens {
+            input: req.input_tokens,
+            output: req.output_tokens,
+            cache_read: req.cache_read_tokens,
+            cache_write: req.cache_write_tokens,
+        };
+        let model = non_empty(&req.model).unwrap_or("none").to_owned();
+        let trace = telemetry::begin_turn_complete(
+            &req.pane_id,
+            non_empty(&req.session_id),
+            non_empty(&req.turn_started_at),
+            hook_reached,
+            identity.role.as_str(),
+            identity.product.as_deref(),
+        );
+        telemetry::record_turn_tokens(
+            &tokens,
+            &model,
+            identity.role.as_str(),
+            identity.product.as_deref(),
+            identity.spec_id.as_deref(),
+        );
+        let turn_cx = trace.turn_complete.context();
+        // Kept by the pane before the monitor stores the turn end: the event handler may
+        // deliver it before the monitor answers with its event id.
+        telemetry::keep_pending_turn(&req.pane_id, turn_cx.clone());
+
+        async {
+            let pane_id = req.pane_id.clone();
+            let pane_id_log = pane_id_for_log(&pane_id);
+            info!(pane_id = %pane_id_log, "turn complete received");
+            if req.session_id.is_empty() {
+                self.warn_when_claude_sends_no_session_id(&pane_id, pane_id_log);
+            }
+
+            let turn_end = (
+                req.pane_id.clone(),
+                req.session_id.clone(),
+                req.transcript_path.clone(),
+            );
+            let event = store::TurnCompleted {
+                pane_id: req.pane_id,
+                pane_label: req.pane_label,
+                last_user_prompt: req.last_user_prompt,
+                assistant_message: req.assistant_message,
+                main_context: req.main_context,
+                agent_incarnation: None,
+                work_summary: agent::domain::CompletionSummaryUpdate::Unchanged,
+            };
+
+            let appended = self.monitor
+                .turn_completed(event)
+                .await
+                .map_err(|e| {
+                    telemetry::forget_pending_turn(&pane_id, &turn_cx);
+                    tracing::error!(pane_id = %pane_id_log, result = "append_failed", error = %e, "turn complete rejected");
+                    Status::internal("event store write failed")
+                })?;
+            match appended
+                .events
+                .iter()
+                .find(|envelope| envelope.r#type == "TurnCompleted")
+            {
+                Some(stored) => telemetry::settle_pending_turn(&pane_id, stored.id, &turn_cx),
+                None => telemetry::forget_pending_turn(&pane_id, &turn_cx),
+            }
+
+            info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
+            if let Some(reminder) = &self.restart_reminder {
+                reminder.turn_ended(&turn_end.0, &turn_end.1, &turn_end.2);
+            }
+            self.note_recap_turn_end(&turn_end.0, &turn_end.1, &turn_end.2);
+            if let Some(upstream) = upstream {
+                slave::slave::report_turn(upstream).await;
+            }
+
+            Ok(())
+        }
+        // `harold.turn_complete` is entered inside `grpc_turn_complete`, so the lines
+        // written along the way carry the turn's trace.
+        .instrument(trace.turn_complete)
+        .instrument(span)
+        .await
+    }
+}
+
+impl HaroldService {
+    /// The turn-end path of this service, shared with the slave link.
+    fn turn_path(&self) -> TurnPath {
+        TurnPath {
+            monitor: self.monitor.clone(),
+            snapshots: self.snapshots.clone(),
+            recaps: self.recaps.clone(),
+            restart_reminder: self.restart_reminder.clone(),
         }
     }
 
@@ -487,94 +619,8 @@ impl Harold for HaroldService {
         }
         // A paired slave also sends the turn up to the master, after it keeps it here.
         let upstream = slave::slave::linked().then(|| req.clone());
-        let trace_id = uuid::Uuid::new_v4().to_string();
-        let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
-        let hook_reached = time::OffsetDateTime::now_utc();
-        // Read before `req` moves into the stored event.
-        let identity = pod_stats::pane_identity(&req.pane_id);
-        let tokens = telemetry::TurnTokens {
-            input: req.input_tokens,
-            output: req.output_tokens,
-            cache_read: req.cache_read_tokens,
-            cache_write: req.cache_write_tokens,
-        };
-        let model = non_empty(&req.model).unwrap_or("none").to_owned();
-        let trace = telemetry::begin_turn_complete(
-            &req.pane_id,
-            non_empty(&req.session_id),
-            non_empty(&req.turn_started_at),
-            hook_reached,
-            identity.role.as_str(),
-            identity.product.as_deref(),
-        );
-        telemetry::record_turn_tokens(
-            &tokens,
-            &model,
-            identity.role.as_str(),
-            identity.product.as_deref(),
-            identity.spec_id.as_deref(),
-        );
-        let turn_cx = trace.turn_complete.context();
-        // Kept by the pane before the monitor stores the turn end: the event handler may
-        // deliver it before the monitor answers with its event id.
-        telemetry::keep_pending_turn(&req.pane_id, turn_cx.clone());
-
-        async {
-            let pane_id = req.pane_id.clone();
-            let pane_id_log = pane_id_for_log(&pane_id);
-            info!(pane_id = %pane_id_log, "turn complete received");
-            if req.session_id.is_empty() {
-                self.warn_when_claude_sends_no_session_id(&pane_id, pane_id_log);
-            }
-
-            let turn_end = (
-                req.pane_id.clone(),
-                req.session_id.clone(),
-                req.transcript_path.clone(),
-            );
-            let event = store::TurnCompleted {
-                pane_id: req.pane_id,
-                pane_label: req.pane_label,
-                last_user_prompt: req.last_user_prompt,
-                assistant_message: req.assistant_message,
-                main_context: req.main_context,
-                agent_incarnation: None,
-                work_summary: agent::domain::CompletionSummaryUpdate::Unchanged,
-            };
-
-            let appended = self.monitor
-                .turn_completed(event)
-                .await
-                .map_err(|e| {
-                    telemetry::forget_pending_turn(&pane_id, &turn_cx);
-                    tracing::error!(pane_id = %pane_id_log, result = "append_failed", error = %e, "turn complete rejected");
-                    Status::internal("event store write failed")
-                })?;
-            match appended
-                .events
-                .iter()
-                .find(|envelope| envelope.r#type == "TurnCompleted")
-            {
-                Some(stored) => telemetry::settle_pending_turn(&pane_id, stored.id, &turn_cx),
-                None => telemetry::forget_pending_turn(&pane_id, &turn_cx),
-            }
-
-            info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
-            if let Some(reminder) = &self.restart_reminder {
-                reminder.turn_ended(&turn_end.0, &turn_end.1, &turn_end.2);
-            }
-            self.note_recap_turn_end(&turn_end.0, &turn_end.1, &turn_end.2);
-            if let Some(upstream) = upstream {
-                slave::slave::report_turn(upstream).await;
-            }
-
-            Ok(Response::new(TurnCompleteResponse { accepted: true }))
-        }
-        // `harold.turn_complete` is entered inside `grpc_turn_complete`, so the lines
-        // written along the way carry the turn's trace.
-        .instrument(trace.turn_complete)
-        .instrument(span)
-        .await
+        self.turn_path().record(req, upstream).await?;
+        Ok(Response::new(TurnCompleteResponse { accepted: true }))
     }
 
     async fn report_agent_state(
@@ -1422,7 +1468,9 @@ fn non_empty(value: &str) -> Option<&str> {
 }
 
 fn pane_id_for_log(value: &str) -> &str {
-    let valid = value.len() <= 64 && agent::runtime::valid_pane_id(value);
+    let valid = value.len() <= 64
+        && (agent::runtime::valid_pane_id(value)
+            || agent::pane_route::parse_host_pane_id(value).is_some());
     if valid { value } else { "<invalid-pane-id>" }
 }
 
@@ -2237,12 +2285,20 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         waiting_rx,
         seen_tx,
     );
+    let (slave_hosts, slave_turns) = (service.host_agents.clone(), service.turn_path());
     // The slave link listener runs only when `[slaves]` exists. It serves `SlaveLink` only.
     let slave_link = cfg.slaves.as_ref().map(|slaves| {
         let data = std::path::Path::new(&store_path)
             .parent()
             .unwrap_or(std::path::Path::new("."));
-        slave::master::serve_slave_link(slaves, data, Arc::new(slave::master::DiscardingSink))
+        // The registry keeps what the slaves report. It takes each turn through the same code
+        // as a hook's turn end, and makes the Rex inventory skip a linked host.
+        let registry = Arc::new(slave::registry::SlaveRegistry::new(
+            slave_hosts,
+            Arc::new(slave_turns),
+        ));
+        slave::registry::install(Arc::clone(&registry));
+        slave::master::serve_slave_link(slaves, data, registry)
     });
     // The slave link starts only when `[master]` exists. The agent monitor and the lock check
     // publish into `slave_source` (slice 2c.1 task 7).

@@ -32,6 +32,8 @@ pub(crate) struct FakeEnvironment {
     elapsed: Mutex<Duration>,
     settings: NotifySettings,
     screen_locked: AtomicBool,
+    /// The lock of the slave that holds every host pane. `None`: no slave decides.
+    slave_lock: Mutex<Option<bool>>,
     fail_sends: AtomicBool,
     /// The error the next turn-end send fails with, once.
     fail_next: Mutex<Option<String>>,
@@ -63,6 +65,7 @@ impl FakeEnvironment {
             elapsed: Mutex::new(Duration::ZERO),
             settings: notify,
             screen_locked: AtomicBool::new(false),
+            slave_lock: Mutex::new(None),
             fail_sends: AtomicBool::new(false),
             fail_next: Mutex::new(None),
             delivered: Mutex::new(Vec::new()),
@@ -86,6 +89,11 @@ impl FakeEnvironment {
 
     pub(crate) fn set_screen_locked(&self, locked: bool) {
         self.screen_locked.store(locked, Ordering::SeqCst);
+    }
+
+    /// Makes `lock` the lock of the slave that holds every host pane (`rex:<label>/...`).
+    pub(crate) fn set_slave_lock(&self, lock: Option<bool>) {
+        *self.slave_lock.lock().unwrap() = lock;
     }
 
     pub(crate) fn set_fail_sends(&self, fail: bool) {
@@ -135,6 +143,11 @@ impl NotifyEnvironment for FakeEnvironment {
 
     fn screen_locked(&self) -> bool {
         self.screen_locked.load(Ordering::SeqCst)
+    }
+
+    fn slave_lock(&self, pane_id: &str) -> Option<bool> {
+        crate::agent::pane_route::parse_host_pane_id(pane_id)?;
+        *self.slave_lock.lock().unwrap()
     }
 
     fn deliver(

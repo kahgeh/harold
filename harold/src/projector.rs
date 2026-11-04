@@ -787,7 +787,7 @@ fn dispatch_spoken_line_with_app<'a>(
         sent(pane_id, Channel::WebApp);
         return Ok(DeliveryOutcome::Delivered);
     }
-    if environment.screen_locked() {
+    if environment.screen_locked_for(pane_id) {
         if messaging_paused {
             info!(pane_id = %pane_id, "spoken line dropped (messaging paused)");
             return Ok(DeliveryOutcome::Skipped);

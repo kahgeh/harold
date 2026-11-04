@@ -634,3 +634,95 @@ async fn a_failed_local_read_leaves_out_nothing_and_logs_nothing() {
         host_lines(&logs)
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn linked_label_skips_rex_inventory() {
+    let host = FakeHost::new(
+        "omarchy",
+        vec![Step::Good(vec![agent("omarchy", "b1", 200, 5, WORKING)])],
+    );
+    let (agents, _shutdown) = spawn(&[Arc::clone(&host)]);
+    // The link is up before the first read.
+    agents.set_linked("omarchy", true);
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    assert_eq!(host.calls(), 0, "no Rex read while the link is up");
+    assert!(agents.snapshot().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_link_returns_to_rex() {
+    let host = FakeHost::new(
+        "omarchy",
+        vec![Step::Good(vec![agent("omarchy", "b1", 200, 5, WORKING)])],
+    );
+    let (agents, _shutdown) = spawn(&[Arc::clone(&host)]);
+    agents.set_linked("omarchy", true);
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    assert_eq!(host.calls(), 0);
+    agents.set_linked("omarchy", false);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(host.calls() >= 1, "Rex reads the host again");
+    let rows = agents.snapshot();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].agent.host_pane_id, "rex:omarchy/block:b1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn omarchy_agent_is_one_row_through_link_up_and_down() {
+    use crate::slave::master::MasterSink;
+    use crate::slave::registry::{SlaveRegistry, TurnFuture, TurnSink};
+    use harold_api::harold::{AgentPaneState, AgentState, AgentStateSnapshot};
+
+    struct NoTurns;
+    impl TurnSink for NoTurns {
+        fn record(&self, _: harold_api::harold::TurnCompleteRequest) -> TurnFuture<'_> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    const ROW: &str = "rex:omarchy/block:b1";
+    let host = FakeHost::new(
+        "omarchy",
+        vec![Step::Good(vec![agent("omarchy", "b1", 200, 5, WORKING)])],
+    );
+    let (agents, _shutdown) = spawn(&[Arc::clone(&host)]);
+    let registry = SlaveRegistry::new(agents.clone(), Arc::new(NoTurns));
+    let one_row = |state: HostAgentState| {
+        let rows = agents.snapshot();
+        assert_eq!(rows.len(), 1, "one row, never two");
+        assert_eq!(rows[0].agent.host_pane_id, ROW);
+        assert_eq!(rows[0].agent.state, state);
+    };
+
+    // Rex first: the row shows what Rex reads.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    one_row(WORKING);
+
+    // The link comes up: the row keeps its id and takes the slave's state as it is.
+    registry.link_changed("omarchy", true);
+    registry.apply_snapshot(
+        "omarchy",
+        AgentStateSnapshot {
+            panes: vec![AgentPaneState {
+                pane_id: "block:b1".into(),
+                agent_pid: 200,
+                pane_pid: 200,
+                agent_started_at_ms: 5,
+                provider_id: "alpha".into(),
+                state: AgentState::Idle as i32,
+                ..AgentPaneState::default()
+            }],
+            ..AgentStateSnapshot::default()
+        },
+    );
+    one_row(IDLE);
+    let reads = host.calls();
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    one_row(IDLE);
+    assert_eq!(host.calls(), reads, "Rex reads nothing while linked");
+
+    // The link drops: Rex reads again and the row takes Rex's state as it is.
+    registry.link_changed("omarchy", false);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(host.calls() > reads);
+    one_row(WORKING);
+}

@@ -146,6 +146,8 @@ struct Inner {
     labels: Vec<String>,
     hosts: Mutex<HashMap<String, Host>>,
     local: Mutex<LocalId>,
+    /// The labels whose slave link is up. Their agents come from the slave, not from Rex.
+    linked: Mutex<HashSet<String>>,
     version: watch::Sender<u64>,
 }
 
@@ -155,6 +157,7 @@ impl Default for Inner {
             labels: Vec::new(),
             hosts: Mutex::new(HashMap::new()),
             local: Mutex::new(LocalId::default()),
+            linked: Mutex::new(HashSet::new()),
             version: watch::channel(0).0,
         }
     }
@@ -232,6 +235,38 @@ impl HostAgents {
             LocalId::Read(id) => id.clone(),
             _ => None,
         }
+    }
+
+    /// Marks the slave link of `label` up or down. While it is up, the Rex task of that
+    /// label reads nothing. Its rows stay until the next report of either source replaces them.
+    pub(crate) fn set_linked(&self, label: &str, linked: bool) {
+        let mut set = self
+            .inner
+            .linked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if linked {
+            set.insert(label.to_owned());
+        } else {
+            set.remove(label);
+        }
+    }
+
+    /// Whether the slave link of `label` is up.
+    pub(crate) fn is_linked(&self, label: &str) -> bool {
+        self.inner
+            .linked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(label)
+    }
+
+    /// The icon of the host `label`, empty until a first report.
+    pub(crate) fn icon_of(&self, label: &str) -> String {
+        self.lock()
+            .get(label)
+            .map(|host| host.icon.clone())
+            .unwrap_or_default()
     }
 
     fn is_left_out(&self, label: &str) -> bool {
@@ -484,6 +519,13 @@ async fn run_host(
         if agents.is_left_out(&label) {
             break;
         }
+        // While the slave link of the label is up, the slave reports its agents: no Rex read.
+        if agents.is_linked(&label) {
+            if !wait_or_stop(&mut shutdown, interval).await {
+                break;
+            }
+            continue;
+        }
         if let Some(read) = late.take() {
             tokio::select! {
                 biased;
@@ -508,6 +550,13 @@ async fn run_host(
                 }
             },
         };
+        // The link came up during the read: the slave's rows stay, not the read's.
+        if agents.is_linked(&label) {
+            if !wait_or_stop(&mut shutdown, interval).await {
+                break;
+            }
+            continue;
+        }
         let seen_host_id = match &report {
             HostReport::Reached { host_id, .. } | HostReport::Unreached { host_id, .. } => {
                 host_id.is_some()
@@ -542,6 +591,15 @@ async fn run_host(
             _ = shutdown.changed() => break,
             () = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+/// Waits `wait`. False when the shutdown came first.
+async fn wait_or_stop(shutdown: &mut watch::Receiver<()>, wait: Duration) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => false,
+        () = tokio::time::sleep(wait) => true,
     }
 }
 

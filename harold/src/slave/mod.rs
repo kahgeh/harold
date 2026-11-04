@@ -10,6 +10,7 @@ use crate::store::{AwayMessageRequested, TurnCompleted};
 pub(crate) mod backlog;
 pub(crate) mod master;
 pub(crate) mod pairing;
+pub(crate) mod registry;
 #[allow(clippy::module_inception)]
 pub(crate) mod slave;
 
@@ -49,6 +50,10 @@ impl<E: NotifyEnvironment> NotifyEnvironment for DeliveryGate<E> {
 
     fn screen_locked(&self) -> bool {
         self.inner.screen_locked()
+    }
+
+    fn slave_lock(&self, pane_id: &str) -> Option<bool> {
+        self.inner.slave_lock(pane_id)
     }
 
     fn deliver(

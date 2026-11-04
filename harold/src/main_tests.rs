@@ -3104,7 +3104,9 @@ async fn a_turn_end_of_a_pane_in_the_snapshot_keeps_its_agent_pid_and_provider()
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
     let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
 
-    service.note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
+    service
+        .turn_path()
+        .note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
 
     let targets = service.recaps.targets();
     assert_eq!(targets.len(), 1);
@@ -3122,8 +3124,10 @@ async fn a_turn_end_with_no_session_id_or_no_transcript_path_keeps_nothing() {
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
     let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
 
-    service.note_recap_turn_end("%8", "", "/t/s-1.jsonl");
-    service.note_recap_turn_end("%8", "s-1", "");
+    service
+        .turn_path()
+        .note_recap_turn_end("%8", "", "/t/s-1.jsonl");
+    service.turn_path().note_recap_turn_end("%8", "s-1", "");
 
     assert!(service.recaps.targets().is_empty());
     task.abort();
@@ -3135,7 +3139,9 @@ async fn a_turn_end_of_a_pane_absent_from_the_snapshot_keeps_nothing() {
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
     let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
 
-    service.note_recap_turn_end("%99", "s-1", "/t/s-1.jsonl");
+    service
+        .turn_path()
+        .note_recap_turn_end("%99", "s-1", "/t/s-1.jsonl");
 
     assert!(service.recaps.targets().is_empty());
     task.abort();
@@ -3146,7 +3152,9 @@ async fn a_turn_end_with_a_new_session_id_replaces_the_entry_and_its_recap() {
     let directory = TestDirectory::new();
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
     let (service, _shutdown, task) = test_service(store, populated_snapshot(1, None));
-    service.note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
+    service
+        .turn_path()
+        .note_recap_turn_end("%8", "s-1", "/t/s-1.jsonl");
     let target = service.recaps.targets().remove(0);
     service.recaps.update_read(
         "%8",
@@ -3161,7 +3169,9 @@ async fn a_turn_end_with_a_new_session_id_replaces_the_entry_and_its_recap() {
     );
     assert!(service.recaps.get("%8", 82).is_some());
 
-    service.note_recap_turn_end("%8", "s-2", "/t/s-2.jsonl");
+    service
+        .turn_path()
+        .note_recap_turn_end("%8", "s-2", "/t/s-2.jsonl");
 
     let targets = service.recaps.targets();
     assert_eq!(targets.len(), 1);
@@ -4715,4 +4725,121 @@ async fn agent_seen_clears_an_agent_of_a_rex_host() {
         crate::telemetry::take_noted_waiting_durations(),
         vec![(String::new(), 6.0)]
     );
+}
+
+/// A registry on the real turn-end path of `service`, with the host `omarchy`.
+fn slave_registry_on(service: &mut HaroldService) -> Arc<super::slave::registry::SlaveRegistry> {
+    service.host_agents = HostAgents::new(vec!["omarchy".into()]);
+    Arc::new(super::slave::registry::SlaveRegistry::new(
+        service.host_agents.clone(),
+        Arc::new(service.turn_path()),
+    ))
+}
+
+fn slave_turn(session_id: &str, transcript_path: &str) -> harold_api::harold::slave::v1::Turn {
+    harold_api::harold::slave::v1::Turn {
+        report_no: 1,
+        pane_id: "block:a1".into(),
+        pane_label: "work:0.1".into(),
+        session_id: session_id.into(),
+        last_user_prompt: "do it".into(),
+        assistant_message: "done".into(),
+        main_context: "repo".into(),
+        input_tokens: 5,
+        transcript_path: transcript_path.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slave_turn_is_stored_by_the_turn_end_path_under_its_host_pane_id() {
+    use super::slave::master::MasterSink;
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    let recorded = Arc::new(RecordedTurnEnds::default());
+    service.restart_reminder =
+        Some(Arc::clone(&recorded) as Arc<dyn crate::restart_reminder::TurnEnds>);
+    let registry = slave_registry_on(&mut service);
+
+    let applied = {
+        let registry = Arc::clone(&registry);
+        tokio::spawn(async move { registry.apply_turn("omarchy", slave_turn("s-1", "/x/t.jsonl")) })
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(applied, super::slave::master::Applied::Applied);
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    let event: store::TurnCompleted = serde_json::from_value(events[0].payload.clone()).unwrap();
+    assert_eq!(event.pane_id, "rex:omarchy/block:a1");
+    assert_eq!(event.pane_label, "work:0.1");
+    assert_eq!(event.last_user_prompt, "do it");
+    assert_eq!(event.assistant_message, "done");
+    // The slave's transcript path means nothing here: the master passes it on empty.
+    assert_eq!(
+        *recorded.0.lock().unwrap(),
+        [(
+            "rex:omarchy/block:a1".to_string(),
+            "s-1".to_string(),
+            String::new()
+        )]
+    );
+    task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_recap_for_slave_agents() {
+    use super::harold::{AgentPaneState, AgentState as WireState, AgentStateSnapshot};
+    use super::slave::master::MasterSink;
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    let registry = slave_registry_on(&mut service);
+    registry.link_changed("omarchy", true);
+    registry.apply_snapshot(
+        "omarchy",
+        AgentStateSnapshot {
+            panes: vec![AgentPaneState {
+                pane_id: "block:a1".into(),
+                agent_pid: 77,
+                pane_pid: 77,
+                provider_id: "claude".into(),
+                state: WireState::Working as i32,
+                recap: Some("the slave's recap".into()),
+                recap_at_ms: 55,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    // A slave turn with a session and a transcript starts no recap read either.
+    let applied = {
+        let registry = Arc::clone(&registry);
+        tokio::spawn(async move { registry.apply_turn("omarchy", slave_turn("s-1", "/x/t.jsonl")) })
+            .await
+            .unwrap()
+    };
+    assert_eq!(applied, super::slave::master::Applied::Applied);
+
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let item = stream.next().await.expect("an item").unwrap();
+    let row = item
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "rex:omarchy/block:a1")
+        .expect("the slave's agent has its host pane id");
+    assert_eq!(row.host, "omarchy");
+    assert_eq!((row.recap.as_deref(), row.recap_at_ms), (None, 0));
+    assert!(service.recaps.targets().is_empty());
+    task.abort();
 }

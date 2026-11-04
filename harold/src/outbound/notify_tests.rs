@@ -1248,3 +1248,35 @@ fn without_imessage_the_chief_message_an_app_cannot_push_is_held_and_not_sent_aw
     assert_eq!(carried, Ok(CarriedBy::Held));
     assert!(away.sends().is_empty());
 }
+
+#[test]
+fn a_slave_agents_turn_at_its_desk_is_held_back_while_the_mac_is_locked() {
+    // The Mac is locked, the slave is not: the slave's lock decides for its agent.
+    let environment = FakeEnvironment::locked("");
+    environment.set_slave_lock(Some(false));
+
+    let outcome = notify_turn(
+        &environment,
+        &NotifyState::default(),
+        &turn("rex:omarchy/block:a1", "x"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+    assert!(environment.delivered().is_empty());
+}
+
+#[cfg(feature = "imessage")]
+#[test]
+fn a_slave_agents_turn_goes_to_the_phone_when_the_slave_is_locked_and_the_mac_is_not() {
+    let environment = FakeEnvironment::new("");
+    environment.set_screen_locked(false);
+    environment.set_slave_lock(Some(true));
+    let state = NotifyState::default();
+
+    let slave = notify_turn(&environment, &state, &turn("rex:omarchy/block:a1", "x"));
+    assert_eq!(slave, Ok(DeliveryOutcome::Delivered));
+
+    // The Mac's own pane still follows the Mac's lock.
+    let mac = notify_turn(&environment, &state, &turn("%1", "y"));
+    assert_eq!(mac, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
+}

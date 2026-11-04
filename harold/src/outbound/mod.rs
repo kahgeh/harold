@@ -171,6 +171,17 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     fn now(&self) -> Instant;
     fn notify_settings(&self) -> &NotifySettings;
     fn screen_locked(&self) -> bool;
+    /// The lock of the slave that holds the agent at `pane_id`, for a pane on a linked
+    /// slave. `None` for any other pane.
+    fn slave_lock(&self, _pane_id: &str) -> Option<bool> {
+        None
+    }
+    /// Whether the screen of the machine that holds the agent at `pane_id` is locked: the
+    /// slave's last lock for a slave's agent, this machine's lock for any other.
+    fn screen_locked_for(&self, pane_id: &str) -> bool {
+        self.slave_lock(pane_id)
+            .unwrap_or_else(|| self.screen_locked())
+    }
     /// Send a turn-end update through `channel`.
     fn deliver(
         &self,
@@ -201,6 +212,10 @@ impl NotifyEnvironment for SystemEnvironment {
 
     fn screen_locked(&self) -> bool {
         is_screen_locked()
+    }
+
+    fn slave_lock(&self, pane_id: &str) -> Option<bool> {
+        crate::slave::registry::slave_lock_for_pane(pane_id)
     }
 
     fn deliver(
@@ -612,7 +627,7 @@ fn notify_routed(
     let messaged_this_turn = mark.is_some_and(|marked_at| left_out::mark_is_fresh(marked_at, now));
 
     let cfg = environment.notify_settings();
-    let screen_locked = environment.screen_locked();
+    let screen_locked = environment.screen_locked_for(&turn.pane_id);
     let channel = OutboundChannel::Away;
     let app_route = match app {
         Some(chief_app) if screen_locked => Some(chief_app),

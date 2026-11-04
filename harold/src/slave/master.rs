@@ -50,20 +50,6 @@ pub(crate) trait MasterSink: Send + Sync + 'static {
     fn link_changed(&self, slave: &str, up: bool);
 }
 
-/// An interim sink: it takes every report and keeps none. Task 6 replaces it with the registry.
-pub(crate) struct DiscardingSink;
-
-impl MasterSink for DiscardingSink {
-    fn apply_snapshot(&self, _slave: &str, _snapshot: AgentStateSnapshot) {}
-    fn apply_turn(&self, _slave: &str, _turn: Turn) -> Applied {
-        Applied::Applied
-    }
-    fn apply_lock(&self, _slave: &str, _locked: bool) -> Applied {
-        Applied::Applied
-    }
-    fn link_changed(&self, _slave: &str, _up: bool) {}
-}
-
 /// The name of the slave that passed the secret check. The interceptor sets it.
 #[derive(Clone)]
 struct AuthenticatedSlave(String);
