@@ -230,14 +230,12 @@ impl LocalSource {
         })
     }
 
-    /// Sets the newest agent snapshot. The agent monitor calls it (slice 2c.1 task 7).
-    #[allow(dead_code)]
+    /// Sets the newest agent snapshot. The snapshot feed calls it.
     pub(crate) fn publish_snapshot(&self, snapshot: AgentStateSnapshot) {
         self.snapshot.send_replace(snapshot);
     }
 
-    /// Sets the lock state. The lock check calls it (slice 2c.1 task 7).
-    #[allow(dead_code)]
+    /// Sets the lock state. The lock feed calls it.
     pub(crate) fn publish_lock(&self, locked: bool) {
         self.lock.send_replace(locked);
     }

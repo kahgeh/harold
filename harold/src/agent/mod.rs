@@ -65,3 +65,15 @@ pub(crate) mod focus;
 #[cfg(test)]
 #[path = "focus_tests.rs"]
 mod focus_tests;
+
+pub(crate) mod screen_lock_linux;
+
+#[cfg(test)]
+#[path = "screen_lock_linux_tests.rs"]
+mod screen_lock_linux_tests;
+
+pub(crate) mod slave_feed;
+
+#[cfg(test)]
+#[path = "slave_feed_tests.rs"]
+mod slave_feed_tests;

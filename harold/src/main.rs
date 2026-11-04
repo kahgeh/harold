@@ -507,6 +507,30 @@ impl HaroldService {
         }
         Ok(())
     }
+
+    /// Starts the task that builds the agent state stream and sends it on `sender`. The
+    /// `WatchAgentStates` stream and the slave feed both use it.
+    fn spawn_snapshot_forwarder(&self, sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>) {
+        let snapshots = self.snapshots.subscribe();
+        let shutdown = self.shutdown.clone();
+        let steps = self.current_steps.clone();
+        let recaps = self.recaps.clone();
+        let hosts = self.host_agents.clone();
+        let window_names = self.window_names.clone();
+        tokio::spawn(forward_agent_snapshots(
+            snapshots,
+            steps,
+            recaps,
+            hosts,
+            window_names,
+            self.local_icon.clone(),
+            self.state_view.roles.clone(),
+            self.watch_counts.clone(),
+            self.waiting.clone(),
+            sender,
+            shutdown,
+        ));
+    }
 }
 
 #[tonic::async_trait]
@@ -671,26 +695,8 @@ impl Harold for HaroldService {
         &self,
         _request: Request<WatchAgentStatesRequest>,
     ) -> Result<Response<Self::WatchAgentStatesStream>, Status> {
-        let snapshots = self.snapshots.subscribe();
-        let shutdown = self.shutdown.clone();
         let (sender, receiver) = mpsc::channel(1);
-        let steps = self.current_steps.clone();
-        let recaps = self.recaps.clone();
-        let hosts = self.host_agents.clone();
-        let window_names = self.window_names.clone();
-        tokio::spawn(forward_agent_snapshots(
-            snapshots,
-            steps,
-            recaps,
-            hosts,
-            window_names,
-            self.local_icon.clone(),
-            self.state_view.roles.clone(),
-            self.watch_counts.clone(),
-            self.waiting.clone(),
-            sender,
-            shutdown,
-        ));
+        self.spawn_snapshot_forwarder(sender);
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
@@ -1283,6 +1289,19 @@ fn waiting_counts(
             count,
         })
         .collect()
+}
+
+/// The screen lock this machine reports to its master. Linux reads it with `pgrep` and
+/// `loginctl`; the Mac keeps its own check.
+fn slave_screen_locked() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        agent::screen_lock_linux::system_screen_locked()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        outbound::is_screen_locked()
+    }
 }
 
 async fn send_agent_snapshot(
@@ -2300,13 +2319,24 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         slave::registry::install(Arc::clone(&registry));
         slave::master::serve_slave_link(slaves, data, registry)
     });
-    // The slave link starts only when `[master]` exists. The agent monitor and the lock check
-    // publish into `slave_source` (slice 2c.1 task 7).
+    // The slave link starts only when `[master]` exists. The agent snapshot feed and the lock
+    // feed publish into `source`.
     if let Some(master) = cfg.master.as_ref() {
         let data = std::path::Path::new(&store_path)
             .parent()
             .unwrap_or(std::path::Path::new("."));
         let source = slave::slave::LocalSource::new();
+        // The feeds use the same builder as `WatchAgentStates`, and start before the link so
+        // the first snapshot and the first lock are ready when it connects.
+        let (feed_sender, feed_receiver) = mpsc::channel(1);
+        service.spawn_snapshot_forwarder(feed_sender);
+        let sink: Arc<dyn agent::slave_feed::FeedSink> = source.clone();
+        tokio::spawn(agent::slave_feed::feed_snapshots(feed_receiver, sink.clone()));
+        tokio::spawn(agent::slave_feed::feed_lock(
+            sink,
+            agent::slave_feed::LOCK_POLL,
+            slave_screen_locked,
+        ));
         if let Err(error) = slave::slave::install(master, &cfg.machine_name, data, source).await {
             warn!(error = %error, "slave link not started");
         }

@@ -1,0 +1,73 @@
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use harold_api::harold::AgentStateSnapshot;
+use tokio::sync::mpsc;
+
+use super::slave_feed::{FeedSink, LockFeed, feed_lock, feed_snapshots};
+
+#[derive(Default)]
+struct Recorder {
+    snapshots: Mutex<Vec<u64>>,
+    locks: Mutex<Vec<bool>>,
+}
+
+impl FeedSink for Recorder {
+    fn publish_snapshot(&self, snapshot: AgentStateSnapshot) {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .push(snapshot.through_event_version);
+    }
+    fn publish_lock(&self, locked: bool) {
+        self.locks.lock().unwrap().push(locked);
+    }
+}
+
+fn snapshot(version: u64) -> AgentStateSnapshot {
+    AgentStateSnapshot {
+        through_event_version: version,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_snapshot_change_reaches_the_sink_once_and_a_repeat_does_not() {
+    let sink = Arc::new(Recorder::default());
+    let (sender, receiver) = mpsc::channel(8);
+    for version in [1, 1, 2, 2, 2] {
+        sender.send(Ok(snapshot(version))).await.unwrap();
+    }
+    drop(sender);
+    feed_snapshots(receiver, sink.clone()).await;
+    assert_eq!(*sink.snapshots.lock().unwrap(), [1, 2]);
+}
+
+#[test]
+fn a_lock_change_reaches_the_sink_once_and_a_repeat_does_not() {
+    let sink = Recorder::default();
+    let mut feed = LockFeed::default();
+    assert!(feed.observe(false, &sink), "the first reading is published");
+    assert!(!feed.observe(false, &sink));
+    assert!(feed.observe(true, &sink));
+    assert!(!feed.observe(true, &sink));
+    assert!(feed.observe(false, &sink));
+    assert_eq!(*sink.locks.lock().unwrap(), [false, true, false]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_lock_loop_publishes_at_start_and_on_change_only() {
+    let sink = Arc::new(Recorder::default());
+    let readings = Arc::new(Mutex::new(vec![true, true, false].into_iter()));
+    let source = Arc::clone(&readings);
+    let task = tokio::spawn(feed_lock(
+        sink.clone(),
+        Duration::from_secs(3),
+        move || source.lock().unwrap().next().unwrap_or(false),
+    ));
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    task.abort();
+    assert_eq!(*sink.locks.lock().unwrap(), [true, false]);
+}

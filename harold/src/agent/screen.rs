@@ -66,12 +66,12 @@ pub(crate) struct PromptBlock {
     pub(crate) candidate: Option<String>,
 }
 
-pub(super) struct CommandOutput {
-    pub(super) success: bool,
-    pub(super) stdout: Vec<u8>,
+pub(crate) struct CommandOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
 }
 
-pub(super) trait CommandRunner: Send + Sync {
+pub(crate) trait CommandRunner: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput>;
 }
 
