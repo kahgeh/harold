@@ -269,6 +269,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "slave",
     "welcome",
     "own",
+    "version",
+    "report_no",
 ];
 
 /// How long shutting the exporters down may take in all.

@@ -34,7 +34,6 @@ pub(crate) fn new_secret() -> String {
 }
 
 /// Whether two secrets are equal. The time does not depend on where they differ.
-#[allow(dead_code)] // The link listener uses it in the next task.
 pub(crate) fn secrets_equal(a: &str, b: &str) -> bool {
     let a = Sha256::digest(a.as_bytes());
     let b = Sha256::digest(b.as_bytes());
@@ -74,7 +73,6 @@ pub(crate) fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
 }
 
 /// The secret in `path`, or `None` when the file is missing, unreadable or empty.
-#[allow(dead_code)] // The slave link client uses it in the next task.
 pub(crate) fn read_secret(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let secret = text.trim();

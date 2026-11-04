@@ -1932,13 +1932,13 @@ const NOTIFY_TELEGRAM_REMOVED: &str = "notify.telegram is no longer read: the li
 const AWAY_CHANNEL_REMOVED: &str = "notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.";
 const GRPC_HOST_NOT_LOOPBACK: &str = "grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.";
 
-/// The config directory and environment name `load` reads from.
 /// The path of the local config file, `local.toml` unless `HAROLD_ENV` names another.
 pub(crate) fn local_toml_path() -> std::path::PathBuf {
     let (config_dir, env) = config_location();
     std::path::Path::new(&config_dir).join(format!("{env}.toml"))
 }
 
+/// The config directory and environment name `load` reads from.
 fn config_location() -> (String, String) {
     let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
     let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {

@@ -15,7 +15,6 @@ pub(crate) const MAX_REPORTS: u64 = 1000;
 pub(crate) const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The kind of message a report holds.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Turn,
@@ -32,7 +31,6 @@ impl ReportKind {
 }
 
 /// How many reports `trim` dropped, and why.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Dropped {
     pub(crate) too_old: u64,
@@ -48,7 +46,6 @@ struct Counters {
     welcomed: bool,
 }
 
-#[allow(dead_code)]
 pub(crate) struct ReportBacklog {
     _db: turso::Database,
     conn: tokio::sync::Mutex<turso::Connection>,
@@ -77,7 +74,6 @@ async fn one_number(conn: &turso::Connection, sql: &str) -> Result<u64> {
     Ok(count(&row.get_value(0)?))
 }
 
-#[allow(dead_code)]
 impl ReportBacklog {
     pub(crate) async fn open(path: &Path) -> Result<Self> {
         let db = turso::Builder::new_local(&path.to_string_lossy())
