@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use harold_api::harold::AgentStateSnapshot;
+use harold_api::harold::{AgentPaneState, AgentStateSnapshot};
 use tokio::sync::mpsc;
 
 use super::slave_feed::{FeedSink, LockFeed, feed_lock, feed_snapshots};
@@ -68,4 +68,46 @@ async fn the_lock_loop_publishes_at_start_and_on_change_only() {
     }
     task.abort();
     assert_eq!(*sink.locks.lock().unwrap(), [true, false]);
+}
+
+/// Keeps the whole snapshot, to read what the master would receive.
+#[derive(Default)]
+struct Whole(Mutex<Vec<AgentStateSnapshot>>);
+
+impl FeedSink for Whole {
+    fn publish_snapshot(&self, snapshot: AgentStateSnapshot) {
+        self.0.lock().unwrap().push(snapshot);
+    }
+    fn publish_lock(&self, _locked: bool) {}
+}
+
+#[tokio::test]
+async fn the_recap_text_does_not_leave_the_slave() {
+    let pane = AgentPaneState {
+        pane_id: "block:1".into(),
+        recap: Some("a recap".into()),
+        recap_at_ms: 99,
+        work_summary: Some("a summary".into()),
+        current_step: Some("a step".into()),
+        ..Default::default()
+    };
+    let sink = Arc::new(Whole::default());
+    let (sender, receiver) = mpsc::channel(2);
+    sender
+        .send(Ok(AgentStateSnapshot {
+            panes: vec![pane],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    drop(sender);
+    feed_snapshots(receiver, sink.clone()).await;
+    let published = sink.0.lock().unwrap();
+    let pane = &published[0].panes[0];
+    assert_eq!(pane.recap, None);
+    assert_eq!(pane.recap_at_ms, 0);
+    assert_eq!(pane.work_summary, None);
+    // The rest of the row stays.
+    assert_eq!(pane.pane_id, "block:1");
+    assert_eq!(pane.current_step.as_deref(), Some("a step"));
 }

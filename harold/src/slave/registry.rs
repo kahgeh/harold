@@ -77,7 +77,7 @@ impl SlaveRegistry {
 
 impl MasterSink for SlaveRegistry {
     /// Replaces the agents of the host with those of the snapshot. The recap never crosses
-    /// the link: the rows hold none.
+    /// the link: the slave clears it before it sends (`agent::slave_feed`), and a row holds none.
     fn apply_snapshot(&self, slave: &str, snapshot: AgentStateSnapshot) {
         if !valid_host_label(slave) {
             warn!("slave snapshot dropped: the slave name is not a host label");

@@ -28,14 +28,27 @@ impl FeedSink for LocalSource {
     }
 }
 
-/// Publishes each snapshot of the `WatchAgentStates` builder that differs from the last one.
-/// It ends when the builder ends.
+/// Clears the text that never crosses the slave link: the recap, its time and the work summary
+/// of each pane. It is done here, on the slave's copy, so the shared builder keeps them for
+/// the Mac's own watchers.
+pub(crate) fn without_recap_text(mut snapshot: AgentStateSnapshot) -> AgentStateSnapshot {
+    for pane in &mut snapshot.panes {
+        pane.recap = None;
+        pane.recap_at_ms = 0;
+        pane.work_summary = None;
+    }
+    snapshot
+}
+
+/// Publishes each snapshot of the `WatchAgentStates` builder that differs from the last one,
+/// without its recap text. It ends when the builder ends.
 pub(crate) async fn feed_snapshots(
     mut snapshots: mpsc::Receiver<Result<AgentStateSnapshot, Status>>,
     sink: Arc<dyn FeedSink>,
 ) {
     let mut last: Option<AgentStateSnapshot> = None;
     while let Some(Ok(snapshot)) = snapshots.recv().await {
+        let snapshot = without_recap_text(snapshot);
         if last.as_ref() == Some(&snapshot) {
             continue;
         }
