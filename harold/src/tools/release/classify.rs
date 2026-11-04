@@ -50,6 +50,9 @@ pub(super) struct Facts<'a> {
     pub other_commits: u32,
 }
 
+/// The note on a spec whose approval names an older text.
+const STALE_APPROVAL_NOTE: &str = "(approved at an older text)";
+
 /// Builds the lists of the product `name`. Each list is sorted by id.
 pub(super) fn classify(name: &str, facts: &Facts<'_>) -> ProductNext {
     let mut next = ProductNext {
@@ -86,7 +89,18 @@ pub(super) fn classify(name: &str, facts: &Facts<'_>) -> ProductNext {
                 Some(Branch::None) | None => next.not_clear.push(line(id, None)),
             },
             SpecState::Approved if is_current_approval(spec, facts) => {
-                next.approved.push(line(id, None));
+                if spec.approval_current {
+                    next.approved.push(line(id, None));
+                } else {
+                    // The approval names an older text: the spec awaits approval again.
+                    let mut stale = line(id, None);
+                    stale.title = if stale.title.is_empty() {
+                        STALE_APPROVAL_NOTE.to_string()
+                    } else {
+                        format!("{} {STALE_APPROVAL_NOTE}", stale.title)
+                    };
+                    next.awaiting.push(stale);
+                }
             }
             SpecState::Open if facts.awaiting.contains(id) => next.awaiting.push(line(id, None)),
             _ => {}

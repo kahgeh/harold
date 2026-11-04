@@ -250,3 +250,73 @@ fn withdrawn_spec_is_in_no_list() {
     assert!(next.awaiting.is_empty());
     assert!(next.not_clear.is_empty());
 }
+
+fn stale(id: &str, approved_at: OffsetDateTime) -> SpecFacts {
+    SpecFacts {
+        approved_at: Some(approved_at),
+        approval_current: false,
+        ..spec(id, SpecState::Approved)
+    }
+}
+
+#[test]
+fn a_stale_approval_lists_in_awaiting_with_the_note() {
+    let fixture = Fixture {
+        specs: vec![stale("old", now())],
+        titles: HashMap::from([("old".to_string(), "T".to_string())]),
+        ..Default::default()
+    };
+    let next = fixture.run();
+    assert!(next.approved.is_empty());
+    assert_eq!(ids(&next.awaiting), vec!["old"]);
+    assert_eq!(next.awaiting[0].title, "T (approved at an older text)");
+}
+
+#[test]
+fn a_stale_approval_with_no_title_gets_the_note_alone() {
+    let fixture = Fixture {
+        specs: vec![stale("old", now())],
+        ..Default::default()
+    };
+    let next = fixture.run();
+    assert_eq!(next.awaiting[0].title, "(approved at an older text)");
+}
+
+#[test]
+fn a_current_approval_lists_in_approved() {
+    let fixture = Fixture {
+        specs: vec![SpecFacts {
+            approved_at: Some(now()),
+            ..spec("ok", SpecState::Approved)
+        }],
+        ..Default::default()
+    };
+    let next = fixture.run();
+    assert_eq!(ids(&next.approved), vec!["ok"]);
+    assert!(next.awaiting.is_empty());
+}
+
+#[test]
+fn a_stale_approval_before_the_first_merged_file_is_in_no_list() {
+    let fixture = Fixture {
+        first_merged_file: Some(day(2026, 10, 22)),
+        specs: vec![stale("history", day(2026, 10, 20))],
+        ..Default::default()
+    };
+    let next = fixture.run();
+    assert!(next.approved.is_empty());
+    assert!(next.awaiting.is_empty());
+}
+
+#[test]
+fn a_parked_stale_approval_is_only_parked() {
+    let fixture = Fixture {
+        specs: vec![stale("p", now())],
+        parked: set(&["p"]),
+        ..Default::default()
+    };
+    let next = fixture.run();
+    assert_eq!(ids(&next.parked), vec!["p"]);
+    assert!(next.awaiting.is_empty());
+    assert!(next.approved.is_empty());
+}

@@ -62,9 +62,9 @@ buckwal
 | --- | --- |
 | merged since the release | Its state is `completed` and its merged commit is not in the release tag (one `git rev-list ^<tag> <commits>` call lists the commits in the history of the given commits that the tag does not reach; one `git merge-base --is-ancestor` call per commit answers if that call fails). A completed spec with no merged commit is in the list when its merge time is after the commit time of the tag. |
 | in progress | Its state is `in_progress`, it has no parked handoff file and its worktree has a branch. |
-| approved, not started | Its state is `approved`, it has no parked handoff file and it was approved on or after the product's first merged file. An older approval is history. |
+| approved, not started | Its state is `approved`, it has no parked handoff file and it was approved on or after the product's first merged file, and its approval names the current text of the spec. An older approval is history. An approval names the current text when `approvals/<id>.md` has no `spec-sha256:` line, or when that line equals the sha-256 of `specs/<id>.md`. |
 | parked | The file `parked/<id>-handoff.md` exists, whatever the state of the spec. A parked spec is in no other list. |
-| awaiting approval | Its state is `open` and the first line of its spec is `Waiting for your approval.` A spec under the small-fix waiver, or one that starts on the user's exact words, is not listed. |
+| awaiting approval | Its state is `open` and the first line of its spec is `Waiting for your approval.` A spec under the small-fix waiver, or one that starts on the user's exact words, is not listed. A spec whose state is `approved` but whose approval names an older text is also in this list, and its title ends with `(approved at an older text)`. |
 | not clear | Its state is `in_progress`, it has no branch and it has no parked handoff file. It may have merged without a merged file, or been given up. |
 
 - **The release** is the newest tag that matches `v[0-9]*` on the base branch of the product (`git describe --tags --abbrev=0 --match 'v[0-9]*' origin/<base>`). Other tags are not releases.
