@@ -10,6 +10,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use harold_api::harold::slave::v1::slave_link_client::SlaveLinkClient;
@@ -134,6 +135,11 @@ struct Shared {
     version: String,
     secret_path: PathBuf,
     backlog: ReportBacklog,
+    /// The newest report number the master is known to have: its last `Welcome` or `Ack`.
+    /// `Hello.last_known_report` carries it.
+    known: AtomicU64,
+    /// Set after the first warning about a connect that failed, so the warning comes once.
+    warned: AtomicBool,
     gate: Mutex<Gate>,
     /// Wakes the stream when a report is appended.
     wake: Notify,
@@ -162,6 +168,8 @@ impl SlaveLink {
             version: version.to_owned(),
             secret_path: slave_secret_path(data),
             backlog,
+            known: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
             gate: Mutex::new(Gate::default()),
             wake: Notify::new(),
             timing,
@@ -304,12 +312,12 @@ pub(crate) async fn run_slave_link(
 }
 
 impl Shared {
-    /// Keeps a report. Before the first `Welcome` of this process, a report waits in memory
-    /// when the backlog has no number yet (it is new or was lost): a number given now could
-    /// sit below the master's, and the master would drop the report as a repeat.
+    /// Keeps a report. Before the first `Welcome` of this process, every report waits in
+    /// memory: a number given now could sit below the master's (a lost or older backlog), and
+    /// the report would be dropped as a repeat. After the `Welcome` it gets a number above it.
     async fn keep(&self, kind: ReportKind, message: SlaveMessage) {
         let mut gate = self.gate.lock().await;
-        if !gate.welcomed && self.backlog.last_number() == 0 {
+        if !gate.welcomed {
             gate.held.push((kind, message));
             return;
         }
@@ -335,6 +343,7 @@ impl Shared {
             warn!(own, welcome, "report backlog behind");
         }
         self.backlog.rebase(welcome);
+        self.known.fetch_max(welcome, Ordering::SeqCst);
         if let Err(error) = self.backlog.ack(welcome).await {
             warn!(slave = %self.name, error = %error, "slave report not kept");
         }
@@ -342,6 +351,13 @@ impl Shared {
         gate.welcomed = true;
         for (kind, message) in std::mem::take(&mut gate.held) {
             self.append(kind, &message).await;
+        }
+    }
+
+    /// Warns once per process start that a connect failed, and why. Never holds the secret.
+    fn warn_once(&self, reason: &'static str) {
+        if !self.warned.swap(true, Ordering::SeqCst) {
+            warn!(slave = %self.name, reason, "slave link not opened");
         }
     }
 
@@ -398,7 +414,7 @@ fn hello(shared: &Shared) -> SlaveMessage {
         body: Some(slave_message::Body::Hello(Hello {
             name: shared.name.clone(),
             version: shared.version.clone(),
-            last_known_report: 0,
+            last_known_report: shared.known.load(Ordering::SeqCst),
             protocol: LINK_PROTOCOL,
         })),
     }
@@ -412,6 +428,7 @@ async fn session(
     locks: &mut watch::Receiver<bool>,
 ) -> (Closed, bool) {
     let Some(secret) = read_secret(&shared.secret_path) else {
+        shared.warn_once("no_secret");
         return (Closed::Network, false);
     };
     let (send, receive) = mpsc::channel::<SlaveMessage>(64);
@@ -420,12 +437,21 @@ async fn session(
     }
     let mut request = Request::new(ReceiverStream::new(receive));
     let (Ok(name), Ok(secret)) = (shared.name.parse(), secret.parse()) else {
+        shared.warn_once("refused");
         return (Closed::Network, false);
     };
     request.metadata_mut().insert(NAME_HEADER, name);
     request.metadata_mut().insert(SECRET_HEADER, secret);
-    let Ok(response) = connector.open(request).await else {
-        return (Closed::Network, false);
+    let response = match connector.open(request).await {
+        Ok(response) => response,
+        Err(status) => {
+            match status.code() {
+                tonic::Code::Unauthenticated => shared.warn_once("refused"),
+                tonic::Code::FailedPrecondition => shared.warn_once("version"),
+                _ => {}
+            }
+            return (Closed::Network, false);
+        }
     };
     let mut inbound = response.into_inner();
     let welcome = match inbound.message().await {
@@ -564,6 +590,7 @@ async fn stream_reports(
                     if let Err(error) = shared.backlog.ack(ack.report_no).await {
                         warn!(slave = %shared.name, error = %error, "slave report not kept");
                     }
+                    shared.known.fetch_max(ack.report_no, Ordering::SeqCst);
                     sent = sent.max(ack.report_no);
                     snapshot_due = true;
                 }

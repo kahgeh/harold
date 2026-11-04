@@ -18,6 +18,9 @@ pub(crate) mod slave;
 /// A paired slave (a `[master]` table) does not: only the master tells the user. It still
 /// records the turn in its own store and sends it up as a `Turn`. An unpaired Harold keeps its
 /// stand-alone behaviour.
+///
+/// Paired needs a `[master]` table and a `master.secret`, but the gate reads the table only. A
+/// missing secret keeps delivery silent: the link cannot open, and a silent slave is safe.
 pub(crate) fn delivers_locally(settings: &Settings) -> bool {
     settings.master.is_none()
 }

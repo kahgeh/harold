@@ -723,29 +723,120 @@ async fn slave_writes_only_its_own_data_folder() {
 
 #[tokio::test]
 async fn paired_slave_still_records_the_turn_and_sends_turn() {
-    // The slave keeps the turn in its backlog while the master is away, and sends it after.
+    // After a first Welcome, a turn made while the master is away stays in the backlog and
+    // goes up after the reconnect.
     let secret = new_secret();
     let master = master(&secret);
     let connector = TestConnector::new(&master);
+    let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
+    until("link up", || {
+        master.sink.events().contains(&"link true".into())
+    })
+    .await;
     connector.set_down(true);
-    let data = slave_data(&secret);
-    let slave = start(&connector, &data, &TestSource::new()).await;
-    // A first number exists, as after any earlier link.
-    slave
-        .shared
-        .backlog
-        .append(
-            ReportKind::Lock,
-            SlaveMessage {
-                body: Some(slave_message::Body::Lock(Lock::default())),
-            }
-            .encode_to_vec(),
-            SystemTime::now(),
-        )
-        .await
-        .unwrap();
+    connector.cut();
+    until("link down", || {
+        master.sink.events().contains(&"link false".into())
+    })
+    .await;
     slave.report_turn(request("block:1", "a")).await;
-    assert!(slave.shared.backlog.len() >= 2);
+    assert!(slave.shared.backlog.len() >= 1);
     connector.set_down(false);
-    until("turn sent", || master.sink.turn_numbers().len() == 1).await;
+    until("turn sent", || master.sink.sessions() == ["a"]).await;
+}
+
+#[tokio::test]
+async fn report_made_before_welcome_with_a_restored_older_backlog_is_sent_above_welcome() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 5);
+    let data = slave_data(&secret);
+    {
+        // A restored older backlog: its last number is 2, below the master's 5.
+        let backlog = ReportBacklog::open(&data.join(BACKLOG_FILE)).await.unwrap();
+        let message = SlaveMessage {
+            body: Some(slave_message::Body::Lock(Lock::default())),
+        };
+        for _ in 0..2 {
+            backlog
+                .append(ReportKind::Lock, message.encode_to_vec(), SystemTime::now())
+                .await
+                .unwrap();
+        }
+    }
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "early")).await;
+    connector.set_down(false);
+    until("early turn applied", || master.sink.sessions() == ["early"]).await;
+    assert!(
+        master.sink.turn_numbers()[0] > 5,
+        "{:?}",
+        master.sink.turn_numbers()
+    );
+}
+
+#[tokio::test]
+async fn hello_carries_the_last_number_the_master_is_known_to_have() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 5);
+    let connector = TestConnector::new(&master);
+    let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
+    slave.report_turn(request("block:1", "a")).await;
+    until("applied", || master.sink.sessions() == ["a"]).await;
+    until("acked", || slave.shared.backlog.len() == 0).await;
+    let acked = slave.shared.known.load(Ordering::SeqCst);
+    assert!(acked > 5);
+    connector.cut();
+    until("second hello", || hellos(&connector).len() >= 2).await;
+    let hellos = hellos(&connector);
+    assert_eq!(hellos[0], 0);
+    assert_eq!(hellos[1], acked);
+}
+
+fn hellos(connector: &TestConnector) -> Vec<u64> {
+    connector
+        .wire
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|message| match &message.body {
+            Some(slave_message::Body::Hello(hello)) => Some(hello.last_known_report),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_failed_connect_warns_once_with_the_reason_and_never_the_secret() {
+    let (logs, _guard) = capture_logs();
+    // No secret file in the slave folder.
+    let master_a = master(&new_secret());
+    let connector = TestConnector::new(&master_a);
+    let bare = temp_dir("slave-bare");
+    let _slave = start(&connector, &bare, &TestSource::new()).await;
+    until("no_secret", || {
+        logs.has_line(&["slave link not opened", "no_secret"])
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let count = |reason: &str| {
+        logs.text()
+            .lines()
+            .filter(|line| line.contains("slave link not opened") && line.contains(reason))
+            .count()
+    };
+    assert_eq!(count("no_secret"), 1, "once per start");
+
+    // A wrong secret: the master refuses it.
+    let wrong = new_secret();
+    let _slave = start(&connector, &slave_data(&wrong), &TestSource::new()).await;
+    until("refused", || {
+        logs.has_line(&["slave link not opened", "refused"])
+    })
+    .await;
+    assert!(!logs.text().contains(&wrong));
 }

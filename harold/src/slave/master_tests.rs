@@ -299,7 +299,7 @@ async fn turn_is_applied_once_and_acked() {
 }
 
 #[tokio::test]
-async fn repeat_turn_is_duplicate_and_acked() {
+async fn repeated_report_is_dropped_by_master() {
     let data = data();
     let secret = paired(data.path());
     let sink = Arc::new(FakeSink::default());

@@ -81,3 +81,9 @@ fn unpaired_linux_harold_keeps_stand_alone_delivery() {
         assert_eq!(gate.inner.delivered().len(), 1);
     }
 }
+
+#[test]
+fn a_master_table_without_a_secret_keeps_delivery_silent() {
+    // No `master.secret` exists in this test: the table alone decides, and the safe side is silent.
+    assert!(!delivers_locally(&settings_with(PAIRED)));
+}
