@@ -58,7 +58,7 @@ class Interrupted(Exception):
 
 
 def run(argv, cwd, inherit=False, merge=False, timeout=None):
-    """Run `argv` in `cwd` and return the finished process; a missing program exits 127.
+    """Run `argv` in `cwd` and return the finished process; a missing program or one that cannot run exits 127.
 
     A call that takes more than `timeout` seconds is stopped and exits 124.
 
@@ -72,8 +72,9 @@ def run(argv, cwd, inherit=False, merge=False, timeout=None):
         return subprocess.run(argv, cwd=str(cwd), text=True, timeout=timeout, **streams)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(argv, 124, '', 'timed out')
-    except FileNotFoundError:
-        text = '{} is not installed\n'.format(argv[0])
+    except (FileNotFoundError, PermissionError) as error:
+        what = 'is not installed' if isinstance(error, FileNotFoundError) else 'cannot be run'
+        text = '{} {}\n'.format(argv[0], what)
         return subprocess.CompletedProcess(argv, 127, text if merge else '', None if merge else text)
 
 

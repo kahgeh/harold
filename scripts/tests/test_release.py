@@ -369,6 +369,18 @@ def harold_calls(test):
     return [call[3:] for call in test.calls if call[0] == 'harold']
 
 
+class RunTests(unittest.TestCase):
+    def test_a_program_that_cannot_run_exits_127(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    with patch.object(release.subprocess, 'run', side_effect=PermissionError):
+                        finished = REAL_RUN(['harold'], tmp, merge=merge)
+                    self.assertEqual(finished.returncode, 127)
+                    text = finished.stdout if merge else finished.stderr
+                    self.assertIn('harold cannot be run\n', text)
+
+
 class RecorderTests(ReleaseTestCase):
     ATTEMPTS = ['declare', 'harold.release.attempts', 'counter', 'Release attempts',
                 '--attr', 'result=ok,failed,stopped',
