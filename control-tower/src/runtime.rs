@@ -13,8 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
 use crate::api::{
-    AgentStateSource, FocusRead, FocusRecord, SharedSeen, SourceError, SourceStream, WorkDetail,
-    WorkListing,
+    AgentStateSource, SharedSeen, SourceError, SourceStream, WorkDetail, WorkListing,
 };
 use crate::app::{
     App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
@@ -280,12 +279,6 @@ trait StreamPort: Sized {
     fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
-    fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
-        Box::pin(async { Err(SourceError::Transport("backlog tool unavailable".into())) })
-    }
-    fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
-        Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
-    }
     fn list_work(&mut self) -> BoxFuture<'_, Result<WorkListing, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("work tool unavailable".into())) })
     }
@@ -359,13 +352,6 @@ impl StreamPort for SourceStream {
     // call here would pick the trait's `&mut self` method and recurse.
     fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
         Box::pin(SourceStream::list_questions(self))
-    }
-
-    fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
-        Box::pin(SourceStream::list_queue_now(self))
-    }
-    fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
-        Box::pin(SourceStream::list_focus(self))
     }
 
     fn list_work(&mut self) -> BoxFuture<'_, Result<WorkListing, SourceError>> {
@@ -507,21 +493,16 @@ where
         // The question queue is read the same way: as the stream opens, every
         // QUESTION_POLL_INTERVAL, before each key that goes to the question rows, and
         // after each answer. Each read is awaited inline and
-        // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
-        // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way,
-        // except when that queue read timed out (see `read_now`).
+        // bounded by VOICE_REQUEST_TIMEOUT.
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;
         }
         let listed = stream.list_questions().await;
-        let questions_timed_out = matches!(listed, Err(SourceError::TimedOut(_)));
         let changed = core.questions_listed(listed).changed;
-        let now = read_now(&mut stream, questions_timed_out).await;
-        let now_changed = core.now_listed(now);
         // The work view can be open as the stream opens: read its list once now.
         let work_changed = poll_work(&mut stream, &mut core.app).await;
-        if changed || now_changed || work_changed {
+        if changed || work_changed {
             draw(terminal, &core.app, clock)?;
         }
         let poll = sleep(call_poll_interval(core.app.call.as_ref()));
@@ -541,11 +522,8 @@ where
             }
             () = &mut question_poll => {
                 let listed = stream.list_questions().await;
-                let questions_timed_out = matches!(listed, Err(SourceError::TimedOut(_)));
                 let changed = core.questions_refreshed(listed);
-                let now = read_now(&mut stream, questions_timed_out).await;
-                let now_changed = core.now_listed(now);
-                if changed || now_changed {
+                if changed {
                     draw(terminal, &core.app, clock)?;
                 }
                 question_poll
@@ -708,38 +686,6 @@ where
     .await;
     stream.close_stream().await;
     result
-}
-
-/// What the header shows below the fleet: the work records in focus, or, when the
-/// work tool is not there, the first line of the chief's Now item.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct NowRead {
-    focus: Vec<FocusRecord>,
-    now: Option<String>,
-}
-
-/// The focus read that follows a question read. When the question read timed out,
-/// Harold is not answering, so the read is skipped and the lines hide, as a failed
-/// read would hide them: a hung Harold holds the keys for one timeout, not two. Any other
-/// question error (an Unimplemented question tool, say) answers at once, so the read
-/// still happens. The queue Now read runs only when the work tool answers Unimplemented.
-/// Any other work failure hides both lines.
-async fn read_now<S: StreamPort>(
-    stream: &mut S,
-    questions_timed_out: bool,
-) -> Result<NowRead, SourceError> {
-    if questions_timed_out {
-        return Err(SourceError::Transport(
-            "skipped after a timed-out question read".into(),
-        ));
-    }
-    match stream.list_focus().await? {
-        FocusRead::Records(focus) => Ok(NowRead { focus, now: None }),
-        FocusRead::Unimplemented => Ok(NowRead {
-            focus: Vec::new(),
-            now: stream.list_queue_now().await?,
-        }),
-    }
 }
 
 /// Reads the work list and applies it: a good read shows the rows, a failed read keeps
@@ -1436,16 +1382,6 @@ impl RuntimeCore {
         listed.changed
     }
 
-    /// Takes a read of the focus records or the chief's Now item, and reports whether
-    /// a line changed. A failed read hides both and sets no status, as a failed question
-    /// read does.
-    fn now_listed(&mut self, result: Result<NowRead, SourceError>) -> bool {
-        let read = result.unwrap_or_default();
-        let focus_changed = self.app.observe_focus_records(read.focus);
-        let now_changed = self.app.observe_now(read.now);
-        focus_changed || now_changed
-    }
-
     /// Asks whether Harold serves the knowledge tool; the answer says whether `s` does anything.
     fn probe_notes(&self) {
         let Some(backend) = self.notes_backend.clone() else {
@@ -1799,16 +1735,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, NowRead,
-        OpenOutcome, QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort,
-        ShutdownPort, SourcePort, StreamControl, StreamPort, TerminalInput, WORK_POLL_INTERVAL,
+        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
+        QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort,
+        SourcePort, StreamControl, StreamPort, TerminalInput, WORK_POLL_INTERVAL,
         call_poll_interval, consume_stream, handle_input, merge_exit, open_stream, poll_work,
         resolve_client, run_loop, runtime_status_detail, spawn_focus_worker, wait_for_retry,
     };
-    use crate::api::{
-        FocusRead, FocusRecord, SeenReporter, SharedSeen, SourceError, WorkDetail, WorkListing,
-        WorkRow,
-    };
+    use crate::api::{SeenReporter, SharedSeen, SourceError, WorkDetail, WorkListing, WorkRow};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
@@ -3510,44 +3443,17 @@ mod tests {
     }
 
     /// Runs `consume_stream` for `run_for` with the question poll every 20 ms, the
-    /// question tool as `questions` and the backlog tool answering `answers` in order.
-    /// The work tool is not there (`Unimplemented`), so the queue Now read decides the
-    /// line. Returns how often the backlog tool was read.
-    async fn run_now_stream(
+    /// question tool as `questions` and `probe` as the work tool.
+    async fn run_polling_stream(
         core: &mut RuntimeCore,
         questions: QuestionProbe,
-        answers: Vec<Result<Option<String>, SourceError>>,
+        probe: &WorkProbe,
         run_for: Duration,
-    ) -> usize {
-        run_focus_stream(
-            core,
-            questions,
-            vec![Ok(FocusRead::Unimplemented)],
-            answers,
-            run_for,
-        )
-        .await
-        .0
-    }
-
-    /// Returns the queue Now read count and the focus read count.
-    async fn run_focus_stream(
-        core: &mut RuntimeCore,
-        questions: QuestionProbe,
-        focus: Vec<Result<FocusRead, SourceError>>,
-        answers: Vec<Result<Option<String>, SourceError>>,
-        run_for: Duration,
-    ) -> (usize, usize) {
+    ) {
         core.question_poll_interval = Duration::from_millis(20);
-        let probe = Arc::new(std::sync::Mutex::new(NowState {
-            answers: answers.into(),
-            reads: 0,
-            focus: focus.into(),
-            focus_reads: 0,
-        }));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
         stream.questions = Some(questions);
-        stream.now = Some(Arc::clone(&probe));
+        stream.work = Some(Arc::clone(probe));
         let (_input_sender, mut input) = InputPump::channel();
         let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
         tokio::spawn(async move {
@@ -3566,219 +3472,46 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Control::Quit);
-        let state = probe.lock().unwrap();
-        (state.reads, state.focus_reads)
-    }
-
-    fn now_read(line: &str) -> NowRead {
-        NowRead {
-            focus: Vec::new(),
-            now: Some(line.into()),
-        }
-    }
-
-    fn focus_record(name: &str) -> FocusRecord {
-        FocusRecord {
-            name: name.into(),
-            status: "open".into(),
-            next_step: format!("next of {name}"),
-        }
     }
 
     #[tokio::test]
-    async fn the_focus_lines_replace_the_now_read() {
+    async fn no_work_list_read_runs_while_the_agent_view_is_open() {
         let mut core = connected_core();
-        let (a, b) = (focus_record("a"), focus_record("b"));
-        let (now_reads, focus_reads) = run_focus_stream(
+        let probe = work_probe(vec![Ok(work_listing(&["a"]))], Ok(work_detail("a")));
+        run_polling_stream(
             &mut core,
             question_probe(Some(Queue::default())),
-            vec![Ok(FocusRead::Records(vec![a.clone(), b.clone()]))],
-            vec![Ok(Some("x".into()))],
+            &probe,
             Duration::from_millis(100),
         )
         .await;
-        assert!(focus_reads >= 1);
-        assert_eq!(now_reads, 0, "the queue Now read does not run");
-        assert_eq!(core.app.focus, vec![a, b]);
-        assert_eq!(core.app.now_line, None);
+        assert_eq!(probe.lock().unwrap().list_reads, 0);
     }
 
     #[tokio::test]
-    async fn an_unimplemented_work_tool_falls_back_to_the_queue_now() {
+    async fn the_work_view_still_reads_the_work_list_while_open() {
         let mut core = connected_core();
-        let (now_reads, _) = run_focus_stream(
+        core.app.handle_key(KeyCode::Char('V'));
+        let probe = work_probe(vec![Ok(work_listing(&["a"]))], Ok(work_detail("a")));
+        run_polling_stream(
             &mut core,
             question_probe(Some(Queue::default())),
-            vec![Ok(FocusRead::Unimplemented)],
-            vec![Ok(Some("x".into()))],
+            &probe,
             Duration::from_millis(100),
         )
         .await;
-        assert!(now_reads >= 1);
-        assert!(core.app.focus.is_empty());
-        assert_eq!(core.app.now_line.as_deref(), Some("x"));
+        assert!(probe.lock().unwrap().list_reads > 0);
+        assert_eq!(work_names(&core), ["a"]);
     }
 
     #[tokio::test]
-    async fn another_work_failure_hides_the_lines() {
+    async fn a_timed_out_question_read_hides_the_questions_and_the_stream_goes_on() {
         let mut core = connected_core();
-        core.app.observe_now(Some("old".into()));
-        core.app.observe_focus_records(vec![focus_record("old")]);
-        let (now_reads, focus_reads) = run_focus_stream(
-            &mut core,
-            question_probe(Some(Queue::default())),
-            vec![Err(SourceError::Transport("work refused".into()))],
-            vec![Ok(Some("x".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(focus_reads >= 1);
-        assert_eq!(now_reads, 0);
-        assert!(core.app.focus.is_empty());
-        assert_eq!(core.app.now_line, None);
-        assert!(core.app.runtime_status().is_none(), "no status is set");
-    }
-
-    #[tokio::test]
-    async fn no_focus_record_shows_no_line() {
-        let mut core = connected_core();
-        let (now_reads, focus_reads) = run_focus_stream(
-            &mut core,
-            question_probe(Some(Queue::default())),
-            vec![Ok(FocusRead::Records(Vec::new()))],
-            vec![Ok(Some("x".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(focus_reads >= 1);
-        assert_eq!(now_reads, 0);
-        assert!(core.app.focus.is_empty());
-        assert_eq!(core.app.now_line, None);
-    }
-
-    #[test]
-    fn a_disconnect_clears_the_focus() {
-        let mut core = connected_core();
-        core.app.observe_focus_records(vec![focus_record("a")]);
-        core.app.mark_disconnected();
-        assert!(core.app.focus.is_empty());
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(feature = "timing-tests"),
-        ignore = "timing: run with --features timing-tests"
-    )]
-    async fn the_now_line_follows_the_question_poll() {
-        let mut core = connected_core();
-        let reads = run_now_stream(
-            &mut core,
-            question_probe(Some(Queue::default())),
-            vec![Ok(Some("a".into())), Ok(Some("b".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(reads >= 2, "read {reads} times");
-        assert_eq!(core.app.now_line.as_deref(), Some("b"));
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(feature = "timing-tests"),
-        ignore = "timing: run with --features timing-tests"
-    )]
-    async fn an_unimplemented_backlog_hides_the_now_line() {
-        let mut core = connected_core();
-        let reads = run_now_stream(
-            &mut core,
-            question_probe(Some(Queue::default())),
-            vec![
-                Ok(Some("a".into())),
-                Err(SourceError::Transport("status: Unimplemented".into())),
-            ],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(reads >= 2, "read {reads} times");
-        assert_eq!(core.app.now_line, None);
-
-        // The read as the stream opens shows the line, and a failed read hides it.
-        let mut core = connected_core();
-        assert!(core.now_listed(Ok(now_read("a"))));
-        assert_eq!(core.app.now_line.as_deref(), Some("a"));
-        assert!(core.now_listed(Err(SourceError::Transport("status: Unimplemented".into()))));
-        assert_eq!(core.app.now_line, None);
-        assert!(
-            !core.now_listed(Ok(NowRead::default())),
-            "no Now item keeps it hidden"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_timed_out_question_read_skips_the_now_read_and_hides_the_line() {
-        let mut core = connected_core();
-        core.app.observe_now(Some("a".into()));
         let questions = question_probe(None);
         questions.lock().unwrap().times_out = true;
-        core.app.observe_focus_records(vec![focus_record("a")]);
-        let (reads, focus_reads) = run_focus_stream(
-            &mut core,
-            questions,
-            vec![Ok(FocusRead::Records(vec![focus_record("a")]))],
-            vec![Ok(Some("a".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert_eq!(reads, 0, "no Now read follows a timed-out question read");
-        assert_eq!(focus_reads, 0, "no focus read follows it either");
-        assert_eq!(core.app.now_line, None);
-        assert!(core.app.focus.is_empty());
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(feature = "timing-tests"),
-        ignore = "timing: run with --features timing-tests"
-    )]
-    async fn an_unimplemented_question_tool_still_shows_the_now_line() {
-        let mut core = connected_core();
-        // `None` answers every list with `status: Unimplemented`, at once.
-        let reads = run_now_stream(
-            &mut core,
-            question_probe(None),
-            vec![Ok(Some("a".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(reads >= 2, "read {reads} times");
-        assert_eq!(core.app.now_line.as_deref(), Some("a"));
+        let probe = work_probe(vec![Ok(work_listing(&["a"]))], Ok(work_detail("a")));
+        run_polling_stream(&mut core, questions, &probe, Duration::from_millis(100)).await;
         assert!(!core.app.questions.is_visible());
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(feature = "timing-tests"),
-        ignore = "timing: run with --features timing-tests"
-    )]
-    async fn a_successful_question_read_is_followed_by_the_now_read() {
-        let mut core = connected_core();
-        let reads = run_now_stream(
-            &mut core,
-            question_probe(Some(Queue::default())),
-            vec![Ok(Some("a".into()))],
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(reads >= 2, "read {reads} times");
-        assert_eq!(core.app.now_line.as_deref(), Some("a"));
-    }
-
-    #[tokio::test]
-    async fn a_stream_without_the_backlog_tool_shows_no_now_line() {
-        let mut core = connected_core();
-        let probe = question_probe(Some(question("Q1", 1, 1)));
-        run_question_stream(&mut core, &probe, &[]).await;
-        assert_eq!(core.app.now_line, None);
     }
 
     #[tokio::test]
@@ -5345,7 +5078,6 @@ mod tests {
         watches: Option<MuteProbe>,
         call: Option<CallProbe>,
         questions: Option<QuestionProbe>,
-        now: Option<NowProbe>,
         seen: Option<SharedSeen>,
         work: Option<WorkProbe>,
     }
@@ -5363,17 +5095,6 @@ mod tests {
     }
 
     type WorkProbe = Arc<std::sync::Mutex<WorkState>>;
-
-    /// The backlog tool's Now reads, answered in order; the last answer repeats.
-    struct NowState {
-        answers: VecDeque<Result<Option<String>, SourceError>>,
-        reads: usize,
-        /// The work tool's focus reads, answered in order; the last answer repeats.
-        focus: VecDeque<Result<FocusRead, SourceError>>,
-        focus_reads: usize,
-    }
-
-    type NowProbe = Arc<std::sync::Mutex<NowState>>;
 
     /// The question tool as a test sees it; every call is logged.
     #[derive(Default)]
@@ -5425,7 +5146,6 @@ mod tests {
                 watches: None,
                 call: None,
                 questions: None,
-                now: None,
                 seen: None,
                 work: None,
             }
@@ -5440,7 +5160,6 @@ mod tests {
                 watches: None,
                 call: None,
                 questions: None,
-                now: None,
                 seen: None,
                 work: None,
             }
@@ -5543,34 +5262,6 @@ mod tests {
                 .queue
                 .clone()
                 .ok_or_else(|| SourceError::Transport("status: Unimplemented".into()));
-            Box::pin(async move { answer })
-        }
-
-        fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
-            let Some(probe) = &self.now else {
-                return Box::pin(async { Err(SourceError::Transport("no backlog tool".into())) });
-            };
-            let mut state = probe.lock().unwrap();
-            state.reads += 1;
-            let answer = if state.answers.len() > 1 {
-                state.answers.pop_front().unwrap()
-            } else {
-                state.answers.front().cloned().unwrap()
-            };
-            Box::pin(async move { answer })
-        }
-
-        fn list_focus(&mut self) -> BoxFuture<'_, Result<FocusRead, SourceError>> {
-            let Some(probe) = &self.now else {
-                return Box::pin(async { Err(SourceError::Transport("no work tool".into())) });
-            };
-            let mut state = probe.lock().unwrap();
-            state.focus_reads += 1;
-            let answer = if state.focus.len() > 1 {
-                state.focus.pop_front().unwrap()
-            } else {
-                state.focus.front().cloned().unwrap()
-            };
             Box::pin(async move { answer })
         }
 

@@ -1,4 +1,4 @@
-use crate::api::{FocusRecord, WorkDetail, WorkListing, WorkRow};
+use crate::api::{WorkDetail, WorkListing, WorkRow};
 use crate::notes::{NotesAction, NotesEvent, NotesKey, NotesView};
 use crate::questions::{
     BlockEffect, Mode, Outgoing, PickView, QStop, QuestionBlock, Queue, SendResult,
@@ -347,12 +347,6 @@ pub struct App {
     pub call: Option<CallView>,
     /// The chief's questions, hidden while none waits.
     pub questions: QuestionBlock,
-    /// The first line of the chief's Now item, hidden while the queue has none or the
-    /// backlog tool cannot be read. It is never focused and takes no keys.
-    pub now_line: Option<String>,
-    /// The work records in focus, at most two; empty while the work tool has none or
-    /// cannot be read. They are never focused and take no keys.
-    pub focus: Vec<FocusRecord>,
     /// `Some` when the cursor is on that row of the questions; `selected` then names the
     /// asker's row (the chief's) when it shows.
     pub question_stop: Option<QStop>,
@@ -570,8 +564,6 @@ impl App {
             selected,
             call: None,
             questions: QuestionBlock::default(),
-            now_line: None,
-            focus: Vec::new(),
             question_stop: None,
             pending_g: false,
             last_snapshot_received_at_ms: None,
@@ -760,20 +752,6 @@ impl App {
 
     pub fn observe_call(&mut self, view: Option<CallView>) {
         self.call = view;
-    }
-
-    /// Takes the focus records, and reports whether they changed.
-    pub fn observe_focus_records(&mut self, records: Vec<FocusRecord>) -> bool {
-        let changed = self.focus != records;
-        self.focus = records;
-        changed
-    }
-
-    /// Takes the latest read of the chief's Now item, and reports whether the line changed.
-    pub fn observe_now(&mut self, line: Option<String>) -> bool {
-        let changed = self.now_line != line;
-        self.now_line = line;
-        changed
     }
 
     /// The row whose pane Harold named as the chief's in its last call answer.
@@ -1154,8 +1132,6 @@ impl App {
 
     pub fn mark_disconnected(&mut self) {
         self.call = None;
-        self.now_line = None;
-        self.focus.clear();
         self.snapshot.harold_version = None;
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
@@ -5568,108 +5544,6 @@ mod tests {
         app.apply_later_snapshot(fleet([Idle, Idle, Working], 2))
             .unwrap();
         assert!(app.cursor_on_question());
-    }
-
-    #[test]
-    fn the_now_line_never_takes_the_cursor() {
-        let keys = [
-            KeyCode::Tab,
-            KeyCode::BackTab,
-            KeyCode::Down,
-            KeyCode::Up,
-            KeyCode::Char('j'),
-            KeyCode::Char('k'),
-            KeyCode::Esc,
-            KeyCode::Tab,
-            KeyCode::Esc,
-            KeyCode::Enter,
-        ];
-        let cursor_moves = |now: Option<&str>, questions: &[&str]| {
-            let mut app = call_app(CallState::Off);
-            assert!(app.observe_now(now.map(str::to_owned)) == now.is_some());
-            if !questions.is_empty() {
-                app.observe_questions(question_queue(questions));
-            }
-            let moves: Vec<Option<Stop>> = keys
-                .iter()
-                .map(|code| {
-                    app.handle_key(*code);
-                    app.cursor_stop()
-                })
-                .collect();
-            assert_eq!(app.now_line.as_deref(), now, "no key changes the Now line");
-            moves
-        };
-        for questions in [&[][..], &["Q1"][..]] {
-            assert_eq!(
-                cursor_moves(Some("Ship the backlog tool"), questions),
-                cursor_moves(None, questions),
-                "the cursor order is the same with the Now line"
-            );
-        }
-    }
-
-    #[test]
-    fn the_focus_lines_never_take_the_cursor() {
-        let keys = [
-            KeyCode::Tab,
-            KeyCode::BackTab,
-            KeyCode::Down,
-            KeyCode::Up,
-            KeyCode::Char('j'),
-            KeyCode::Char('k'),
-            KeyCode::Esc,
-            KeyCode::Tab,
-            KeyCode::Esc,
-            KeyCode::Enter,
-        ];
-        let records = vec![FocusRecord {
-            name: "a".into(),
-            status: "open".into(),
-            next_step: "go".into(),
-        }];
-        let cursor_moves = |focus: &[FocusRecord], questions: &[&str]| {
-            let mut app = call_app(CallState::Off);
-            assert!(app.observe_focus_records(focus.to_vec()) == !focus.is_empty());
-            if !questions.is_empty() {
-                app.observe_questions(question_queue(questions));
-            }
-            let moves: Vec<Option<Stop>> = keys
-                .iter()
-                .map(|code| {
-                    app.handle_key(*code);
-                    app.cursor_stop()
-                })
-                .collect();
-            assert_eq!(app.focus, focus, "no key changes the focus lines");
-            moves
-        };
-        for questions in [&[][..], &["Q1"][..]] {
-            assert_eq!(
-                cursor_moves(&records, questions),
-                cursor_moves(&[], questions),
-                "the cursor order is the same with the focus lines"
-            );
-        }
-    }
-
-    #[test]
-    fn a_disconnect_hides_the_now_line() {
-        let mut app = call_app(CallState::Off);
-        app.observe_now(Some("Ship the backlog tool".into()));
-        app.mark_disconnected();
-        assert_eq!(app.now_line, None);
-    }
-
-    #[test]
-    fn observe_now_reports_a_change() {
-        let mut app = call_app(CallState::Off);
-        assert_eq!(app.now_line, None);
-        assert!(app.observe_now(Some("a".into())));
-        assert!(!app.observe_now(Some("a".into())));
-        assert!(app.observe_now(Some("b".into())));
-        assert!(app.observe_now(None));
-        assert!(!app.observe_now(None));
     }
 
     #[test]

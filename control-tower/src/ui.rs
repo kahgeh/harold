@@ -6376,11 +6376,9 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {needle:?}:\n{lines}"))
     }
 
-    const NOW: &str = "Ship the backlog queue tool, then import the live lists after install";
-
-    fn now_app() -> App {
+    fn masthead_app() -> App {
         let selected = incarnation("%17", 91700, 91844, "codex");
-        let mut app = live_app(
+        live_app(
             vec![row(
                 selected.clone(),
                 AgentState::Working,
@@ -6390,26 +6388,12 @@ mod tests {
                 90_000,
             )],
             Some(selected),
-        );
-        app.observe_now(Some(NOW.into()));
-        app
+        )
     }
 
     #[test]
     fn no_focus_or_now_line_shows_and_monitor_follows_the_masthead() {
-        let mut app = now_app();
-        app.observe_focus_records(vec![
-            crate::api::FocusRecord {
-                name: "alpha-work".into(),
-                status: "building".into(),
-                next_step: "write it".into(),
-            },
-            crate::api::FocusRecord {
-                name: "beta-work".into(),
-                status: "open".into(),
-                next_step: "check it".into(),
-            },
-        ]);
+        let app = masthead_app();
         for width in [140, 118, 90, 60] {
             let lines = rendered_lines(&app, width, 30, 100_000);
             assert!(!lines.contains("FOCUS"), "{width}: {lines}");

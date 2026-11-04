@@ -13,9 +13,6 @@ use harold_api::harold::{
     SetRemoteOrderRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
 };
-use harold_api::tools::backlog::v1::{
-    ListQueueRequest, ListQueueResponse, backlog_service_client::BacklogServiceClient,
-};
 use harold_api::tools::knowledge::v1::{
     Hit as KnowledgeHit, RecentRequest, SearchRequest, ShowVaultNoteRequest,
     knowledge_service_client::KnowledgeServiceClient,
@@ -62,8 +59,6 @@ const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
 /// Harold refuses a question field of 2,000 characters or more.
 const QUESTION_FIELD_LIMIT: usize = 2_000;
-/// The Now line is one terminal row, so its text is cut well before the field's own size.
-const NOW_LINE_LIMIT: usize = 512;
 const SOURCE_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +203,6 @@ pub struct SourceStream {
     reader: Option<JoinHandle<()>>,
     voice: Option<HaroldClient<Channel>>,
     questions: Option<QuestionServiceClient<Channel>>,
-    backlog: Option<BacklogServiceClient<Channel>>,
     knowledge: Option<KnowledgeServiceClient<Channel>>,
     watch: Option<WatchServiceClient<Channel>>,
     work: Option<WorkServiceClient<Channel>>,
@@ -253,7 +247,6 @@ where
         reader: Some(reader),
         voice: None,
         questions: None,
-        backlog: None,
         knowledge: None,
         watch: None,
         work: None,
@@ -399,36 +392,6 @@ impl SourceStream {
             .map(|client| Arc::new(KnowledgeNotes { client }) as SharedBackend)
     }
 
-    /// The first line of the chief's Now item, `None` when the queue has none, or an
-    /// error when the backlog tool cannot be reached: an older Harold answers
-    /// `Unimplemented`.
-    pub async fn list_queue_now(&self) -> Result<Option<String>, SourceError> {
-        let Some(mut client) = self.backlog.clone() else {
-            return Err(SourceError::transport("backlog tool unavailable"));
-        };
-        tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.list_queue(now_request()))
-            .await
-            .map_err(|_| SourceError::transport("backlog request timed out"))?
-            .map(|response| map_now(response.into_inner()))
-            .map_err(|error| SourceError::transport(error.to_string()))
-    }
-
-    /// The open work records in focus, in the order the work tool lists them. An older
-    /// Harold answers `Unimplemented`, which reads as `FocusRead::Unimplemented`.
-    pub async fn list_focus(&self) -> Result<FocusRead, SourceError> {
-        let Some(mut client) = self.work.clone() else {
-            return Err(SourceError::transport("work tool unavailable"));
-        };
-        let answer = tokio::time::timeout(
-            VOICE_REQUEST_TIMEOUT,
-            client.list(WorkListRequest { all: false }),
-        )
-        .await
-        .map_err(|_| SourceError::transport("work request timed out"))?
-        .map(tonic::Response::into_inner);
-        focus_read(answer)
-    }
-
     /// The open work records for the work view: focus, then next, and a count of the rest.
     pub async fn list_work(&self) -> Result<WorkListing, SourceError> {
         let Some(mut client) = self.work.clone() else {
@@ -538,53 +501,11 @@ impl AgentStateSource {
             let mut source = spawn_reader(stream);
             source.voice = Some(client);
             source.questions = Some(QuestionServiceClient::new(channel.clone()));
-            source.backlog = Some(BacklogServiceClient::new(channel.clone()));
             source.knowledge = Some(KnowledgeServiceClient::new(channel.clone()));
             source.watch = Some(WatchServiceClient::new(channel.clone()));
             source.work = Some(WorkServiceClient::new(channel));
             Ok(source)
         })
-    }
-}
-
-/// The work tool allows two open work records in focus.
-const FOCUS_LIMIT: usize = 2;
-
-/// One work record in focus, as the screen shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FocusRecord {
-    pub name: String,
-    pub status: String,
-    pub next_step: String,
-}
-
-/// What the work tool answered: the focus records, or that it is not there.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FocusRead {
-    Records(Vec<FocusRecord>),
-    Unimplemented,
-}
-
-/// Keeps the first two work records in focus, in order, and cleans each text field.
-pub fn map_focus(response: WorkListResponse) -> Vec<FocusRecord> {
-    response
-        .records
-        .into_iter()
-        .filter(|record| record.priority == "focus")
-        .take(FOCUS_LIMIT)
-        .map(|record| FocusRecord {
-            name: sanitize_display(&record.name, PANE_FIELD_LIMIT),
-            status: sanitize_display(&record.status, PANE_FIELD_LIMIT),
-            next_step: sanitize_display(&record.next_step, SUMMARY_LIMIT),
-        })
-        .collect()
-}
-
-fn focus_read(answer: Result<WorkListResponse, tonic::Status>) -> Result<FocusRead, SourceError> {
-    match answer {
-        Ok(response) => Ok(FocusRead::Records(map_focus(response))),
-        Err(status) if status.code() == tonic::Code::Unimplemented => Ok(FocusRead::Unimplemented),
-        Err(status) => Err(SourceError::transport(status.to_string())),
     }
 }
 
@@ -921,23 +842,6 @@ fn map_option(option: DecisionOption) -> OptionView {
     }
 }
 
-/// The control-tower's queue read. `done_since_ms` 0 would return every done item, a history
-/// that only grows, so the read asks for done items from the end of time: none.
-pub(crate) fn now_request() -> ListQueueRequest {
-    ListQueueRequest {
-        done_since_ms: i64::MAX,
-    }
-}
-
-/// The Now item's first line, cleaned and cut, or `None` when there is no Now item or
-/// its first line is blank.
-pub fn map_now(response: ListQueueResponse) -> Option<String> {
-    let now = response.now?;
-    let line = sanitize_display(now.text.lines().next()?, NOW_LINE_LIMIT);
-    let line = line.trim();
-    (!line.is_empty()).then(|| line.to_owned())
-}
-
 fn question_text(text: &str) -> String {
     sanitize_display(text, QUESTION_FIELD_LIMIT)
 }
@@ -1079,9 +983,8 @@ mod tests {
     use crate::app::{AgentState, CallAction, CallState, CallView, MonitorHealthState};
 
     use super::{
-        FocusRead, PANE_FIELD_LIMIT, ProtocolError, SUMMARY_LIMIT, SnapshotReader, SourceError,
-        call_request_timeout, focus_read, map_call, map_focus, map_now, map_snapshot,
-        map_work_list, map_work_show, now_request, spawn_reader,
+        ProtocolError, SUMMARY_LIMIT, SnapshotReader, SourceError, call_request_timeout, map_call,
+        map_snapshot, map_work_list, map_work_show, spawn_reader,
     };
     use crate::text::sanitize_display;
 
@@ -1759,13 +1662,6 @@ mod tests {
         assert!(!error.detail().contains('\x1b'));
     }
 
-    #[tokio::test]
-    async fn list_queue_now_without_a_client_reports_unavailable() {
-        let stream = spawn_reader(FakeReader::new([]));
-        let error = stream.list_queue_now().await.unwrap_err();
-        assert!(error.detail().contains("backlog tool unavailable"));
-    }
-
     fn work_record(
         name: &str,
         priority: &str,
@@ -1787,52 +1683,6 @@ mod tests {
             records,
             file: String::new(),
         }
-    }
-
-    #[test]
-    fn map_focus_keeps_two_focus_records_in_order() {
-        let mapped = map_focus(work_list(vec![
-            work_record("a", "focus", "x"),
-            work_record("b", "next", "x"),
-            work_record("c", "focus", "x"),
-            work_record("d", "focus", "x"),
-        ]));
-        let names: Vec<&str> = mapped.iter().map(|record| record.name.as_str()).collect();
-        assert_eq!(names, ["a", "c"]);
-    }
-
-    #[test]
-    fn map_focus_ends_with_an_empty_next_step() {
-        let mapped = map_focus(work_list(vec![work_record("a", "focus", "")]));
-        assert_eq!(mapped[0].next_step, "");
-        assert_eq!(mapped[0].status, "building");
-    }
-
-    #[test]
-    fn map_focus_cleans_control_characters() {
-        let mapped = map_focus(work_list(vec![work_record(
-            "a\u{1b}[31mb",
-            "focus",
-            "go\nnow\u{1b}[0m",
-        )]));
-        assert_eq!(
-            mapped[0].name,
-            sanitize_display("a\u{1b}[31mb", PANE_FIELD_LIMIT)
-        );
-        assert_eq!(
-            mapped[0].next_step,
-            sanitize_display("go\nnow\u{1b}[0m", SUMMARY_LIMIT)
-        );
-        assert!(!mapped[0].name.contains('\x1b'));
-        assert!(!mapped[0].next_step.contains('\n'));
-        assert!(!mapped[0].next_step.contains('\x1b'));
-    }
-
-    #[tokio::test]
-    async fn list_focus_without_a_client_reports_unavailable() {
-        let stream = spawn_reader(FakeReader::new([]));
-        let error = stream.list_focus().await.unwrap_err();
-        assert!(error.detail().contains("work tool unavailable"));
     }
 
     #[test]
@@ -1925,57 +1775,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_work_answer_reads_as_unimplemented() {
-        let read = focus_read(Err(tonic::Status::unimplemented("no work"))).unwrap();
-        assert_eq!(read, FocusRead::Unimplemented);
-        let error = focus_read(Err(tonic::Status::unavailable("down"))).unwrap_err();
-        assert!(matches!(error, SourceError::Transport(_)));
-        let records = focus_read(Ok(work_list(vec![work_record("a", "focus", "x")]))).unwrap();
-        assert!(matches!(records, FocusRead::Records(ref list) if list.len() == 1));
-    }
-
-    #[test]
     fn a_timeout_reads_as_a_transport_error() {
         let timed_out = SourceError::timed_out("question request timed out");
         let transport = SourceError::transport("question request timed out");
         assert_eq!(timed_out.detail(), transport.detail());
         assert_eq!(timed_out.to_string(), transport.to_string());
         assert_ne!(timed_out, transport);
-    }
-
-    #[test]
-    fn the_now_read_asks_for_no_done_items() {
-        assert_eq!(now_request().done_since_ms, i64::MAX);
-    }
-
-    #[test]
-    fn map_now_takes_the_now_items_first_line_cleaned_or_none() {
-        use harold_api::tools::backlog::v1::{ListQueueResponse, QueueItem};
-        let response = |text: Option<&str>| ListQueueResponse {
-            now: text.map(|text| QueueItem {
-                id: "q1".into(),
-                state: "now".into(),
-                text: text.into(),
-                ..QueueItem::default()
-            }),
-            parked: vec![QueueItem {
-                text: "parked".into(),
-                ..QueueItem::default()
-            }],
-            ..ListQueueResponse::default()
-        };
-        assert_eq!(
-            map_now(response(Some("Ship \x1b[31mit\nthen the rest"))),
-            Some("Ship it".into())
-        );
-        assert_eq!(map_now(response(None)), None, "a parked item is not Now");
-        assert_eq!(map_now(response(Some(""))), None);
-        assert_eq!(map_now(response(Some("  \nsecond"))), None);
-        let long = "x".repeat(600);
-        assert_eq!(
-            map_now(response(Some(&long))).map(|line| line.chars().count()),
-            Some(512)
-        );
     }
 
     #[tokio::test]
