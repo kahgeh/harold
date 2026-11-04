@@ -90,7 +90,12 @@ fn hyprlock_running_is_locked() {
     let (results, log) = run(&runner, 1);
     assert_eq!(results, [true]);
     assert!(!log.contains("screen lock unknown"));
-    assert!(!runner.calls().iter().any(|call| call.starts_with("loginctl")));
+    assert!(
+        !runner
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("loginctl"))
+    );
 }
 
 #[test]
@@ -154,10 +159,11 @@ fn a_session_hint_that_fails_warns_with_loginctl_failed() {
 
 #[test]
 fn a_failed_pgrep_does_not_stop_loginctl_from_answering() {
-    let runner = base()
-        .fail(PGREP)
-        .answer(USER, true, "Display=2\n")
-        .answer(SESSION, true, "LockedHint=yes\n");
+    let runner = base().fail(PGREP).answer(USER, true, "Display=2\n").answer(
+        SESSION,
+        true,
+        "LockedHint=yes\n",
+    );
     let (results, log) = run(&runner, 1);
     assert_eq!(results, [true]);
     assert!(!log.contains("screen lock unknown"));

@@ -60,11 +60,9 @@ async fn the_lock_loop_publishes_at_start_and_on_change_only() {
     let sink = Arc::new(Recorder::default());
     let readings = Arc::new(Mutex::new(vec![true, true, false].into_iter()));
     let source = Arc::clone(&readings);
-    let task = tokio::spawn(feed_lock(
-        sink.clone(),
-        Duration::from_secs(3),
-        move || source.lock().unwrap().next().unwrap_or(false),
-    ));
+    let task = tokio::spawn(feed_lock(sink.clone(), Duration::from_secs(3), move || {
+        source.lock().unwrap().next().unwrap_or(false)
+    }));
     for _ in 0..6 {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }

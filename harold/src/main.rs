@@ -2331,7 +2331,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         let (feed_sender, feed_receiver) = mpsc::channel(1);
         service.spawn_snapshot_forwarder(feed_sender);
         let sink: Arc<dyn agent::slave_feed::FeedSink> = source.clone();
-        tokio::spawn(agent::slave_feed::feed_snapshots(feed_receiver, sink.clone()));
+        tokio::spawn(agent::slave_feed::feed_snapshots(
+            feed_receiver,
+            sink.clone(),
+        ));
         tokio::spawn(agent::slave_feed::feed_lock(
             sink,
             agent::slave_feed::LOCK_POLL,
