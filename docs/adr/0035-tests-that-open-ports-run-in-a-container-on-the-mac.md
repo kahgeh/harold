@@ -1,4 +1,4 @@
-# 34. Tests that open ports run in a container on the Mac
+# 35. Tests that open ports run in a container on the Mac
 
 Date: 2026-11-05
 Status: Accepted.

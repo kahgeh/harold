@@ -1,2 +1,1 @@
-# The final name is checked after linux-satellite-2c slice 2c.1 merges.
 slave::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link
