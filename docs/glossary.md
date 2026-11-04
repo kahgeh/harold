@@ -12,6 +12,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | timing test | A test that asserts a real time, and so can fail on a busy machine. It runs only with `--features timing-tests`, locally | "flaky test" |
 | test log | The kept log of one test run, with its header and footer, in the test log folder | "test output" for the kept file |
 | test log folder | The base checkout's `.superpowers/pod/test-logs/`, one subfolder for each spec id | "artifacts folder" |
+| container test set | A named list of tests that `scripts/test-run --container` runs in a podman container, because they open a port or start a second Harold | "integration tests", "sandbox" |
 | `imessage` | The feature that builds in the iMessage channel. macOS only | "iMessage flag" |
 | `calls` | The feature that builds in calls, the call answerer, the call models and the echo test page. macOS only | "voice feature" |
 | Mac package | The release file `harold-aarch64-apple-darwin.tar.gz`, built with `mac-defaults` | "bundle" for the file |

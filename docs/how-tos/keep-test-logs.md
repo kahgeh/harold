@@ -51,6 +51,54 @@ The runner sets `TEST_RUN_DIR` and `TEST_RUN_STEM` for the script. The script th
 
 Each script scans a file for secrets before it copies the file. The script does not copy a file with a secret. The `-<part>.withheld` file names the pattern and never the match. Without the two variables, the scripts copy nothing.
 
+## Tests that open a port or start a second Harold
+
+Some tests open a port or start a second Harold. On this Mac they could reach the installed Harold. These tests run in a container test set, in a podman container with no route to the Mac.
+
+A container test set is a file `scripts/container-tests/<set>.txt`. It lists one test name on each line. The runner skips blank lines and lines that start with `#`. The runner refuses an empty set and an unknown set name.
+
+Run a set:
+
+```sh
+scripts/test-run <spec id> <name> --container <set> -- cargo test
+```
+
+The words after `--` show that this is a test run. The set decides which tests run. The command in the container is always:
+
+```sh
+cargo test --locked --offline -p harold --no-default-features --features harold/linux-defaults -- --ignored --exact <names>
+```
+
+The runner does these steps in order:
+
+1. It refuses to run when the podman machine is stopped. It never starts the machine. Run `podman machine start` yourself.
+2. It makes the podman network `harold-tests` (`--internal`) when the network is missing.
+3. It runs `cargo fetch --locked --target aarch64-unknown-linux-gnu` on the Mac. The log holds the output and one line `# fetched: <crate-version list>` with the crates that are new in `~/.cargo/registry/cache`.
+4. It runs the container. The container gets the worktree and the crate files as read-only mounts, and no Mac environment value.
+5. It moves each result file of the test from `/out` to the test log folder as `<stem>-<part>`. A file with a secret goes through the same scan as in `scripts/call_test.py`. The runner withholds it and writes a `.withheld` note.
+6. It counts the lines `test <name> ... ok`. The count uses the exact name. The test run fails and names each test that did not run.
+
+The header of the test log has two extra lines:
+
+- `container: <image id> from <base digest>`
+- `dpkg: <package>=<version> ...`, the packages installed in the image, on one line
+
+The `command` line shows the cargo command. It holds no environment value.
+
+### Build the image
+
+Build the image only after the audit row exists:
+
+```sh
+podman build -t harold-tests scripts/container-tests
+```
+
+Audit row 19 in `docs/references/dependency-audits.md` covers the base image and the three apt packages. Ask for a new audit when one of these happens:
+
+- The Containerfile changes.
+- The toolchain leaves 1.97.1.
+- The date is after 2026-12-05.
+
 ## Read a log
 
 List the runs of one spec id:

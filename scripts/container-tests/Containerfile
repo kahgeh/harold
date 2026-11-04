@@ -1,0 +1,35 @@
+# The image of the container test sets. Build it only after the audit row exists:
+#   podman build -t harold-tests scripts/container-tests
+# The base digest is the arm64 manifest digest that the audit row lists.
+FROM docker.io/library/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+
+# The apt sources are only the signed bookworm and bookworm-security repositories.
+# The packages are the ones that linux-tests.yml installs. Each has a pinned version.
+RUN printf '%s\n' \
+      'Types: deb' \
+      'URIs: http://deb.debian.org/debian' \
+      'Suites: bookworm' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      '' \
+      'Types: deb' \
+      'URIs: http://deb.debian.org/debian-security' \
+      'Suites: bookworm-security' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get install --no-install-recommends -y \
+      protobuf-compiler=3.21.12-3+deb12u1 \
+      build-essential=12.9 \
+      perl=5.36.0-7+deb12u4 \
+ && rm -rf /var/lib/apt/lists/*
+
+# The user `test` has the same uid and gid as the tmpfs mounts in scripts/test-run.
+# The folders are the mount points of the volumes and of the result folder.
+RUN groupadd --gid 1000 test \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/test test \
+ && mkdir -p /cargo /target /out \
+ && chown test:test /cargo /target /out
+
+USER test
