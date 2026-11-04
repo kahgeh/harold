@@ -409,6 +409,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.agent.state_observed` | counter, `{observation}` | `source` (`program_status`, `program_status_call`, `screen`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `provider_id`, `multiplexer` |
 | `harold.agent.recap_read` | counter, `{read}` | `result` (`found`, `none`, `failed`), `provider_id` |
 | `harold.agent.blocked_long` | counter, `{event}` | `provider_id` |
+| `harold.slave_link.connected` | gauge, `{link}` | `slave` (seeded 0 for each name in `[slaves] names`) |
+| `harold.slave_link.reports` | counter, `{report}` | `slave`, `kind` (`snapshot`, `turn`, `lock`), `outcome` (`applied`, `duplicate`) |
+| `harold.slave_link.backlog` | gauge, `{report}` | `slave`. The count in the slave's newest `Snapshot` |
 | `harold.multiplexer.sessions` | gauge, `{session}` | `multiplexer`, `host` |
 | `harold.multiplexer.panes` | gauge, `{pane}` | `multiplexer`, `host` |
 | `harold.work.records` | gauge, `{record}` | `priority` (`focus`, `next`, `later`), `status` (each open status) |
@@ -613,6 +616,17 @@ The [knowledge tool](../tools/knowledge.md#graph-logs-and-spans) logs and traces
 | `buckwal.maintenance` | `buckwal.generation`, `buckwal.outcome` |
 
 The dashboard group "Knowledge index" holds the six cards. They read `otel.otel_logs` and the span table directly, so they are tables and numbers without an earlier tile, and the product filter does not reach them.
+
+## Slave link
+
+A master Harold logs the life of each slave link. No line holds a secret, a typed line or a turn's text.
+
+| Line | Fields |
+|---|---|
+| `slave link opened` (`info`) | `slave`, `welcome` (the last report number the master holds), `version` |
+| `slave link closed` (`info`) | `slave`, `reason` (`slave_gone`, `master_gone`, `network`, `shutdown`) |
+| `slave link refused` (`warn`) | `reason` (`bad_secret`, `unknown_slave`, `version`) |
+| `report backlog behind` (`warn`) | `own` (the slave's last report number), `welcome` (the master's number) |
 
 ## Watch pauses and reminders
 

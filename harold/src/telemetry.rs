@@ -266,6 +266,9 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "links",
     "agent.name",
     "prefix",
+    "slave",
+    "welcome",
+    "own",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -421,6 +424,8 @@ pub(crate) struct Instruments {
     pub work_slices: Histogram<u64>,
     /// `harold.telemetry.calls`, `{call}`, by `prefix`, `kind` and `outcome`.
     pub telemetry_calls: Counter<u64>,
+    /// `harold.slave_link.reports`, `{report}`, by `slave`, `kind` and `outcome`.
+    pub slave_link_reports: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -534,7 +539,116 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .with_boundaries(vec![1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0])
             .build(),
         telemetry_calls: counter("harold.telemetry.calls", "{call}"),
+        slave_link_reports: counter("harold.slave_link.reports", "{report}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The slave link
+// ---------------------------------------------------------------------------
+
+/// Every `kind` of report a slave sends.
+pub(crate) const SLAVE_REPORT_KINDS: [&str; 3] = ["snapshot", "turn", "lock"];
+/// Every `outcome` of a report on the master.
+pub(crate) const SLAVE_REPORT_OUTCOMES: [&str; 2] = ["applied", "duplicate"];
+
+/// What the two slave-link gauges read, by slave name.
+#[derive(Default)]
+struct SlaveLinkGaugeState {
+    /// 1 when the slave's link is up, else 0.
+    connected: BTreeMap<String, u64>,
+    /// The slave's report backlog, from its newest `Snapshot`.
+    backlog: BTreeMap<String, u64>,
+}
+
+fn slave_link_gauge_state() -> &'static Arc<Mutex<SlaveLinkGaugeState>> {
+    static STATE: OnceLock<Arc<Mutex<SlaveLinkGaugeState>>> = OnceLock::new();
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<u64>; 2]> = OnceLock::new();
+    let state = STATE.get_or_init(|| Arc::new(Mutex::new(SlaveLinkGaugeState::default())));
+    GAUGES.get_or_init(|| {
+        let meter = meter();
+        let connected = Arc::clone(state);
+        let backlog = Arc::clone(state);
+        [
+            meter
+                .u64_observable_gauge("harold.slave_link.connected")
+                .with_unit("{link}")
+                .with_callback(move |observer| {
+                    let state = connected.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (slave, up) in &state.connected {
+                        observer.observe(*up, &[KeyValue::new("slave", slave.clone())]);
+                    }
+                })
+                .build(),
+            meter
+                .u64_observable_gauge("harold.slave_link.backlog")
+                .with_unit("{report}")
+                .with_callback(move |observer| {
+                    let state = backlog.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (slave, waiting) in &state.backlog {
+                        observer.observe(*waiting, &[KeyValue::new("slave", slave.clone())]);
+                    }
+                })
+                .build(),
+        ]
+    });
+    state
+}
+
+/// Seeds the slave-link instruments for the slaves in `names`: the connected gauge at 0
+/// and each report counter series at 0. `main` calls it once, after `init_telemetry`, when
+/// export is on and `[slaves]` exists.
+pub(crate) fn register_slave_link(names: &[String]) {
+    {
+        let mut state = slave_link_gauge_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for name in names {
+            state.connected.entry(name.clone()).or_insert(0);
+        }
+    }
+    for name in names {
+        for kind in SLAVE_REPORT_KINDS {
+            for outcome in SLAVE_REPORT_OUTCOMES {
+                count_slave_report_n(0, name, kind, outcome);
+            }
+        }
+    }
+}
+
+/// Sets the connected gauge of `slave`.
+pub(crate) fn note_slave_connected(slave: &str, up: bool) {
+    slave_link_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .connected
+        .insert(slave.to_owned(), u64::from(up));
+}
+
+/// Sets the backlog gauge of `slave` to the count its newest `Snapshot` carried.
+pub(crate) fn note_slave_backlog(slave: &str, waiting: u64) {
+    slave_link_gauge_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .backlog
+        .insert(slave.to_owned(), waiting);
+}
+
+/// Counts one report from `slave`. `kind` is `snapshot`, `turn` or `lock`. `outcome` is
+/// `applied` or `duplicate`.
+pub(crate) fn count_slave_report(slave: &str, kind: &'static str, outcome: &'static str) {
+    count_slave_report_n(1, slave, kind, outcome);
+}
+
+fn count_slave_report_n(n: u64, slave: &str, kind: &'static str, outcome: &'static str) {
+    instruments().slave_link_reports.add(
+        n,
+        &[
+            KeyValue::new("slave", slave.to_owned()),
+            KeyValue::new("kind", kind),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------

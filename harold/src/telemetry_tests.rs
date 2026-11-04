@@ -6253,3 +6253,53 @@ fn stopping_a_signals_provider_waits_for_the_send_on_its_way() {
         .unwrap();
     assert_eq!(sent.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn the_slave_link_fields_are_allowed() {
+    for field in ["slave", "welcome", "own"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn the_slave_link_instruments_are_seeded_at_zero() {
+    test_support::install();
+    register_slave_link(&["seeded-slave".to_owned()]);
+    assert_eq!(
+        test_support::gauge_value("harold.slave_link.connected", &[("slave", "seeded-slave")]),
+        Some(0)
+    );
+    for kind in SLAVE_REPORT_KINDS {
+        for outcome in SLAVE_REPORT_OUTCOMES {
+            let seeded = test_support::exact_counter_value(
+                "harold.slave_link.reports",
+                &[
+                    ("slave", "seeded-slave"),
+                    ("kind", kind),
+                    ("outcome", outcome),
+                ],
+            );
+            assert_eq!(seeded, Some(0), "{kind} {outcome}");
+        }
+    }
+}
+
+#[test]
+fn the_slave_link_gauges_follow_the_notes() {
+    test_support::install();
+    note_slave_connected("noted-slave", true);
+    note_slave_backlog("noted-slave", 7);
+    assert_eq!(
+        test_support::gauge_value("harold.slave_link.connected", &[("slave", "noted-slave")]),
+        Some(1)
+    );
+    assert_eq!(
+        test_support::gauge_value("harold.slave_link.backlog", &[("slave", "noted-slave")]),
+        Some(7)
+    );
+    note_slave_connected("noted-slave", false);
+    assert_eq!(
+        test_support::gauge_value("harold.slave_link.connected", &[("slave", "noted-slave")]),
+        Some(0)
+    );
+}

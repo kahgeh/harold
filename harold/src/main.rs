@@ -1996,6 +1996,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>(),
         );
+        if let Some(slaves) = &settings.slaves {
+            crate::telemetry::register_slave_link(&slaves.names);
+        }
         crate::telemetry::register_multiplexer_counters(&settings.agent_monitor.multiplexer);
         crate::telemetry::register_host_counters(
             &settings.agent_monitor.multiplexer,
@@ -2224,6 +2227,13 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         waiting_rx,
         seen_tx,
     );
+    // The slave link listener runs only when `[slaves]` exists. It serves `SlaveLink` only.
+    let slave_link = cfg.slaves.as_ref().map(|slaves| {
+        let data = std::path::Path::new(&store_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        slave::master::serve_slave_link(slaves, data, Arc::new(slave::master::DiscardingSink))
+    });
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))
@@ -2244,6 +2254,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             drop(shutdown_tx);
         })
         .await;
+
+    if let Some(slave_link) = slave_link {
+        slave_link.abort();
+    }
 
     // An open call ends with reason `shutdown`, and its folder and child programs go.
     if let Some(calls) = voice_input::daemon_calls() {
