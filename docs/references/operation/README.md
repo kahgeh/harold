@@ -290,7 +290,7 @@ Not yet on Linux: speech, the web app, and the line to the phone. The installer 
 
 ## The slave link
 
-A **slave** Harold reports its agents, turn ends and questions to a **master** Harold over one gRPC stream, the **slave link**. The Mac's Harold is the master. The Harold on omarchy is the slave. [ADR 34](../../adr/0034-a-slave-harold-reports-to-the-master-over-one-link.md) has the decision. The slave opens the stream and keeps it open. The master never opens it.
+A **slave** Harold reports its agents, turn ends and questions to a **master** Harold over one gRPC stream, the **slave link**. The Mac's Harold is the master. The Harold on omarchy is the slave. [ADR 0034](../../adr/0034-a-slave-harold-reports-to-the-master-over-one-link.md) has the decision. The slave opens the stream and keeps it open. The master never opens it.
 
 ### Settings
 
@@ -304,10 +304,10 @@ The slave tells the master its own name: the `machine_name` setting of the slave
 
 ### Pair a slave, once
 
-1. On the master, run `harold slaves pair omarchy`. It makes a 32-byte secret, the **slave pairing secret**. It keeps the secret in `slaves/omarchy.secret` in the data folder (mode 0600) and prints it once.
-2. On the slave, run `harold master pair <secret> --address <the master's tailnet address and port>`. It keeps the secret in `master.secret` (mode 0600) and writes `[master] address` in `local.toml`.
-3. Add `[slaves]` with `names = ["omarchy"]` to the master's `local.toml`. Restart Harold on both machines.
-4. Publish the link listener on the tailnet. The chief runs this one command on the master, after the release that brings the slave link:
+1. On the master, add the slave's label to `[agent_monitor] rex_hosts`, and add `[slaves]` with `names = ["omarchy"]` to `local.toml`. `harold slaves pair` refuses a name that is not in `[slaves] names`.
+2. On the master, run `harold slaves pair omarchy`. It makes a 32-byte secret, the **slave pairing secret**. It keeps the secret in `slaves/omarchy.secret` in the data folder (mode 0600) and prints it once.
+3. On the slave, run `harold master pair <secret> --address <the master's tailnet address and port>`. It keeps the secret in `master.secret` (mode 0600) and writes `[master] address` in `local.toml`.
+4. Restart Harold on both machines. Then publish the link listener on the tailnet. The chief runs this one command on the master, after the release that brings the slave link:
 
 ```sh
 tailscale serve --bg --tcp 4333 tcp://127.0.0.1:4333
@@ -339,14 +339,14 @@ A paired slave sends no phone message, no push, no spoken line and no todo for a
 
 ### No recap crosses the link
 
-The answer to the open question is No. The recap text of a slave's agent does not cross the link. The master's row shows the agent's state and step, with no recap. The slave sends no transcript path.
+The recap text of a slave's agent does not cross the link. The master's row shows the agent's state and step, with no recap. The slave sends no transcript path, and the recap is read from the transcript, so the master cannot make one.
 
 ### When `slave-link-down` fires
 
 The alert `slave-link-down` fires when a slave's `harold.slave_link.connected` stays 0 for 30 minutes. Do these steps.
 
 1. Check that the slave's machine is on and awake.
-2. Check that Harold runs on the slave: `harold` is up and `haroldctl status` answers.
+2. Check that Harold runs on the slave: run `haroldctl status`.
 3. Read the `slave link` lines in the slave's `harold.log`. `slave link not opened` has a `reason`: `no_secret` (the slave has no `master.secret`), `refused` (the secret does not match) or `version` (the versions differ).
 4. Read the `slave link refused` and `slave link closed` lines in the master's `harold.log`. A `refused` line with `unknown_slave` means the slave's `machine_name` is not in `[slaves] names`, or the master has no secret for it.
 5. Check that the `tailscale serve` command of the pairing step 4 is still active: `tailscale serve status`.

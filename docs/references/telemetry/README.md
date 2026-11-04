@@ -629,6 +629,8 @@ A master Harold and a slave Harold both log the life of a slave link. No line ho
 | `slave link not opened` (`warn`, slave, once for each start) | `slave`, `reason` (`no_secret`, `refused`, `version`) |
 | `report backlog behind` (`warn`, slave) | `own` (the slave's last report number), `welcome` (the master's number) |
 | `slave report dropped` (`warn`, slave) | `count`, `reason` (`too_old`: older than 24 hours; `too_many`: more than 1,000 reports) |
+| `slave report not kept` (`warn`, slave) | `slave`, `error` (why the report backlog could not keep the report) |
+| `slave report not applied` (`warn`, master) | `slave`, `kind` (`snapshot`, `turn`, `lock`), `report_no` (the report's number) |
 | `screen lock unknown` (`warn`, slave on Linux, once for each start) | `reason` (`pgrep_failed`, `loginctl_failed`, `no_display_session`) |
 
 Four questions lead to these lines and to the three `harold.slave_link` metrics.
@@ -638,7 +640,7 @@ Four questions lead to these lines and to the three `harold.slave_link` metrics.
 3. *Is the slave holding reports back?* The gauge `harold.slave_link.backlog` is the number of reports that the master has not acknowledged. It stays near 0 while the link is up. Above 100 for 10 minutes means a gap. The `slave report dropped` line shows when the 24-hour or the 1,000-report limit dropped reports.
 4. *Does a reply reach the slave's agent?* Planned in 2c.2: a counter and a log line for the requests. Nothing records this yet.
 
-The dashboard has no card for these metrics yet. The two notes above (info) are read from the counter and the gauge directly.
+The dashboard has no card for these metrics yet. Read the counter and the gauge directly.
 
 ## Watch pauses and reminders
 
