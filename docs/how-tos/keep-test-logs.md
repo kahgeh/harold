@@ -74,7 +74,7 @@ The runner does these steps in order:
 1. It refuses to run when the podman machine is stopped. It never starts the machine. Run `podman machine start` yourself.
 2. It makes the podman network `harold-tests` (`--internal`) when the network is missing.
 3. It runs `cargo fetch --locked --target aarch64-unknown-linux-gnu` on the Mac. The log holds the output and one line `# fetched: <crate-version list>` with the crates that are new in `~/.cargo/registry/cache`.
-4. It runs the container. The container gets the worktree and the crate files as read-only mounts, and no Mac environment value.
+4. It runs the container. The container gets the worktree and the crate files as read-only mounts, and no Mac environment value. The container gets seven fixed environment values. Two of them, `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_BUILD_JOBS=2`, make a build without debug information. That build differs from the normal test build and still tests the same code paths. The first run builds the image and compiles the workspace: about 20 to 30 minutes. Later runs reuse the two volumes.
 5. It moves each result file of the test from `/out` to the test log folder as `<stem>-<part>`. A file with a secret goes through the same scan as in `scripts/call_test.py`. The runner withholds it and writes a `.withheld` note.
 6. It counts the lines `test <name> ... ok`. The count uses the exact name. The test run fails and names each test that did not run.
 

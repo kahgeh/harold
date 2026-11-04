@@ -485,17 +485,20 @@ class TestContainer(unittest.TestCase):
             'type=tmpfs,destination=/tmp,tmpfs-mode=0700,U=true'])
         self.assertNotIn('sock', ' '.join(cmd))
 
-    def test_command_only_five_env_values(self):
+    def test_command_only_seven_env_constants(self):
         cmd = self.command()
         env = dict(cmd[i + 1].split('=', 1) for i, a in enumerate(cmd) if a == '-e')
         plain = {k for k in env if not k.startswith('XDG_')}
-        self.assertEqual(plain, {'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'PATH'})
         self.assertEqual(env['HOME'], '/home/test')
         self.assertEqual(env['CARGO_HOME'], '/cargo')
         self.assertEqual(env['CARGO_TARGET_DIR'], '/target')
         for key, value in env.items():
             if key.startswith('XDG_'):
                 self.assertTrue(value.startswith('/home/test/'))
+        self.assertEqual(env['CARGO_PROFILE_DEV_DEBUG'], '0')
+        self.assertEqual(env['CARGO_BUILD_JOBS'], '2')
+        self.assertEqual(plain, {'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'PATH',
+                                 'CARGO_PROFILE_DEV_DEBUG', 'CARGO_BUILD_JOBS'})
         self.assertEqual(env, self.mod.ENV_VALUES)
 
     def test_script_seeds_index_and_crates_then_runs_cargo(self):

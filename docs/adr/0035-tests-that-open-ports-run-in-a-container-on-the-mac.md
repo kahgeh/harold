@@ -9,7 +9,7 @@ Some tests open a port or start a second Harold. On the Mac they could reach the
 
 ## Decision
 
-1. `scripts/test-run --container <set>` runs a container test set before the merge. It uses a podman container with an `--internal` network, no capabilities, a read-only root, a read-only source and crate seed, and no Mac environment. The image has a base named by digest. The chief audits the image.
+1. `scripts/test-run --container <set>` runs a container test set before the merge. It uses a podman container with an `--internal` network, no capabilities, a read-only root, a read-only source and crate seed, and no Mac environment. The container gets seven fixed environment values. The image has a base named by digest. The chief audits the image.
 2. `--internal` is the isolation. The `apt-get` of the image build is the one network use. It follows the audit.
 
 ## Consequences

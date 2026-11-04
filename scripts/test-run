@@ -37,6 +37,9 @@ ENV_VALUES = {
     'CARGO_HOME': '/cargo',
     'CARGO_TARGET_DIR': '/target',
     'PATH': '/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    # These two keep the link inside the memory of the podman machine.
+    'CARGO_PROFILE_DEV_DEBUG': '0',
+    'CARGO_BUILD_JOBS': '2',
 }
 # Runs in the container. It copies the index cache and the crate files from the read-only
 # seed, then runs cargo. The test names come in as "$@".
