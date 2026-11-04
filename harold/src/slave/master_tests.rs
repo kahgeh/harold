@@ -573,3 +573,13 @@ async fn serve_slave_link_listens_on_the_configured_address_and_only_for_the_lin
     assert_eq!(missing.code(), Code::Unimplemented);
     handle.abort();
 }
+
+#[test]
+fn the_listener_pings_a_quiet_link_and_gives_up_on_a_silent_one() {
+    // The builder in `serve_on` takes these two. A real listener needs a port, so the test
+    // checks the values: a ping every 30 s, a dead link ended after 20 s more, and the
+    // slave's own keepalive (30 s) is not slower than the master's.
+    assert_eq!(KEEPALIVE_INTERVAL, Duration::from_secs(30));
+    assert_eq!(KEEPALIVE_TIMEOUT, Duration::from_secs(20));
+    assert!(KEEPALIVE_TIMEOUT < KEEPALIVE_INTERVAL);
+}

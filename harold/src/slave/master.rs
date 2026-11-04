@@ -30,6 +30,11 @@ pub(crate) const SECRET_HEADER: &str = "x-harold-slave-secret";
 pub(crate) const NAME_HEADER: &str = "x-harold-slave-name";
 /// The link protocol version this master knows.
 pub(crate) const LINK_PROTOCOL: u32 = 1;
+/// How often the listener pings a quiet link. A slave that sleeps or loses its network
+/// answers no ping, so the stream ends and `slave-link-down` can fire.
+pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long the listener waits for the answer to a ping before it ends the stream.
+pub(crate) const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a new stream may take to send `Hello`.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
 
@@ -359,6 +364,8 @@ pub(crate) fn serve_on(
     let service = link_service(data, &settings.names, sink);
     tokio::spawn(async move {
         let result = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
             .add_service(service)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await;
