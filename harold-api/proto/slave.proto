@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package harold.slave.v1;
+
+import "harold.proto";
+
+// One stream per slave. The slave keeps it open. The secret goes in the
+// stream metadata, `x-harold-slave-secret`, never in a message.
+service SlaveLink {
+  rpc Open (stream SlaveMessage) returns (stream MasterMessage);
+}
+
+message SlaveMessage {
+  oneof body {
+    Hello hello = 1;
+    Snapshot snapshot = 2;
+    Turn turn = 3;
+    Lock lock = 4;
+    // 5 and 6 are for the slice 2c.2 answer to a typing request.
+    // The slice 2c.1 code does not use them.
+  }
+  reserved 5, 6;
+}
+
+message MasterMessage {
+  oneof body {
+    Welcome welcome = 1;
+    Ack ack = 2;
+    // 3 and 4 are for the slice 2c.2 typing request.
+    // The slice 2c.1 code does not use them.
+  }
+  reserved 3, 4;
+}
+
+// First message on each connect.
+message Hello {
+  // The slave's name, its Rex label on the master.
+  string name = 1;
+  // The slave's Harold version.
+  string version = 2;
+  // The last report number the slave knows the master has.
+  uint64 last_known_report = 3;
+  // The link protocol version. The master refuses a version it does not know.
+  uint32 protocol = 4;
+}
+
+// The newest agent snapshot. It has no report number: only the newest counts.
+message Snapshot {
+  harold.AgentStateSnapshot snapshot = 1;
+  // How many reports wait for an Ack.
+  uint64 backlog = 2;
+}
+
+// One turn end. The fields follow harold.TurnCompleteRequest.
+message Turn {
+  uint64 report_no = 1;
+  // The slave's local pane id, `block:<id>`.
+  string pane_id = 2;
+  string pane_label = 3;
+  string session_id = 4;
+  // RFC 3339.
+  string turn_started_at = 5;
+  string last_user_prompt = 6;
+  string assistant_message = 7;
+  // A git branch or repository name, at most 120 characters.
+  string main_context = 8;
+  uint64 input_tokens = 9;
+  uint64 output_tokens = 10;
+  uint64 cache_read_tokens = 11;
+  uint64 cache_write_tokens = 12;
+  string model = 13;
+  // A path on the slave. The slave sends it empty. The master never reads it.
+  string transcript_path = 14;
+}
+
+message Lock {
+  uint64 report_no = 1;
+  bool locked = 2;
+}
+
+// The answer to Hello.
+message Welcome {
+  // The last report number the master has from this slave.
+  uint64 last_report = 1;
+}
+
+// The highest report number the master has applied.
+message Ack {
+  uint64 report_no = 1;
+}

@@ -1,6 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/harold.proto");
     println!("cargo:rerun-if-changed=proto/tts.proto");
+    println!("cargo:rerun-if-changed=proto/slave.proto");
     println!("cargo:rerun-if-changed=proto/tools/questions.proto");
     println!("cargo:rerun-if-changed=proto/tools/backlog.proto");
     println!("cargo:rerun-if-changed=proto/tools/watch.proto");
@@ -17,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "proto/harold.proto",
                 "proto/tts.proto",
+                "proto/slave.proto",
                 "proto/tools/questions.proto",
                 "proto/tools/backlog.proto",
                 "proto/tools/watch.proto",
