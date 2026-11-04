@@ -197,7 +197,13 @@ impl SlaveLink {
         let message = SlaveMessage {
             body: Some(slave_message::Body::Turn(turn)),
         };
-        self.shared.keep(ReportKind::Turn, message).await;
+        // The append must not be cancelled: a cancel after `BEGIN IMMEDIATE` leaves the
+        // transaction open, and every later append fails. The hook kills its call after 4 s
+        // and tonic then drops this future. The work runs in its own task, so a drop of this
+        // future only drops the join handle, which detaches the task and lets it finish.
+        let shared = Arc::clone(&self.shared);
+        let kept = tokio::spawn(async move { shared.keep(ReportKind::Turn, message).await });
+        let _ = kept.await;
     }
 
     /// Stops the link task.

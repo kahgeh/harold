@@ -1043,3 +1043,28 @@ async fn a_slaves_reports_reach_the_registry_through_the_in_process_link() {
     slave.abort();
     until("unlinked", || !registry.is_linked(NAME)).await;
 }
+
+#[tokio::test]
+async fn a_dropped_report_turn_still_finishes_and_the_next_report_appends() {
+    let secret = new_secret();
+    let master = master(&secret);
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
+    for session in ["a", "b", "c"] {
+        // Drop the caller's future after its first poll, as tonic does when the hook gives up.
+        let call = slave.report_turn(request("block:1", session));
+        tokio::select! {
+            biased;
+            _ = call => {}
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    slave.report_turn(request("block:1", "d")).await;
+    until("all four kept", || slave.shared.backlog.len() == 4).await;
+    connector.set_down(false);
+    until("all four applied", || {
+        master.sink.sessions() == ["a", "b", "c", "d"]
+    })
+    .await;
+}
