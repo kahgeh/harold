@@ -478,9 +478,11 @@ class TestContainer(unittest.TestCase):
             '/h/.cargo/registry/cache:/cargo-seed/cache:ro',
             '/h/.cargo/git/db:/cargo-seed/git-db:ro',
             'harold-test-cargo:/cargo', 'harold-test-target:/target', '/out-dir:/out']))
-        tmpfs = [cmd[i + 1] for i, a in enumerate(cmd) if a == '--tmpfs']
-        self.assertEqual(sorted(tmpfs), ['/home/test:mode=0700,uid=1000,gid=1000',
-                                         '/tmp:mode=0700,uid=1000,gid=1000'])
+        self.assertNotIn('--tmpfs', cmd)
+        tmpfs = [cmd[i + 1] for i, a in enumerate(cmd) if a == '--mount']
+        self.assertEqual(sorted(tmpfs), [
+            'type=tmpfs,destination=/home/test,tmpfs-mode=0700,U=true',
+            'type=tmpfs,destination=/tmp,tmpfs-mode=0700,U=true'])
         self.assertNotIn('sock', ' '.join(cmd))
 
     def test_command_only_five_env_values(self):

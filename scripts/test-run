@@ -25,7 +25,6 @@ OK_LINE = re.compile(rb'^test (.+) \.\.\. ok$')
 CONTAINER_SETS = Path(__file__).resolve().parent / 'container-tests'
 IMAGE = 'harold-tests'
 NETWORK = 'harold-tests'
-TEST_IDS = 'uid=1000,gid=1000'
 FETCH = ['cargo', 'fetch', '--locked', '--target', 'aarch64-unknown-linux-gnu']
 CARGO_TEST = ['cargo', 'test', '--locked', '--offline', '-p', 'harold', '--no-default-features',
               '--features', 'harold/linux-defaults', '--', '--ignored', '--exact']
@@ -293,7 +292,7 @@ def podman_command(worktree, out, seed, image, names):
     for mount in mounts:
         command += ['-v', mount]
     for target in ('/tmp', '/home/test'):
-        command += ['--tmpfs', f'{target}:mode=0700,{TEST_IDS}']
+        command += ['--mount', f'type=tmpfs,destination={target},tmpfs-mode=0700,U=true']
     for key, value in ENV_VALUES.items():
         command += ['-e', f'{key}={value}']
     return command + [image, 'sh', '-c', CONTAINER_SCRIPT, 'sh'] + list(names)

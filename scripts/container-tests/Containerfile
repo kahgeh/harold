@@ -25,7 +25,7 @@ RUN printf '%s\n' \
       perl=5.36.0-7+deb12u4 \
  && rm -rf /var/lib/apt/lists/*
 
-# The user `test` has the same uid and gid as the tmpfs mounts in scripts/test-run.
+# The user `test` owns the tmpfs mounts of scripts/test-run (podman option U=true).
 # The folders are the mount points of the volumes and of the result folder.
 RUN groupadd --gid 1000 test \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/test test \
