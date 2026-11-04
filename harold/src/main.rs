@@ -485,6 +485,8 @@ impl Harold for HaroldService {
             agent::pane_route::refuse_write(&req.pane_id, "turn_complete", refusal);
             return Ok(Response::new(TurnCompleteResponse::default()));
         }
+        // A paired slave also sends the turn up to the master, after it keeps it here.
+        let upstream = slave::slave::linked().then(|| req.clone());
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
         let hook_reached = time::OffsetDateTime::now_utc();
@@ -562,6 +564,9 @@ impl Harold for HaroldService {
                 reminder.turn_ended(&turn_end.0, &turn_end.1, &turn_end.2);
             }
             self.note_recap_turn_end(&turn_end.0, &turn_end.1, &turn_end.2);
+            if let Some(upstream) = upstream {
+                slave::slave::report_turn(upstream).await;
+            }
 
             Ok(Response::new(TurnCompleteResponse { accepted: true }))
         }
@@ -2133,7 +2138,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&store),
         snapshots.clone(),
         telemetry_tasks.alert_queue.clone(),
-        web_app.as_ref().map(|running| Arc::clone(&running.route)),
+        // A paired slave has no phone route: only the master tells the user.
+        web_app
+            .as_ref()
+            .filter(|_| slave::delivers_locally(cfg))
+            .map(|running| Arc::clone(&running.route)),
+        slave::delivers_locally(cfg),
         shutdown_rx.clone(),
     ));
     #[cfg(feature = "imessage")]
@@ -2234,6 +2244,17 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(std::path::Path::new("."));
         slave::master::serve_slave_link(slaves, data, Arc::new(slave::master::DiscardingSink))
     });
+    // The slave link starts only when `[master]` exists. The agent monitor and the lock check
+    // publish into `slave_source` (slice 2c.1 task 7).
+    if let Some(master) = cfg.master.as_ref() {
+        let data = std::path::Path::new(&store_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        let source = slave::slave::LocalSource::new();
+        if let Err(error) = slave::slave::install(master, &cfg.machine_name, data, source).await {
+            warn!(error = %error, "slave link not started");
+        }
+    }
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))
@@ -2258,6 +2279,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(slave_link) = slave_link {
         slave_link.abort();
     }
+    slave::slave::stop();
 
     // An open call ends with reason `shutdown`, and its folder and child programs go.
     if let Some(calls) = voice_input::daemon_calls() {

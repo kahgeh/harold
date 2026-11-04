@@ -1261,21 +1261,30 @@ pub async fn run_event_handler(
     alerts: Option<AlertQueue>,
     shutdown: watch::Receiver<()>,
 ) {
-    run_event_handler_with_app(store, snapshots, alerts, None, shutdown).await;
+    run_event_handler_with_app(store, snapshots, alerts, None, true, shutdown).await;
 }
 
 /// `run_event_handler` with `app`: when it is set, the chief's messages to the phone go to
-/// the web app.
+/// the web app. `deliver_locally` is false on a paired slave: it sends nothing to the user.
 pub async fn run_event_handler_with_app(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
     alerts: Option<AlertQueue>,
     app: Option<Arc<dyn AppRoute>>,
+    deliver_locally: bool,
     shutdown: watch::Receiver<()>,
 ) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(
-        production_dispatcher(Arc::new(SystemEnvironment), &snapshots, app, alerts.clone())
-            .with_photos_dir(store.app_photos_dir()),
+        production_dispatcher(
+            Arc::new(crate::slave::DeliveryGate::new(
+                SystemEnvironment,
+                deliver_locally,
+            )),
+            &snapshots,
+            app,
+            alerts.clone(),
+        )
+        .with_photos_dir(store.app_photos_dir()),
     );
     info!("event handler starting");
     run_deliveries(store, dispatcher, Some(snapshots), alerts, shutdown).await;
