@@ -859,6 +859,9 @@ pub(crate) struct SpecFacts {
     pub size: SpecSize,
     /// True when the first line of the spec is `Waiting for your approval.`.
     pub awaiting: bool,
+    /// False when `approvals/<id>.md` names (`spec-sha256:`) another text than the spec
+    /// has now. True when it names the current text or has no such line.
+    pub approval_current: bool,
 }
 
 impl Default for SpecFacts {
@@ -884,6 +887,7 @@ impl Default for SpecFacts {
             revised_after_approval: 0,
             size: SpecSize::Unsized,
             awaiting: false,
+            approval_current: true,
         }
     }
 }
@@ -937,6 +941,22 @@ pub(crate) fn spec_awaiting(markdown: &str) -> bool {
         .lines()
         .next()
         .is_some_and(|line| line.trim() == "Waiting for your approval.")
+}
+
+/// True when the approval has no `spec-sha256:` line, or when that line (trimmed, in lower
+/// case) equals the sha-256 of the spec text.
+pub(crate) fn approval_is_current(approval: Option<&str>, spec_text: Option<&str>) -> bool {
+    let Some(named) = approval.and_then(|text| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix("spec-sha256:"))
+    }) else {
+        return true;
+    };
+    let Some(spec_text) = spec_text else {
+        return true;
+    };
+    let current = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(spec_text.as_bytes()));
+    named.trim().to_lowercase() == current
 }
 
 /// A fact about a spec that Harold logs once.
@@ -1312,6 +1332,8 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let words = spec_text.as_deref().map_or(0, spec_words);
     let size = spec_text.as_deref().map_or(SpecSize::Unsized, spec_size);
     let awaiting = spec_text.as_deref().is_some_and(spec_awaiting);
+    let approval_text = read_text(&pod.join("approvals").join(format!("{id}.md")));
+    let approval_current = approval_is_current(approval_text.as_deref(), spec_text.as_deref());
     let facts = SpecFacts {
         id: id.to_owned(),
         state,
@@ -1331,6 +1353,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         revised_after_approval: revised_after_approval(&entries, approved_at),
         size,
         awaiting,
+        approval_current,
     };
     Some((facts, notices))
 }
@@ -1716,17 +1739,23 @@ pub(crate) fn work_waiting(
             .map(|since| now - since)
             .collect()
     };
-    let awaiting = ages(&|spec| {
+    let mut awaiting = ages(&|spec| {
         (spec.state == SpecState::Open && spec.awaiting)
             .then_some(spec.open_at)
             .flatten()
     });
-    let approved = ages(&|spec| {
+    // A stale approval (one that names an older text) awaits approval again.
+    let approved_since = |spec: &SpecFacts, current: bool| {
         let approved_at = spec.approved_at?;
-        (spec.state == SpecState::Approved && cutoff.is_none_or(|cutoff| approved_at >= cutoff))
-            .then_some(approved_at)
-    });
+        (spec.state == SpecState::Approved
+            && spec.approval_current == current
+            && cutoff.is_none_or(|cutoff| approved_at >= cutoff))
+        .then_some(approved_at)
+    };
+    let stale = ages(&|spec| approved_since(spec, false));
+    let approved = ages(&|spec| approved_since(spec, true));
     let in_progress = ages(&|spec| (spec.state == SpecState::InProgress).then_some(spec.state_at));
+    awaiting.extend(stale);
     let idle = if approved.is_empty() { 0 } else { free_slots };
     let lists = BTreeMap::from([
         (WORK_LISTS[0], list_stats(&awaiting)),

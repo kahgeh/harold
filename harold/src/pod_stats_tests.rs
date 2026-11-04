@@ -4431,3 +4431,81 @@ async fn pane_identity_finds_the_spec_when_the_started_file_holds_the_folder_nam
     assert_eq!(worker.role, Role::BuildWorker);
     assert_eq!(worker.spec_id.as_deref(), Some("adr-0027-host-scan"));
 }
+
+fn sha_of(text: &str) -> String {
+    hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()))
+}
+
+#[test]
+fn approval_current_is_true_for_a_matching_checksum() {
+    let approval = format!("approved: 2026-10-14\nspec-sha256: {}\n", sha_of("text"));
+    assert!(approval_is_current(Some(&approval), Some("text")));
+}
+
+#[test]
+fn approval_current_is_false_for_another_checksum() {
+    let approval = format!("spec-sha256: {}\n", sha_of("older text"));
+    assert!(!approval_is_current(Some(&approval), Some("text")));
+}
+
+#[test]
+fn approval_current_is_true_without_a_checksum_line() {
+    assert!(approval_is_current(
+        Some("approved: 2026-10-14\n"),
+        Some("text")
+    ));
+}
+
+#[test]
+fn approval_current_ignores_case_and_spaces_of_the_checksum() {
+    let approval = format!("  spec-sha256:   {}  \n", sha_of("text").to_uppercase());
+    assert!(approval_is_current(Some(&approval), Some("text")));
+}
+
+#[test]
+fn read_specs_marks_an_approval_that_names_an_older_text() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["fresh", "stale"] {
+        write(&dir.join(format!("specs/{id}.md")), "# Spec\nnew\n");
+    }
+    let approval = |text: &str| format!("approved: 2026-10-14\nspec-sha256: {}\n", sha_of(text));
+    write(&dir.join("approvals/fresh.md"), &approval("# Spec\nnew\n"));
+    write(&dir.join("approvals/stale.md"), &approval("# Spec\nold\n"));
+
+    let specs = by_id(read_files(&dir).specs);
+
+    assert!(specs["fresh"].approval_current);
+    assert!(!specs["stale"].approval_current);
+}
+
+#[test]
+fn work_waiting_counts_a_stale_approval_as_awaiting_approval() {
+    let now = at("2026-11-03T00:00:00Z");
+    let stale = SpecFacts {
+        approved_at: Some(now - time::Duration::days(2)),
+        approval_current: false,
+        ..spec_in("stale", SpecState::Approved, now)
+    };
+
+    let (idle, lists) = work_waiting(&[stale], 2, None, now);
+
+    assert_eq!(idle, 0);
+    assert_eq!(lists["awaiting_approval"].items, 1);
+    assert_eq!(lists["approved_not_started"].items, 0);
+}
+
+#[test]
+fn work_waiting_still_counts_a_current_approval_as_approved() {
+    let now = at("2026-11-03T00:00:00Z");
+    let current = SpecFacts {
+        approved_at: Some(now - time::Duration::days(2)),
+        ..spec_in("current", SpecState::Approved, now)
+    };
+
+    let (idle, lists) = work_waiting(&[current], 2, None, now);
+
+    assert_eq!(idle, 2);
+    assert_eq!(lists["awaiting_approval"].items, 0);
+    assert_eq!(lists["approved_not_started"].items, 1);
+}
