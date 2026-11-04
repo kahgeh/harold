@@ -33,24 +33,34 @@ pub(crate) const LINK_PROTOCOL: u32 = 1;
 /// How long a new stream may take to send `Hello`.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
 
+/// Whether the sink took a report. After `Failed` the master keeps the report number, sends
+/// no `Ack` and ends the stream, so the slave sends the report again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Applied {
+    Applied,
+    Failed,
+}
+
 /// Where the master puts what a slave reports.
 pub(crate) trait MasterSink: Send + Sync + 'static {
     fn apply_snapshot(&self, slave: &str, snapshot: AgentStateSnapshot);
-    /// Applies a turn. Returns false when the sink did not take it.
-    fn apply_turn(&self, slave: &str, turn: Turn) -> bool;
-    fn apply_lock(&self, slave: &str, locked: bool);
+    /// Applies a turn. The master repeats nothing: it dedupes by report number before this call.
+    fn apply_turn(&self, slave: &str, turn: Turn) -> Applied;
+    fn apply_lock(&self, slave: &str, locked: bool) -> Applied;
     fn link_changed(&self, slave: &str, up: bool);
 }
 
-/// A sink that takes every report and keeps none. The master registry replaces it.
+/// An interim sink: it takes every report and keeps none. Task 6 replaces it with the registry.
 pub(crate) struct DiscardingSink;
 
 impl MasterSink for DiscardingSink {
     fn apply_snapshot(&self, _slave: &str, _snapshot: AgentStateSnapshot) {}
-    fn apply_turn(&self, _slave: &str, _turn: Turn) -> bool {
-        false
+    fn apply_turn(&self, _slave: &str, _turn: Turn) -> Applied {
+        Applied::Applied
     }
-    fn apply_lock(&self, _slave: &str, _locked: bool) {}
+    fn apply_lock(&self, _slave: &str, _locked: bool) -> Applied {
+        Applied::Applied
+    }
     fn link_changed(&self, _slave: &str, _up: bool) {}
 }
 
@@ -63,9 +73,16 @@ type Replies = Pin<Box<dyn Stream<Item = Result<MasterMessage, Status>> + Send>>
 pub(crate) struct SlaveLinkService {
     data: PathBuf,
     sink: Arc<dyn MasterSink>,
-    /// The newest stream of each slave, so a stream that a newer one replaced stays quiet
-    /// when it ends.
-    generations: Arc<Mutex<HashMap<String, u64>>>,
+    /// What all streams of a slave share: the newest stream, so a stream that a newer one
+    /// replaced stays quiet when it ends, and the last applied report number, so two streams
+    /// cannot apply one report twice.
+    slaves: Arc<Mutex<HashMap<String, SlaveState>>>,
+}
+
+#[derive(Default)]
+struct SlaveState {
+    generation: u64,
+    last_report: u64,
 }
 
 impl SlaveLinkService {
@@ -73,18 +90,21 @@ impl SlaveLinkService {
         Self {
             data: data.to_path_buf(),
             sink,
-            generations: Arc::new(Mutex::new(HashMap::new())),
+            slaves: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn next_generation(&self, slave: &str) -> u64 {
-        let mut generations = self
-            .generations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let generation = generations.entry(slave.to_owned()).or_insert(0);
-        *generation += 1;
-        *generation
+    /// Registers a new stream of `slave`. Returns its generation and the last applied number.
+    fn open_stream(&self, slave: &str) -> (u64, u64) {
+        let mut slaves = self.slaves.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = slaves
+            .entry(slave.to_owned())
+            .or_insert_with(|| SlaveState {
+                generation: 0,
+                last_report: read_last_report(&self.data, slave),
+            });
+        state.generation += 1;
+        (state.generation, state.last_report)
     }
 }
 
@@ -192,7 +212,7 @@ impl SlaveLink for SlaveLinkService {
             refuse("version", Some(&slave));
             return Err(Status::failed_precondition("version"));
         }
-        let mut last_report = read_last_report(&self.data, &slave);
+        let (generation, last_report) = self.open_stream(&slave);
         let (replies, outbound) = mpsc::channel(16);
         let welcome = MasterMessage {
             body: Some(master_message::Body::Welcome(Welcome { last_report })),
@@ -202,14 +222,13 @@ impl SlaveLink for SlaveLinkService {
             .await
             .map_err(|_| Status::cancelled("closed"))?;
         info!(slave = %slave, welcome = last_report, version = %hello.version, "slave link opened");
-        let generation = self.next_generation(&slave);
         self.sink.link_changed(&slave, true);
         telemetry::note_slave_connected(&slave, true);
 
         let sink = Arc::clone(&self.sink);
         let data = self.data.clone();
         let stream_slave = slave;
-        let generations = Arc::clone(&self.generations);
+        let slaves = Arc::clone(&self.slaves);
         tokio::spawn(async move {
             let reason = loop {
                 let message = match inbound.message().await {
@@ -218,8 +237,15 @@ impl SlaveLink for SlaveLinkService {
                     Err(_) => break "network",
                 };
                 let Some(body) = message.body else { continue };
-                let acked = handle(&*sink, &data, &stream_slave, &mut last_report, body);
-                if let Some(number) = acked {
+                let handled = handle(&*sink, &data, &slaves, &stream_slave, body);
+                if handled == Handled::Failed {
+                    // No `Ack` and no new number: the slave sends the report again.
+                    let _ = replies
+                        .send(Err(Status::internal("report not applied")))
+                        .await;
+                    break "master_gone";
+                }
+                if let Handled::Ack(number) = handled {
                     let ack = MasterMessage {
                         body: Some(master_message::Body::Ack(Ack { report_no: number })),
                     };
@@ -228,11 +254,11 @@ impl SlaveLink for SlaveLinkService {
                     }
                 }
             };
-            let current = generations
+            let current = slaves
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&stream_slave)
-                == Some(&generation);
+                .is_some_and(|state| state.generation == generation);
             if current {
                 sink.link_changed(&stream_slave, false);
                 telemetry::note_slave_connected(&stream_slave, false);
@@ -243,15 +269,25 @@ impl SlaveLink for SlaveLinkService {
     }
 }
 
-/// Handles one message. Returns the number to acknowledge, if the message is a report that
-/// takes an `Ack`.
+/// What a message needs next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handled {
+    /// Nothing to send.
+    Nothing,
+    /// Send an `Ack` with this number.
+    Ack(u64),
+    /// The sink failed: send no `Ack` and end the stream.
+    Failed,
+}
+
+/// Handles one message.
 fn handle(
     sink: &dyn MasterSink,
     data: &Path,
+    slaves: &Mutex<HashMap<String, SlaveState>>,
     slave: &str,
-    last_report: &mut u64,
     body: slave_message::Body,
-) -> Option<u64> {
+) -> Handled {
     match body {
         slave_message::Body::Snapshot(snapshot) => {
             telemetry::note_slave_backlog(slave, snapshot.backlog);
@@ -259,48 +295,52 @@ fn handle(
                 sink.apply_snapshot(slave, state);
             }
             telemetry::count_slave_report(slave, "snapshot", "applied");
-            None
+            Handled::Nothing
         }
         slave_message::Body::Turn(turn) => {
             let number = turn.report_no;
-            report(sink, data, slave, last_report, number, "turn", |sink| {
+            report(data, slaves, slave, number, "turn", || {
                 sink.apply_turn(slave, turn)
             })
         }
         slave_message::Body::Lock(lock) => {
             let number = lock.report_no;
-            report(sink, data, slave, last_report, number, "lock", |sink| {
-                sink.apply_lock(slave, lock.locked);
-                true
+            report(data, slaves, slave, number, "lock", || {
+                sink.apply_lock(slave, lock.locked)
             })
         }
         // A second `Hello` changes nothing.
-        slave_message::Body::Hello(_) => None,
+        slave_message::Body::Hello(_) => Handled::Nothing,
     }
 }
 
-/// Applies a numbered report when it is above the last applied number, and returns the
-/// number the master acknowledges: the last applied number.
+/// Applies a numbered report when it is above the last applied number. The check, the apply
+/// and the new number happen under one lock, so two streams of one slave cannot apply a
+/// report twice. A failed apply keeps the number.
 fn report(
-    sink: &dyn MasterSink,
     data: &Path,
+    slaves: &Mutex<HashMap<String, SlaveState>>,
     slave: &str,
-    last_report: &mut u64,
     number: u64,
     kind: &'static str,
-    apply: impl FnOnce(&dyn MasterSink) -> bool,
-) -> Option<u64> {
-    if number <= *last_report {
+    apply: impl FnOnce() -> Applied,
+) -> Handled {
+    let mut slaves = slaves.lock().unwrap_or_else(PoisonError::into_inner);
+    let state = slaves.entry(slave.to_owned()).or_default();
+    if number <= state.last_report {
         telemetry::count_slave_report(slave, kind, "duplicate");
-        return Some(*last_report);
+        return Handled::Ack(state.last_report);
     }
-    let taken = apply(sink);
-    *last_report = number;
+    if apply() == Applied::Failed {
+        warn!(slave, kind, report_no = number, "slave report not applied");
+        return Handled::Failed;
+    }
+    state.last_report = number;
     if let Err(error) = write_last_report(data, slave, number) {
         warn!(slave, error = %error, "slave state not saved");
     }
-    telemetry::count_slave_report(slave, kind, if taken { "applied" } else { "duplicate" });
-    Some(number)
+    telemetry::count_slave_report(slave, kind, "applied");
+    Handled::Ack(number)
 }
 
 /// The slave link service with the secret check in front of it.

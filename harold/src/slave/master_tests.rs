@@ -22,11 +22,23 @@ const NAME: &str = "omarchy";
 #[derive(Default)]
 struct FakeSink {
     events: Mutex<Vec<String>>,
+    /// When set, every turn and lock fails to apply.
+    fail: std::sync::atomic::AtomicBool,
 }
 
 impl FakeSink {
     fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
+    }
+}
+
+impl FakeSink {
+    fn outcome(&self) -> Applied {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            Applied::Failed
+        } else {
+            Applied::Applied
+        }
     }
 }
 
@@ -37,18 +49,19 @@ impl MasterSink for FakeSink {
             .unwrap()
             .push(format!("snapshot {slave}"));
     }
-    fn apply_turn(&self, slave: &str, turn: Turn) -> bool {
+    fn apply_turn(&self, slave: &str, turn: Turn) -> Applied {
         self.events
             .lock()
             .unwrap()
             .push(format!("turn {slave} {}", turn.report_no));
-        true
+        self.outcome()
     }
-    fn apply_lock(&self, slave: &str, locked: bool) {
+    fn apply_lock(&self, slave: &str, locked: bool) -> Applied {
         self.events
             .lock()
             .unwrap()
             .push(format!("lock {slave} {locked}"));
+        self.outcome()
     }
     fn link_changed(&self, slave: &str, up: bool) {
         self.events
@@ -106,9 +119,54 @@ fn data() -> Data {
 }
 
 fn paired(data: &Path) -> String {
+    paired_as(data, NAME)
+}
+
+fn paired_as(data: &Path, name: &str) -> String {
     let secret = new_secret();
-    write_secret(&master_secret_path(data, NAME), &secret).unwrap();
+    write_secret(&master_secret_path(data, name), &secret).unwrap();
     secret
+}
+
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Logs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// Whether a line holds every one of `parts`.
+    fn has_line(&self, parts: &[&str]) -> bool {
+        self.text()
+            .lines()
+            .any(|line| parts.iter().all(|part| line.contains(part)))
+    }
+}
+
+/// Captures this thread's log lines; use it from a current-thread runtime.
+fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
 }
 
 fn hello(name: &str, protocol: u32) -> SlaveMessage {
@@ -343,6 +401,132 @@ async fn snapshot_reaches_the_sink_and_sets_the_backlog_gauge() {
         ),
         Some(3)
     );
+}
+
+#[tokio::test]
+async fn a_failed_apply_is_not_acked_and_the_number_does_not_advance() {
+    let (logs, _guard) = capture_logs();
+    let data = data();
+    let secret = paired(data.path());
+    let sink = Arc::new(FakeSink::default());
+    let running = start(data.path(), &[NAME], sink.clone());
+    sink.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut link = open(&running, Some(&secret), Some(NAME), hello(NAME, 1))
+        .await
+        .unwrap();
+    link.next().await;
+    link.send.send(turn(1)).await.unwrap();
+    // The stream ends with an error and no Ack.
+    assert!(link.replies.message().await.is_err());
+    assert!(
+        !data
+            .path()
+            .join("slaves")
+            .join(format!("{NAME}.json"))
+            .exists()
+    );
+    assert!(logs.has_line(&["slave report not applied"]));
+    // The slave connects again: the master still holds 0, and the same report applies.
+    sink.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut again = open(&running, Some(&secret), Some(NAME), hello(NAME, 1))
+        .await
+        .unwrap();
+    assert!(matches!(
+        again.next().await,
+        master_message::Body::Welcome(welcome) if welcome.last_report == 0
+    ));
+    again.send.send(turn(1)).await.unwrap();
+    assert!(matches!(
+        again.next().await,
+        master_message::Body::Ack(ack) if ack.report_no == 1
+    ));
+}
+
+#[tokio::test]
+async fn a_hello_name_that_differs_from_the_metadata_name_is_refused() {
+    let data = data();
+    let secret = paired(data.path());
+    let sink = Arc::new(FakeSink::default());
+    let running = start(data.path(), &[NAME, "other"], sink.clone());
+    let refused = open(&running, Some(&secret), Some(NAME), hello("other", 1)).await;
+    assert_eq!(refused.err().unwrap().code(), Code::Unauthenticated);
+    assert!(sink.events().is_empty());
+}
+
+#[tokio::test]
+async fn an_ended_stream_sets_the_gauge_to_0_and_logs_slave_gone() {
+    let (logs, _guard) = capture_logs();
+    let data = data();
+    let name = "gauge-slave";
+    let secret = paired_as(data.path(), name);
+    let sink = Arc::new(FakeSink::default());
+    let running = start(data.path(), &[name], sink.clone());
+    let mut link = open(&running, Some(&secret), Some(name), hello(name, 1))
+        .await
+        .unwrap();
+    link.next().await;
+    let gauge = || {
+        crate::telemetry::test_support::gauge_value(
+            "harold.slave_link.connected",
+            &[("slave", name)],
+        )
+    };
+    assert_eq!(gauge(), Some(1));
+    assert!(logs.has_line(&["slave link opened", name]));
+    drop(link);
+    for _ in 0..200 {
+        if logs.has_line(&["slave link closed"]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(logs.has_line(&["slave link closed", "slave_gone", name]));
+    assert_eq!(gauge(), Some(0));
+    assert!(sink.events().contains(&format!("link {name} false")));
+}
+
+#[tokio::test]
+async fn refusals_are_logged_with_a_reason_and_never_the_secret() {
+    let (logs, _guard) = capture_logs();
+    let data = data();
+    let secret = paired(data.path());
+    let running = start(data.path(), &[NAME], Arc::new(FakeSink::default()));
+    let _ = open(&running, Some(&secret), Some(NAME), hello(NAME, 99)).await;
+    let _ = open(&running, Some("not-the-secret"), Some(NAME), hello(NAME, 1)).await;
+    assert!(logs.has_line(&["WARN", "slave link refused", "version"]));
+    assert!(logs.has_line(&["WARN", "slave link refused", "bad_secret"]));
+    assert!(!logs.text().contains(&secret));
+    assert!(!logs.text().contains("not-the-secret"));
+}
+
+#[tokio::test]
+async fn two_streams_of_one_slave_apply_a_report_once() {
+    let data = data();
+    let name = "twin-slave";
+    let secret = paired_as(data.path(), name);
+    let sink = Arc::new(FakeSink::default());
+    let running = start(data.path(), &[name], sink.clone());
+    let mut first = open(&running, Some(&secret), Some(name), hello(name, 1))
+        .await
+        .unwrap();
+    first.next().await;
+    let mut second = open(&running, Some(&secret), Some(name), hello(name, 1))
+        .await
+        .unwrap();
+    second.next().await;
+    first.send.send(turn(1)).await.unwrap();
+    first.next().await;
+    second.send.send(turn(1)).await.unwrap();
+    assert!(matches!(
+        second.next().await,
+        master_message::Body::Ack(ack) if ack.report_no == 1
+    ));
+    let turns = sink
+        .events()
+        .iter()
+        .filter(|event| event.starts_with("turn"))
+        .count();
+    assert_eq!(turns, 1);
 }
 
 #[test]
