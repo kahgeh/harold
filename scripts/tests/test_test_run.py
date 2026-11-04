@@ -302,5 +302,385 @@ class TestRun(unittest.TestCase):
         self.assertEqual(rows[0]['features'], 'timing')
 
 
+FAKE_PODMAN = """#!/bin/sh
+echo "podman $*" >> "$FAKE_CALLS"
+case "$1 $2" in
+"machine inspect") echo "${FAKE_MACHINE:-running}" ;;
+"network exists") [ -n "$FAKE_NETWORK" ] || exit 1 ;;
+"image inspect")
+  case "$*" in
+    *Id*) echo "${FAKE_IMAGE:-sha256:fakeimage}" ;;
+    *) echo "sha256:fakebase" ;;
+  esac ;;
+esac
+case "$*" in *dpkg-query*) printf 'perl=5.36.0-7+deb12u4\nprotobuf-compiler=3.21.12-3+deb12u1\n'; exit 0 ;; esac
+if [ "$1" = run ]; then
+  for a in "$@"; do
+    case "$a" in *:/out*) outdir="${a%%:*}" ;; esac
+  done
+  if [ -n "$FAKE_OUT_NAME" ]; then printf '%s' "$FAKE_OUT_BODY" > "$outdir/$FAKE_OUT_NAME"; fi
+  [ -z "$FAKE_RUN_OUTPUT" ] || cat "$FAKE_RUN_OUTPUT"
+  exit "${FAKE_RUN_EXIT:-0}"
+fi
+"""
+
+FAKE_CARGO = """#!/bin/sh
+echo "cargo $*" >> "$FAKE_CALLS"
+echo "FAKE CARGO FETCH OUTPUT"
+if [ -n "$FAKE_NEW_CRATE" ]; then touch "$FAKE_CACHE_DIR/$FAKE_NEW_CRATE.crate"; fi
+exit "${FAKE_CARGO_EXIT:-0}"
+"""
+
+
+class TestLoadSet(unittest.TestCase):
+    def setUp(self):
+        self.mod = load()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def write(self, name, text):
+        (self.root / f'{name}.txt').write_text(text)
+
+    def refused(self, name):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as caught:
+                self.mod.load_set(name, self.root)
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+
+    def test_load_set_skips_comments_and_blank(self):
+        self.write('s', '# a comment\n\nfirst::test\n   \n# more\nsecond::test\n')
+        self.assertEqual(self.mod.load_set('s', self.root), ['first::test', 'second::test'])
+
+    def test_load_set_drops_duplicates(self):
+        self.write('s', 'a\nb\na\n')
+        self.assertEqual(self.mod.load_set('s', self.root), ['a', 'b'])
+
+    def test_load_set_refuses_empty(self):
+        self.write('s', '# only a comment\n\n')
+        self.refused('s')
+
+    def test_load_set_refuses_unknown_name(self):
+        self.refused('missing')
+
+    def test_load_set_refuses_path_name(self):
+        (self.root.parent / 'escape.txt').write_text('x::y\n')
+        self.addCleanup((self.root.parent / 'escape.txt').unlink)
+        for name in ('../escape', 'a/b', '', 'Cap'):
+            self.refused(name)
+
+    def test_shipped_port_tests_set_loads(self):
+        root = SCRIPT.parent / 'container-tests'
+        names = self.mod.load_set('port-tests', root)
+        self.assertEqual(names, ['slave::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link'])
+
+    def test_main_parses_container_option(self):
+        calls = []
+        with patch.object(self.mod, 'run_container', lambda *a: calls.append(a) or 0):
+            code = self.mod.main(['1', 'n', '--container', 'port-tests', '--', 'cargo', 'test'])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][:4], ('1', 'n', 'port-tests', ['cargo', 'test']))
+
+
+class TestContainer(unittest.TestCase):
+    def setUp(self):
+        self.mod = load()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.repo = make_repo(tmp).resolve()
+        self.bin = tmp / 'bin'
+        self.bin.mkdir()
+        self.calls = tmp / 'calls.txt'
+        self.calls.write_text('')
+        for name, body in (('podman', FAKE_PODMAN), ('cargo', FAKE_CARGO)):
+            path = self.bin / name
+            path.write_text(body)
+            path.chmod(0o755)
+        self.home = tmp / 'home'
+        (self.home / '.cargo' / 'registry' / 'index' / 'index.crates.io-abc').mkdir(parents=True)
+        self.cache = self.home / '.cargo' / 'registry' / 'cache' / 'index.crates.io-abc'
+        self.cache.mkdir(parents=True)
+        (self.cache / 'old-1.0.0.crate').write_text('x')
+        (self.home / '.cargo' / 'git' / 'db').mkdir(parents=True)
+        self.run_output = tmp / 'run-output.txt'
+        self.set_root = tmp / 'sets'
+        self.set_root.mkdir()
+        self.set_names('only::one')
+        self.patches = [
+            patch.dict(os.environ, {
+                'PATH': f'{self.bin}:{os.environ["PATH"]}', 'HOME': str(self.home),
+                'FAKE_CALLS': str(self.calls), 'FAKE_NETWORK': 'yes', 'FAKE_CACHE_DIR': str(self.cache),
+                'FAKE_RUN_OUTPUT': str(self.run_output)}),
+            patch.object(self.mod, 'CONTAINER_SETS', self.set_root)]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+        self.run_output.write_text('test only::one ... ok\n')
+
+    def set_names(self, *names):
+        (self.set_root / 'demo.txt').write_text(''.join(n + '\n' for n in names))
+
+    def run_container(self, set_name='demo'):
+        out = io.BytesIO()
+        err = io.StringIO()
+        fake = type('F', (), {'buffer': out, 'flush': lambda s: None})()
+        with patch.object(sys, 'stdout', fake), contextlib.redirect_stderr(err):
+            code = self.mod.run_container('1', 'box', set_name, ['cargo', 'test'], self.repo)
+        return code, out.getvalue(), err.getvalue()
+
+    def log_text(self):
+        folder = self.repo / '.superpowers' / 'pod' / 'test-logs' / '1'
+        logs = sorted(folder.glob('*.log'))
+        self.assertEqual(len(logs), 1)
+        return logs[0].read_text()
+
+    def calls_text(self):
+        return self.calls.read_text()
+
+    def command(self, names=('a::b', 'c::d')):
+        seed = {'index': [Path('/h/.cargo/registry/index/index.crates.io-x')],
+                'cache': Path('/h/.cargo/registry/cache'), 'git': Path('/h/.cargo/git/db')}
+        return self.mod.podman_command(Path('/wt'), Path('/out-dir'), seed, 'harold-tests',
+                                       list(names))
+
+    # Task 1
+    def test_without_container_run_unchanged(self):
+        code = self.mod.main(['1', 'plain', '--', 'echo', 'hi']) if False else None
+        out = io.BytesIO()
+        fake = type('F', (), {'buffer': out, 'flush': lambda s: None})()
+        with patch.object(sys, 'stdout', fake):
+            code = self.mod.run('1', 'plain', ['echo', 'hi'], self.repo)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), b'hi\n')
+        self.assertNotIn('container:', self.log_text())
+        self.assertEqual(self.calls_text(), '')
+
+    # Task 2
+    def test_command_has_isolation_flags(self):
+        cmd = self.command()
+        text = ' '.join(cmd)
+        self.assertEqual(cmd[:2], ['podman', 'run'])
+        for flag in ('--network harold-tests', '--no-hosts', '--cap-drop all',
+                     '--security-opt no-new-privileges', '--read-only', '--user test'):
+            self.assertIn(flag, text)
+        for flag in ('-p', '--publish', '--env-host', '--env-file', '--privileged'):
+            self.assertNotIn(flag, cmd)
+
+    def test_command_mounts_and_tmpfs(self):
+        cmd = self.command()
+        mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-v']
+        self.assertEqual(sorted(mounts), sorted([
+            '/wt:/src:ro',
+            '/h/.cargo/registry/index/index.crates.io-x:/cargo-seed/index/index.crates.io-x:ro',
+            '/h/.cargo/registry/cache:/cargo-seed/cache:ro',
+            '/h/.cargo/git/db:/cargo-seed/git-db:ro',
+            'harold-test-cargo:/cargo', 'harold-test-target:/target', '/out-dir:/out']))
+        tmpfs = [cmd[i + 1] for i, a in enumerate(cmd) if a == '--tmpfs']
+        self.assertEqual(sorted(tmpfs), ['/home/test:mode=0700,uid=1000,gid=1000',
+                                         '/tmp:mode=0700,uid=1000,gid=1000'])
+        self.assertNotIn('sock', ' '.join(cmd))
+
+    def test_command_only_five_env_values(self):
+        cmd = self.command()
+        env = dict(cmd[i + 1].split('=', 1) for i, a in enumerate(cmd) if a == '-e')
+        plain = {k for k in env if not k.startswith('XDG_')}
+        self.assertEqual(plain, {'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'PATH'})
+        self.assertEqual(env['HOME'], '/home/test')
+        self.assertEqual(env['CARGO_HOME'], '/cargo')
+        self.assertEqual(env['CARGO_TARGET_DIR'], '/target')
+        for key, value in env.items():
+            if key.startswith('XDG_'):
+                self.assertTrue(value.startswith('/home/test/'))
+        self.assertEqual(env, self.mod.ENV_VALUES)
+
+    def test_script_seeds_index_and_crates_then_runs_cargo(self):
+        cmd = self.command()
+        script = cmd[cmd.index('-c') + 1]
+        self.assertIn('/cargo-seed/index/', script)
+        self.assertIn('/cargo/registry/index', script)
+        self.assertIn('/cargo-seed/cache', script)
+        self.assertIn('/cargo/git/db', script)
+        self.assertLess(script.index('/cargo-seed'), script.index('cargo test'))
+        self.assertIn('cargo test --locked --offline -p harold --no-default-features '
+                      '--features harold/linux-defaults -- --ignored --exact "$@"', script)
+        self.assertEqual(cmd[-2:], ['a::b', 'c::d'])
+
+    # Task 3
+    def test_machine_stopped_refused(self):
+        os.environ['FAKE_MACHINE'] = 'stopped'
+        self.addCleanup(os.environ.pop, 'FAKE_MACHINE', None)
+        code, _, err = self.run_container()
+        self.assertEqual(code, 1)
+        self.assertIn('podman machine is not running: podman machine start', err)
+        self.assertNotIn('machine start', self.calls_text())
+        self.assertNotIn('cargo fetch', self.calls_text())
+        self.assertFalse((self.repo / '.superpowers').exists())
+
+    def test_network_made_when_missing(self):
+        del os.environ['FAKE_NETWORK']
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 0)
+        self.assertIn('podman network create --internal harold-tests', self.calls_text())
+
+    def test_network_not_made_when_present(self):
+        self.run_container()
+        self.assertNotIn('network create', self.calls_text())
+
+    def test_cargo_fetch_runs_first_outside_and_is_logged(self):
+        code, out, _ = self.run_container()
+        self.assertEqual(code, 0)
+        calls = self.calls_text()
+        self.assertIn('cargo fetch --locked --target aarch64-unknown-linux-gnu\n', calls)
+        self.assertLess(calls.index('cargo fetch --locked'), calls.index('--network harold-tests'))
+        self.assertIn(b'FAKE CARGO FETCH OUTPUT', out)
+        self.assertIn('FAKE CARGO FETCH OUTPUT', self.log_text())
+
+    def test_fetched_line_lists_new_crates_only(self):
+        os.environ['FAKE_NEW_CRATE'] = 'newcrate-2.3.4'
+        self.addCleanup(os.environ.pop, 'FAKE_NEW_CRATE', None)
+        self.run_container()
+        lines = [l for l in self.log_text().splitlines() if l.startswith('# fetched: ')]
+        self.assertEqual(lines, ['# fetched: newcrate-2.3.4'])
+
+    def test_fetched_line_says_none_when_nothing_new(self):
+        self.run_container()
+        self.assertIn('# fetched: none\n', self.log_text())
+
+    def test_fetched_line_uses_cargo_home(self):
+        other = Path(self._tmp.name) / 'ch'
+        (other / 'registry' / 'cache' / 'idx').mkdir(parents=True)
+        (other / 'registry' / 'cache' / 'idx' / 'z-9.crate').write_text('x')
+        with patch.dict(os.environ, {'CARGO_HOME': str(other)}):
+            self.assertEqual(self.mod.cached_crates(), {'z-9'})
+
+    def test_failed_fetch_runs_no_container(self):
+        os.environ['FAKE_CARGO_EXIT'] = '7'
+        self.addCleanup(os.environ.pop, 'FAKE_CARGO_EXIT', None)
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 7)
+        self.assertNotIn('--network harold-tests', self.calls_text())
+
+    def test_header_names_image_and_base_digest(self):
+        self.run_container()
+        text = self.log_text()
+        self.assertIn('# container: sha256:fakeimage from sha256:fakebase\n', text)
+        self.assertIn('# result: passed, ', text.replace('# result: passed\n', '# result: passed, '))
+
+    def test_header_lists_installed_packages_on_one_line(self):
+        self.run_container()
+        text = self.log_text()
+        lines = [l for l in text.splitlines() if l.startswith('# dpkg: ')]
+        self.assertEqual(lines, ['# dpkg: perl=5.36.0-7+deb12u4 protobuf-compiler=3.21.12-3+deb12u1'])
+        self.assertIn('dpkg-query', self.calls_text())
+        self.assertLess(text.index('# dpkg:'), text.index('# finished:'))
+        folder = self.repo / '.superpowers' / 'pod' / 'test-logs' / '1'
+        header, footer = self.mod.read_log(next(folder.glob('*-box.log')))
+        self.assertEqual(header['name'], 'box')
+        self.assertEqual(footer['result'], 'passed')
+
+    def test_command_line_holds_no_env_value(self):
+        self.run_container()
+        header = self.log_text().split('# started:')[0]
+        command = next(l for l in header.splitlines() if l.startswith('# command: '))
+        self.assertIn('cargo test --locked --offline -p harold', command)
+        for value in ('/home/test', '/cargo', '/target', 'HOME=', 'CARGO_HOME'):
+            self.assertNotIn(value, command)
+        self.assertNotIn('podman', command)
+
+    # Task 4
+    def test_missing_ok_line_fails_and_names_test(self):
+        self.set_names('only::one', 'second::two')
+        code, out, _ = self.run_container()
+        self.assertEqual(code, 1)
+        self.assertIn(b'second::two', out)
+        self.assertNotIn(b'did not run: only::one', out)
+        text = self.log_text()
+        self.assertIn('second::two', text)
+        self.assertIn('# exit: 1\n', text)
+        self.assertIn('# result: failed', text)
+
+    def test_all_ok_passes(self):
+        self.set_names('only::one', 'second::two')
+        self.run_output.write_text('test only::one ... ok\ntest second::two ... ok\n')
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 0)
+        self.assertIn('# result: passed\n', self.log_text())
+
+    def test_duplicate_name_counts_as_one(self):
+        self.set_names('only::one', 'only::one')
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 0)
+
+    def test_count_ok_uses_exact_name(self):
+        out = b'test other::only::one ... ok\ntest only::one_more ... ok\n'
+        self.assertEqual(self.mod.count_ok(out, ['only::one']), ['only::one'])
+        self.assertEqual(self.mod.count_ok(out + b'test only::one ... ok\n', ['only::one']), [])
+
+    def test_count_ok_ignores_failed_and_ignored(self):
+        out = b'test a::b ... FAILED\ntest c::d ... ignored\n'
+        self.assertEqual(self.mod.count_ok(out, ['a::b', 'c::d']), ['a::b', 'c::d'])
+
+    def test_same_suffix_run_fails_the_count(self):
+        self.run_output.write_text('test other::only::one ... ok\n')
+        code, out, _ = self.run_container()
+        self.assertEqual(code, 1)
+        self.assertIn(b'only::one', out)
+
+    def test_set_with_comments_counts_only_names(self):
+        (self.set_root / 'demo.txt').write_text('# c\n\nonly::one\n\n')
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 0)
+
+    def test_empty_set_runs_nothing(self):
+        (self.set_root / 'demo.txt').write_text('# nothing\n')
+        with self.assertRaises(SystemExit) as caught:
+            self.run_container()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.calls_text(), '')
+
+    def test_unknown_set_runs_nothing(self):
+        with self.assertRaises(SystemExit):
+            self.run_container('nope')
+        with self.assertRaises(SystemExit):
+            self.run_container('../demo')
+        self.assertEqual(self.calls_text(), '')
+
+    def test_container_failure_keeps_exit_code(self):
+        os.environ['FAKE_RUN_EXIT'] = '101'
+        self.addCleanup(os.environ.pop, 'FAKE_RUN_EXIT', None)
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 101)
+
+    def test_result_file_moved_as_part(self):
+        os.environ['FAKE_OUT_NAME'] = 'harold.log'
+        os.environ['FAKE_OUT_BODY'] = 'plain output\n'
+        self.addCleanup(os.environ.pop, 'FAKE_OUT_NAME', None)
+        self.addCleanup(os.environ.pop, 'FAKE_OUT_BODY', None)
+        code, _, _ = self.run_container()
+        self.assertEqual(code, 0)
+        log = next((self.repo / '.superpowers' / 'pod' / 'test-logs' / '1').glob('*-box.log'))
+        part = log.parent / f'{log.stem}-harold.log'
+        self.assertEqual(part.read_text(), 'plain output\n')
+        self.assertEqual(self.mod.show('1', self.repo)[0]['result'], 'passed')
+
+    def test_secret_result_file_withheld(self):
+        os.environ['FAKE_OUT_NAME'] = 'harold.log'
+        os.environ['FAKE_OUT_BODY'] = 'Authorization: Bearer abc\n'
+        self.addCleanup(os.environ.pop, 'FAKE_OUT_NAME', None)
+        self.addCleanup(os.environ.pop, 'FAKE_OUT_BODY', None)
+        self.run_container()
+        folder = self.repo / '.superpowers' / 'pod' / 'test-logs' / '1'
+        log = next(folder.glob('*-box.log'))
+        self.assertFalse((folder / f'{log.stem}-harold.log').exists())
+        note = (folder / f'{log.stem}-harold.log.withheld').read_text()
+        self.assertEqual(note, 'authorization-header\n')
+        self.assertNotIn('abc', note)
+        for path in folder.iterdir():
+            self.assertNotIn('Bearer abc', path.read_text())
+
+
 if __name__ == '__main__':
     unittest.main()

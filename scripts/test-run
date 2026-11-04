@@ -2,11 +2,14 @@
 """Run a command and keep one log of the run in one format.
 
     test-run <spec id> <name> -- <command...>
+    test-run <spec id> <name> --container <set> -- <cargo args>
     test-run show <spec id>
 
 The log is <base checkout>/.superpowers/pod/test-logs/<spec id>/<UTC time>-<name>.log.
 """
 from datetime import datetime, timezone
+import glob
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -18,6 +21,34 @@ import time
 
 KEBAB = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 RESULT_LINE = re.compile(rb'test result:.*?(\d+) passed; (\d+) failed; (\d+) ignored')
+OK_LINE = re.compile(rb'^test (.+) \.\.\. ok$')
+CONTAINER_SETS = Path(__file__).resolve().parent / 'container-tests'
+IMAGE = 'harold-tests'
+NETWORK = 'harold-tests'
+TEST_IDS = 'uid=1000,gid=1000'
+FETCH = ['cargo', 'fetch', '--locked', '--target', 'aarch64-unknown-linux-gnu']
+CARGO_TEST = ['cargo', 'test', '--locked', '--offline', '-p', 'harold', '--no-default-features',
+              '--features', 'harold/linux-defaults', '--', '--ignored', '--exact']
+ENV_VALUES = {
+    'HOME': '/home/test',
+    'XDG_CONFIG_HOME': '/home/test/.config',
+    'XDG_DATA_HOME': '/home/test/.local/share',
+    'XDG_STATE_HOME': '/home/test/.local/state',
+    'XDG_CACHE_HOME': '/home/test/.cache',
+    'CARGO_HOME': '/cargo',
+    'CARGO_TARGET_DIR': '/target',
+    'PATH': '/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+}
+# Runs in the container. It copies the index cache and the crate files from the read-only
+# seed, then runs cargo. The test names come in as "$@".
+CONTAINER_SCRIPT = """set -e
+mkdir -p /cargo/registry/index /cargo/registry/cache /cargo/git/db
+if [ -d /cargo-seed/index ]; then cp -rn /cargo-seed/index/. /cargo/registry/index/; fi
+if [ -d /cargo-seed/cache ]; then cp -rn /cargo-seed/cache/. /cargo/registry/cache/; fi
+if [ -d /cargo-seed/git-db ]; then cp -rn /cargo-seed/git-db/. /cargo/git/db/; fi
+cd /src
+exec """ + ' '.join(CARGO_TEST) + """ "$@"
+"""
 LOG_DIR = Path('.superpowers') / 'pod' / 'test-logs'
 
 
@@ -101,8 +132,12 @@ def open_log(base, spec_id, name, now):
         return path, os.fdopen(fd, 'wb')
 
 
-def run(spec_id, name, command, cwd=None):
-    """Run the command, keep the log and return the exit code."""
+def run(spec_id, name, command, cwd=None, container=None):
+    """Run the command, keep the log and return the exit code.
+
+    With `container` (a dict from `run_container`), `command` is only the text shown in the
+    header. The runner fetches the crates, then runs the container command.
+    """
     cwd = Path(cwd).resolve() if cwd else Path.cwd()
     for label, value in (('id', spec_id), ('name', name)):
         if not KEBAB.match(value):
@@ -122,11 +157,29 @@ def run(spec_id, name, command, cwd=None):
     header = [('test-run', '1'), ('id', spec_id), ('name', name),
               ('command', shlex.join(command).replace('\r', '\\r').replace('\n', '\\n')), ('cwd', str(cwd)),
               ('commit', commit), ('started', rfc3339(started))]
+    if container:
+        header.insert(6, ('container', container['label']))
+        header.append(('dpkg', container['dpkg']))
     with log:
         log.write(''.join(f'# {k}: {v}\n' for k, v in header).encode())
         log.flush()
         t0 = time.monotonic()
-        code, stopped, tail, matched = execute(command, cwd, env, log)
+        if container:
+            before = cached_crates()
+            code, stopped, tail, matched = execute(FETCH, cwd, env, log)
+            if tail not in (b'', b'\n'):
+                log.write(b'\n')
+            fetched = sorted(cached_crates() - before)
+            log.write(f'# fetched: {" ".join(fetched) or "none"}\n'.encode())
+            if code == 0 and not stopped:
+                out_dir = path.parent / f'{path.stem}.out'
+                out_dir.mkdir()
+                ok_lines = []
+                code, stopped, tail, matched = execute(
+                    container['build'](out_dir), cwd, env, log, ok_lines)
+                code = finish_container(code, out_dir, path, container['names'], ok_lines, log)
+        else:
+            code, stopped, tail, matched = execute(command, cwd, env, log)
         if tail not in (b'', b'\n'):
             log.write(b'\n')
         duration = time.monotonic() - t0
@@ -140,8 +193,11 @@ def run(spec_id, name, command, cwd=None):
     return code
 
 
-def execute(command, cwd, env, log):
-    """Run the command, copy its output. Return (exit code, stopped, last byte, result lines)."""
+def execute(command, cwd, env, log, ok_lines=None):
+    """Run the command, copy its output. Return (exit code, stopped, last byte, result lines).
+
+    When `ok_lines` is a list, it gets each `test <name> ... ok` line.
+    """
     try:
         proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT)
@@ -186,16 +242,178 @@ def execute(command, cwd, env, log):
             lines = (pending + chunk).split(b'\n')
             pending = lines.pop()
             matched += [l for l in lines if RESULT_LINE.search(l)]
+            if ok_lines is not None:
+                ok_lines += [l for l in lines if OK_LINE.match(l)]
         proc.wait()
         proc.stdout.close()
         if RESULT_LINE.search(pending):
             matched.append(pending)
+        if ok_lines is not None and OK_LINE.match(pending):
+            ok_lines.append(pending)
     finally:
         for signum, handler in old.items():
             signal.signal(signum, handler)
     if proc.returncode < 0:
         return 128 - proc.returncode, True, last, matched
     return proc.returncode, bool(forwarded), last, matched
+
+
+def load_set(name, root):
+    """Return the test names of the container test set `name`, in order, with no duplicates."""
+    def refuse(message):
+        print(f'test-run: {message}', file=sys.stderr)
+        raise SystemExit(2)
+    if not KEBAB.match(name):
+        refuse(f'bad container test set {name!r}: use kebab-case')
+    path = Path(root) / f'{name}.txt'
+    if not path.is_file():
+        refuse(f'no container test set {name!r}')
+    names = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and line not in names:
+            names.append(line)
+    if not names:
+        refuse(f'container test set {name!r} has no test names')
+    return names
+
+
+def podman_command(worktree, out, seed, image, names):
+    """Return the `podman run` command line. `seed` holds the Mac's cargo files to mount."""
+    command = ['podman', 'run', '--rm', '--network', NETWORK, '--no-hosts', '--cap-drop', 'all',
+               '--security-opt', 'no-new-privileges', '--read-only', '--user', 'test']
+    mounts = [f'{worktree}:/src:ro']
+    for index in seed.get('index', []):
+        mounts.append(f'{index}:/cargo-seed/index/{Path(index).name}:ro')
+    if seed.get('cache'):
+        mounts.append(f'{seed["cache"]}:/cargo-seed/cache:ro')
+    if seed.get('git'):
+        mounts.append(f'{seed["git"]}:/cargo-seed/git-db:ro')
+    mounts += ['harold-test-cargo:/cargo', 'harold-test-target:/target', f'{out}:/out']
+    for mount in mounts:
+        command += ['-v', mount]
+    for target in ('/tmp', '/home/test'):
+        command += ['--tmpfs', f'{target}:mode=0700,{TEST_IDS}']
+    for key, value in ENV_VALUES.items():
+        command += ['-e', f'{key}={value}']
+    return command + [image, 'sh', '-c', CONTAINER_SCRIPT, 'sh'] + list(names)
+
+
+def count_ok(output, names):
+    """Return the names with no `test <name> ... ok` line in the output, in order."""
+    seen = set()
+    for line in output.splitlines():
+        match = OK_LINE.match(line.rstrip(b'\r'))
+        if match:
+            seen.add(match.group(1).decode('utf-8', 'replace'))
+    return [name for name in names if name not in seen]
+
+
+def first_secret(text):
+    """Use the secret patterns of call_test.py, loaded by file path."""
+    path = Path(__file__).resolve().parent / 'call_test.py'
+    spec = importlib.util.spec_from_file_location('call_test_patterns', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.first_secret(text)
+
+
+def collect_out(out, folder, stem):
+    """Move each result file of `out` to `<folder>/<stem>-<part>`. Return the new paths.
+
+    A file with a secret is not kept. A `.withheld` note names the pattern instead.
+    """
+    moved = []
+    for path in sorted(Path(out).iterdir()):
+        if not path.is_file():
+            continue
+        found = first_secret(path.read_text(errors='replace'))
+        if found is None:
+            target = Path(folder) / f'{stem}-{path.name}'
+            path.replace(target)
+        else:
+            target = Path(folder) / f'{stem}-{path.name}.withheld'
+            target.write_text(found + '\n')
+            path.unlink()
+        moved.append(target)
+    try:
+        Path(out).rmdir()
+    except OSError:
+        pass
+    return moved
+
+
+def finish_container(code, out_dir, path, names, ok_lines, log):
+    """Move the result files, check that every test ran and return the exit code."""
+    collect_out(out_dir, path.parent, path.stem)
+    missing = count_ok(b'\n'.join(ok_lines), names)
+    if missing:
+        msg = ('test-run: these tests did not run: ' + ', '.join(missing) + '\n').encode()
+        log.write(msg)
+        sys.stdout.buffer.write(msg)
+        sys.stdout.buffer.flush()
+        return code or 1
+    return code
+
+
+def cargo_home():
+    return Path(os.environ.get('CARGO_HOME') or Path.home() / '.cargo')
+
+
+def cached_crates():
+    """Return the names (`<crate>-<version>`) of the crate files in the Mac's registry cache."""
+    return {p.name[:-len('.crate')]
+            for p in (cargo_home() / 'registry' / 'cache').glob('*/*.crate')}
+
+
+def podman_out(*args):
+    """Run podman. Return (exit code, output), or (127, '') when podman is missing."""
+    try:
+        done = subprocess.run(['podman', *args], capture_output=True, text=True)
+    except OSError:
+        return 127, ''
+    return done.returncode, done.stdout.strip()
+
+
+def run_container(spec_id, name, set_name, cargo_args, cwd=None):
+    """Run the container test set in a podman container. The cargo command is fixed.
+
+    `cargo_args` (the words after `--`) are not used: the set decides what runs.
+    """
+    cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    names = load_set(set_name, CONTAINER_SETS)
+    code, state = podman_out('machine', 'inspect', '--format', '{{.State}}')
+    if code != 0 or state != 'running':
+        print('test-run: podman machine is not running: podman machine start', file=sys.stderr)
+        return 1
+    if podman_out('network', 'exists', NETWORK)[0] != 0:
+        if podman_out('network', 'create', '--internal', NETWORK)[0] != 0:
+            print(f'test-run: cannot make the podman network {NETWORK}', file=sys.stderr)
+            return 1
+    code, image_id = podman_out('image', 'inspect', '--format', '{{.Id}}', IMAGE)
+    if code != 0 or not image_id:
+        print(f'test-run: no image {IMAGE}: podman build -t {IMAGE} scripts/container-tests',
+              file=sys.stderr)
+        return 1
+    digest = podman_out('image', 'inspect', '--format',
+                        '{{index .Annotations "org.opencontainers.image.base.digest"}}',
+                        IMAGE)[1] or 'unknown'
+    # The packages are read before the log opens: the image does not change during a run.
+    code, packages = podman_out('run', '--rm', '--network', 'none', '--cap-drop', 'all',
+                                '--read-only', '--user', 'test', '--entrypoint', 'dpkg-query',
+                                IMAGE, '-W', '-f', '${Package}=${Version}\\n')
+    dpkg = ' '.join(packages.split()) if code == 0 and packages else 'unknown'
+    top = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd, capture_output=True,
+                         text=True).stdout.strip() or str(cwd)
+    cargo = cargo_home()
+    seed = {'index': [Path(p) for p in sorted(glob.glob(
+                str(cargo / 'registry' / 'index' / 'index.crates.io-*')))],
+            'cache': cargo / 'registry' / 'cache', 'git': cargo / 'git' / 'db'}
+    seed = {k: v for k, v in seed.items() if v and (v if k == 'index' else v.is_dir())}
+    container = {
+        'label': f'{image_id} from {digest}', 'dpkg': dpkg, 'names': names,
+        'build': lambda out: podman_command(top, out, seed, IMAGE, names)}
+    return run(spec_id, name, CARGO_TEST + names, cwd, container)
 
 
 def read_ends(path):
@@ -271,9 +489,11 @@ def main(argv):
             print('  '.join(str(row[k]) for k in
                             ('time', 'name', 'commit', 'seconds', 'result', 'features')).rstrip())
         return 0
+    if len(argv) >= 5 and argv[2] == '--container' and argv[4] == '--':
+        return run_container(argv[0], argv[1], argv[3], argv[5:], Path.cwd())
     if len(argv) >= 4 and argv[2] == '--':
         return run(argv[0], argv[1], argv[3:])
-    print('usage: test-run <spec id> <name> -- <command...>\n       test-run show <spec id>',
+    print('usage: test-run <spec id> <name> -- <command...>\n       test-run <spec id> <name> --container <set> -- <cargo args>\n       test-run show <spec id>',
           file=sys.stderr)
     return 2
 
