@@ -131,9 +131,6 @@ struct Shared {
     known: AtomicU64,
     /// Set after the first warning about a connect that failed, so the warning comes once.
     warned: AtomicBool,
-    /// The backlog's last number when this process opened it. Rows above it are new rows:
-    /// reports this process made before its first `Welcome`.
-    start_last: u64,
     /// Set when the first `Welcome` of this process has been handled.
     welcomed_once: AtomicBool,
     /// Wakes the stream when a report is appended.
@@ -158,7 +155,6 @@ impl SlaveLink {
         timing: Timing,
     ) -> Result<Self, StoreError> {
         let backlog = ReportBacklog::open(&data.join(BACKLOG_FILE)).await?;
-        let start_last = backlog.last_number();
         let shared = Arc::new(Shared {
             name: name.to_owned(),
             version: version.to_owned(),
@@ -166,7 +162,6 @@ impl SlaveLink {
             backlog,
             known: AtomicU64::new(0),
             warned: AtomicBool::new(false),
-            start_last,
             welcomed_once: AtomicBool::new(false),
             wake: Notify::new(),
             timing,
@@ -328,37 +323,32 @@ impl Shared {
 
     /// Handles a `Welcome`: the numbers rise above it, and the reports the master has go.
     ///
-    /// At the first `Welcome` of the process, the old rows (up to `start_last`) go when the
-    /// master has them. The new rows (above `start_last`) never go: when `welcome` is at or
-    /// above `start_last` they are renumbered above `welcome`, so the master does not take
-    /// them as repeats. When `welcome` is below `start_last`, they are already above it.
-    async fn welcomed(&self, welcome: u64) {
+    /// At the first `Welcome` of the process the backlog does it in one transaction
+    /// (`welcome_first`): old rows the master has go, and the provisional rows (made before
+    /// this `Welcome`, also after a crash) get numbers above it. The flag is set only on
+    /// success. After a failure the stream must not send, so the caller ends it, and the next
+    /// `Welcome` tries again.
+    async fn welcomed(&self, welcome: u64) -> bool {
         let own = self.backlog.last_number();
         if welcome > own {
             warn!(own, welcome, "report backlog behind");
         }
         self.known.fetch_max(welcome, Ordering::SeqCst);
-        let first = !self.welcomed_once.swap(true, Ordering::SeqCst);
-        let result = if first {
-            self.first_welcome(welcome).await
-        } else {
+        let result = if self.welcomed_once.load(Ordering::SeqCst) {
             self.backlog.rebase(welcome);
             self.backlog.ack(welcome).await
+        } else {
+            let done = self.backlog.welcome_first(welcome).await;
+            if done.is_ok() {
+                self.welcomed_once.store(true, Ordering::SeqCst);
+            }
+            done
         };
         if let Err(error) = result {
             warn!(slave = %self.name, error = %error, "slave report not kept");
+            return false;
         }
-    }
-
-    async fn first_welcome(&self, welcome: u64) -> crate::store::Result<()> {
-        self.backlog.ack(welcome.min(self.start_last)).await?;
-        if welcome >= self.start_last {
-            self.backlog
-                .renumber_new_above(self.start_last, welcome)
-                .await?;
-        }
-        self.backlog.rebase(welcome);
-        Ok(())
+        true
     }
 
     /// Warns once per process start that a connect failed, and why. Never holds the secret.
@@ -518,7 +508,9 @@ async fn stream_reports(
     locks: &mut watch::Receiver<bool>,
 ) -> Closed {
     // The numbers rise above `Welcome` before any report goes out.
-    shared.welcomed(welcome).await;
+    if !shared.welcomed(welcome).await {
+        return Closed::Network;
+    }
     shared.trim().await;
     // The master needs the newest lock. A kept `Lock` above `Welcome` may say it.
     let current_lock = *locks.borrow_and_update();

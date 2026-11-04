@@ -43,6 +43,9 @@ pub(crate) struct Dropped {
 struct Counters {
     last: u64,
     len: u64,
+    /// The first `Welcome` of this process has been handled. A row appended before it is
+    /// provisional.
+    welcomed: bool,
 }
 
 #[allow(dead_code)]
@@ -50,6 +53,9 @@ pub(crate) struct ReportBacklog {
     _db: turso::Database,
     conn: tokio::sync::Mutex<turso::Connection>,
     counters: Mutex<Counters>,
+    /// A test sets it to make the next `welcome_first` fail once.
+    #[cfg(test)]
+    fail_welcome_first: std::sync::atomic::AtomicBool,
 }
 
 fn at_ms(time: SystemTime) -> i64 {
@@ -83,11 +89,24 @@ impl ReportBacklog {
                 number INTEGER PRIMARY KEY,
                 kind TEXT NOT NULL,
                 payload BLOB NOT NULL,
-                at_ms INTEGER NOT NULL
+                at_ms INTEGER NOT NULL,
+                provisional INTEGER NOT NULL DEFAULT 0
             )",
             (),
         )
         .await?;
+        // A backlog file from before the column existed gets it. Its rows are not provisional.
+        if conn
+            .query("SELECT provisional FROM reports LIMIT 1", ())
+            .await
+            .is_err()
+        {
+            conn.execute(
+                "ALTER TABLE reports ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0",
+                (),
+            )
+            .await?;
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS backlog_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
             (),
@@ -106,7 +125,10 @@ impl ReportBacklog {
             counters: Mutex::new(Counters {
                 last: kept.max(newest),
                 len,
+                welcomed: false,
             }),
+            #[cfg(test)]
+            fail_welcome_first: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -120,21 +142,26 @@ impl ReportBacklog {
         now: SystemTime,
     ) -> Result<u64> {
         let conn = self.conn.lock().await;
-        // Take the number under the counter lock, so `rebase` cannot lower it.
-        let number = {
+        // Take the number and the provisional mark under the counter lock, so `rebase` cannot
+        // lower the number. `welcome_first` holds the connection lock too, so an append is
+        // wholly before it (provisional, and numbered by it) or wholly after it (numbered
+        // above the new last number).
+        let (number, provisional) = {
             let mut counters = self.counters.lock().unwrap();
             counters.last += 1;
-            counters.last
+            (counters.last, !counters.welcomed)
         };
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let written = async {
             conn.execute(
-                "INSERT INTO reports (number, kind, payload, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO reports (number, kind, payload, at_ms, provisional)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
                     number as i64,
                     kind.label(),
                     turso::Value::Blob(payload),
                     at_ms(now),
+                    i64::from(provisional),
                 ),
             )
             .await?;
@@ -187,48 +214,64 @@ impl ReportBacklog {
         self.refresh_len(&conn).await
     }
 
-    /// Gives the rows above `start_last` (in order) the numbers `above + 1`, `above + 2` and so
-    /// on, in one transaction. `above` must be at least `start_last`, so each row moves up or
-    /// stays. The next number is then above the last row.
-    pub(crate) async fn renumber_new_above(&self, start_last: u64, above: u64) -> Result<()> {
+    /// Handles the first `Welcome` of this process, in one transaction.
+    ///
+    /// It deletes the old rows the master has (not provisional, number up to `welcome`). It
+    /// then gives the provisional rows, in order, the numbers above `welcome` and above the
+    /// highest old row left, and clears their mark. The last number is raised to at least
+    /// `welcome`. A failure changes nothing, so the next `Welcome` can try again.
+    pub(crate) async fn welcome_first(&self, welcome: u64) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_welcome_first
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Data("welcome_first failed (test)".into()));
+        }
         let conn = self.conn.lock().await;
-        let mut rows = conn
-            .query(
-                "SELECT kind, payload, at_ms FROM reports WHERE number > ?1 ORDER BY number",
-                (start_last as i64,),
-            )
-            .await?;
-        let mut moving = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let kind = row
-                .get_value(0)?
-                .as_text()
-                .cloned()
-                .ok_or_else(|| StoreError::Data("report kind is not text".into()))?;
-            let payload = row
-                .get_value(1)?
-                .as_blob()
-                .cloned()
-                .ok_or_else(|| StoreError::Data("report payload is not a blob".into()))?;
-            let at = row.get_value(2)?.as_integer().copied().unwrap_or(0);
-            moving.push((kind, payload, at));
-        }
-        drop(rows);
-        if moving.is_empty() {
-            return Ok(());
-        }
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let moved = async {
             conn.execute(
-                "DELETE FROM reports WHERE number > ?1",
-                (start_last as i64,),
+                "DELETE FROM reports WHERE provisional = 0 AND number <= ?1",
+                (welcome as i64,),
             )
             .await?;
-            let mut number = above;
+            let highest_old = one_number(
+                &conn,
+                "SELECT COALESCE(MAX(number), 0) FROM reports WHERE provisional = 0",
+            )
+            .await?;
+            let mut rows = conn
+                .query(
+                    "SELECT kind, payload, at_ms FROM reports WHERE provisional = 1
+                     ORDER BY number",
+                    (),
+                )
+                .await?;
+            let mut moving = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let kind = row
+                    .get_value(0)?
+                    .as_text()
+                    .cloned()
+                    .ok_or_else(|| StoreError::Data("report kind is not text".into()))?;
+                let payload = row
+                    .get_value(1)?
+                    .as_blob()
+                    .cloned()
+                    .ok_or_else(|| StoreError::Data("report payload is not a blob".into()))?;
+                let at = row.get_value(2)?.as_integer().copied().unwrap_or(0);
+                moving.push((kind, payload, at));
+            }
+            drop(rows);
+            conn.execute("DELETE FROM reports WHERE provisional = 1", ())
+                .await?;
+            let mut number = welcome.max(highest_old);
             for (kind, payload, at) in moving {
                 number += 1;
                 conn.execute(
-                    "INSERT INTO reports (number, kind, payload, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO reports (number, kind, payload, at_ms, provisional)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
                     (number as i64, kind, turso::Value::Blob(payload), at),
                 )
                 .await?;
@@ -245,15 +288,25 @@ impl ReportBacklog {
         .await;
         match moved {
             Ok(last) => {
-                let mut counters = self.counters.lock().unwrap();
-                counters.last = counters.last.max(last);
-                Ok(())
+                {
+                    let mut counters = self.counters.lock().unwrap();
+                    counters.last = counters.last.max(last).max(welcome);
+                    counters.welcomed = true;
+                }
+                self.refresh_len(&conn).await
             }
             Err(error) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 Err(error)
             }
         }
+    }
+
+    /// Makes `welcome_first` fail once. For tests.
+    #[cfg(test)]
+    pub(crate) fn fail_welcome_first_once(&self) {
+        self.fail_welcome_first
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The newest number given out. It never goes down.

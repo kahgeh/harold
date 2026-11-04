@@ -227,66 +227,160 @@ async fn trim_counts_too_old_and_too_many_together() {
     assert_eq!(backlog.len(), 1000);
 }
 
-#[tokio::test]
-async fn renumber_new_above_keeps_order_and_leaves_old_rows() {
-    let path = temp_db("renumber");
-    let backlog = ReportBacklog::open(&path).await.unwrap();
-    for payload in [1u8, 2] {
+/// Opens `path`, appends `old` rows, and closes it: they are old rows for the next open.
+async fn with_old_rows(path: &std::path::Path, old: u8) {
+    let backlog = ReportBacklog::open(path).await.unwrap();
+    for payload in 1..=old {
         backlog
             .append(ReportKind::Turn, vec![payload], t0())
             .await
             .unwrap();
     }
-    // The process opened the backlog at last = 2. These three are new rows 3, 4, 5.
-    for payload in [30u8, 40, 50] {
+    backlog.welcome_first(0).await.unwrap();
+}
+
+async fn rows(backlog: &ReportBacklog) -> Vec<(u64, Vec<u8>)> {
+    backlog.after(0).await.unwrap()
+}
+
+#[tokio::test]
+async fn welcome_first_numbers_new_rows_above_a_master_that_is_ahead() {
+    let path = temp_db("wf-ahead");
+    with_old_rows(&path, 2).await;
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    for payload in [30u8, 40] {
         backlog
             .append(ReportKind::Lock, vec![payload], t0())
             .await
             .unwrap();
     }
-    backlog.renumber_new_above(2, 9).await.unwrap();
-    let rows = backlog.after(0).await.unwrap();
-    assert_eq!(
-        rows,
-        vec![
-            (1, vec![1]),
-            (2, vec![2]),
-            (10, vec![30]),
-            (11, vec![40]),
-            (12, vec![50])
-        ]
-    );
-    assert_eq!(backlog.last_number(), 12);
-    assert_eq!(backlog.len(), 5);
-    // The next report is above the last row, and the numbers survive a reopen.
+    assert_eq!(backlog.last_number(), 4);
+    backlog.welcome_first(5).await.unwrap();
+    // Old rows 1 and 2 go (the master has them); the new rows keep their order above 5.
+    assert_eq!(rows(&backlog).await, vec![(6, vec![30]), (7, vec![40])]);
+    assert_eq!(backlog.last_number(), 7);
+    // After the first Welcome a row is not provisional: it only takes the next number.
     assert_eq!(
         backlog
             .append(ReportKind::Turn, vec![9], t0())
             .await
             .unwrap(),
-        13
+        8
     );
-    drop(backlog);
-    let backlog = ReportBacklog::open(&path).await.unwrap();
-    assert_eq!(backlog.last_number(), 13);
-    assert_eq!(backlog.after(9).await.unwrap().len(), 4);
+    backlog.ack(7).await.unwrap();
+    assert_eq!(rows(&backlog).await, vec![(8, vec![9])]);
 }
 
 #[tokio::test]
-async fn renumber_new_above_with_overlapping_numbers_loses_no_row() {
-    let path = temp_db("renumber-overlap");
-    let backlog = ReportBacklog::open(&path).await.unwrap();
-    for payload in [1u8, 2, 3, 4] {
+async fn a_crash_before_the_first_welcome_keeps_the_new_rows() {
+    let path = temp_db("wf-crash");
+    with_old_rows(&path, 2).await;
+    {
+        let backlog = ReportBacklog::open(&path).await.unwrap();
         backlog
-            .append(ReportKind::Turn, vec![payload], t0())
+            .append(ReportKind::Turn, vec![30], t0())
+            .await
+            .unwrap();
+        // The process ends here, before any Welcome.
+    }
+    // The restarted process opens a backlog whose last number is 3. Row 3 is still provisional.
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    assert_eq!(backlog.last_number(), 3);
+    backlog.welcome_first(5).await.unwrap();
+    assert_eq!(rows(&backlog).await, vec![(6, vec![30])]);
+}
+
+#[tokio::test]
+async fn a_wiped_backlog_with_a_crash_and_welcome_7_numbers_the_row_8() {
+    let path = temp_db("wf-wiped");
+    {
+        let backlog = ReportBacklog::open(&path).await.unwrap();
+        backlog
+            .append(ReportKind::Turn, vec![1], t0())
             .await
             .unwrap();
     }
-    // New rows 2, 3, 4 move to 3, 4, 5: the new numbers overlap the old ones.
-    backlog.renumber_new_above(1, 2).await.unwrap();
-    let rows = backlog.after(0).await.unwrap();
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    backlog.welcome_first(7).await.unwrap();
+    assert_eq!(rows(&backlog).await, vec![(8, vec![1])]);
+}
+
+#[tokio::test]
+async fn welcome_first_when_welcome_is_the_highest_old_number() {
+    let path = temp_db("wf-equal");
+    with_old_rows(&path, 2).await;
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    backlog
+        .append(ReportKind::Turn, vec![30], t0())
+        .await
+        .unwrap();
+    backlog.welcome_first(2).await.unwrap();
+    assert_eq!(rows(&backlog).await, vec![(3, vec![30])]);
+}
+
+#[tokio::test]
+async fn welcome_first_when_the_master_is_behind_reuses_no_number() {
+    let path = temp_db("wf-behind");
+    with_old_rows(&path, 4).await;
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    backlog
+        .append(ReportKind::Turn, vec![50], t0())
+        .await
+        .unwrap();
+    backlog.welcome_first(2).await.unwrap();
+    // Rows 3 and 4 are old rows the master lacks. The new row stays above them.
     assert_eq!(
-        rows,
-        vec![(1, vec![1]), (3, vec![2]), (4, vec![3]), (5, vec![4])]
+        rows(&backlog).await,
+        vec![(3, vec![3]), (4, vec![4]), (5, vec![50])]
     );
+}
+
+#[tokio::test]
+async fn a_failed_welcome_first_changes_nothing_and_can_be_tried_again() {
+    let path = temp_db("wf-fail");
+    with_old_rows(&path, 2).await;
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    backlog
+        .append(ReportKind::Turn, vec![30], t0())
+        .await
+        .unwrap();
+    backlog.fail_welcome_first_once();
+    assert!(backlog.welcome_first(5).await.is_err());
+    assert_eq!(
+        rows(&backlog).await,
+        vec![(1, vec![1]), (2, vec![2]), (3, vec![30])]
+    );
+    backlog.welcome_first(5).await.unwrap();
+    assert_eq!(rows(&backlog).await, vec![(6, vec![30])]);
+}
+
+#[tokio::test]
+async fn a_backlog_file_without_the_provisional_column_is_migrated() {
+    let path = temp_db("migrate");
+    {
+        let db = turso::Builder::new_local(&path.to_string_lossy())
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE reports (number INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+             payload BLOB NOT NULL, at_ms INTEGER NOT NULL)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reports (number, kind, payload, at_ms) VALUES (1, 'turn', x'07', 0)",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    assert_eq!(backlog.last_number(), 1);
+    assert_eq!(rows(&backlog).await, vec![(1, vec![7])]);
+    // The old row is not provisional: the master's Welcome deletes it.
+    backlog.welcome_first(1).await.unwrap();
+    assert!(rows(&backlog).await.is_empty());
 }

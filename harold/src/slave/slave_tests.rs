@@ -442,6 +442,8 @@ async fn restart_with_unacked_reports_does_not_apply_a_report_twice() {
                 .await
                 .unwrap();
         }
+        // The rows came from an earlier process: they are old rows, not provisional.
+        backlog.welcome_first(0).await.unwrap();
     };
     seed().await;
     let connector = TestConnector::new(&master);
@@ -753,6 +755,8 @@ async fn seed_locks(data: &Path, rows: u64) {
             .await
             .unwrap();
     }
+    // The rows came from an earlier process: they are old rows, not provisional.
+    backlog.welcome_first(0).await.unwrap();
 }
 
 #[tokio::test]
@@ -788,6 +792,85 @@ async fn new_rows_keep_numbers_when_welcome_is_below_start_last() {
     connector.set_down(false);
     until("early turn applied", || master.sink.sessions() == ["early"]).await;
     assert_eq!(master.sink.turn_numbers(), [5], "no renumbering");
+}
+
+#[tokio::test]
+async fn a_crash_after_a_pre_welcome_write_with_the_master_ahead_keeps_the_row() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 5);
+    let data = slave_data(&secret);
+    seed_locks(&data, 2).await;
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "early")).await;
+    slave.abort();
+    drop(slave);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The restarted process opens a backlog at 3. The row is still provisional.
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    connector.set_down(false);
+    until("early turn applied", || master.sink.sessions() == ["early"]).await;
+    assert_eq!(master.sink.turn_numbers(), [6]);
+    drop(slave);
+}
+
+#[tokio::test]
+async fn a_wiped_backlog_with_a_crash_and_welcome_7_sends_the_row_as_8() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 7);
+    let data = slave_data(&secret);
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "early")).await;
+    slave.abort();
+    drop(slave);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let _slave = start(&connector, &data, &TestSource::new()).await;
+    connector.set_down(false);
+    until("early turn applied", || master.sink.sessions() == ["early"]).await;
+    assert_eq!(master.sink.turn_numbers(), [8]);
+}
+
+#[tokio::test]
+async fn a_failed_welcome_first_sends_nothing_and_is_retried_on_the_next_welcome() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 5);
+    let data = slave_data(&secret);
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "early")).await;
+    slave.shared.backlog.fail_welcome_first_once();
+    connector.set_down(false);
+    until("early turn applied", || master.sink.sessions() == ["early"]).await;
+    // The first Welcome could not renumber, so nothing went out under the old number. The
+    // retry on the next Welcome numbered the row above 5, and the master applied it once.
+    assert_eq!(master.sink.turn_numbers(), [6]);
+    assert!(connector.opens() >= 2);
+}
+
+#[tokio::test]
+async fn a_second_welcome_in_the_same_process_only_acks() {
+    let secret = new_secret();
+    let master = master(&secret);
+    let connector = TestConnector::new(&master);
+    let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
+    slave.report_turn(request("block:1", "a")).await;
+    until("a applied", || master.sink.sessions() == ["a"]).await;
+    until("acked", || slave.shared.backlog.len() == 0).await;
+    connector.cut();
+    slave.report_turn(request("block:1", "b")).await;
+    until("b applied", || master.sink.sessions() == ["a", "b"]).await;
+    until("acked again", || slave.shared.backlog.len() == 0).await;
+    let numbers = master.sink.turn_numbers();
+    assert!(numbers[0] < numbers[1]);
 }
 
 #[tokio::test]
