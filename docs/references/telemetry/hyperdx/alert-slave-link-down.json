@@ -1,0 +1,33 @@
+{
+  "name": "slave-link-down",
+  "note": "slave-link-down",
+  "message": "A slave Harold has not been connected to the master for 30 minutes. Check that the slave's machine is on and awake, then read the slave link lines in the log of the slave.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "slave-link-down",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "max",
+        "valueExpression": "Value",
+        "metricName": "harold.slave_link.connected",
+        "metricType": "gauge",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ],
+    "groupBy": "Attributes['slave']"
+  },
+  "threshold": 1,
+  "thresholdType": "below",
+  "interval": "15m",
+  "numConsecutiveWindows": 2,
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

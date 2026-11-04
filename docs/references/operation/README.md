@@ -288,6 +288,72 @@ systemd stops the user's services when the user logs out, unless lingering is on
 
 Not yet on Linux: speech, the web app, and the line to the phone. The installer writes `[tts] command = ""`, so a `harold speak` line is logged as not spoken. It writes `[telemetry] export = false`, because the local collector runs on the Mac. The installer needs `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. It stops when no Rex server answers.
 
+## The slave link
+
+A **slave** Harold reports its agents, turn ends and questions to a **master** Harold over one gRPC stream, the **slave link**. The Mac's Harold is the master. The Harold on omarchy is the slave. [ADR 34](../../adr/0034-a-slave-harold-reports-to-the-master-over-one-link.md) has the decision. The slave opens the stream and keeps it open. The master never opens it.
+
+### Settings
+
+| Setting | Machine | Meaning |
+| --- | --- | --- |
+| `[slaves] listen` | master | The address of the link listener. Loopback only. The default is `127.0.0.1:4333`. With no `[slaves]` table, the master opens no link listener |
+| `[slaves] names` | master | The slaves that may connect. Each name is a label in `[agent_monitor] rex_hosts` |
+| `[master] address` | slave | The master's `<host>:<port>`. With no `[master]` table, Harold is no slave |
+
+The slave tells the master its own name: the `machine_name` setting of the slave. That name must equal a label in the master's `[slaves] names`. Harold reads these settings at start, so restart Harold after a change.
+
+### Pair a slave, once
+
+1. On the master, run `harold slaves pair omarchy`. It makes a 32-byte secret, the **slave pairing secret**. It keeps the secret in `slaves/omarchy.secret` in the data folder (mode 0600) and prints it once.
+2. On the slave, run `harold master pair <secret> --address <the master's tailnet address and port>`. It keeps the secret in `master.secret` (mode 0600) and writes `[master] address` in `local.toml`.
+3. Add `[slaves]` with `names = ["omarchy"]` to the master's `local.toml`. Restart Harold on both machines.
+4. Publish the link listener on the tailnet. The chief runs this one command on the master, after the release that brings the slave link:
+
+```sh
+tailscale serve --bg --tcp 4333 tcp://127.0.0.1:4333
+```
+
+Port 4333 is the default of `[slaves] listen`. Harold never runs `tailscale` and never changes Tailscale. `tailscale serve` hands each connection to the listener as a local caller, so the secret is the only check. The listener serves `SlaveLink` and nothing else. It refuses a stream with no secret or a wrong secret before it reads a message.
+
+To remove a slave, run `harold slaves unpair omarchy` on the master. It removes the secret, and the next connect is refused.
+
+The tailnet path is not tested until real use. The first real run of the slave link is its first test.
+
+### What happens while the link is up
+
+- The master takes the slave's agents from the slave's snapshot and skips its Rex inventory of that label. Each agent keeps its host pane id, `rex:omarchy/block:<id>`, so its row does not move.
+- A turn end or a question from a slave's agent goes through the master's own turn-end path. It reaches your phone as one from the Mac does.
+- The master counts each report once. It keeps the last report number it applied for each slave in `slaves/<name>.json`.
+- The lock of the slave's machine decides if you are at the desk or away for the slave's agents.
+
+### What happens while the link is down
+
+- The slave keeps working alone. It keeps each report it has not yet sent in `report-backlog.db`, for up to 24 hours or 1,000 reports. It sends the reports the master has not had when the link comes back. It drops older reports and counts them (the `slave report dropped` line).
+- The master reads the slave's agents through Rex again, read-only, as before.
+- Until the link comes back, a turn end or a question from the slave's agents does not reach your phone.
+- A reply that you write on your phone for a slave's agent cannot be typed yet. Requests from the master to the slave are planned in 2c.2.
+
+### A paired slave tells you nothing itself
+
+A paired slave sends no phone message, no push, no spoken line and no todo for a turn end or a question. It records the turn in its own store and sends it to the master. Only the master delivers it. An unpaired Linux Harold keeps its stand-alone behavior.
+
+### No recap crosses the link
+
+The answer to the open question is No. The recap text of a slave's agent does not cross the link. The master's row shows the agent's state and step, with no recap. The slave sends no transcript path.
+
+### When `slave-link-down` fires
+
+The alert `slave-link-down` fires when a slave's `harold.slave_link.connected` stays 0 for 30 minutes. Do these steps.
+
+1. Check that the slave's machine is on and awake.
+2. Check that Harold runs on the slave: `harold` is up and `haroldctl status` answers.
+3. Read the `slave link` lines in the slave's `harold.log`. `slave link not opened` has a `reason`: `no_secret` (the slave has no `master.secret`), `refused` (the secret does not match) or `version` (the versions differ).
+4. Read the `slave link refused` and `slave link closed` lines in the master's `harold.log`. A `refused` line with `unknown_slave` means the slave's `machine_name` is not in `[slaves] names`, or the master has no secret for it.
+5. Check that the `tailscale serve` command of the pairing step 4 is still active: `tailscale serve status`.
+6. Pair again when the secret does not match: run `harold slaves unpair` and `harold slaves pair`, then `harold master pair`.
+
+To silence the alert for a long time off, remove the name from `[slaves] names`. [The telemetry reference](../telemetry/README.md#slave-link) has the metrics and the log lines.
+
 ## Shutdown
 
 `haroldctl stop` disables the job, unloads it, and waits for its process to stop within a bounded period. A clean shutdown exits 0 and marks the crash file `clean`. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The agent monitor has a bounded shutdown deadline.

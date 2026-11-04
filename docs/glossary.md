@@ -33,7 +33,14 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | pane, pane id | The tmux pane or the Rex block an agent runs in, and its id. The id has three forms: `%47` (tmux, this machine), `block:01a1…` (Rex, this machine) and `rex:omarchy/block:01a1…` (Rex, a Rex host; see host pane id). The first two are the local forms | "pane address", "target" |
 | Rex host | Another machine's Rex server that this Mac's Rex knows by a label, such as `omarchy`. Harold reads the agents of the hosts in `[agent_monitor] rex_hosts`, read-only. `rex hosts list` lists the hosts, and `rex -S <label>` reaches one | "node" |
 | agent on a Rex host | An agent in a Rex host's pane. Harold shows it in the control-tower and does nothing else with it. In the code: `RexHostAgent` | "remote agent" |
-| host pane id | The pane id of an agent on a Rex host, `rex:<label>/block:<id>`. No writer takes it | "remote id", "qualified id", "pane address" |
+| host pane id | The pane id of an agent on a Rex host, `rex:<label>/block:<id>`. No writer on the master types into it. The master will send a type request to the slave that holds the pane (planned in 2c.2) | "remote id", "qualified id", "pane address" |
+| master | The Harold that your phone, the chief and the control-tower talk to: the Mac's | "hub", "primary" |
+| slave | A Harold on another machine that reports its agents to the master: omarchy's. In 2c.2 it will also do the master's requests | "satellite", "replica", "member" |
+| slave link | The one gRPC stream a slave opens to the master and keeps open, carrying reports up (and, in 2c.2, requests down) | "link" alone (a todo's link field), "tunnel", "peer connection" |
+| report (on a slave link) | One message a slave sends up: a snapshot, a turn end or a lock state | "event" (an event is in Harold's event store) |
+| report backlog | The reports a slave has not yet had acknowledged by the master, kept in `report-backlog.db` for up to 24 hours or 1,000 reports | "outbox" (the state database's list of delivery work), "queue" |
+| slave pairing secret | The one-time 32-byte secret that `harold slaves pair` prints on the master and `harold master pair` keeps on the slave. It is the only check of a slave link | "pairing code" (that is the phone's fixed code), "token", "password" |
+| type request (planned in 2c.2) | A master's request on a slave link to type one line into a slave's pane. Not built yet | "command" |
 | host icon | The mark name that `[agent_monitor.rex_host_marks]` gives a host, `arch`, `linux` or `mac`, keyed by a label in `rex_hosts` or by Harold's own `machine_name`. A host with no entry has none | "host logo", "host image" |
 | host marker | The glyph, emoji or label and dot that the control-tower's WHERE column shows before the session of an agent: the mark of its host icon, or, in text mode, the label of a Rex host | "host badge", "icon prefix", "host tag" |
 | exited block | A Rex block whose program has exited. Rex keeps it, with its `last_exit`, and it holds no agent | "dead pane", "zombie block" |
@@ -342,7 +349,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | give up | The delivery handler marks an outbox row as failed for good, after its 10th failed try, or after `LONGEST_INVENTORY_WAIT` while the inventory fails | "drop", "abandon" |
 | delivery handler | The part of Harold that reads the outbox, checks the `[notify]` settings and whether the user is at the desk, then leaves out or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
 | channel listener | The part of Harold that receives replies from the away channel and records each in the event stream | "poller", "watcher" for it |
-| snapshot | The complete current view of every agent, as the control-tower receives it | — |
+| snapshot | The complete current view of every agent, as the control-tower receives it. On a master, it includes each slave's agents, from the slave's snapshot over the slave link | — |
 | snapshot publisher | The part of Harold that sends snapshots to clients | — |
 | `WatchAgentStates` | The gRPC stream that sends a client a snapshot when it connects, then each new one | — |
 | grace period | How long a hook's or a report's state wins over the screen: `hook_grace_ms`, 2 seconds, and `report_grace_ms`, 30 seconds | — |

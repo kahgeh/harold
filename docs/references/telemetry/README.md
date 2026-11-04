@@ -619,14 +619,26 @@ The dashboard group "Knowledge index" holds the six cards. They read `otel.otel_
 
 ## Slave link
 
-A master Harold logs the life of each slave link. No line holds a secret, a typed line or a turn's text.
+A master Harold and a slave Harold both log the life of a slave link. No line holds a secret, a typed line or a turn's text. The slave names itself with its `machine_name` setting. That name must equal a label in the master's `[slaves] names`.
 
 | Line | Fields |
 |---|---|
-| `slave link opened` (`info`) | `slave`, `welcome` (the last report number the master holds), `version` |
-| `slave link closed` (`info`) | `slave`, `reason` (`slave_gone`, `master_gone`, `network`, `shutdown`) |
-| `slave link refused` (`warn`) | `reason` (`bad_secret`, `unknown_slave`, `version`) |
-| `report backlog behind` (`warn`) | `own` (the slave's last report number), `welcome` (the master's number) |
+| `slave link opened` (`info`, master and slave) | `slave`, `welcome` (the last report number the master holds), `version` (on the master) |
+| `slave link closed` (`info`, master and slave) | `slave`, `reason` (on the master: `slave_gone`, `master_gone`, `network`, `shutdown`; on the slave: `master_gone`, `network`) |
+| `slave link refused` (`warn`, master) | `reason` (`bad_secret`, `unknown_slave`, `version`), and `slave` when the stream named a slave |
+| `slave link not opened` (`warn`, slave, once for each start) | `slave`, `reason` (`no_secret`, `refused`, `version`) |
+| `report backlog behind` (`warn`, slave) | `own` (the slave's last report number), `welcome` (the master's number) |
+| `slave report dropped` (`warn`, slave) | `count`, `reason` (`too_old`: older than 24 hours; `too_many`: more than 1,000 reports) |
+| `screen lock unknown` (`warn`, slave on Linux, once for each start) | `reason` (`pgrep_failed`, `loginctl_failed`, `no_display_session`) |
+
+Four questions lead to these lines and to the three `harold.slave_link` metrics.
+
+1. *Is the slave connected?* The gauge `harold.slave_link.connected` is 1 while the link is up. The alert `slave-link-down` fires when it stays 0 for 30 minutes. Read the `slave link closed` and `slave link refused` lines on the master, then the slave's own `harold.log`. A `slave link not opened` line with `reason` `refused` means the secret on the slave does not match the master's: pair again.
+2. *Do the reports arrive?* The counter `harold.slave_link.reports` counts each report as `applied` or `duplicate`. More `duplicate` than a tenth of `applied` in a day means the acknowledgements get lost. Read the `welcome` number of the `slave link opened` line.
+3. *Is the slave holding reports back?* The gauge `harold.slave_link.backlog` is the number of reports that the master has not acknowledged. It stays near 0 while the link is up. Above 100 for 10 minutes means a gap. The `slave report dropped` line shows when the 24-hour or the 1,000-report limit dropped reports.
+4. *Does a reply reach the slave's agent?* Planned in 2c.2: a counter and a log line for the requests. Nothing records this yet.
+
+The dashboard has no card for these metrics yet. The two notes above (info) are read from the counter and the gauge directly.
 
 ## Watch pauses and reminders
 
@@ -954,6 +966,7 @@ The disk is the one that holds the home folder. No path is sent.
 | `agent-recaps-stopped` | For one `provider_id`, no read found a recap for 72 hours. Severity: warn. Action: look for `away_summary` lines in one current transcript and in Claude Code's release notes, then ask for a spec that follows the new format. Expected rate: 0. The threshold is 3 days, because 2 days of the last 16 had no recap | sum of `harold.agent.recap_read` with `result` `found`, grouped by `provider_id`, below 1 in each of 3 windows of 1 day in a row. The second condition of the spec, `none` at 100 or more, cannot be written in a HyperDX alert |
 | `work-rotation-failed` | A work file did not rotate: Harold logged `work rotation failed` at least once in a day. The line is logged once when a failure begins for a file, and not again for its daily retries, so the alert fires once for each failure. Severity: warn. Action: read the line's `file` and `reason` (`count_mismatch`, `write_failed` or `rename_failed`) and the work data folder `tools/work/`. Expected rate: never | count of the log lines `ServiceName = 'harold' AND Body = 'work rotation failed'` above 0, over 1 day, on the logs source |
 | `agent-blocked-long` | An agent has been blocked for 15 minutes: Harold counts one for each blocked spell and logs `agent blocked long` (`warn`, fields `pane_id`, `provider_id`, no agent text) once. Severity: warn. Action: go to the agent named by `pane_id` and answer it. Expected rate: under 1 a day | sum of `harold.agent.blocked_long` above 0, every 5 minutes. HyperDX's reading is right, because of the 0 points at start. The alert reads the counter, as every other definition reads a metric; the log line is for diagnosis |
+| `slave-link-down` | A slave Harold was not connected to the master for 30 minutes. Severity: warn. Action: check that the slave's machine is on and awake, then read the `slave link` lines in its `harold.log` and the `slave link closed` and `slave link refused` lines on the master. To silence it for a long time off, remove the name from `[slaves] names`. Expected rate: each time the slave's machine is off or asleep for over 30 minutes. While the link is down, the slave's turn ends and questions do not reach the phone, and a card shows that only to someone who looks | `max` of `harold.slave_link.connected` below 1, grouped by `slave`, every 15 minutes, for 2 windows in a row. The gauge is 0 from the start for each name in `[slaves] names`, so a slave that never connects fires too. Harold's alert address keeps one state for each alert name, so with two slaves a `cleared` can come while the other is still down |
 | `disk-low` | A home disk was 90% full or more for 30 minutes. Severity: warn. Action: look today, then free space. Expected rate: 0 a month on the Mac, whose home disk was 56% full on 25 October | `max` of `system.filesystem.utilization` over every machine, not grouped, above 0.9, every 15 minutes, for 2 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
@@ -1066,7 +1079,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the eleven alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the twelve alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -1189,7 +1202,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -1221,7 +1234,7 @@ fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Mach
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -1234,7 +1247,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
