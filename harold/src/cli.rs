@@ -43,6 +43,8 @@ pub(crate) enum Mode {
     Tool(ToolCommand),
     App(AppCommand),
     StartControlTower(StartControlTowerArgs),
+    Slaves(crate::slave::pairing::SlavesCommand),
+    Master(crate::slave::pairing::MasterCommand),
 }
 
 /// A `harold app` command: the web app's pairing and its paired devices.
@@ -71,6 +73,37 @@ fn parse_app(args: &[&str]) -> Result<AppCommand, String> {
             name: (*name).into(),
         }),
         _ => Err(APP_USAGE_LINE.into()),
+    }
+}
+
+const SLAVES_USAGE_LINE: &str = "invalid argument: usage is harold slaves pair NAME | unpair NAME";
+const MASTER_USAGE_LINE: &str =
+    "invalid argument: usage is harold master pair SECRET --address HOST:PORT";
+
+fn parse_slaves(args: &[&str]) -> Result<crate::slave::pairing::SlavesCommand, String> {
+    use crate::slave::pairing::SlavesCommand;
+    match args {
+        ["pair", name] if !name.is_empty() && !name.starts_with('-') => Ok(SlavesCommand::Pair {
+            name: (*name).into(),
+        }),
+        ["unpair", name] if !name.is_empty() && !name.starts_with('-') => {
+            Ok(SlavesCommand::Unpair {
+                name: (*name).into(),
+            })
+        }
+        _ => Err(SLAVES_USAGE_LINE.into()),
+    }
+}
+
+fn parse_master(args: &[&str]) -> Result<crate::slave::pairing::MasterCommand, String> {
+    match args {
+        ["pair", secret, "--address", address] if !secret.starts_with('-') => {
+            Ok(crate::slave::pairing::MasterCommand::Pair {
+                secret: (*secret).into(),
+                address: (*address).into(),
+            })
+        }
+        _ => Err(MASTER_USAGE_LINE.into()),
     }
 }
 
@@ -1721,6 +1754,8 @@ impl Mode {
             [START_CONTROL_TOWER_COMMAND, rest @ ..] => {
                 parse_start_control_tower(rest).map(Self::StartControlTower)
             }
+            ["slaves", rest @ ..] => parse_slaves(rest).map(Self::Slaves),
+            ["master", rest @ ..] => parse_master(rest).map(Self::Master),
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
                 Ok(Self::Diagnostics { delay_seconds: 10 })
@@ -4772,6 +4807,40 @@ mod tests {
         assert!(text.contains("passages: 108"));
         assert!(text.contains("no pass has succeeded yet"));
         assert!(text.contains("searches answer from the last index"));
+    }
+
+    #[test]
+    fn slaves_and_master_commands_parse() {
+        use crate::slave::pairing::{MasterCommand, SlavesCommand};
+        assert_eq!(
+            parse(&["slaves", "pair", "omarchy"]),
+            Ok(Mode::Slaves(SlavesCommand::Pair {
+                name: "omarchy".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["slaves", "unpair", "omarchy"]),
+            Ok(Mode::Slaves(SlavesCommand::Unpair {
+                name: "omarchy".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["master", "pair", "abc", "--address", "mac:4333"]),
+            Ok(Mode::Master(MasterCommand::Pair {
+                secret: "abc".into(),
+                address: "mac:4333".into()
+            }))
+        );
+        for bad in [
+            vec!["slaves"],
+            vec!["slaves", "pair"],
+            vec!["slaves", "pair", "--all"],
+            vec!["slaves", "list"],
+            vec!["master", "pair", "abc"],
+            vec!["master", "pair", "abc", "--address"],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

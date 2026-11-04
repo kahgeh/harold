@@ -134,3 +134,14 @@ command = "say"
 # enabled = true
 # server = "/Users/you/typedb-3.14.1/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
 # idle_minutes = 10                                # stop TypeDB after this many minutes without a graph call
+
+# The slave link, on the master Mac: a slave Harold on another machine reports its agents here.
+# Pair with `harold slaves pair NAME`. Absent: no link listener.
+# [slaves]
+# listen = "127.0.0.1:4333"        # loopback only; publish it with `tailscale serve --bg --tcp 4333 tcp://127.0.0.1:4333`
+# names = ["omarchy"]              # each a label in [agent_monitor] rex_hosts
+
+# On a slave machine: where its master listens. `harold master pair SECRET --address HOST:PORT` writes it.
+# Absent: this Harold is no slave.
+# [master]
+# address = "your-mac.your-tailnet.ts.net:4333"

@@ -16,6 +16,7 @@ mod projector;
 mod remote_order;
 mod restart_reminder;
 mod settings;
+mod slave;
 mod store;
 mod telemetry;
 mod timed_prompts;
@@ -1573,6 +1574,10 @@ fn print_help() {
     println!("                          clears the lock and the wrong tries. Never shows the code");
     println!("  harold app devices      List the devices paired with the web app");
     println!("  harold app unpair NAME  Remove a paired device; its next request is refused");
+    println!("  harold slaves pair NAME   Pair the slave NAME; prints its secret once");
+    println!("  harold slaves unpair NAME Remove the secret of NAME; its next connect is refused");
+    println!("  harold master pair SECRET --address HOST:PORT");
+    println!("                          On a slave: keep the secret and write [master] address");
     println!("  harold tool questions put");
     println!(
         "                          Add a question from JSON on stdin; prints its id and version"
@@ -1830,6 +1835,8 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::Tool(_)
             | cli::Mode::App(_)
             | cli::Mode::StartControlTower(_)
+            | cli::Mode::Slaves(_)
+            | cli::Mode::Master(_)
     );
     let launchd = started_by_launchd(&mode);
     // Before `load`, which would deserialise (or reject) the settings this names.
@@ -1899,6 +1906,38 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
                 Err(line) => line,
             };
             exit_with_line(&line);
+        }
+        cli::Mode::Slaves(ref command) => {
+            let data = std::path::PathBuf::from(settings.store.resolved_path());
+            let data = data
+                .parent()
+                .unwrap_or(std::path::Path::new(""))
+                .to_path_buf();
+            let names = settings
+                .slaves
+                .as_ref()
+                .map(|slaves| slaves.names.clone())
+                .unwrap_or_default();
+            match slave::pairing::run_slaves(&data, &names, command) {
+                Ok(text) => println!("{text}"),
+                Err(line) => exit_with_line(&line),
+            }
+            return Ok(());
+        }
+        cli::Mode::Master(slave::pairing::MasterCommand::Pair {
+            ref secret,
+            ref address,
+        }) => {
+            let data = std::path::PathBuf::from(settings.store.resolved_path());
+            let data = data
+                .parent()
+                .unwrap_or(std::path::Path::new(""))
+                .to_path_buf();
+            match slave::pairing::run_master(&data, &settings::local_toml_path(), secret, address) {
+                Ok(text) => println!("{text}"),
+                Err(line) => exit_with_line(&line),
+            }
+            return Ok(());
         }
         cli::Mode::App(ref command) => {
             let address = settings.grpc.addr()?.to_string();

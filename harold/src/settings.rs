@@ -1782,6 +1782,73 @@ pub struct Settings {
     /// The home-screen app. Off when the section is absent.
     #[serde(default)]
     pub(crate) web_app: Option<WebAppSettings>,
+    /// The slave link listener, on a master. Off when the section is absent.
+    #[serde(default)]
+    pub(crate) slaves: Option<SlavesSettings>,
+    /// The master this Harold reports to, on a slave. Off when the section is absent.
+    #[serde(default)]
+    pub(crate) master: Option<MasterSettings>,
+}
+
+/// `[slaves]`: the link listener and the slaves that may use it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SlavesSettings {
+    /// The link listener's address. Loopback only.
+    #[serde(default = "default_slaves_listen")]
+    pub(crate) listen: String,
+    /// The slaves, each a label in `[agent_monitor] rex_hosts`.
+    #[serde(default)]
+    pub(crate) names: Vec<String>,
+}
+
+fn default_slaves_listen() -> String {
+    "127.0.0.1:4333".into()
+}
+
+/// `[master]`: where this slave reaches its master.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MasterSettings {
+    /// `<host>:<port>` of the master's link listener.
+    pub(crate) address: String,
+}
+
+/// What is wrong with `[slaves]` and `[master]`.
+fn link_errors(
+    slaves: Option<&SlavesSettings>,
+    master: Option<&MasterSettings>,
+    monitor: &AgentMonitorSettings,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(slaves) = slaves {
+        match slaves.listen.parse::<SocketAddr>() {
+            Ok(address) if address.ip().is_loopback() => {}
+            _ => errors.push(format!(
+                "slaves.listen must be a loopback address and port: {}",
+                slaves.listen
+            )),
+        }
+        let mut seen = std::collections::HashSet::new();
+        for name in &slaves.names {
+            if !monitor.rex_hosts.contains(name) {
+                errors.push(format!(
+                    "slaves.names must each be a label in agent_monitor.rex_hosts: {name}"
+                ));
+            } else if !seen.insert(name.as_str()) {
+                errors.push(format!("duplicate slaves.names: {name}"));
+            }
+        }
+    }
+    if let Some(master) = master
+        && !crate::slave::pairing::valid_address(&master.address)
+    {
+        errors.push(format!(
+            "master.address must be <host>:<port>: {}",
+            master.address
+        ));
+    }
+    errors
 }
 
 impl Settings {
@@ -1812,6 +1879,11 @@ impl Settings {
         errors.extend(web_app_errors(
             self.web_app.as_ref(),
             self.notify.chief.as_deref(),
+        ));
+        errors.extend(link_errors(
+            self.slaves.as_ref(),
+            self.master.as_ref(),
+            &self.agent_monitor,
         ));
         #[cfg(feature = "imessage")]
         {
@@ -1861,6 +1933,12 @@ const AWAY_CHANNEL_REMOVED: &str = "notify.away_channel is no longer read: Harol
 const GRPC_HOST_NOT_LOOPBACK: &str = "grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.";
 
 /// The config directory and environment name `load` reads from.
+/// The path of the local config file, `local.toml` unless `HAROLD_ENV` names another.
+pub(crate) fn local_toml_path() -> std::path::PathBuf {
+    let (config_dir, env) = config_location();
+    std::path::Path::new(&config_dir).join(format!("{env}.toml"))
+}
+
 fn config_location() -> (String, String) {
     let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
     let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {
@@ -2907,6 +2985,55 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             .into_iter()
             .filter(|e| e.contains("rex_host") || e.contains("host_marker"))
             .collect()
+    }
+
+    #[test]
+    fn names_must_be_rex_hosts() {
+        let ok = crate::settings::settings_with(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]\n[slaves]\nnames = [\"omarchy\"]",
+        );
+        assert!(
+            ok.validate().iter().all(|e| !e.contains("slaves")),
+            "{:?}",
+            ok.validate()
+        );
+        let slaves = ok.slaves.as_ref().unwrap();
+        assert_eq!(slaves.listen, "127.0.0.1:4333");
+        let bad = crate::settings::settings_with(
+            "[agent_monitor]\nmultiplexer = \"rex\"\nrex_hosts = [\"omarchy\"]\n[slaves]\nnames = [\"nas\"]",
+        );
+        assert_eq!(
+            bad.validate()
+                .into_iter()
+                .filter(|e| e.contains("slaves"))
+                .collect::<Vec<_>>(),
+            vec!["slaves.names must each be a label in agent_monitor.rex_hosts: nas".to_string()]
+        );
+    }
+
+    #[test]
+    fn slaves_listen_must_be_loopback_and_master_address_needs_a_port() {
+        let wide = crate::settings::settings_with("[slaves]\nlisten = \"0.0.0.0:4333\"");
+        assert!(
+            wide.validate()
+                .iter()
+                .any(|e| e.starts_with("slaves.listen"))
+        );
+        let bad = crate::settings::settings_with("[master]\naddress = \"mac\"");
+        assert!(
+            bad.validate()
+                .iter()
+                .any(|e| e.starts_with("master.address"))
+        );
+        let good = crate::settings::settings_with("[master]\naddress = \"mac.ts.net:4333\"");
+        assert!(good.validate().iter().all(|e| !e.starts_with("master")));
+    }
+
+    #[test]
+    fn no_slaves_table_means_no_listener() {
+        let shipped = crate::settings::settings_with("");
+        assert!(shipped.slaves.is_none());
+        assert!(shipped.master.is_none());
     }
 
     #[test]
