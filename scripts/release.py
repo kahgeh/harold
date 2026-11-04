@@ -88,9 +88,15 @@ class Recorder:
                '--attr', 'result=' + ','.join(RESULTS),
                '--attr', 'step=' + ','.join(STEP_NAMES))
 
-    def __init__(self, cwd):
+    def __init__(self, cwd, prefix):
         self.cwd = cwd
+        self.prefix = Path(prefix)
         self.start = 0
+
+    def program(self):
+        """The installed `<prefix>/harold/harold` when it can run, else `harold` from PATH."""
+        path = self.prefix / 'harold' / 'harold'
+        return str(path) if path.is_file() and os.access(str(path), os.X_OK) else 'harold'
 
     def left(self):
         return RECORD_BUDGET - (clock() - self.start)
@@ -109,12 +115,14 @@ class Recorder:
             left = self.left()
             if left <= 0:
                 return 'the {} second budget is spent'.format(RECORD_BUDGET)
-            done = run(('harold', 'tool', 'telemetry') + args, self.cwd, merge=True,
+            done = run((self.program(), 'tool', 'telemetry') + args, self.cwd, merge=True,
                        timeout=min(CALL_LIMIT, left))
             if not done.returncode:
                 return None
+            if done.returncode == 127:
+                return 'harold cannot be run'
             reason = 'harold tool telemetry {} exited {}'.format(args[0], done.returncode)
-            if done.returncode == 127 or attempt == 2 or self.left() <= RETRY_WAIT:
+            if attempt == 2 or self.left() <= RETRY_WAIT:
                 return reason
             sleep(RETRY_WAIT)
         return reason
@@ -652,7 +660,7 @@ def main(argv=None, cwd=REPO_ROOT):
     if attempt:
         # The release's code is known before anything is recorded, and recording never changes it.
         step = 'none' if result == 'ok' else attempt.current or 'checks'
-        reason = Recorder(cwd).record(result, step, attempt.seconds)
+        reason = Recorder(cwd, prefix_of(cwd, args.prefix)).record(result, step, attempt.seconds)
         if reason:
             print('release attempt not recorded: {}'.format(reason), file=sys.stderr)
     if unexpected:

@@ -43,6 +43,11 @@ def done(argv, code=0, stdout='', stderr=''):
     return subprocess.CompletedProcess(argv, code, stdout, stderr)
 
 
+def is_harold(program):
+    """True for `harold` on PATH and for the installed `<prefix>/harold/harold`."""
+    return program == 'harold' or program.endswith('/harold/harold')
+
+
 def option(args, name):
     """The value after `name` in `args`, or None."""
     return args[args.index(name) + 1] if name in args else None
@@ -282,7 +287,7 @@ class ReleaseTestCase(unittest.TestCase):
     def fake_run(self, argv, cwd, inherit=False, merge=False, timeout=None):
         argv = [str(item) for item in argv]
         self.calls.append(argv)
-        if argv[0] == 'harold':
+        if is_harold(argv[0]):
             return self.fake_harold(argv, timeout)
         if argv[0] == 'git':
             return REAL_RUN(argv, cwd, inherit=inherit, merge=merge)
@@ -366,7 +371,7 @@ class ReleaseTestCase(unittest.TestCase):
 
 def harold_calls(test):
     """The `harold` calls of the test, each without the leading `harold tool telemetry`."""
-    return [call[3:] for call in test.calls if call[0] == 'harold']
+    return [call[3:] for call in test.calls if is_harold(call[0])]
 
 
 class RunTests(unittest.TestCase):
@@ -389,8 +394,8 @@ class RecorderTests(ReleaseTestCase):
                '--attr', 'result=ok,failed,stopped',
                '--attr', 'step=checks,local_tests,publish,github_build,install']
 
-    def record(self, result='ok', step='none', seconds=None):
-        return release.Recorder(self.work).record(result, step, {'checks': 3.0, 'publish': 7.4}
+    def record(self, result='ok', step='none', seconds=None, prefix=None):
+        return release.Recorder(self.work, prefix or self.prefix).record(result, step, {'checks': 3.0, 'publish': 7.4}
                                                   if seconds is None else seconds)
 
     def test_the_declarations_come_before_the_counts(self):
@@ -400,7 +405,64 @@ class RecorderTests(ReleaseTestCase):
             ['count', 'harold.release.attempts', '--attr', 'result=ok', '--attr', 'step=none'],
             ['count', 'harold.release.seconds', '3', '--attr', 'result=ok', '--attr', 'step=checks'],
             ['count', 'harold.release.seconds', '7', '--attr', 'result=ok', '--attr', 'step=publish']])
-        self.assertEqual(self.calls[0][:3], ['harold', 'tool', 'telemetry'])
+        self.assertEqual(self.calls[0][1:3], ['tool', 'telemetry'])
+
+    def install_program(self, prefix, mode=0o755):
+        program = prefix / 'harold' / 'harold'
+        program.parent.mkdir(parents=True)
+        program.write_text('#!/bin/sh\n')
+        program.chmod(mode)
+        return program
+
+    def test_the_installed_program_runs_by_its_full_path(self):
+        program = self.install_program(self.prefix)
+        self.assertIsNone(self.record())
+        self.assertEqual(self.calls[0][0], str(program))
+
+    def test_the_default_prefix_is_used_when_none_is_given(self):
+        self.pack()
+        program = self.install_program(release.DEFAULT_PREFIX)
+        self.main('release')
+        self.assertEqual(self.calls[-1][0], str(program))
+
+    def test_a_given_prefix_is_used(self):
+        self.pack()
+        given = self.root / 'given prefix'
+        program = self.install_program(given)
+        self.main('release', '--prefix', str(given))
+        self.assertEqual(self.calls[-1][0], str(program))
+
+    def test_no_installed_program_falls_back_to_path(self):
+        self.assertIsNone(self.record())
+        self.assertEqual(self.calls[0][0], 'harold')
+
+    def test_a_program_that_is_not_executable_falls_back_to_path(self):
+        self.install_program(self.prefix, 0o644)
+        self.assertIsNone(self.record())
+        self.assertEqual(self.calls[0][0], 'harold')
+
+    def test_a_folder_named_harold_in_the_bundle_falls_back_to_path(self):
+        (self.prefix / 'harold' / 'harold').mkdir(parents=True)
+        self.assertIsNone(self.record())
+        self.assertEqual(self.calls[0][0], 'harold')
+
+    def test_a_program_that_cannot_run_gives_one_clear_reason(self):
+        self.harold = [(None, 127, 0)]
+        self.assertEqual(self.record(), 'harold cannot be run')
+        self.assertEqual(len(harold_calls(self)), 1)
+
+    def test_a_path_folder_named_harold_is_not_a_python_error(self):
+        (self.root / 'bin' / 'harold').mkdir(parents=True)
+        with patch.dict(os.environ, {'PATH': str(self.root / 'bin')}):
+            try:
+                subprocess.run(['harold'], capture_output=True)
+            except FileNotFoundError:
+                self.skipTest('this system answers ENOENT for a folder on PATH')
+            except PermissionError:
+                pass
+            recorder = release.Recorder(self.work, self.prefix)
+            with patch.object(release, 'run', REAL_RUN):
+                self.assertEqual(recorder.call(('declare',)), 'harold cannot be run')
 
     def test_a_second_attempt_declares_again(self):
         self.record()
@@ -422,7 +484,7 @@ class RecorderTests(ReleaseTestCase):
 
     def test_a_missing_harold_is_not_tried_again(self):
         self.harold = [(None, 127, 0)]
-        self.assertIn('127', self.record())
+        self.assertEqual(self.record(), 'harold cannot be run')
         self.assertEqual(len(harold_calls(self)), 1)
 
     def test_the_budget_holds_when_harold_never_answers(self):
@@ -438,7 +500,7 @@ class RecorderTests(ReleaseTestCase):
 
     def test_a_ctrl_c_while_the_handlers_are_set_is_answered(self):
         with patch.object(release.signal, 'signal', side_effect=KeyboardInterrupt):
-            self.assertEqual(release.Recorder(self.work).record('ok', 'none', {}), 'stopped by the user')
+            self.assertEqual(release.Recorder(self.work, self.prefix).record('ok', 'none', {}), 'stopped by the user')
 
     def test_a_short_step_records_one_second(self):
         self.record(seconds={'checks': 0.2})
@@ -496,6 +558,14 @@ class AttemptTests(ReleaseTestCase):
         self.assertEqual(code, 1)
         # The failed step keeps its own seconds, as in the github_build test.
         self.assert_recorded('failed', 'install', list(release.STEP_NAMES))
+
+    def test_a_failed_release_with_an_unrunnable_harold_keeps_its_exit_code(self):
+        self.github.outcome = 'failure'
+        self.harold = [(None, 127, 0)]
+        code, _, err = self.release()
+        self.assertEqual(code, 1)
+        self.assertTrue(err.endswith('release attempt not recorded: harold cannot be run\n'))
+        self.assertNotIn('PermissionError', err)
 
     def test_an_interrupt_in_github_build_records_stopped(self):
         def interrupt(seconds):
@@ -775,7 +845,7 @@ class CheckTests(ReleaseTestCase):
     def test_a_missing_tool_is_refused(self):
         self.missing = ('gh',)
         self.assert_refused('Not released: gh is not installed.')
-        self.assertEqual([call for call in self.calls if call[0] != 'harold'], [])
+        self.assertEqual([call for call in self.calls if not is_harold(call[0])], [])
 
     def test_an_untracked_folder_is_not_a_change(self):
         (self.work / 'tasks').mkdir()
