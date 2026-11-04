@@ -325,7 +325,7 @@ def collect_out(out, folder, stem):
     """
     moved = []
     for path in sorted(Path(out).iterdir()):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         found = first_secret(path.read_text(errors='replace'))
         if found is None:

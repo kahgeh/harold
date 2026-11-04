@@ -681,6 +681,19 @@ class TestContainer(unittest.TestCase):
         for path in folder.iterdir():
             self.assertNotIn('Bearer abc', path.read_text())
 
+    def test_collect_out_skips_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'out'
+            out.mkdir()
+            folder = Path(tmp) / 'logs'
+            folder.mkdir()
+            target = Path(tmp) / 'outside.txt'
+            target.write_text('plain\n')
+            (out / 'link.log').symlink_to(target)
+            self.assertEqual(self.mod.collect_out(out, folder, 'stem'), [])
+            self.assertEqual(list(folder.iterdir()), [])
+            self.assertTrue(target.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
