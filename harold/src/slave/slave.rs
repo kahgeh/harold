@@ -19,7 +19,7 @@ use harold_api::harold::slave::v1::{
 };
 use harold_api::harold::{AgentStateSnapshot, TurnCompleteRequest};
 use prost::Message;
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -121,15 +121,6 @@ impl Closed {
     }
 }
 
-/// What the first `Welcome` of this process has not yet let in.
-#[derive(Default)]
-struct Gate {
-    /// A `Welcome` arrived in this process.
-    welcomed: bool,
-    /// Reports held in memory until the first `Welcome`.
-    held: Vec<(ReportKind, SlaveMessage)>,
-}
-
 struct Shared {
     name: String,
     version: String,
@@ -140,7 +131,11 @@ struct Shared {
     known: AtomicU64,
     /// Set after the first warning about a connect that failed, so the warning comes once.
     warned: AtomicBool,
-    gate: Mutex<Gate>,
+    /// The backlog's last number when this process opened it. Rows above it are new rows:
+    /// reports this process made before its first `Welcome`.
+    start_last: u64,
+    /// Set when the first `Welcome` of this process has been handled.
+    welcomed_once: AtomicBool,
     /// Wakes the stream when a report is appended.
     wake: Notify,
     timing: Timing,
@@ -163,6 +158,7 @@ impl SlaveLink {
         timing: Timing,
     ) -> Result<Self, StoreError> {
         let backlog = ReportBacklog::open(&data.join(BACKLOG_FILE)).await?;
+        let start_last = backlog.last_number();
         let shared = Arc::new(Shared {
             name: name.to_owned(),
             version: version.to_owned(),
@@ -170,7 +166,8 @@ impl SlaveLink {
             backlog,
             known: AtomicU64::new(0),
             warned: AtomicBool::new(false),
-            gate: Mutex::new(Gate::default()),
+            start_last,
+            welcomed_once: AtomicBool::new(false),
             wake: Notify::new(),
             timing,
         });
@@ -312,16 +309,9 @@ pub(crate) async fn run_slave_link(
 }
 
 impl Shared {
-    /// Keeps a report. Before the first `Welcome` of this process, every report waits in
-    /// memory: a number given now could sit below the master's (a lost or older backlog), and
-    /// the report would be dropped as a repeat. After the `Welcome` it gets a number above it.
+    /// Keeps a report on disk at once, with a number above the backlog's last. A report made
+    /// before the first `Welcome` is renumbered then, if the master's number is above it.
     async fn keep(&self, kind: ReportKind, message: SlaveMessage) {
-        let mut gate = self.gate.lock().await;
-        if !gate.welcomed {
-            gate.held.push((kind, message));
-            return;
-        }
-        drop(gate);
         self.append(kind, &message).await;
     }
 
@@ -336,22 +326,39 @@ impl Shared {
         }
     }
 
-    /// Makes the backlog numbers rise above `welcome`, then lets the held reports in.
+    /// Handles a `Welcome`: the numbers rise above it, and the reports the master has go.
+    ///
+    /// At the first `Welcome` of the process, the old rows (up to `start_last`) go when the
+    /// master has them. The new rows (above `start_last`) never go: when `welcome` is at or
+    /// above `start_last` they are renumbered above `welcome`, so the master does not take
+    /// them as repeats. When `welcome` is below `start_last`, they are already above it.
     async fn welcomed(&self, welcome: u64) {
         let own = self.backlog.last_number();
         if welcome > own {
             warn!(own, welcome, "report backlog behind");
         }
-        self.backlog.rebase(welcome);
         self.known.fetch_max(welcome, Ordering::SeqCst);
-        if let Err(error) = self.backlog.ack(welcome).await {
+        let first = !self.welcomed_once.swap(true, Ordering::SeqCst);
+        let result = if first {
+            self.first_welcome(welcome).await
+        } else {
+            self.backlog.rebase(welcome);
+            self.backlog.ack(welcome).await
+        };
+        if let Err(error) = result {
             warn!(slave = %self.name, error = %error, "slave report not kept");
         }
-        let mut gate = self.gate.lock().await;
-        gate.welcomed = true;
-        for (kind, message) in std::mem::take(&mut gate.held) {
-            self.append(kind, &message).await;
+    }
+
+    async fn first_welcome(&self, welcome: u64) -> crate::store::Result<()> {
+        self.backlog.ack(welcome.min(self.start_last)).await?;
+        if welcome >= self.start_last {
+            self.backlog
+                .renumber_new_above(self.start_last, welcome)
+                .await?;
         }
+        self.backlog.rebase(welcome);
+        Ok(())
     }
 
     /// Warns once per process start that a connect failed, and why. Never holds the secret.

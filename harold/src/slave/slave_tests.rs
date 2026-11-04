@@ -478,11 +478,7 @@ async fn wiped_backlog_then_reconnect_numbers_above_welcome_and_next_turn_applie
     connector.set_down(true);
     let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
     slave.report_turn(request("block:1", "early")).await;
-    assert_eq!(
-        slave.shared.backlog.len(),
-        0,
-        "held in memory, not numbered"
-    );
+    assert_eq!(slave.shared.backlog.len(), 1, "kept on disk at once");
 
     connector.set_down(false);
     until("early turn applied", || master.sink.sessions() == ["early"]).await;
@@ -494,7 +490,7 @@ async fn wiped_backlog_then_reconnect_numbers_above_welcome_and_next_turn_applie
     .await;
     // The slave's Lock took number 7.
     assert_eq!(master.sink.turn_numbers(), [6, 8]);
-    assert!(logs.has_line(&["report backlog behind", "own=0", "welcome=5"]));
+    assert!(logs.has_line(&["report backlog behind", "own=1", "welcome=5"]));
 }
 
 #[tokio::test]
@@ -745,36 +741,96 @@ async fn paired_slave_still_records_the_turn_and_sends_turn() {
     until("turn sent", || master.sink.sessions() == ["a"]).await;
 }
 
+/// A backlog folder whose last number is `rows`: that many kept `Lock` reports.
+async fn seed_locks(data: &Path, rows: u64) {
+    let backlog = ReportBacklog::open(&data.join(BACKLOG_FILE)).await.unwrap();
+    let message = SlaveMessage {
+        body: Some(slave_message::Body::Lock(Lock::default())),
+    };
+    for _ in 0..rows {
+        backlog
+            .append(ReportKind::Lock, message.encode_to_vec(), SystemTime::now())
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
-async fn report_made_before_welcome_with_a_restored_older_backlog_is_sent_above_welcome() {
+async fn new_rows_are_renumbered_above_welcome_when_backlog_was_older() {
     let secret = new_secret();
     let master = master(&secret);
     write_master_state(&master.data, 5);
     let data = slave_data(&secret);
-    {
-        // A restored older backlog: its last number is 2, below the master's 5.
-        let backlog = ReportBacklog::open(&data.join(BACKLOG_FILE)).await.unwrap();
-        let message = SlaveMessage {
-            body: Some(slave_message::Body::Lock(Lock::default())),
-        };
-        for _ in 0..2 {
-            backlog
-                .append(ReportKind::Lock, message.encode_to_vec(), SystemTime::now())
-                .await
-                .unwrap();
-        }
-    }
+    // A restored older backlog: its last number is 2, below the master's 5.
+    seed_locks(&data, 2).await;
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "early")).await;
+    assert_eq!(slave.shared.backlog.last_number(), 3, "number 3 on disk");
+    connector.set_down(false);
+    until("early turn applied", || master.sink.sessions() == ["early"]).await;
+    assert_eq!(master.sink.turn_numbers(), [6]);
+}
+
+#[tokio::test]
+async fn new_rows_keep_numbers_when_welcome_is_below_start_last() {
+    let secret = new_secret();
+    let master = master(&secret);
+    write_master_state(&master.data, 2);
+    let data = slave_data(&secret);
+    // Rows 1 to 4 are kept. The master has 1 and 2. Rows 3 and 4 are old rows it lacks.
+    seed_locks(&data, 4).await;
     let connector = TestConnector::new(&master);
     connector.set_down(true);
     let slave = start(&connector, &data, &TestSource::new()).await;
     slave.report_turn(request("block:1", "early")).await;
     connector.set_down(false);
     until("early turn applied", || master.sink.sessions() == ["early"]).await;
-    assert!(
-        master.sink.turn_numbers()[0] > 5,
-        "{:?}",
-        master.sink.turn_numbers()
-    );
+    assert_eq!(master.sink.turn_numbers(), [5], "no renumbering");
+}
+
+#[tokio::test]
+async fn reports_before_first_welcome_are_kept_on_disk_and_trimmed() {
+    let (logs, _guard) = capture_logs();
+    let secret = new_secret();
+    let master = master(&secret);
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
+    for _ in 0..1003 {
+        slave.report_turn(request("block:1", "x")).await;
+    }
+    // On disk and counted, and the limit of 1,000 holds before any Welcome.
+    until("trimmed", || {
+        logs.has_line(&["slave report dropped", "too_many"])
+    })
+    .await;
+    assert!(slave.shared.backlog.len() <= 1000 + 5);
+    assert!(slave.shared.backlog.len() >= 1000);
+}
+
+#[tokio::test]
+async fn a_crash_before_welcome_keeps_the_reports() {
+    let secret = new_secret();
+    let master = master(&secret);
+    let data = slave_data(&secret);
+    let connector = TestConnector::new(&master);
+    connector.set_down(true);
+    let slave = start(&connector, &data, &TestSource::new()).await;
+    slave.report_turn(request("block:1", "a")).await;
+    slave.report_turn(request("block:1", "b")).await;
+    slave.abort();
+    drop(slave);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A new process opens the same folder and still has both reports, then sends them.
+    let reopened = ReportBacklog::open(&data.join(BACKLOG_FILE)).await.unwrap();
+    assert_eq!(reopened.after(0).await.unwrap().len(), 2);
+    drop(reopened);
+    connector.set_down(false);
+    let _slave = start(&connector, &data, &TestSource::new()).await;
+    until("both applied", || master.sink.sessions() == ["a", "b"]).await;
 }
 
 #[tokio::test]

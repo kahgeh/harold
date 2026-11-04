@@ -187,6 +187,75 @@ impl ReportBacklog {
         self.refresh_len(&conn).await
     }
 
+    /// Gives the rows above `start_last` (in order) the numbers `above + 1`, `above + 2` and so
+    /// on, in one transaction. `above` must be at least `start_last`, so each row moves up or
+    /// stays. The next number is then above the last row.
+    pub(crate) async fn renumber_new_above(&self, start_last: u64, above: u64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT kind, payload, at_ms FROM reports WHERE number > ?1 ORDER BY number",
+                (start_last as i64,),
+            )
+            .await?;
+        let mut moving = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let kind = row
+                .get_value(0)?
+                .as_text()
+                .cloned()
+                .ok_or_else(|| StoreError::Data("report kind is not text".into()))?;
+            let payload = row
+                .get_value(1)?
+                .as_blob()
+                .cloned()
+                .ok_or_else(|| StoreError::Data("report payload is not a blob".into()))?;
+            let at = row.get_value(2)?.as_integer().copied().unwrap_or(0);
+            moving.push((kind, payload, at));
+        }
+        drop(rows);
+        if moving.is_empty() {
+            return Ok(());
+        }
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let moved = async {
+            conn.execute(
+                "DELETE FROM reports WHERE number > ?1",
+                (start_last as i64,),
+            )
+            .await?;
+            let mut number = above;
+            for (kind, payload, at) in moving {
+                number += 1;
+                conn.execute(
+                    "INSERT INTO reports (number, kind, payload, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                    (number as i64, kind, turso::Value::Blob(payload), at),
+                )
+                .await?;
+            }
+            conn.execute(
+                "INSERT INTO backlog_meta (key, value) VALUES ('last_number', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+                (number as i64,),
+            )
+            .await?;
+            conn.execute("COMMIT", ()).await?;
+            Ok::<u64, StoreError>(number)
+        }
+        .await;
+        match moved {
+            Ok(last) => {
+                let mut counters = self.counters.lock().unwrap();
+                counters.last = counters.last.max(last);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
+    }
+
     /// The newest number given out. It never goes down.
     pub(crate) fn last_number(&self) -> u64 {
         self.counters.lock().unwrap().last
