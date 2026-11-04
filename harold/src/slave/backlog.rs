@@ -53,6 +53,7 @@ pub(crate) struct ReportBacklog {
 }
 
 fn at_ms(time: SystemTime) -> i64 {
+    // A clock before the epoch counts as time zero.
     time.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
@@ -110,6 +111,8 @@ impl ReportBacklog {
     }
 
     /// Keep a report and return its number.
+    ///
+    /// Do not cancel this future: a cancel can leave a transaction open on the connection.
     pub(crate) async fn append(
         &self,
         kind: ReportKind,
@@ -117,7 +120,12 @@ impl ReportBacklog {
         now: SystemTime,
     ) -> Result<u64> {
         let conn = self.conn.lock().await;
-        let number = self.last_number() + 1;
+        // Take the number under the counter lock, so `rebase` cannot lower it.
+        let number = {
+            let mut counters = self.counters.lock().unwrap();
+            counters.last += 1;
+            counters.last
+        };
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let written = async {
             conn.execute(
@@ -132,7 +140,7 @@ impl ReportBacklog {
             .await?;
             conn.execute(
                 "INSERT INTO backlog_meta (key, value) VALUES ('last_number', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                 ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
                 (number as i64,),
             )
             .await?;
@@ -145,7 +153,6 @@ impl ReportBacklog {
             return Err(error);
         }
         let mut counters = self.counters.lock().unwrap();
-        counters.last = number;
         counters.len += 1;
         Ok(number)
     }

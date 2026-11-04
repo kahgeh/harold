@@ -124,3 +124,105 @@ async fn rebase_numbers_above_welcome() {
     backlog.rebase(10);
     assert_eq!(backlog.last_number(), 51);
 }
+
+#[tokio::test]
+async fn rebase_between_append_steps_never_lowers_the_number() {
+    for _ in 0..20 {
+        let backlog = std::sync::Arc::new(ReportBacklog::open(&temp_db("race")).await.unwrap());
+        for _ in 0..5 {
+            backlog
+                .append(ReportKind::Turn, vec![0], t0())
+                .await
+                .unwrap();
+        }
+        let appending = {
+            let backlog = backlog.clone();
+            tokio::spawn(async move {
+                backlog
+                    .append(ReportKind::Turn, vec![1], t0())
+                    .await
+                    .unwrap()
+            })
+        };
+        backlog.rebase(50);
+        appending.await.unwrap();
+        assert!(backlog.last_number() >= 50);
+        assert!(
+            backlog
+                .append(ReportKind::Turn, vec![2], t0())
+                .await
+                .unwrap()
+                > 50
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_report_exactly_24h_old_is_kept() {
+    let backlog = ReportBacklog::open(&temp_db("edge-age")).await.unwrap();
+    backlog
+        .append(ReportKind::Turn, vec![1], t0())
+        .await
+        .unwrap();
+    let dropped = backlog.trim(t0() + MAX_AGE).await.unwrap();
+    assert_eq!(dropped, Dropped::default());
+    assert_eq!(backlog.len(), 1);
+}
+
+#[tokio::test]
+async fn exactly_1000_reports_are_kept() {
+    let backlog = ReportBacklog::open(&temp_db("edge-count")).await.unwrap();
+    for _ in 0..1000 {
+        backlog
+            .append(ReportKind::Turn, vec![0], t0())
+            .await
+            .unwrap();
+    }
+    assert_eq!(backlog.trim(t0()).await.unwrap(), Dropped::default());
+    assert_eq!(backlog.len(), 1000);
+}
+
+#[tokio::test]
+async fn rebase_then_reopen_keeps_numbers_above_the_base() {
+    let path = temp_db("rebase-reopen");
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    backlog.rebase(50);
+    assert_eq!(
+        backlog
+            .append(ReportKind::Turn, vec![1], t0())
+            .await
+            .unwrap(),
+        51
+    );
+    backlog.ack(51).await.unwrap();
+    drop(backlog);
+    let backlog = ReportBacklog::open(&path).await.unwrap();
+    assert_eq!(backlog.last_number(), 51);
+}
+
+#[tokio::test]
+async fn trim_counts_too_old_and_too_many_together() {
+    let backlog = ReportBacklog::open(&temp_db("both")).await.unwrap();
+    for _ in 0..3 {
+        backlog
+            .append(ReportKind::Turn, vec![0], t0())
+            .await
+            .unwrap();
+    }
+    let fresh = t0() + Duration::from_secs(30 * 3600);
+    for _ in 0..1002 {
+        backlog
+            .append(ReportKind::Turn, vec![0], fresh)
+            .await
+            .unwrap();
+    }
+    let dropped = backlog.trim(fresh).await.unwrap();
+    assert_eq!(
+        dropped,
+        Dropped {
+            too_old: 3,
+            too_many: 2
+        }
+    );
+    assert_eq!(backlog.len(), 1000);
+}
