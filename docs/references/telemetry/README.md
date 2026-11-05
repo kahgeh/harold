@@ -918,22 +918,24 @@ Two limits remain:
 
 ## Harold: the big picture
 
-`big-picture.json` is the dashboard "Harold: the big picture". It has ten cards, one for each lever: a way of working that moves quality, speed, waste or token cost. Each card is two tables side by side: the numbers of this week, and the same numbers of last week.
+`big-picture.json` is the dashboard "Harold: the big picture". It has ten cards, one for each lever: a way of working that moves quality, speed, waste or token cost. Each card is one table with two columns: `this_week` and `last_week`.
 
 **This week** means the last 7 days. **Last week** means the 7 days before them. Open the dashboard with a time range of at least the last 14 days. The window is in each query, not in the time range.
+
+**How a card counts.** A counter or a histogram of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. The declared `agent.*` counters keep their totals, so their cards read the total at three times, by the method of `queries/agent-counter.sql`. A gauge card reads the newest export of the gauge in the week, never the last value of each series, so a series that Harold no longer exports does not count. A week with no point gives no number (an empty cell), never a 0.
 
 | Card | The number | Source metrics | Note (info only, no alert) |
 |---|---|---|---|
 | Value created | Work records that the user checked | `harold.work.checked` | The count at `released`, which the user did not use, is a note. |
-| Delivery lead time | The mean days from idea to the user's check, and the four phases | `harold.work.lead_time`. Until it has data, `pod.spec.lead_time` gives "spec time, open to merged" | The slowest work record is the first to check. |
-| Work waiting | Item-days, and the count and the oldest age of each list | `pod.inventory.items`, `.oldest_hours` and `.item_days`; `harold.work.records` at `released` | The oldest `awaiting_approval` spec is over 72 hours old. |
-| Waste | Hours of free slots with work waiting, redo, and failed release attempts; specs revised after approval | `pod.slots.idle_with_work`, `pod.spec.effort`, `agent.harold.release.seconds` | Each source has its own note. |
+| Delivery lead time | The p50 days from idea to the user's check, and the four phases. The p50 is the median of the mean of each rise, weighted by the count, as for the panel "Waiting for you, p50" | `harold.work.lead_time`. Until it has data, `pod.spec.lead_time` gives "spec time, open to merged" | The slowest work record is the first to check. |
+| Work waiting | Item-days with a total, and the count and the oldest age in days of each list | `pod.inventory.items`, `.oldest_hours` and `.item_days`; `harold.work.records` at `released` | The oldest `awaiting_approval` spec is over 3 days (72 hours) old. |
+| Waste | Hours of free slots with work waiting, redo, and failed release attempts (result `failed` only); specs revised after approval, for the specs that changed or merged in the week | `pod.slots.idle_with_work`, `pod.spec.effort`, `agent.harold.release.seconds` | Each source has its own note. |
 | Tokens and turns | Tokens, the share of each model, turns, and tokens per merged spec | `harold.turn.tokens`, `harold.turn.tokens.by_spec`, `harold.turns`, `pod.merges` | A build worker on Opus. The `other` role over a fifth. Subagent tokens are not counted. |
-| Slicing and sizing | The share of specs over the limit of their size, and slices per work record | `pod.spec.effort` with `spec.size`, `harold.work.slices` | Medium specs over 8 hours. |
-| Test and release time | Minutes of an ok release attempt, by step, and failed release attempts | `agent.harold.release.*` | An ok attempt over 70 minutes. 2 failed attempts in a week. |
+| Slicing and sizing | The share of specs over the limit of their size, for the specs that changed or merged in the week, and slices per work record | `pod.spec.effort` with `spec.size`, `harold.work.slices` | Medium specs over 8 hours. |
+| Test and release time | Minutes of an ok release attempt, by step, and failed release attempts | `agent.harold.release.*` | An ok attempt over 70 minutes. 2 failed attempts in a week. An attempt with the result `stopped` is not a failed attempt. |
 | Products changed | Merged specs of each product | `pod.merges` | None. |
 | Now | Agents that work, of all agents, by pod | `pod.agents` with `state`, `harold.agents` | None. |
-| Clarification requests per day, by cause | The times the user asked the chief what a word or a reply meant, by `cause` | `agent.chief.clarification_requests` | Any day above 3: the chief's writing needs a look. |
+| Clarification requests per day, by cause | The times the user asked the chief what a word or a reply meant, by `cause` and for all causes together (`all`) | `agent.chief.clarification_requests` | Any day above 3: the chief's writing needs a look. |
 
 **The product filter** is named "Product (pod and spec cards only)". It reaches only the queries that read a `pod.product` attribute. These cards ignore it:
 
@@ -947,7 +949,7 @@ Two limits remain:
 
 Products changed uses the filter fully.
 
-**A card with no data yet** shows no row, and the card's note reads `no data yet` with the name of the spec it waits for. It never shows a 0 that reads as a result. The cards wait for these specs:
+**A card with no data yet** shows no row. The name of the tile of a card that waits for a spec reads `<Card title> (empty: no data yet, waits for <spec>)`, so the empty table has a visible reason. The note stays in the query file as a comment. The name does not change by itself when the data arrives: remove the text in the parentheses, in the file and in the tile, when the spec lands. A card never shows a 0 that reads as a result. The cards wait for these specs:
 
 | Card | Waits for |
 |---|---|
@@ -961,7 +963,7 @@ Products changed uses the filter fully.
 
 The other cards wait for nothing. Their sources exist.
 
-**The SQL of a card** is the file `queries/<card>.sql`. The tile in `big-picture.json` holds the same text. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, or when a file has no card. After you edit a query file, make the same change in the tile. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
+**The SQL of a card** is the file `queries/<card>.sql`. The card has one tile, with the id `<card>`, and the tile in `big-picture.json` holds the same text. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, or when a file has no card. After you edit a query file, make the same change in the tile. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
 
 **The clarification card's producer.** The chief records the counter with the telemetry tool. Run this once, after the telemetry tool is installed. It seeds the four series at 0:
 

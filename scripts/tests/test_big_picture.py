@@ -4,17 +4,18 @@ The test reads files as text, with the standard library only. It needs no
 ClickHouse, no port and no server.
 
 The files:
-- hyperdx/big-picture.json holds ten cards. Each card has two tiles.
+- hyperdx/big-picture.json holds ten cards. Each card has one tile.
 - queries/<card>.sql holds the SQL of the card.
 
 The rule that links a tile to its file:
-- The id of a tile is "<card>-this-week" or "<card>-last-week".
-- The two tiles of one card read the same file, queries/<card>.sql.
-  This week is the column this_week. Last week is the column last_week.
+- The id of a tile is the name of its card, "<card>".
+- The tile reads the file queries/<card>.sql. The table of the tile has two columns:
+  this_week and last_week.
 - The sqlTemplate of a tile equals the text of that file, byte for byte.
 
 The rule for notes: each query file has a "-- Note:" line and a "-- Waits for:" line.
-A file that waits for a spec has a "-- Empty: no data yet (waits for <spec>)" line too.
+A file that waits for a spec has a "-- Empty: no data yet (waits for <spec>)" line too,
+and the name of its tile ends with "(empty: no data yet, waits for <spec>)".
 
 The files agent-counter.sql and README.md are not cards. The test ignores them.
 """
@@ -41,10 +42,62 @@ CARDS = [
     "now",
     "clarification-requests",
 ]
-SUFFIXES = ("this-week", "last-week")
-TILE_ID = re.compile(r"^(?P<card>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<week>this-week|last-week)$")
+TILE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # $__filters is the only HyperDX macro that a query may use.
 MACRO = re.compile(r"\$__\w+")
+
+
+def strip_comments(sql):
+    return re.sub(r"(?m)--.*$", "", sql)
+
+
+def depth_zero(sql):
+    """Return the text of the SQL with the contents of all parentheses blanked out."""
+    out, depth = [], 0
+    for char in sql:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0:
+            out.append(char)
+    return "".join(out)
+
+
+def final_statement(sql):
+    """Return the part of the SQL after the last depth-0 UNION ALL and its SELECT.
+
+    This is the outermost SELECT of a query with no UNION ALL at depth 0.
+    A WITH clause comes before it, and its parentheses do not count.
+    """
+    code = strip_comments(sql)
+    depth, start, index = 0, 0, 0
+    pattern = re.compile(r"(?i)\bUNION\s+ALL\b")
+    while index < len(code):
+        char = code[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0:
+            match = pattern.match(code, index)
+            if match:
+                start = match.end()
+                index = match.end()
+                continue
+        index += 1
+    tail = code[start:]
+    select = re.search(r"(?i)\bSELECT\b", depth_zero(tail))
+    if not select:
+        return tail
+    # Position of the depth-0 SELECT in the original tail.
+    depth, position = 0, 0
+    for index, char in enumerate(tail):
+        if depth == 0 and re.match(r"(?i)SELECT\b", tail[index:]):
+            position = index
+            break
+        depth += (char == "(") - (char == ")")
+    return tail[position:]
 
 
 class BigPictureTest(unittest.TestCase):
@@ -54,10 +107,9 @@ class BigPictureTest(unittest.TestCase):
         return json.loads(DASHBOARD.read_text(encoding="utf-8"))["tiles"]
 
     def card_of(self, tile):
-        match = TILE_ID.match(tile.get("id", ""))
-        if not match:
-            self.fail(f"tile id is not <card>-this-week or <card>-last-week: {tile.get('id')!r}")
-        return match.group("card")
+        if not TILE_ID.match(tile.get("id", "")):
+            self.fail(f"tile id is not a card name: {tile.get('id')!r}")
+        return tile["id"]
 
     def query_text(self, card):
         path = QUERIES / f"{card}.sql"
@@ -78,25 +130,64 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(sorted(files - cards), [], "query files with no card")
         self.assertEqual(sorted(cards - files), [], "cards with no query file")
 
-    def test_ten_cards_two_tiles_each(self):
+    def test_ten_cards_one_tile_each(self):
         tiles = self.tiles()
         ids = [tile.get("id") for tile in tiles]
         self.assertEqual(len(ids), len(set(ids)), "tile ids repeat")
-        expected = sorted(f"{card}-{week}" for card in CARDS for week in SUFFIXES)
-        self.assertEqual(sorted(ids), expected)
+        self.assertEqual(sorted(ids), sorted(CARDS))
+
+    def test_tile_name_shows_that_the_card_waits_for_a_spec(self):
+        for tile in self.tiles():
+            card = self.card_of(tile)
+            match = re.search(r"(?m)^-- Waits for: (\S+)\s*$", self.query_text(card))
+            with self.subTest(tile=card):
+                self.assertTrue(match, "no '-- Waits for:' line")
+                if match.group(1) == "nothing":
+                    self.assertNotIn("no data yet", tile["name"])
+                else:
+                    self.assertTrue(
+                        tile["name"].endswith(f"(empty: no data yet, waits for {match.group(1)})"),
+                        tile["name"],
+                    )
 
     def test_empty_window_guard(self):
         # Offline there is no ClickHouse. The test checks the SQL text.
         # An aggregate with no GROUP BY returns one row of 0 for an empty window.
         # A GROUP BY returns no row, and the card then shows "no data yet".
+        # The guard must stand in the outermost SELECT: an inner GROUP BY does not help,
+        # because the outer SELECT would still return one row.
         for card in CARDS:
             with self.subTest(card=card):
                 sql = self.query_text(card)
-                self.assertRegex(sql, r"(?i)\bGROUP\s+BY\b", "no GROUP BY: an empty window returns a row of 0")
+                final = final_statement(sql)
+                self.assertRegex(depth_zero(final), r"(?i)\b(GROUP\s+BY|HAVING)\b",
+                                 "the outermost SELECT has no GROUP BY or HAVING")
                 self.assertRegex(sql, r"(?i)\bthis_week\b")
                 self.assertRegex(sql, r"(?i)\blast_week\b")
                 for macro in set(MACRO.findall(sql)):
                     self.assertEqual(macro, "$__filters", "only $__filters is allowed")
+
+    def test_the_guard_check_sees_only_the_outermost_select(self):
+        inner_only = "SELECT a FROM (SELECT a, count() FROM t GROUP BY a) ORDER BY a"
+        self.assertNotRegex(depth_zero(final_statement(inner_only)), r"(?i)\bGROUP\s+BY\b")
+        outer = "WITH c AS (SELECT 1) SELECT a FROM t GROUP BY a"
+        self.assertRegex(depth_zero(final_statement(outer)), r"(?i)\bGROUP\s+BY\b")
+        union = "SELECT a FROM t GROUP BY a UNION ALL SELECT b FROM u"
+        self.assertNotRegex(depth_zero(final_statement(union)), r"(?i)\bGROUP\s+BY\b")
+
+    def test_harold_and_pod_counters_use_the_reset_rule(self):
+        # The README counter rule counts a drop by its whole value. The difference of two
+        # maxIf values loses the counts before each restart of Harold.
+        # Only declared agent.* counters keep their totals, so they may use that difference.
+        for path in sorted(QUERIES.glob("*.sql")):
+            text = path.read_text(encoding="utf-8")
+            names = re.findall(r"MetricName\s*=\s*'([^']+)'", text)
+            if not any(name.startswith(("harold.", "pod.")) for name in names):
+                continue
+            with self.subTest(file=path.name):
+                code = strip_comments(text)
+                self.assertNotRegex(code, r"(?is)greatest\s*\([^;]*?maxIf\s*\(",
+                                    "greatest( with maxIf( on a harold.* or pod.* metric")
 
     def test_tiles_valid_shape(self):
         for tile in self.tiles():

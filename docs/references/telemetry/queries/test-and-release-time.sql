@@ -4,7 +4,9 @@
 -- Test and release time: the rise of the counters agent.harold.release.seconds and agent.harold.release.attempts.
 -- The rows "ok minutes per attempt, <step>" are the rise of the seconds of the result ok at the step, divided by 60 and by the ok attempts of the week.
 -- The row "ok minutes per attempt, all steps" is the sum of those rows.
--- The row "failed attempts" is the rise of the attempts with a result that is not ok. The row "ok attempts" is the rise of the attempts with the result ok.
+-- The row "failed attempts" is the rise of the attempts with the result failed. The row "ok attempts" is the rise of the attempts with the result ok.
+-- An attempt with the result stopped is in neither row.
+-- The counters are declared agent.* counters. Harold keeps their totals, so the query reads totals by the method of agent-counter.sql.
 -- A series is one result and one step, so the query takes the rise of each series before it sums. The card has no product.
 -- A week with no ok attempt gives no minutes for that week. Columns: series, this_week, last_week.
 WITH
@@ -56,6 +58,7 @@ FROM (
         toFloat64(greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0)) AS last_value
     FROM otel.otel_metrics_sum
     WHERE MetricName = 'agent.harold.release.attempts'
+      AND Attributes['result'] IN ('ok', 'failed')
       AND TimeUnix > now() - INTERVAL 28 DAY
     GROUP BY Attributes
 )

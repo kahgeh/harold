@@ -2,11 +2,47 @@
 -- Waits for: work-status-history
 -- Empty: no data yet (waits for work-status-history)
 -- Slicing and sizing: the share of the specs of each size that are over the limit of the size, in percent.
--- It reads pod.spec.effort at measure build_worker_hours: the last value of each spec in the week. The limit is 4 hours for small and 8 hours for medium.
+-- It reads pod.spec.effort at measure build_worker_hours: the last value of each spec of the week. The limit is 4 hours for small and 8 hours for medium.
+-- A spec counts in a week only when it changed or merged in that week. The README says pod.spec.effort sends a value on every poll for each spec
+-- that is not completed or withdrawn, and for each spec that entered one of those states in the last 30 days. So the points of a spec repeat
+-- until the spec changes. A spec changed in a week when its state, its `revisions` value or its `build_worker_hours` value at the end of the week
+-- differs from the value at the end of the week before, or when it has no point before the week. A spec that merged in the week changed its state.
 -- The sizes large and unsized have no limit, so the card has no share for them. The rows "specs counted" give the number of specs of each size.
 -- The row "slices per work record" is the mean of the histogram harold.work.slices: the rise of Sum divided by the rise of Count. It has no product.
+-- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
+-- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
+-- The query reads the points of 21 days: 14 days of two weeks and 7 days before them for the previous point.
+-- Histogram rule: the same rule on the Count and the Sum. A reset is judged by the Count. Each point gives the rise of the Count and the rise of the Sum.
 -- The product filter applies to the pod.spec.effort rows only. A week with no number for a row gives no number for that week.
 -- Columns: series, this_week, last_week.
+WITH
+    touched AS (
+        SELECT
+            spec,
+            max(this_changed) AS this_changed,
+            max(last_changed) AS last_changed
+        FROM (
+            SELECT
+                Attributes['spec.id'] AS spec,
+                argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY) AS v2,
+                argMaxIfOrNull(Attributes['state'], TimeUnix, TimeUnix > now() - INTERVAL 7 DAY) AS s2,
+                argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS v1,
+                argMaxIfOrNull(Attributes['state'], TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS s1,
+                argMaxIfOrNull(Value, TimeUnix, TimeUnix <= now() - INTERVAL 14 DAY) AS v0,
+                argMaxIfOrNull(Attributes['state'], TimeUnix, TimeUnix <= now() - INTERVAL 14 DAY) AS s0,
+                isNotNull(v2) AND (isNull(v1) AND isNull(v0) OR ifNull(v2 != if(isNull(v1), v0, v1) OR s2 != if(isNull(s1), s0, s1), 1)) AS this_changed,
+                isNotNull(v1) AND (isNull(v0) OR ifNull(v1 != v0 OR s1 != s0, 1)) AS last_changed
+            FROM otel.otel_metrics_gauge
+            WHERE MetricName = 'pod.spec.effort'
+              AND Attributes['measure'] IN ('revisions', 'build_worker_hours')
+              AND TimeUnix > now() - INTERVAL 28 DAY
+              AND $__filters
+            GROUP BY Attributes['spec.id'], Attributes['measure']
+        )
+        GROUP BY spec
+    ),
+    (SELECT groupArray(spec) FROM touched WHERE this_changed) AS this_specs,
+    (SELECT groupArray(spec) FROM touched WHERE last_changed) AS last_specs
 SELECT
     series,
     sum(this_value) AS this_week,
@@ -19,8 +55,8 @@ FROM (
     FROM (
         SELECT
             Attributes['spec.size'] AS size,
-            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY AND TimeUnix <= now()) AS this_v,
-            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS last_v
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY AND has(this_specs, Attributes['spec.id'])) AS this_v,
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND has(last_specs, Attributes['spec.id'])) AS last_v
         FROM otel.otel_metrics_gauge
         WHERE MetricName = 'pod.spec.effort'
           AND Attributes['measure'] = 'build_worker_hours'
@@ -38,8 +74,8 @@ FROM (
     FROM (
         SELECT
             Attributes['spec.size'] AS size,
-            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY AND TimeUnix <= now()) AS this_v,
-            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS last_v
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY AND has(this_specs, Attributes['spec.id'])) AS this_v,
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND has(last_specs, Attributes['spec.id'])) AS last_v
         FROM otel.otel_metrics_gauge
         WHERE MetricName = 'pod.spec.effort'
           AND Attributes['measure'] = 'build_worker_hours'
@@ -52,20 +88,32 @@ FROM (
     UNION ALL
     SELECT
         'slices per work record' AS series,
-        if(sum(this_count) = 0, NULL, sum(this_sum) / sum(this_count)) AS this_value,
-        if(sum(last_count) = 0, NULL, sum(last_sum) / sum(last_count)) AS last_value
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY AND rise_count > 0) = 0, NULL, sumIf(rise_sum, TimeUnix > now() - INTERVAL 7 DAY AND rise_count > 0) / sumIf(rise_count, TimeUnix > now() - INTERVAL 7 DAY AND rise_count > 0)) AS this_value,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND rise_count > 0) = 0, NULL, sumIf(rise_sum, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND rise_count > 0) / sumIf(rise_count, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND rise_count > 0)) AS last_value
     FROM (
         SELECT
-            greatest(toInt64(maxIf(Count, TimeUnix <= now()) - maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_count,
-            greatest(maxIf(Sum, TimeUnix <= now()) - maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY), 0) AS this_sum,
-            greatest(toInt64(maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Count, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_count,
-            greatest(maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Sum, TimeUnix <= now() - INTERVAL 14 DAY), 0) AS last_sum
-        FROM otel.otel_metrics_histogram
-        WHERE MetricName = 'harold.work.slices'
-          AND TimeUnix > now() - INTERVAL 28 DAY
-        GROUP BY Attributes
+            Attributes,
+            TimeUnix,
+            if(cnt >= before_cnt, toInt64(cnt) - toInt64(before_cnt), toInt64(cnt)) AS rise_count,
+            if(cnt >= before_cnt, total - before_total, total) AS rise_sum
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Count AS cnt,
+                Sum AS total,
+                lagInFrame(Count, 1, toUInt64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_cnt,
+                lagInFrame(Sum, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_total
+            FROM otel.otel_metrics_histogram
+            WHERE MetricName = 'harold.work.slices'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+        )
     )
-    GROUP BY 1
+    GROUP BY series
 )
 GROUP BY series
 HAVING isNotNull(this_week) OR isNotNull(last_week)

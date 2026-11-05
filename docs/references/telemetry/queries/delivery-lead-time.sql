@@ -1,39 +1,82 @@
 -- Note: The slowest work record is the first one to check when the lead time grows.
 -- Waits for: work-status-history
 -- Empty: no data yet (waits for work-status-history)
--- Delivery lead time in days, as the mean of the histogram: the rise of Sum divided by the rise of Count.
+-- Delivery lead time in days, as the p50 of the histogram, by the method of the README panel "Waiting for you, p50":
+-- each point gives the mean of the lead times recorded since the previous point (rise of Sum divided by rise of Count).
+-- The p50 is the median of these means, weighted by the rise of the Count. Merges are minutes apart and Harold exports every 30 seconds,
+-- so a rise holds one lead time. Two lead times within one export would stand as their mean.
 -- The rows "work: <phase>" read harold.work.lead_time (idea to your check, by phase).
 -- The rows "spec: <phase>" read pod.spec.lead_time (spec time, open to merged). They show a number until the work rows have data.
--- The product filter applies to the "spec:" rows only. A row with no new observation in a week is not returned for that week.
+-- The product filter applies to the "spec:" rows only. A week with no new observation gives no number for that week.
+-- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
+-- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
+-- The query reads the points of 21 days: 14 days of two weeks and 7 days before them for the previous point.
+-- Histogram rule: the same rule on the Count and the Sum. A reset is judged by the Count. Each point gives the rise of the Count and the rise of the Sum.
 -- Columns: series, this_week, last_week.
 SELECT
     series,
-    if(sum(this_count) = 0, NULL, sum(this_sum) / sum(this_count) / 86400) AS this_week,
-    if(sum(last_count) = 0, NULL, sum(last_sum) / sum(last_count) / 86400) AS last_week
+    if(countIf(TimeUnix > now() - INTERVAL 7 DAY AND rise_count > 0) = 0, NULL, quantileExactWeightedIf(0.5)(rise_sum / rise_count / 86400, toUInt64(rise_count), TimeUnix > now() - INTERVAL 7 DAY AND rise_count > 0)) AS this_week,
+    if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND rise_count > 0) = 0, NULL, quantileExactWeightedIf(0.5)(rise_sum / rise_count / 86400, toUInt64(rise_count), TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND rise_count > 0)) AS last_week
 FROM (
     SELECT
         concat('work: ', Attributes['phase']) AS series,
-        greatest(toInt64(maxIf(Count, TimeUnix <= now()) - maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_count,
-        greatest(maxIf(Sum, TimeUnix <= now()) - maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY), 0) AS this_sum,
-        greatest(toInt64(maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Count, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_count,
-        greatest(maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Sum, TimeUnix <= now() - INTERVAL 14 DAY), 0) AS last_sum
-    FROM otel.otel_metrics_histogram
-    WHERE MetricName = 'harold.work.lead_time'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-    GROUP BY Attributes
+        TimeUnix,
+        rise_count,
+        rise_sum
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(cnt >= before_cnt, toInt64(cnt) - toInt64(before_cnt), toInt64(cnt)) AS rise_count,
+            if(cnt >= before_cnt, total - before_total, total) AS rise_sum
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Count AS cnt,
+                Sum AS total,
+                lagInFrame(Count, 1, toUInt64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_cnt,
+                lagInFrame(Sum, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_total
+            FROM otel.otel_metrics_histogram
+            WHERE MetricName = 'harold.work.lead_time'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+        )
+    )
     UNION ALL
     SELECT
         concat('spec: ', Attributes['phase']) AS series,
-        greatest(toInt64(maxIf(Count, TimeUnix <= now()) - maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_count,
-        greatest(maxIf(Sum, TimeUnix <= now()) - maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY), 0) AS this_sum,
-        greatest(toInt64(maxIf(Count, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Count, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_count,
-        greatest(maxIf(Sum, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Sum, TimeUnix <= now() - INTERVAL 14 DAY), 0) AS last_sum
-    FROM otel.otel_metrics_histogram
-    WHERE MetricName = 'pod.spec.lead_time'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-      AND $__filters
-    GROUP BY Attributes
+        TimeUnix,
+        rise_count,
+        rise_sum
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(cnt >= before_cnt, toInt64(cnt) - toInt64(before_cnt), toInt64(cnt)) AS rise_count,
+            if(cnt >= before_cnt, total - before_total, total) AS rise_sum
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Count AS cnt,
+                Sum AS total,
+                lagInFrame(Count, 1, toUInt64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_cnt,
+                lagInFrame(Sum, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_total
+            FROM otel.otel_metrics_histogram
+            WHERE MetricName = 'pod.spec.lead_time'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+              AND $__filters
+        )
+    )
 )
 GROUP BY series
-HAVING sum(this_count) > 0 OR sum(last_count) > 0
+HAVING isNotNull(this_week) OR isNotNull(last_week)
 ORDER BY series

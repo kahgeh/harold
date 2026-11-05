@@ -330,7 +330,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
 | the big picture | The HyperDX dashboard "Harold: the big picture", one card for each lever | "KPI dashboard", "scorecard" |
 | lever | A way of working that moves quality, speed, waste or token cost: spec quality, slot use, model mix, slicing and sizing, the user's waiting time, test and release time, tooling | "KPI", "metric" for it |
-| card (of a dashboard) | One number of the big picture, this week against the 7 days before, with its notes | "tile" for the pair as a whole. A tile is one HyperDX panel |
+| card (of a dashboard) | One table of the big picture with the columns this week and last week (the 7 days before), with its notes. A card is one HyperDX tile | "pair" |
 | work waiting (a card) | The specs and work records that wait in each list, with the oldest age and the item-days | "inventory" for it. The glossary's inventory is the agent monitor's pane scan. `pod.inventory.*` stays only as the name of the signal |
 | release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
 | push checks | The Linux and macOS workflows that run on each push to `main`. A release needs both to have passed on its commit | "CI" alone, "pre-release checks" |

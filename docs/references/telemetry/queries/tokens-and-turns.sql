@@ -2,70 +2,150 @@
 -- Waits for: turn-tokens
 -- Empty: no data yet (waits for turn-tokens)
 -- Tokens and turns: the rise of the counters harold.turn.tokens (all four kinds), harold.turns, harold.turn.tokens.by_spec and pod.merges.
--- A series is one session, one model or one spec, so the query takes the rise of each series before it sums.
+-- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
+-- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
+-- The query reads the points of 21 days: 14 days of two weeks and 7 days before them for the previous point.
+-- A week with no point for a source gives no number for that week, never a 0. Tokens with the model none (the seeded start points) are left out.
 -- The rows "share of tokens, <model>" are percentages of all tokens. The row "tokens, build worker on Opus" counts the tokens of the role build_worker on a model whose name has opus.
 -- The row "share of tokens, role other" is the percentage of the tokens with the role other.
 -- The rows "tokens per merged spec" and "turns per merged spec" divide by the merged specs. A week with no merged spec gives no number.
 -- The rows "tokens per merged spec" use harold.turn.tokens.by_spec and pod.merges. They ignore the product filter, because by_spec has no product.
--- The product filter applies to the other rows. Columns: series, this_week, last_week.
+-- The product filter applies to the other rows.
+-- Columns: series, this_week, last_week.
 WITH r AS (
     SELECT
         'tokens' AS src,
         Attributes['model'] AS model,
         Attributes['role'] AS role,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now()) - maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_rise,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_rise
-    FROM otel.otel_metrics_sum
-    WHERE MetricName = 'harold.turn.tokens'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-      AND $__filters
-    GROUP BY Attributes
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName = 'harold.turn.tokens'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+              AND Attributes['model'] != 'none'
+              AND $__filters
+        )
+    )
+    GROUP BY model, role
     UNION ALL
     SELECT
         'turns' AS src,
         '' AS model,
         '' AS role,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now()) - maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_rise,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_rise
-    FROM otel.otel_metrics_sum
-    WHERE MetricName = 'harold.turns'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-      AND $__filters
-    GROUP BY Attributes
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName = 'harold.turns'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+              AND $__filters
+        )
+    )
+    GROUP BY model, role
     UNION ALL
     SELECT
         'merges' AS src,
         '' AS model,
         '' AS role,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now()) - maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_rise,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_rise
-    FROM otel.otel_metrics_sum
-    WHERE MetricName = 'pod.merges'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-      AND $__filters
-    GROUP BY Attributes
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName = 'pod.merges'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+              AND $__filters
+        )
+    )
+    GROUP BY model, role
     UNION ALL
     SELECT
         'merges_all' AS src,
         '' AS model,
         '' AS role,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now()) - maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_rise,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_rise
-    FROM otel.otel_metrics_sum
-    WHERE MetricName = 'pod.merges'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-    GROUP BY Attributes
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName = 'pod.merges'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+        )
+    )
+    GROUP BY model, role
     UNION ALL
     SELECT
         'by_spec' AS src,
         '' AS model,
         '' AS role,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now()) - maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY)), 0) AS this_rise,
-        greatest(toInt64(maxIf(Value, TimeUnix <= now() - INTERVAL 7 DAY) - maxIf(Value, TimeUnix <= now() - INTERVAL 14 DAY)), 0) AS last_rise
-    FROM otel.otel_metrics_sum
-    WHERE MetricName = 'harold.turn.tokens.by_spec'
-      AND TimeUnix > now() - INTERVAL 28 DAY
-    GROUP BY Attributes
+        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
+        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
+    FROM (
+        SELECT
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName = 'harold.turn.tokens.by_spec'
+              AND TimeUnix > now() - INTERVAL 21 DAY
+        )
+    )
+    GROUP BY model, role
 )
 SELECT series, this_week, last_week
 FROM (
@@ -87,12 +167,11 @@ FROM (
     UNION ALL
     SELECT
         'tokens, build worker on Opus' AS series,
-        toFloat64(sumIf(this_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0)) AS this_week,
-        toFloat64(sumIf(last_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0)) AS last_week
+        if(isNull(sum(this_rise)), NULL, toFloat64(ifNull(sumIf(this_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0), 0))) AS this_week,
+        if(isNull(sum(last_rise)), NULL, toFloat64(ifNull(sumIf(last_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0), 0))) AS last_week
     FROM r
     WHERE src = 'tokens'
     GROUP BY src
-    HAVING sum(this_rise) > 0 OR sum(last_rise) > 0
     UNION ALL
     SELECT
         'share of tokens, role other' AS series,
@@ -134,5 +213,6 @@ FROM (
     WHERE src IN ('turns', 'merges')
     GROUP BY 1
 )
-WHERE isNotNull(this_week) OR isNotNull(last_week)
+GROUP BY series, this_week, last_week
+HAVING isNotNull(this_week) OR isNotNull(last_week)
 ORDER BY series
