@@ -1,6 +1,6 @@
 -- Note: The slowest work record is the first one to check when the lead time grows.
 -- Waits for: work-status-history
--- Empty: no data yet (waits for work-status-history)
+-- Empty: work rows: no data yet (waits for work-status-history)
 -- Delivery lead time in days, as the p50 of the histogram, by the method of the README panel "Waiting for you, p50":
 -- each point gives the mean of the lead times recorded since the previous point (rise of Sum divided by rise of Count).
 -- The p50 is the median of these means, weighted by the rise of the Count. Merges are minutes apart and Harold exports every 30 seconds,

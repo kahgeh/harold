@@ -922,7 +922,7 @@ Two limits remain:
 
 **This week** means the last 7 days. **Last week** means the 7 days before them. Open the dashboard with a time range of at least the last 14 days. The window is in each query, not in the time range.
 
-**How a card counts.** A counter or a histogram of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. The declared `agent.*` counters keep their totals, so their cards read the total at three times, by the method of `queries/agent-counter.sql`. A gauge card reads the newest export of the gauge in the week, never the last value of each series, so a series that Harold no longer exports does not count. A week with no point gives no number (an empty cell), never a 0.
+**How a card counts.** A counter or a histogram of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. The declared `agent.*` counters keep their totals, so their cards read the total at three times, by the method of `queries/agent-counter.sql`. The gauge cards Now and Work waiting read the newest export of the gauge in the week, never the last value of each series, so a series that Harold no longer exports does not count. Three groups of rows read otherwise. The rows from `pod.spec.effort` (redo hours, revised after approval, and the specs counted and over limit of Slicing and sizing) read the last value of each spec in the week, for the specs that changed or merged in it. The row "free slots, work waiting" of Waste sums all points of the week, times 30 seconds. The row "failed release attempts" reads a declared counter total. A week with no point gives no number (an empty cell), never a 0.
 
 | Card | The number | Source metrics | Note (info only, no alert) |
 |---|---|---|---|
@@ -949,19 +949,18 @@ Two limits remain:
 
 Products changed uses the filter fully.
 
-**A card with no data yet** shows no row. The name of the tile of a card that waits for a spec reads `<Card title> (empty: no data yet, waits for <spec>)`, so the empty table has a visible reason. The note stays in the query file as a comment. The name does not change by itself when the data arrives: remove the text in the parentheses, in the file and in the tile, when the spec lands. A card never shows a 0 that reads as a result. The cards wait for these specs:
+**A card with no data yet** shows no row for the part that waits. The name of the tile names only that part. A card that is empty as a whole reads `<Card title> (empty: no data yet, waits for <spec>)`. A card with real rows and one part that waits reads `<Card title> (<part>: no data yet, waits for <spec>)`. So the empty part has a visible reason. The note stays in the query file as a comment. The name does not change by itself when the data arrives: remove the text in the parentheses, in the file and in the tile, when the spec lands. A card never shows a 0 that reads as a result. The cards wait for these specs:
 
 | Card | Waits for |
 |---|---|
 | Value created | work-status-history |
 | Delivery lead time (the "work: ..." rows) | work-status-history |
-| Slicing and sizing | work-status-history |
-| Waste (failed release attempts) | release-attempts |
+| Slicing and sizing (the row "slices per work record") | work-status-history |
+| Waste (the row "failed release attempts") | release-attempts |
 | Test and release time | release-attempts |
-| Tokens and turns | turn-tokens |
 | Clarification requests per day, by cause | telemetry-record-tool |
 
-The other cards wait for nothing. Their sources exist.
+The other cards wait for nothing. Their sources exist, and Tokens and turns shows real rows since `turn-tokens` merged.
 
 **The SQL of a card** is the file `queries/<card>.sql`. The card has one tile, with the id `<card>`, and the tile in `big-picture.json` holds the same text. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, or when a file has no card. After you edit a query file, make the same change in the tile. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
 

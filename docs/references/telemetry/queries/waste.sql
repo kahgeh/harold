@@ -1,11 +1,11 @@
 -- Note: A day with over 2 slot hours of free slots with work waiting needs a look. So does a spec with over 2 redo hours. A spec with 3 or more revisions after approval was not ready.
 -- Waits for: release-attempts
--- Empty: no data yet (waits for release-attempts)
+-- Empty: failed release attempts: no data yet (waits for release-attempts)
 -- Waste: the hours and the counts of the week.
 -- The row "free slots, work waiting (slot hours)" reads pod.slots.idle_with_work: the sum of the points times 30, divided by 3600.
 -- The row "redo hours" reads pod.spec.effort at measure redo_hours: the last value of each spec of the week, summed.
 -- The rows "revised after approval" read pod.spec.effort at measure revised_after_approval: the specs with at least 1 revision, and the specs counted.
--- A spec counts in a week only when it changed or merged in that week. The README says pod.spec.effort sends a value on every poll for each spec
+-- A spec counts in a week only when it changed or merged in that week. The README states that pod.spec.effort sends a value on every poll for each spec
 -- that is not completed or withdrawn, and for each spec that entered one of those states in the last 30 days. So the points of a spec repeat
 -- until the spec changes. A spec changed in a week when its state, its `revisions` value or its `build_worker_hours` value at the end of the week
 -- differs from the value at the end of the week before, or when it has no point before the week. A spec that merged in the week changed its state.

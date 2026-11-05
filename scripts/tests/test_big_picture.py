@@ -14,8 +14,9 @@ The rule that links a tile to its file:
 - The sqlTemplate of a tile equals the text of that file, byte for byte.
 
 The rule for notes: each query file has a "-- Note:" line and a "-- Waits for:" line.
-A file that waits for a spec has a "-- Empty: no data yet (waits for <spec>)" line too,
-and the name of its tile ends with "(empty: no data yet, waits for <spec>)".
+A file that waits for a spec has a "-- Empty: [<part>: ]no data yet (waits for <spec>)" line too.
+The name of its tile ends with "(empty: no data yet, waits for <spec>)", or with
+"(<part>: no data yet, waits for <spec>)" when only the part waits.
 
 The files agent-counter.sql and README.md are not cards. The test ignores them.
 """
@@ -49,6 +50,19 @@ MACRO = re.compile(r"\$__\w+")
 
 def strip_comments(sql):
     return re.sub(r"(?m)--.*$", "", sql)
+
+
+def restart_unsafe_metrics(code):
+    """Return the harold.* and pod.* metrics read by a SELECT that uses maxIf(.
+
+    The metric of a maxIf( is the next MetricName literal after it: the WHERE of its SELECT.
+    """
+    found = []
+    for match in re.finditer(r"(?i)\bmaxIf\s*\(", code):
+        name = re.search(r"MetricName\s*=\s*'([^']+)'", code[match.end():])
+        if name and name.group(1).startswith(("harold.", "pod.")):
+            found.append(name.group(1))
+    return sorted(set(found))
 
 
 def depth_zero(sql):
@@ -137,18 +151,24 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(sorted(ids), sorted(CARDS))
 
     def test_tile_name_shows_that_the_card_waits_for_a_spec(self):
+        # The name names only the part that waits. A card that waits as a whole is "empty".
         for tile in self.tiles():
             card = self.card_of(tile)
-            match = re.search(r"(?m)^-- Waits for: (\S+)\s*$", self.query_text(card))
+            text = self.query_text(card)
+            waits = re.search(r"(?m)^-- Waits for: (\S+)\s*$", text)
             with self.subTest(tile=card):
-                self.assertTrue(match, "no '-- Waits for:' line")
-                if match.group(1) == "nothing":
+                self.assertTrue(waits, "no '-- Waits for:' line")
+                if waits.group(1) == "nothing":
                     self.assertNotIn("no data yet", tile["name"])
-                else:
-                    self.assertTrue(
-                        tile["name"].endswith(f"(empty: no data yet, waits for {match.group(1)})"),
-                        tile["name"],
-                    )
+                    continue
+                empty = re.search(r"(?m)^-- Empty: (?:(.+?): )?no data yet \(waits for (\S+)\)\s*$", text)
+                self.assertTrue(empty, "no '-- Empty:' line")
+                self.assertEqual(empty.group(2), waits.group(1))
+                part = empty.group(1) or "empty"
+                self.assertTrue(
+                    tile["name"].endswith(f"({part}: no data yet, waits for {waits.group(1)})"),
+                    tile["name"],
+                )
 
     def test_empty_window_guard(self):
         # Offline there is no ClickHouse. The test checks the SQL text.
@@ -176,18 +196,24 @@ class BigPictureTest(unittest.TestCase):
         self.assertNotRegex(depth_zero(final_statement(union)), r"(?i)\bGROUP\s+BY\b")
 
     def test_harold_and_pod_counters_use_the_reset_rule(self):
-        # The README counter rule counts a drop by its whole value. The difference of two
-        # maxIf values loses the counts before each restart of Harold.
-        # Only declared agent.* counters keep their totals, so they may use that difference.
+        # The README counter rule counts a drop by its whole value. A maxIf( total, or the
+        # difference of two maxIf( totals, loses the counts before each restart of Harold.
+        # Only declared agent.* counters keep their totals, so only they may read maxIf(.
         for path in sorted(QUERIES.glob("*.sql")):
-            text = path.read_text(encoding="utf-8")
-            names = re.findall(r"MetricName\s*=\s*'([^']+)'", text)
-            if not any(name.startswith(("harold.", "pod.")) for name in names):
-                continue
+            code = strip_comments(path.read_text(encoding="utf-8"))
             with self.subTest(file=path.name):
-                code = strip_comments(text)
-                self.assertNotRegex(code, r"(?is)greatest\s*\([^;]*?maxIf\s*\(",
-                                    "greatest( with maxIf( on a harold.* or pod.* metric")
+                self.assertEqual(restart_unsafe_metrics(code), [])
+
+    def test_the_reset_rule_check_finds_a_plain_maxif_difference(self):
+        bad = ("SELECT maxIf(Value, a) - maxIf(Value, b) AS d FROM t "
+               "WHERE MetricName = 'harold.turns'")
+        self.assertEqual(restart_unsafe_metrics(bad), ["harold.turns"])
+        greatest = ("SELECT greatest(maxIf(Value, a) - maxIf(Value, b), 0) FROM t "
+                    "WHERE MetricName = 'pod.merges'")
+        self.assertEqual(restart_unsafe_metrics(greatest), ["pod.merges"])
+        agent = ("SELECT maxIf(Value, a) - maxIf(Value, b) FROM t "
+                 "WHERE MetricName = 'agent.harold.release.seconds'")
+        self.assertEqual(restart_unsafe_metrics(agent), [])
 
     def test_tiles_valid_shape(self):
         for tile in self.tiles():
@@ -210,7 +236,7 @@ class BigPictureTest(unittest.TestCase):
                 self.assertRegex(text, r"(?m)^-- Note: \S", "no '-- Note:' line")
                 self.assertRegex(text, r"(?m)^-- Waits for: \S", "no '-- Waits for:' line")
                 if not re.search(r"(?m)^-- Waits for: nothing\s*$", text):
-                    self.assertRegex(text, r"(?m)^-- Empty: no data yet \(waits for \S", "no '-- Empty:' line")
+                    self.assertRegex(text, r"(?m)^-- Empty: (.+?: )?no data yet \(waits for \S", "no '-- Empty:' line")
 
 
 if __name__ == "__main__":

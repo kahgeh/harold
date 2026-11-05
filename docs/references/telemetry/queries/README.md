@@ -30,7 +30,7 @@ Every query returns one row for each series, with these columns:
 
 | Column | Meaning |
 | --- | --- |
-| `series` | The series' attributes as `key=value` pairs, sorted by key and joined by commas. Empty for a counter with no attributes |
+| `series` | In the ten card files, a label for the row, such as `harold` or `tokens per merged spec`. In `agent-counter.sql`, the series' attributes as `key=value` pairs, sorted by key and joined by commas, empty for a counter with no attributes |
 | `this_week` | The count in the last 7 days |
 | `last_week` | The count in the 7 days before |
 

@@ -1,6 +1,5 @@
 -- Note: A build worker on an Opus model is the first thing to check, because build workers belong on Sonnet. The role `other` above a fifth of the tokens means turns do not reach their pod. The tokens of subagents are not counted.
--- Waits for: turn-tokens
--- Empty: no data yet (waits for turn-tokens)
+-- Waits for: nothing
 -- Tokens and turns: the rise of the counters harold.turn.tokens (all four kinds), harold.turns, harold.turn.tokens.by_spec and pod.merges.
 -- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
 -- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.

@@ -1,9 +1,9 @@
 -- Note: Medium specs over 8 hours are the first thing to check. A third or more of the medium specs over 8 hours in a week means the sizes are too small.
 -- Waits for: work-status-history
--- Empty: no data yet (waits for work-status-history)
+-- Empty: slices per work record: no data yet (waits for work-status-history)
 -- Slicing and sizing: the share of the specs of each size that are over the limit of the size, in percent.
 -- It reads pod.spec.effort at measure build_worker_hours: the last value of each spec of the week. The limit is 4 hours for small and 8 hours for medium.
--- A spec counts in a week only when it changed or merged in that week. The README says pod.spec.effort sends a value on every poll for each spec
+-- A spec counts in a week only when it changed or merged in that week. The README states that pod.spec.effort sends a value on every poll for each spec
 -- that is not completed or withdrawn, and for each spec that entered one of those states in the last 30 days. So the points of a spec repeat
 -- until the spec changes. A spec changed in a week when its state, its `revisions` value or its `build_worker_hours` value at the end of the week
 -- differs from the value at the end of the week before, or when it has no point before the week. A spec that merged in the week changed its state.
