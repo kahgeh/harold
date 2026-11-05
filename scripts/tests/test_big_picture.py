@@ -78,8 +78,6 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(sorted(files - cards), [], "query files with no card")
         self.assertEqual(sorted(cards - files), [], "cards with no query file")
 
-    # TODO: remove this mark when the second dispatch adds the other five cards.
-    @unittest.expectedFailure
     def test_ten_cards_two_tiles_each(self):
         tiles = self.tiles()
         ids = [tile.get("id") for tile in tiles]
@@ -91,8 +89,7 @@ class BigPictureTest(unittest.TestCase):
         # Offline there is no ClickHouse. The test checks the SQL text.
         # An aggregate with no GROUP BY returns one row of 0 for an empty window.
         # A GROUP BY returns no row, and the card then shows "no data yet".
-        cards = sorted({self.card_of(tile) for tile in self.tiles()})
-        for card in cards:
+        for card in CARDS:
             with self.subTest(card=card):
                 sql = self.query_text(card)
                 self.assertRegex(sql, r"(?i)\bGROUP\s+BY\b", "no GROUP BY: an empty window returns a row of 0")
