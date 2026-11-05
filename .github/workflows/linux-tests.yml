@@ -63,6 +63,14 @@ jobs:
           python3 -m unittest hooks.providers.test_turn_complete
           python3 -I harold/src/tts/test_tts_workers.py
 
+      - name: Test the container test set
+        timeout-minutes: 25
+        run: |
+          # The set file is the single list of names.
+          mapfile -t names < <(grep -v '^[[:space:]]*\(#\|$\)' scripts/container-tests/port-tests.txt)
+          [ "${#names[@]}" -gt 0 ] || { echo "port-tests.txt lists no test names" >&2; exit 1; }
+          cargo test --locked --no-default-features --features harold/linux-defaults -p harold -- --ignored --exact "${names[@]}"
+
       - name: Save the compiled dependencies
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

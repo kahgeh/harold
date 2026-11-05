@@ -539,7 +539,7 @@ fn the_data_folder_of_a_test_is_under_the_temp_folder() {
     assert!(outside.is_err());
 }
 
-#[ignore = "opens a port: runs in CI only"]
+#[ignore = "opens a port: runs in the container test set and in CI"]
 #[tokio::test]
 async fn serve_slave_link_listens_on_the_configured_address_and_only_for_the_link() {
     let data = data();
