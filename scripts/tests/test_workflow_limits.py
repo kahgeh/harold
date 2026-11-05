@@ -75,6 +75,21 @@ class WorkflowLimitsTest(unittest.TestCase):
         self.assertEqual(step_limit(text, "test", "Test"), 40)
         self.assertEqual(step_limit(text, "features", "Check the feature mixes"), 30)
 
+    def test_macos_test_step_commands_share_flags(self):
+        text = read("macos-checks.yml")
+        commands = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("cargo test ")
+        ]
+        self.assertEqual(len(commands), 2)
+        first, second = commands
+        self.assertIn("--workspace", second)
+        self.assertEqual(
+            re.search(r"--target \S+", first).group(0),
+            re.search(r"--target \S+", second).group(0),
+        )
+
     def test_build_linux_job_has_no_test_step(self):
         with self.assertRaises(LookupError):
             step_limit(read("build.yml"), "linux", "Test")
