@@ -1,1 +1,1 @@
-slave::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link
+slave::master::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link
