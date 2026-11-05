@@ -935,8 +935,10 @@ pub(crate) fn spec_size(markdown: &str) -> SpecSize {
     }
 }
 
-/// True when the first line of the spec, trimmed, is `Waiting for your approval.`.
+/// True when the first line of the spec, trimmed, is `Waiting for your approval.`. One
+/// leading byte-order mark (U+FEFF) is not part of the line.
 pub(crate) fn spec_awaiting(markdown: &str) -> bool {
+    let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
     markdown
         .lines()
         .next()
@@ -1911,8 +1913,6 @@ pub(crate) struct PodStats<G: Git> {
     /// The warnings about a spec's merges that were logged, so each is logged once, also
     /// across restarts.
     warned: PodNotices,
-    /// The large specs already logged as `large spec approved`, kept in memory only.
-    warned_large: HashSet<String>,
     /// The pod files that did not parse and were logged: (product, file) -> what the file
     /// held then.
     unreadable: HashMap<(String, String), String>,
@@ -1960,7 +1960,6 @@ impl<G: Git> PodStats<G> {
             agents,
             chief,
             warned,
-            warned_large: HashSet::new(),
             unreadable: HashMap::new(),
         }
     }
@@ -2147,9 +2146,8 @@ impl<G: Git> PodStats<G> {
         // that poll's counts but never counts them twice.
         self.tips.save(&product.name, &history.tip)?;
         let changes = self.specs.observe(&product.name, &specs);
-        self.log_notices(&product.name, &notices);
         let cutoff = first_merged_file(&product.repo.join(POD_FOLDER), self.offset);
-        self.log_large_specs(&product.name, &specs, cutoff);
+        self.log_notices(&product.name, &notices, &specs, cutoff);
         if let TipMove::Merges(merges) = &moved {
             let is_spec = |id: &str| specs.iter().any(|spec| spec.id == id);
             for merge in merges {
@@ -2236,7 +2234,8 @@ impl<G: Git> PodStats<G> {
             .is_some_and(|output| output.success)
     }
 
-    /// Logs each large spec of `product` that is approved and not started, once. An
+    /// Logs each large spec of `product` that is approved and not started, once, also
+    /// across restarts. Its key is kept in the pod notices and added to `warned_now`. An
     /// approval before `cutoff` (the earliest merged file) is history and is not logged;
     /// with no `cutoff`, every approval counts.
     fn log_large_specs(
@@ -2244,6 +2243,7 @@ impl<G: Git> PodStats<G> {
         product: &str,
         specs: &[SpecFacts],
         cutoff: Option<OffsetDateTime>,
+        warned_now: &mut HashSet<String>,
     ) {
         for spec in specs {
             let approved = spec.state == SpecState::Approved
@@ -2253,10 +2253,10 @@ impl<G: Git> PodStats<G> {
             if spec.size != SpecSize::Large || !approved {
                 continue;
             }
-            if self
-                .warned_large
-                .insert(format!("{product}\0large\0{}", spec.id))
-            {
+            let key = format!("{product}\0large\0{}", spec.id);
+            warned_now.insert(key.clone());
+            if !self.warned.contains(&key) {
+                self.warned.insert(key, OffsetDateTime::now_utc());
                 warn!(
                     pod.product = %product,
                     spec.id = %spec.id,
@@ -2269,8 +2269,15 @@ impl<G: Git> PodStats<G> {
     /// Logs what the specs of `product` show about merges and unreadable files, once each.
     /// A merge warning is kept in the pod notices until the specs of `product` no longer
     /// show it, so it is logged again only if it comes back. This runs only for a product
-    /// whose specs were read, so an unavailable product keeps its keys.
-    fn log_notices(&mut self, product: &str, notices: &[Notice]) {
+    /// whose specs were read, so an unavailable product keeps its keys. A large approved
+    /// spec is warned about here too, so its key follows the same rule.
+    fn log_notices(
+        &mut self,
+        product: &str,
+        notices: &[Notice],
+        specs: &[SpecFacts],
+        cutoff: Option<OffsetDateTime>,
+    ) {
         let mut unreadable_now: HashSet<&str> = HashSet::new();
         let mut warned_now: HashSet<String> = HashSet::new();
         let now = OffsetDateTime::now_utc();
@@ -2323,6 +2330,7 @@ impl<G: Git> PodStats<G> {
                 }
             }
         }
+        self.log_large_specs(product, specs, cutoff, &mut warned_now);
         // A file that parses again, or went, is logged again if it fails again.
         self.unreadable
             .retain(|(known, file), _| known != product || unreadable_now.contains(file.as_str()));

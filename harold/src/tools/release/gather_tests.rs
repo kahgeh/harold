@@ -544,7 +544,7 @@ async fn each_spec_list_agrees_with_read_specs_state() {
 
 #[tokio::test]
 async fn a_byte_order_mark_before_the_waiting_line_still_awaits_approval() {
-    let mut fixture = Fixture::new();
+    let fixture = Fixture::new();
     fixture.spec(
         "waiting",
         "\u{feff}Waiting for your approval.\n\n# waiting: Waiting\n",

@@ -11,11 +11,8 @@ use super::model::ProductNext;
 use super::title::spec_title;
 use crate::pod_stats::{
     AGENT_PANE, Git, NO_ANSWER, POD_FOLDER, Product, Sources, SpecRead, SpecState, file_time,
-    first_merged_file, read_history, read_specs, slots,
+    first_merged_file, read_history, read_specs, slots, spec_awaiting,
 };
-
-/// The first line of a spec that waits for the approval of the user.
-const WAITING_LINE: &str = "Waiting for your approval.";
 
 /// The lists of the next release of `product`. When git gives no answer, the product
 /// has the reason `git gave no answer` and empty lists.
@@ -123,7 +120,7 @@ async fn gather(
             continue;
         };
         titles.insert(spec.id.clone(), spec_title(&spec.id, &text));
-        if text.lines().next().map(str::trim) == Some(WAITING_LINE) {
+        if spec_awaiting(&text) {
             awaiting.insert(spec.id.clone());
         }
     }

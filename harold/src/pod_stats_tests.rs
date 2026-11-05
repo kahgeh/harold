@@ -3722,9 +3722,15 @@ fn awaiting_is_true_only_for_the_exact_first_line() {
 #[test]
 fn awaiting_ignores_one_leading_byte_order_mark() {
     assert!(spec_awaiting("\u{feff}Waiting for your approval.\n\nText"));
-    assert!(spec_awaiting("\u{feff}  Waiting for your approval.  \nText"));
-    assert!(!spec_awaiting("\u{feff}\u{feff}Waiting for your approval.\n"));
-    assert!(!spec_awaiting("\u{feff}Starts under the small-fix waiver.\n"));
+    assert!(spec_awaiting(
+        "\u{feff}  Waiting for your approval.  \nText"
+    ));
+    assert!(!spec_awaiting(
+        "\u{feff}\u{feff}Waiting for your approval.\n"
+    ));
+    assert!(!spec_awaiting(
+        "\u{feff}Starts under the small-fix waiver.\n"
+    ));
     assert!(!spec_awaiting("Text\u{feff}Waiting for your approval.\n"));
 }
 
@@ -4361,6 +4367,8 @@ fn a_merge_seen_only_from_a_gone_worktree_logs_an_unknown_commit() {
             merged_at,
             commit: None,
         }],
+        &[],
+        None,
     );
 
     let text = logs.text();
