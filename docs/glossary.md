@@ -328,6 +328,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
 | signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
+| the big picture | The HyperDX dashboard "Harold: the big picture", one card for each lever | "KPI dashboard", "scorecard" |
+| lever | A way of working that moves quality, speed, waste or token cost: spec quality, slot use, model mix, slicing and sizing, the user's waiting time, test and release time, tooling | "KPI", "metric" for it |
+| card (of a dashboard) | One number of the big picture, this week against the 7 days before, with its notes | "tile" for the pair as a whole. A tile is one HyperDX panel |
+| work waiting (a card) | The specs and work records that wait in each list, with the oldest age and the item-days | "inventory" for it. The glossary's inventory is the agent monitor's pane scan. `pod.inventory.*` stays only as the name of the signal |
 | release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
 | push checks | The Linux and macOS workflows that run on each push to `main`. A release needs both to have passed on its commit | "CI" alone, "pre-release checks" |
 | release run | The GitHub run of `build.yml` on a published release. It only builds, checks the binaries and uploads them | "build" for the whole release |

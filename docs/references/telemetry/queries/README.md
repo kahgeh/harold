@@ -9,6 +9,20 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | File | What it shows | Parameter |
 | --- | --- | --- |
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
+| `value-created.sql` | Work records that the user checked: the card "Value created" | none |
+| `delivery-lead-time.sql` | The mean days of each phase, from idea to the user's check, and the spec time from open to merged: the card "Delivery lead time" | none |
+| `work-waiting.sql` | The items in each list, the oldest age and the item-days: the card "Work waiting" | none |
+| `waste.sql` | Hours of free slots with work waiting, redo and failed release attempts, and the specs revised after approval: the card "Waste" | none |
+| `tokens-and-turns.sql` | Tokens, the share of each model, turns, and tokens and turns per merged spec: the card "Tokens and turns" | none |
+| `slicing-and-sizing.sql` | The share of specs over the limit of their size, and slices per work record: the card "Slicing and sizing" | none |
+| `test-and-release-time.sql` | Minutes of an ok release attempt, by step, and the failed attempts: the card "Test and release time" | none |
+| `products-changed.sql` | Merged specs of each product: the card "Products changed" | none |
+| `now.sql` | The agents that work, of all agents, by pod: the card "Now" | none |
+| `clarification-requests.sql` | The times the user asked the chief what a word or reply meant, by cause: the card "Clarification requests per day, by cause" | none |
+
+The ten files after `agent-counter.sql` are the cards of the dashboard "Harold: the big picture". See [Harold: the big picture](../README.md#harold-the-big-picture). A test keeps each card and its file equal.
+
+`bin/logq --named <card>` replaces `$__filters` with `1`. The card applies the product filter. The named query does not. So the two give the same numbers only when the filter is empty.
 
 ## The columns
 
