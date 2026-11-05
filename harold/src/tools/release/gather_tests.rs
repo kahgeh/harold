@@ -541,3 +541,21 @@ async fn each_spec_list_agrees_with_read_specs_state() {
     assert_eq!(ids(&next.approved), ["ready"]);
     assert_eq!(ids(&next.awaiting), ["waiting"]);
 }
+
+#[tokio::test]
+async fn a_byte_order_mark_before_the_waiting_line_still_awaits_approval() {
+    let mut fixture = Fixture::new();
+    fixture.spec(
+        "waiting",
+        "\u{feff}Waiting for your approval.\n\n# waiting: Waiting\n",
+    );
+    let next = fixture.next(&fixture.git()).await;
+    assert_eq!(ids(&next.awaiting), ["waiting"]);
+}
+
+#[test]
+fn the_release_tool_has_no_copy_of_the_waiting_line() {
+    let source = include_str!("gather.rs");
+    assert!(!source.contains("WAITING_LINE"));
+    assert!(!source.contains("Waiting for your approval."));
+}

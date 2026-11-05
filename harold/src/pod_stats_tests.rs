@@ -3147,6 +3147,71 @@ async fn a_large_spec_that_is_not_approved_is_not_logged() {
     );
 }
 
+fn large_line(pod: &Pod) -> String {
+    format!("large spec approved pod.product={} spec.id=big", pod.name)
+}
+
+fn large_key(pod: &Pod) -> String {
+    format!("{}\0large\0big", pod.name)
+}
+
+#[tokio::test]
+async fn a_restart_does_not_log_a_large_spec_again() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+    put_approval(&files, "big");
+    let registry = one_product(&pod, &repo);
+    let logs = CapturedLogs::start();
+    let (mut first, _) = stats(registry.clone());
+    first.poll().await;
+    assert_eq!(logs.text().matches(&large_line(&pod)).count(), 1);
+    assert_eq!(notice_keys(&pod), vec![large_key(&pod)]);
+    drop(first);
+
+    let restarted = CapturedLogs::start();
+    let (mut second, _) = stats(registry);
+    second.poll().await;
+    let text = restarted.text();
+    assert_eq!(text.matches(&large_line(&pod)).count(), 0, "{text}");
+    assert_eq!(notice_keys(&pod), vec![large_key(&pod)]);
+}
+
+#[tokio::test]
+async fn a_restart_over_a_notices_file_with_the_large_key_does_not_log() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+    put_approval(&files, "big");
+    let saved: BTreeMap<String, String> =
+        BTreeMap::from([(large_key(&pod), "2026-11-01T00:00:00Z".to_owned())]);
+    write(&notices_path(&pod), &serde_json::to_string(&saved).unwrap());
+    let logs = CapturedLogs::start();
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let text = logs.text();
+    assert_eq!(text.matches(&large_line(&pod)).count(), 0, "{text}");
+    assert!(!text.contains("pod notices unreadable"), "{text}");
+    assert_eq!(notice_keys(&pod), vec![large_key(&pod)]);
+}
+
+#[tokio::test]
+async fn the_large_key_leaves_when_the_spec_starts() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/big.md"), "# Big\n\n**Size.** large\n");
+    put_approval(&files, "big");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    assert_eq!(notice_keys(&pod), vec![large_key(&pod)]);
+    put_started(&files, "big", "2026-10-15T10:00:00Z");
+    stats.poll().await;
+    assert_eq!(notice_keys(&pod), Vec::<String>::new());
+}
+
 async fn large_spec_log_count(prepare: impl FnOnce(&Path)) -> usize {
     let pod = Pod::new();
     let repo = pod.repo("main");
@@ -3652,6 +3717,15 @@ fn awaiting_is_true_only_for_the_exact_first_line() {
     assert!(!spec_awaiting("Waiting for your approval\n"));
     assert!(!spec_awaiting("Starts under the small-fix waiver.\n"));
     assert!(!spec_awaiting(""));
+}
+
+#[test]
+fn awaiting_ignores_one_leading_byte_order_mark() {
+    assert!(spec_awaiting("\u{feff}Waiting for your approval.\n\nText"));
+    assert!(spec_awaiting("\u{feff}  Waiting for your approval.  \nText"));
+    assert!(!spec_awaiting("\u{feff}\u{feff}Waiting for your approval.\n"));
+    assert!(!spec_awaiting("\u{feff}Starts under the small-fix waiver.\n"));
+    assert!(!spec_awaiting("Text\u{feff}Waiting for your approval.\n"));
 }
 
 #[test]
