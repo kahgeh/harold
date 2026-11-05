@@ -136,6 +136,9 @@ struct Shared {
     /// Wakes the stream when a report is appended.
     wake: Notify,
     timing: Timing,
+    /// Every wait that `run` chose, in order. Tests read it to check the waits.
+    #[cfg(test)]
+    waits: std::sync::Mutex<Vec<Duration>>,
 }
 
 /// The running slave link.
@@ -165,6 +168,8 @@ impl SlaveLink {
             welcomed_once: AtomicBool::new(false),
             wake: Notify::new(),
             timing,
+            #[cfg(test)]
+            waits: std::sync::Mutex::new(Vec::new()),
         });
         let task = tokio::spawn(run(
             Arc::clone(&shared),
@@ -308,6 +313,12 @@ pub(crate) async fn run_slave_link(
 }
 
 impl Shared {
+    /// The waits that `run` chose so far.
+    #[cfg(test)]
+    fn waits(&self) -> Vec<Duration> {
+        self.waits.lock().unwrap().clone()
+    }
+
     /// Keeps a report on disk at once, with a number above the backlog's last. A report made
     /// before the first `Welcome` is renumbered then, if the master's number is above it.
     async fn keep(&self, kind: ReportKind, message: SlaveMessage) {
@@ -405,6 +416,8 @@ async fn run(
             debug!(slave = %shared.name, reason = closed.label(), "slave link not opened");
         }
         info!(slave = %shared.name, reason = closed.label(), "slave link closed");
+        #[cfg(test)]
+        shared.waits.lock().unwrap().push(wait);
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(timing.max);
     }

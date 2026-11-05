@@ -504,17 +504,15 @@ async fn failed_apply_keeps_the_report_and_reconnects_with_backoff() {
     let slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
     slave.report_turn(request("block:1", "x")).await;
 
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    // Waits of 20, 40, 80, 80 ms: a few opens, not a tight loop.
+    until("four waits", || slave.shared.waits().len() >= 4).await;
+    // The waits the code chooses: 20, 40, 80, then the maximum of 80 ms. A loose bound on the
+    // opens stays, so a tight loop still fails.
+    let waits = slave.shared.waits();
+    let ms = |list: &[Duration]| list.iter().map(|wait| wait.as_millis()).collect::<Vec<_>>();
+    assert_eq!(ms(&waits[..4]), [20, 40, 80, 80]);
+    assert!(waits.iter().all(|wait| *wait <= Duration::from_millis(80)));
     let opens = connector.opens();
-    assert!((3..=12).contains(&opens), "opens: {opens}");
-    let times = connector.opens.lock().unwrap().clone();
-    let gaps: Vec<_> = times.windows(2).map(|w| w[1] - w[0]).collect();
-    assert!(gaps[1] >= gaps[0], "{gaps:?}");
-    assert!(
-        gaps.iter().all(|gap| *gap >= Duration::from_millis(18)),
-        "{gaps:?}"
-    );
+    assert!(opens <= waits.len() + 2, "opens: {opens}, waits: {waits:?}");
     assert!(master.sink.turn_numbers().is_empty());
     assert!(slave.shared.backlog.len() >= 1, "the report stays");
 
@@ -530,16 +528,13 @@ async fn backoff_doubles_to_the_maximum_and_resets_after_a_stable_link() {
     let connector = TestConnector::new(&master);
     connector.set_down(true);
     let _slave = start(&connector, &slave_data(&secret), &TestSource::new()).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let times = connector.opens.lock().unwrap().clone();
-    let gaps: Vec<_> = times.windows(2).map(|w| w[1] - w[0]).collect();
-    assert!(gaps.len() >= 4, "{gaps:?}");
-    // 20, 40, 80, 80: the wait stops at the maximum.
-    assert!(gaps[2] >= Duration::from_millis(75));
-    assert!(
-        gaps.iter().all(|gap| *gap < Duration::from_millis(250)),
-        "{gaps:?}"
-    );
+    until("four waits", || _slave.shared.waits().len() >= 4).await;
+    // 20, 40, 80, 80: the wait doubles and stops at the maximum.
+    let waits = _slave.shared.waits();
+    let ms = |list: &[Duration]| list.iter().map(|wait| wait.as_millis()).collect::<Vec<_>>();
+    assert_eq!(ms(&waits[..4]), [20, 40, 80, 80]);
+    assert!(waits.iter().all(|wait| *wait <= Duration::from_millis(80)));
+    assert!(connector.opens() <= waits.len() + 2, "{waits:?}");
 
     connector.set_down(false);
     until("link up", || {
@@ -549,13 +544,12 @@ async fn backoff_doubles_to_the_maximum_and_resets_after_a_stable_link() {
     // A stable link, then a cut: the next connect waits the first wait again.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let before = connector.opens();
-    let cut_at = Instant::now();
+    let waits_before = _slave.shared.waits().len();
     connector.cut();
     until("reconnect", || connector.opens() > before).await;
-    let reopened = connector.opens.lock().unwrap()[before];
-    let gap = reopened - cut_at;
-    // The first wait is 20 ms. A wait that had not reset would be 80 ms.
-    assert!(gap < Duration::from_millis(70), "{gap:?}");
+    // The first wait after the cut is 20 ms. A wait that had not reset would be 80 ms.
+    let waits = _slave.shared.waits();
+    assert_eq!(waits[waits_before], Duration::from_millis(20), "{waits:?}");
 }
 
 #[tokio::test]
