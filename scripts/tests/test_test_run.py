@@ -374,7 +374,7 @@ class TestLoadSet(unittest.TestCase):
     def test_shipped_port_tests_set_loads(self):
         root = SCRIPT.parent / 'container-tests'
         names = self.mod.load_set('port-tests', root)
-        self.assertEqual(names, ['slave::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link'])
+        self.assertEqual(names, ['slave::master::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link'])
 
     def test_main_parses_container_option(self):
         calls = []
