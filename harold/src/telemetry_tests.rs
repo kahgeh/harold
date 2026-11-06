@@ -1988,6 +1988,13 @@ const METRICS: &[&str] = &[
     "pod.slots.busy",
     "pod.slots.free",
     "pod.merges",
+    "harold.web_app.requests",
+    "harold.web_app.requests.waiting",
+    "harold.web_app.request.duration",
+    "harold.web_app.connections",
+    "harold.web_app.updates.open",
+    "harold.web_app.updates.duration",
+    "harold.web_app.updates.closed",
     "pod.merged_lines",
     "harold.phone_requests",
     "harold.phone_requests.wrong",
@@ -2100,6 +2107,8 @@ const ATTRIBUTES: &[&str] = &[
     "model",
     "step",
     "cause",
+    "route_class",
+    "short",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -5433,6 +5442,94 @@ fn register_collection_counters_seeds_unknown_and_each_name() {
             );
             assert!(point.is_some(), "{name} {result}");
         }
+    }
+}
+
+#[test]
+fn web_request_counters_are_seeded_at_zero() {
+    test_support::install();
+    register_web_request_counters();
+    assert_eq!(WEB_ROUTE_CLASSES.len(), 13);
+    assert_eq!(WEB_REFUSAL_REASONS.len(), 5);
+    assert_eq!(UPDATES_CLOSE_REASONS.len(), 3);
+    for class in WEB_ROUTE_CLASSES {
+        let served = test_support::exact_counter_value(
+            "harold.web_app.requests",
+            &[
+                ("route_class", class),
+                ("result", "served"),
+                ("status", "2xx"),
+                ("reason", ""),
+            ],
+        );
+        assert!(served.is_some(), "requests {class}");
+        let waiting = test_support::exact_counter_value(
+            "harold.web_app.requests.waiting",
+            &[("route_class", class)],
+        );
+        // A waiting request is never a result of `requests`. `updates` has no waiting series.
+        assert_eq!(waiting.is_some(), class != "updates", "waiting {class}");
+    }
+    for reason in WEB_REFUSAL_REASONS {
+        let refused = test_support::exact_counter_value(
+            "harold.web_app.requests",
+            &[
+                ("route_class", "other"),
+                ("result", "refused"),
+                ("status", "4xx"),
+                ("reason", reason),
+            ],
+        );
+        assert!(refused.is_some(), "refused {reason}");
+    }
+    for outcome in ["requests", "no_request"] {
+        let point = test_support::exact_counter_value(
+            "harold.web_app.connections",
+            &[("outcome", outcome)],
+        );
+        assert!(point.is_some(), "connections {outcome}");
+    }
+    for reason in UPDATES_CLOSE_REASONS {
+        for short in ["true", "false"] {
+            let point = test_support::exact_counter_value(
+                "harold.web_app.updates.closed",
+                &[("reason", reason), ("short", short)],
+            );
+            assert!(point.is_some(), "closed {reason} {short}");
+        }
+    }
+}
+
+#[test]
+fn the_web_request_functions_count_and_a_waiting_request_is_not_a_result() {
+    test_support::install();
+    count_web_request_waiting("thread");
+    assert!(
+        test_support::exact_counter_value(
+            "harold.web_app.requests.waiting",
+            &[("route_class", "thread")]
+        )
+        .is_some_and(|value| value >= 1)
+    );
+    count_web_request("notes", "served", "2xx", "");
+    count_web_connection("requests");
+    web_updates_open_add(1);
+    web_updates_open_add(-1);
+    record_web_request_duration("notes", 0.2);
+    record_web_updates_closed("client_gone", 5.0);
+    assert!(
+        test_support::exact_counter_value(
+            "harold.web_app.updates.closed",
+            &[("reason", "client_gone"), ("short", "true")]
+        )
+        .is_some_and(|value| value >= 1)
+    );
+}
+
+#[test]
+fn web_request_fields_are_allowed() {
+    for field in ["route_class", "result", "waited_ms", "open_s", "short"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
 }
 

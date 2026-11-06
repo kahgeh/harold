@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
-use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _, UpDownCounter};
 use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
     Link, SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
@@ -116,6 +116,9 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "audio_ms",
     "language",
     "waited_ms",
+    "route_class",
+    "open_s",
+    "short",
     "source",
     "start_ms",
     "first_sound_ms",
@@ -396,6 +399,21 @@ pub(crate) struct Instruments {
     pub web_app_pushes: Counter<u64>,
     /// `harold.web_app.collection_pages`, `{page}`, by `collection` and `result`.
     pub web_app_collection_pages: Counter<u64>,
+    /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
+    pub web_app_requests: Counter<u64>,
+    /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
+    /// waits over 5 seconds. It is not a result of `web_app_requests`.
+    pub web_app_requests_waiting: Counter<u64>,
+    /// `harold.web_app.request.duration`, seconds, by `route_class`.
+    pub web_app_request_duration: Histogram<f64>,
+    /// `harold.web_app.connections`, `{connection}`, by `outcome`.
+    pub web_app_connections: Counter<u64>,
+    /// `harold.web_app.updates.open`, `{stream}`: the streams that are open now.
+    pub web_app_updates_open: UpDownCounter<i64>,
+    /// `harold.web_app.updates.duration`, seconds, by `reason`.
+    pub web_app_updates_duration: Histogram<f64>,
+    /// `harold.web_app.updates.closed`, `{stream}`, by `reason` and `short`.
+    pub web_app_updates_closed: Counter<u64>,
     /// `harold.app_spans.not_forwarded`, `{span}`, by `reason`.
     pub app_spans_not_forwarded: Counter<u64>,
     /// `harold.multiplexer.calls`, `{call}`, by `multiplexer`, `host`, `operation`, `outcome`.
@@ -497,6 +515,22 @@ fn build_instruments(meter: &Meter) -> Instruments {
         notifications: counter("harold.notifications", "{notification}"),
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
         web_app_collection_pages: counter("harold.web_app.collection_pages", "{page}"),
+        web_app_requests: counter("harold.web_app.requests", "{request}"),
+        web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
+        web_app_request_duration: seconds(
+            "harold.web_app.request.duration",
+            &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+        ),
+        web_app_connections: counter("harold.web_app.connections", "{connection}"),
+        web_app_updates_open: meter
+            .i64_up_down_counter("harold.web_app.updates.open")
+            .with_unit("{stream}")
+            .build(),
+        web_app_updates_duration: seconds(
+            "harold.web_app.updates.duration",
+            &[1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 3600.0, 14400.0, 86400.0],
+        ),
+        web_app_updates_closed: counter("harold.web_app.updates.closed", "{stream}"),
         app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
         multiplexer_calls: counter("harold.multiplexer.calls", "{call}"),
         multiplexer_call_duration: milliseconds(
@@ -1478,6 +1512,150 @@ pub(crate) fn count_collection_page(collection: &str, result: &str) {
             KeyValue::new("result", result.to_string()),
         ],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Web requests
+// ---------------------------------------------------------------------------
+
+/// Every `route_class` of the web request counters. A raw path is never a route class.
+pub(crate) const WEB_ROUTE_CLASSES: [&str; 13] = [
+    "thread",
+    "updates",
+    "replies",
+    "todos",
+    "notes",
+    "specs",
+    "pages",
+    "call",
+    "pair",
+    "static",
+    "telemetry",
+    "page_events",
+    "other",
+];
+
+/// Every `reason` of a refused web request.
+pub(crate) const WEB_REFUSAL_REASONS: [&str; 5] = [
+    "no_login",
+    "no_cookie",
+    "unknown_device",
+    "origin",
+    "not_datastar",
+];
+
+/// Every `reason` for which an updates stream closes.
+pub(crate) const UPDATES_CLOSE_REASONS: [&str; 3] = ["client_gone", "server_end", "shutdown"];
+
+/// A stream that lives less than this many seconds is `short`.
+const UPDATES_SHORT_SECONDS: f64 = 60.0;
+
+/// Records 0 once for each series of the web request counters. The web app calls it at
+/// its start.
+pub(crate) fn register_web_request_counters() {
+    let instruments = instruments();
+    for class in WEB_ROUTE_CLASSES {
+        instruments.web_app_requests.add(
+            0,
+            &[
+                KeyValue::new("route_class", class),
+                KeyValue::new("result", "served"),
+                KeyValue::new("status", "2xx"),
+                KeyValue::new("reason", ""),
+            ],
+        );
+        // An updates stream stays open, so it has no waiting series.
+        if class != "updates" {
+            instruments
+                .web_app_requests_waiting
+                .add(0, &[KeyValue::new("route_class", class)]);
+        }
+    }
+    for reason in WEB_REFUSAL_REASONS {
+        instruments.web_app_requests.add(
+            0,
+            &[
+                KeyValue::new("route_class", "other"),
+                KeyValue::new("result", "refused"),
+                KeyValue::new("status", "4xx"),
+                KeyValue::new("reason", reason),
+            ],
+        );
+    }
+    for outcome in ["requests", "no_request"] {
+        instruments
+            .web_app_connections
+            .add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+    for reason in UPDATES_CLOSE_REASONS {
+        for short in ["true", "false"] {
+            instruments.web_app_updates_closed.add(
+                0,
+                &[
+                    KeyValue::new("reason", reason),
+                    KeyValue::new("short", short),
+                ],
+            );
+        }
+    }
+}
+
+/// Counts one web request that has its answer. `reason` is empty when the request is served.
+pub(crate) fn count_web_request(route_class: &str, result: &str, status: &str, reason: &str) {
+    instruments().web_app_requests.add(
+        1,
+        &[
+            KeyValue::new("route_class", route_class.to_string()),
+            KeyValue::new("result", result.to_string()),
+            KeyValue::new("status", status.to_string()),
+            KeyValue::new("reason", reason.to_string()),
+        ],
+    );
+}
+
+/// Counts one web request that waits over 5 seconds. It is not a result of the requests
+/// counter.
+pub(crate) fn count_web_request_waiting(route_class: &str) {
+    instruments()
+        .web_app_requests_waiting
+        .add(1, &[KeyValue::new("route_class", route_class.to_string())]);
+}
+
+/// Records the time a web request takes to get its answer.
+pub(crate) fn record_web_request_duration(route_class: &str, seconds: f64) {
+    instruments().web_app_request_duration.record(
+        seconds,
+        &[KeyValue::new("route_class", route_class.to_string())],
+    );
+}
+
+/// Counts one web connection that is closed. `outcome` is `requests` or `no_request`.
+pub(crate) fn count_web_connection(outcome: &str) {
+    instruments()
+        .web_app_connections
+        .add(1, &[KeyValue::new("outcome", outcome.to_string())]);
+}
+
+/// Adds `delta` to the count of open updates streams.
+pub(crate) fn web_updates_open_add(delta: i64) {
+    instruments().web_app_updates_open.add(delta, &[]);
+}
+
+/// Records one updates stream that closes: counts it by `reason` and `short`, and records
+/// how long it was open.
+pub(crate) fn record_web_updates_closed(reason: &str, open_seconds: f64) {
+    let instruments = instruments();
+    let short = open_seconds < UPDATES_SHORT_SECONDS;
+    instruments.web_app_updates_closed.add(
+        1,
+        &[
+            KeyValue::new("reason", reason.to_string()),
+            KeyValue::new("short", short.to_string()),
+        ],
+    );
+    instruments
+        .web_app_updates_duration
+        .record(open_seconds, &[KeyValue::new("reason", reason.to_string())]);
 }
 
 // ---------------------------------------------------------------------------
