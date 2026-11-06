@@ -457,7 +457,7 @@ fn tts_refusal_line(status: &tonic::Status) -> String {
         (_, "model_downloading") => "the TTS model is still downloading: try again soon".into(),
         (_, "model_missing") => "the TTS model is not on this machine: run harold tool tts models".into(),
         (_, "voice_muted") => "the voice is muted: nothing was said (unmute it in the control-tower)".into(),
-        (_, "worker_failed") => "the TTS worker failed: see harold.log".into(),
+        (_, "worker_failed") => "the TTS worker failed: see HyperDX, or harold.log when the collector is down".into(),
         (_, "timed_out") => "the TTS worker did not answer in time".into(),
         (_, "invalid_text") => "the text must be 1 to 4,000 characters".into(),
         (_, "") => "the Harold daemon refused the call".into(),
@@ -8977,6 +8977,10 @@ mod tests {
         assert_eq!(
             line(tonic::Code::FailedPrecondition, "unsafe_format"),
             "refused: the model has a weight file that can run code (.bin, .pt, .pth or .pkl)"
+        );
+        assert_eq!(
+            line(tonic::Code::Internal, "worker_failed"),
+            "the TTS worker failed: see HyperDX, or harold.log when the collector is down"
         );
         assert_eq!(
             line(tonic::Code::FailedPrecondition, "voice_muted"),
