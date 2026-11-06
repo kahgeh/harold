@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use super::request_signals::Refusal;
 use super::route::now_ms;
 use super::{AppState, Clock};
 
@@ -431,8 +432,9 @@ impl Pairing {
         true
     }
 
-    /// Whether a refusal for `reason` is logged now: once per reason per hour.
-    fn should_log(&self, reason: &'static str) -> bool {
+    /// Whether a refusal for `reason` is logged now: once per reason per hour. The login check
+    /// uses the key `login`.
+    pub(crate) fn should_log(&self, reason: &'static str) -> bool {
         let now = (self.clock)();
         let mut state = self.state();
         match state.logged.get(reason) {
@@ -538,10 +540,13 @@ pub(crate) async fn require_device(
     if pairing.should_log(reason) {
         info!(reason, "app device refused");
     }
-    if page {
-        return pair_screen(&state);
-    }
-    StatusCode::UNAUTHORIZED.into_response()
+    let mut response = if page {
+        pair_screen(&state)
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    };
+    response.extensions_mut().insert(Refusal(reason));
+    response
 }
 
 /// The code as compared: without spaces and hyphens, in lowercase.

@@ -16,10 +16,11 @@
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use tracing::warn;
 
 use super::AppState;
+use super::request_signals::refuse;
 
 /// The one route that takes `application/octet-stream` without the Datastar header: the
 /// call's raw audio, which as signals would be base64 and a third larger.
@@ -51,10 +52,10 @@ pub(crate) async fn require_same_origin(
             .map(|authority| authority.as_str())
     });
     let Some(host) = host else {
-        return StatusCode::FORBIDDEN.into_response();
+        return refuse(StatusCode::FORBIDDEN, "origin");
     };
     if !host_is_accepted(host, &state.loopback_hosts) {
-        return StatusCode::FORBIDDEN.into_response();
+        return refuse(StatusCode::FORBIDDEN, "origin");
     }
     let reads_only = matches!(*request.method(), Method::GET | Method::HEAD);
     if !reads_only {
@@ -67,7 +68,12 @@ pub(crate) async fn require_same_origin(
                     "app post refused"
                 );
             }
-            return StatusCode::FORBIDDEN.into_response();
+            let reason = if same_origin {
+                "not_datastar"
+            } else {
+                "origin"
+            };
+            return refuse(StatusCode::FORBIDDEN, reason);
         }
     }
     next.run(request).await

@@ -12,6 +12,7 @@ use tokio::sync::watch;
 
 use super::request_signals::{Refusal, route_class, track_requests};
 use super::{AppState, router};
+use crate::outbound::fake::CapturedLogs;
 use crate::store::HaroldStore;
 use crate::telemetry::{WEB_ROUTE_CLASSES, test_support};
 
@@ -38,12 +39,17 @@ impl axum::serve::Listener for OneConnection {
 
 /// Sends one request to `app` over an in-memory pipe and returns the status code.
 async fn status_of(app: Router, path: &str, extra_headers: &str) -> u16 {
+    send(app, "GET", path, extra_headers).await
+}
+
+/// Sends one request with `method` to `app` over an in-memory pipe and returns the status code.
+async fn send(app: Router, method: &str, path: &str, extra_headers: &str) -> u16 {
     let (mut client, server) = tokio::io::duplex(64 * 1024);
     let serving = tokio::spawn(async move {
         let _ = axum::serve(OneConnection(Some(server)), app).await;
     });
     let request = format!(
-        "GET {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra_headers}\r\n"
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: 0\r\n{extra_headers}\r\n"
     );
     client.write_all(request.as_bytes()).await.unwrap();
     let mut reply = Vec::new();
@@ -205,4 +211,104 @@ async fn refusal_extension_counts_refused_with_its_reason() {
     let before = requests("call", "refused", "4xx", "not_datastar");
     assert_eq!(status_of(app, "/call/refused", "").await, 403);
     assert!(requests("call", "refused", "4xx", "not_datastar") > before);
+}
+
+/// The router with the device check on, and the folder that holds its files.
+async fn router_with_pairing() -> (Router, std::path::PathBuf) {
+    let directory =
+        std::env::temp_dir().join(format!("harold-web-signals-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(HaroldStore::open(directory.join("store")).await.unwrap());
+    let (_shutdown, shutdown_rx) = watch::channel(());
+    let pairing = super::pair::Pairing::load(
+        directory.join("devices.json"),
+        directory.join("code"),
+        true,
+        Arc::new(std::time::Instant::now),
+    )
+    .unwrap();
+    let state = AppState::for_tests(
+        store,
+        LOGIN,
+        "BPublicKeyForTheTestPage",
+        Arc::from(vec!["localhost".to_owned()]),
+        shutdown_rx,
+        None,
+        Default::default(),
+    )
+    .with_pairing(pairing);
+    (router(state), directory)
+}
+
+const LOGIN_LINE: &str = "tailscale-user-login: me@example.com\r\n";
+
+#[tokio::test(flavor = "current_thread")]
+async fn no_login_counts_refused_and_logs_once_per_hour() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let (app, directory) = harold_router().await;
+    let before = requests("todos", "refused", "4xx", "no_login");
+    for _ in 0..2 {
+        assert_eq!(status_of(app.clone(), "/todos/tick", "").await, 403);
+    }
+    assert_eq!(requests("todos", "refused", "4xx", "no_login"), before + 2);
+    let text = logs.text();
+    assert_eq!(text.matches("app login refused").count(), 1, "{text}");
+    assert!(text.contains("todos"), "{text}");
+    assert!(!text.contains("/todos/tick"), "{text}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refusals_count_every_time_while_the_log_stays_once_per_hour() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let (app, directory) = router_with_pairing().await;
+    let before = requests("pages", "refused", "4xx", "no_cookie");
+    for _ in 0..2 {
+        assert_eq!(status_of(app.clone(), "/c/none", LOGIN_LINE).await, 401);
+    }
+    assert_eq!(requests("pages", "refused", "4xx", "no_cookie"), before + 2);
+    let text = logs.text();
+    assert_eq!(text.matches("app device refused").count(), 1, "{text}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unknown_cookie_counts_unknown_device() {
+    test_support::install();
+    let (app, directory) = router_with_pairing().await;
+    let before = requests("notes", "refused", "4xx", "unknown_device");
+    let headers = format!("{LOGIN_LINE}cookie: harold_device=nobody\r\n");
+    assert_eq!(status_of(app, "/notes", &headers).await, 401);
+    assert_eq!(
+        requests("notes", "refused", "4xx", "unknown_device"),
+        before + 1
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_cross_origin_post_counts_origin() {
+    test_support::install();
+    let (app, directory) = harold_router().await;
+    let before = requests("replies", "refused", "4xx", "origin");
+    let headers = format!("{LOGIN_LINE}sec-fetch-site: cross-site\r\n");
+    assert_eq!(send(app, "POST", "/replies", &headers).await, 403);
+    assert_eq!(requests("replies", "refused", "4xx", "origin"), before + 1);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_same_origin_post_without_datastar_counts_not_datastar() {
+    test_support::install();
+    let (app, directory) = harold_router().await;
+    let before = requests("specs", "refused", "4xx", "not_datastar");
+    let headers = format!("{LOGIN_LINE}sec-fetch-site: same-origin\r\n");
+    assert_eq!(send(app, "POST", "/specs/x/y", &headers).await, 403);
+    assert_eq!(
+        requests("specs", "refused", "4xx", "not_datastar"),
+        before + 1
+    );
+    let _ = std::fs::remove_dir_all(directory);
 }

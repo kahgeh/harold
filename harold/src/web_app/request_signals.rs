@@ -6,7 +6,7 @@ use std::time::Instant;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::telemetry::{count_web_request, record_web_request_duration};
 
@@ -14,6 +14,13 @@ use crate::telemetry::{count_web_request, record_web_request_duration};
 /// one of `WEB_REFUSAL_REASONS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Refusal(pub &'static str);
+
+/// A refusal response: `status` with an empty body, marked with `reason` for the layer.
+pub(crate) fn refuse(status: StatusCode, reason: &'static str) -> Response {
+    let mut response = status.into_response();
+    response.extensions_mut().insert(Refusal(reason));
+    response
+}
 
 /// The route class of a path or of a route pattern. The result is always one of
 /// `WEB_ROUTE_CLASSES`. Only the first segment of the path decides the class, and every
