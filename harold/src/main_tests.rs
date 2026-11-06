@@ -3743,14 +3743,22 @@ async fn get_harold_state_answers_closed_with_no_call_and_writes_the_false() {
     assert_eq!(response.call_where, "");
     assert_eq!(response.call_opened_at_ms, 0);
     // Tag 10 is a varint: 0x50, with its value 0.
-    assert!(response.encode_to_vec().windows(2).any(|pair| pair == [0x50, 0x00]));
+    assert!(
+        response
+            .encode_to_vec()
+            .windows(2)
+            .any(|pair| pair == [0x50, 0x00])
+    );
 }
 
 #[test]
 fn call_fields_name_the_open_call_and_its_start() {
     assert_eq!(super::call_fields(None, None), (false, "", 0));
     assert_eq!(super::call_fields(Some(1_000), None), (true, "desk", 1_000));
-    assert_eq!(super::call_fields(None, Some(2_000)), (true, "phone", 2_000));
+    assert_eq!(
+        super::call_fields(None, Some(2_000)),
+        (true, "phone", 2_000)
+    );
     // A phone call ends a desk call, so both open is a moment between: the phone's wins.
     assert_eq!(
         super::call_fields(Some(1_000), Some(2_000)),

@@ -1845,6 +1845,7 @@ pub(crate) enum GetThing {
     Multiplexer,
     Hosts,
     Chief,
+    Call,
 }
 
 impl GetThing {
@@ -1857,6 +1858,7 @@ impl GetThing {
             "multiplexer" => Self::Multiplexer,
             "hosts" => Self::Hosts,
             "chief" => Self::Chief,
+            "call" => Self::Call,
             _ => return None,
         })
     }
@@ -1887,7 +1889,7 @@ impl From<String> for GetFailure {
 fn parse_get(args: &[&str]) -> Result<GetThing, String> {
     let unknown = |name: &str| {
         format!(
-            "unknown thing \"{name}\": voice, messaging, version, machine, multiplexer, hosts, chief"
+            "unknown thing \"{name}\": voice, messaging, version, machine, multiplexer, hosts, chief, call"
         )
     };
     match args {
@@ -1903,6 +1905,26 @@ fn switch_state(stopped: Option<bool>) -> &'static str {
 
 /// The JSON object that `harold get` prints for `thing`. Structs keep the field order.
 fn render_get(thing: GetThing, state: &GetHaroldStateResponse) -> String {
+    render_get_at(thing, state, crate::telemetry::local_offset())
+}
+
+/// Fails for `get call` when the answer has no call flag: a Harold that answers the state
+/// but does not know calls. The caller then treats the call as possibly open.
+fn check_answer(thing: GetThing, state: &GetHaroldStateResponse) -> Result<(), GetFailure> {
+    if thing == GetThing::Call && state.call_open.is_none() {
+        return Err(GetFailure::other(
+            "this Harold is too old for harold get call",
+        ));
+    }
+    Ok(())
+}
+
+/// `render_get` with the time zone, in which the start of a call is written, given.
+fn render_get_at(
+    thing: GetThing,
+    state: &GetHaroldStateResponse,
+    offset: time::UtcOffset,
+) -> String {
     use serde::Serialize;
     #[derive(Serialize)]
     struct Voice<'a> {
@@ -1939,7 +1961,20 @@ fn render_get(thing: GetThing, state: &GetHaroldStateResponse) -> String {
     struct Chief<'a> {
         chief_session: &'a str,
     }
+    #[derive(Serialize)]
+    struct CallOpen<'a> {
+        state: &'static str,
+        #[serde(rename = "where")]
+        place: &'a str,
+        since: String,
+    }
     let json = match thing {
+        GetThing::Call if state.call_open == Some(true) => serde_json::to_string(&CallOpen {
+            state: "open",
+            place: &state.call_where,
+            since: local_time(state.call_opened_at_ms, offset),
+        }),
+        GetThing::Call => serde_json::to_string(&Switch { state: "closed" }),
         GetThing::Voice => serde_json::to_string(&Voice {
             state: switch_state(state.tts_muted),
             engine: &state.tts_engine,
@@ -1974,6 +2009,15 @@ fn render_get(thing: GetThing, state: &GetHaroldStateResponse) -> String {
     json.expect("a struct of strings is valid JSON")
 }
 
+/// `ms` since the Unix epoch as an RFC 3339 time in `offset`, to the second.
+fn local_time(ms: i64, offset: time::UtcOffset) -> String {
+    let time = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+    time.format(&time::format_description::well_known::Rfc3339)
+        .expect("a time in range formats as RFC 3339")
+}
+
 pub(crate) async fn get(settings: &Settings, thing: GetThing) -> Result<String, GetFailure> {
     get_within(settings, thing, CALL_DEADLINE).await
 }
@@ -2003,7 +2047,9 @@ pub(crate) async fn get_within(
             })
     })
     .await?;
-    Ok(render_get(thing, &response.into_inner()))
+    let state = response.into_inner();
+    check_answer(thing, &state)?;
+    Ok(render_get(thing, &state))
 }
 
 pub(crate) async fn accept(
@@ -9274,7 +9320,7 @@ mod tests {
         use crate::harold::{RexHostIcon, *};
         use tokio_stream::wrappers::ReceiverStream;
 
-        const UNKNOWN: &str = "unknown thing \"bogus\": voice, messaging, version, machine, multiplexer, hosts, chief";
+        const UNKNOWN: &str = "unknown thing \"bogus\": voice, messaging, version, machine, multiplexer, hosts, chief, call";
 
         fn state() -> GetHaroldStateResponse {
             GetHaroldStateResponse {
@@ -9348,18 +9394,65 @@ mod tests {
             assert_eq!(render_get(GetThing::Hosts, &state), r#"{"hosts":[]}"#);
         }
 
+        fn at(hours: i8) -> time::UtcOffset {
+            time::UtcOffset::from_hms(hours, 0, 0).unwrap()
+        }
+
+        #[test]
+        fn get_call_prints_the_place_and_the_start_in_local_time() {
+            let mut state = state();
+            // 2026-11-03T22:12:03Z.
+            state.call_open = Some(true);
+            state.call_where = "phone".into();
+            state.call_opened_at_ms = 1_793_743_923_000;
+            assert_eq!(
+                render_get_at(GetThing::Call, &state, at(11)),
+                r#"{"state":"open","where":"phone","since":"2026-11-04T09:12:03+11:00"}"#
+            );
+            state.call_where = "desk".into();
+            state.call_opened_at_ms = 1_793_743_923_999;
+            assert_eq!(
+                render_get_at(GetThing::Call, &state, at(-5)),
+                r#"{"state":"open","where":"desk","since":"2026-11-03T17:12:03-05:00"}"#
+            );
+        }
+
+        #[test]
+        fn get_call_prints_closed_with_no_call() {
+            let mut state = state();
+            state.call_open = Some(false);
+            assert_eq!(
+                render_get_at(GetThing::Call, &state, at(11)),
+                r#"{"state":"closed"}"#
+            );
+        }
+
+        #[test]
+        fn get_call_fails_when_the_answer_has_no_call_flag() {
+            let mut state = state();
+            state.call_open = None;
+            let failure = check_answer(GetThing::Call, &state).unwrap_err();
+            assert_eq!(failure.exit_code, 1);
+            assert_eq!(failure.line, "this Harold is too old for harold get call");
+            // Another thing does not need the flag.
+            assert_eq!(check_answer(GetThing::Chief, &state), Ok(()));
+            state.call_open = Some(false);
+            assert_eq!(check_answer(GetThing::Call, &state), Ok(()));
+        }
+
         #[test]
         fn get_parses_a_thing_and_refuses_the_rest() {
+            assert_eq!(parse(&["get", "call"]), Ok(Mode::Get(GetThing::Call)));
             assert_eq!(parse(&["get", "voice"]), Ok(Mode::Get(GetThing::Voice)));
             assert_eq!(parse(&["get", "chief"]), Ok(Mode::Get(GetThing::Chief)));
             assert_eq!(
                 parse(&["get"]),
-                Err("unknown thing \"\": voice, messaging, version, machine, multiplexer, hosts, chief".into())
+                Err("unknown thing \"\": voice, messaging, version, machine, multiplexer, hosts, chief, call".into())
             );
             assert_eq!(parse(&["get", "bogus"]), Err(UNKNOWN.into()));
             assert_eq!(
                 parse(&["get", "voice", "x"]),
-                Err("unknown thing \"voice x\": voice, messaging, version, machine, multiplexer, hosts, chief".into())
+                Err("unknown thing \"voice x\": voice, messaging, version, machine, multiplexer, hosts, chief, call".into())
             );
         }
 

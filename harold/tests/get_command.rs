@@ -17,7 +17,7 @@ fn get_an_unknown_thing_exits_2_with_nothing_on_standard_output() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "unknown thing \"bogus\": voice, messaging, version, machine, multiplexer, hosts, chief\n"
+        "unknown thing \"bogus\": voice, messaging, version, machine, multiplexer, hosts, chief, call\n"
     );
 }
 

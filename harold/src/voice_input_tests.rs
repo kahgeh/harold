@@ -2081,8 +2081,14 @@ async fn a_call_keeps_the_time_it_opened_until_it_ends() {
     h.start().await;
     let after = unix_ms();
 
-    let opened = h.calls.call_opened_at_ms().expect("an open call has a start");
-    assert!((before..=after).contains(&opened), "{before} {opened} {after}");
+    let opened = h
+        .calls
+        .call_opened_at_ms()
+        .expect("an open call has a start");
+    assert!(
+        (before..=after).contains(&opened),
+        "{before} {opened} {after}"
+    );
     // A second start finds the call open and keeps its start.
     h.calls.start().await;
     assert_eq!(h.calls.call_opened_at_ms(), Some(opened));
