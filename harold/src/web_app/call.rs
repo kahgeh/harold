@@ -163,6 +163,10 @@ impl<B: CallPorts> LineTaker for AppCalls<B> {
         }
         Some(played)
     }
+
+    fn call_opened_at_ms(&self) -> Option<u64> {
+        self.phone.call_opened_at_ms()
+    }
 }
 
 /// `?call=<id>&at=<ms>` on a posted piece: the call it is for, as `POST /call` answered,

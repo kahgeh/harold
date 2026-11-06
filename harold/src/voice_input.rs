@@ -198,6 +198,7 @@ impl<P: CallPorts> CallControl<P> {
                 last_transcript: None,
                 last_result: None,
                 model_percent: None,
+                opened_at_ms: None,
             })),
             call: Mutex::new(None),
         }
@@ -208,6 +209,16 @@ impl<P: CallPorts> CallControl<P> {
         let mut status = lock(&self.status).clone();
         status.chief_pane_id = chief_pane(&*self.ports);
         status
+    }
+
+    /// When the open call started, in milliseconds since the Unix epoch. `None` when the
+    /// state is `Off` or `NotSetUp`.
+    pub(crate) fn call_opened_at_ms(&self) -> Option<u64> {
+        let status = lock(&self.status);
+        match status.state {
+            CallState::Off | CallState::NotSetUp => None,
+            _ => status.opened_at_ms,
+        }
     }
 
     /// Starts a call, and answers once it listens or has ended. With a call already on,
@@ -231,6 +242,7 @@ impl<P: CallPorts> CallControl<P> {
                     info!(reason = TurnResult::VoiceMuted.reason(), "call not started");
                     return self.status();
                 }
+                lock(&self.status).opened_at_ms = Some(unix_ms());
                 let (events, inbox) = mpsc::unbounded_channel();
                 let (opened_tx, opened) = watch::channel(false);
                 let (ended_tx, ended) = watch::channel(false);
@@ -323,6 +335,13 @@ impl<P: CallPorts> CallControl<P> {
     }
 }
 
+/// The time now in milliseconds since the Unix epoch.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(0))
+}
+
 /// The daemon's calls with the chief at the desk.
 pub(crate) type DaemonCalls = CallControl<MacPorts>;
 
@@ -380,6 +399,10 @@ pub(crate) fn daemon_calls() -> Option<&'static DaemonCalls> {
 impl<P: CallPorts> LineTaker for CallControl<P> {
     fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
         CallControl::say_blocking(self, line, by)
+    }
+
+    fn call_opened_at_ms(&self) -> Option<u64> {
+        CallControl::call_opened_at_ms(self)
     }
 }
 

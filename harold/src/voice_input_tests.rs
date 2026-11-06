@@ -1879,6 +1879,10 @@ impl LineTaker for FakeLineTaker {
         self.taken.fetch_add(1, Ordering::SeqCst);
         self.answer
     }
+
+    fn call_opened_at_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[test]
@@ -2065,4 +2069,46 @@ fn two_agents_in_the_chiefs_folder_leave_the_first_as_the_chief() {
     let text = logs.text();
     assert_eq!(text.matches("chief pane changed").count(), 1, "{text}");
     assert!(text.contains("state=\"found\""), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_keeps_the_time_it_opened_until_it_ends() {
+    let h = Harness::new();
+    assert_eq!(h.calls.call_opened_at_ms(), None);
+    assert_eq!(h.status().opened_at_ms, None);
+
+    let before = unix_ms();
+    h.start().await;
+    let after = unix_ms();
+
+    let opened = h.calls.call_opened_at_ms().expect("an open call has a start");
+    assert!((before..=after).contains(&opened), "{before} {opened} {after}");
+    // A second start finds the call open and keeps its start.
+    h.calls.start().await;
+    assert_eq!(h.calls.call_opened_at_ms(), Some(opened));
+
+    h.calls.stop().await;
+    assert_eq!(h.calls.call_opened_at_ms(), None);
+    assert_eq!(h.status().opened_at_ms, None);
+}
+
+#[test]
+fn a_call_is_open_in_every_state_but_off_and_not_set_up() {
+    let calls = CallControl::new(FakePorts::new(), true);
+    lock(&calls.status).opened_at_ms = Some(1_000);
+    let open = [
+        CallState::Connecting,
+        CallState::Listening,
+        CallState::Transcribing,
+        CallState::Waiting,
+        CallState::Speaking,
+    ];
+    for state in open {
+        lock(&calls.status).state = state;
+        assert_eq!(calls.call_opened_at_ms(), Some(1_000), "{state:?}");
+    }
+    for state in [CallState::Off, CallState::NotSetUp] {
+        lock(&calls.status).state = state;
+        assert_eq!(calls.call_opened_at_ms(), None, "{state:?}");
+    }
 }

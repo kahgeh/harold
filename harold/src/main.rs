@@ -600,6 +600,7 @@ impl Harold for HaroldService {
             machine_host_icon: view.machine_host_icon.clone(),
             tts_engine: view.tts_engine.clone(),
             chief_session: view.chief_session.clone(),
+            ..Default::default()
         }))
     }
 
@@ -840,6 +841,7 @@ impl Harold for HaroldService {
                 last_transcript: None,
                 last_result: None,
                 model_percent: None,
+                opened_at_ms: None,
             })));
         };
         let status = match action {

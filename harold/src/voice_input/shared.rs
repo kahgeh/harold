@@ -76,6 +76,9 @@ pub(crate) struct CallStatus {
     /// How far a speech model's download has come, in whole percent, while the call
     /// connects.
     pub model_percent: Option<u8>,
+    /// When the open call started, in milliseconds since the Unix epoch. Set when the call
+    /// opens, kept while it lasts, and cleared when it ends.
+    pub opened_at_ms: Option<u64>,
 }
 
 /// Who sent a line said into an open call.
@@ -92,6 +95,9 @@ pub(crate) trait LineTaker: Send + Sync {
     /// Says `line` in the open call, from a blocking thread, and returns once it has ended.
     /// `None` when no call is open.
     fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool>;
+    /// When the open call started, in milliseconds since the Unix epoch. `None` when no call
+    /// is open.
+    fn call_opened_at_ms(&self) -> Option<u64>;
 }
 
 /// What the phone shows and plays now.

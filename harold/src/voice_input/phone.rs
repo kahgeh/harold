@@ -770,6 +770,10 @@ impl<B: CallPorts> LineTaker for PhoneCalls<B> {
     fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
         PhoneCalls::say_blocking(self, line, by)
     }
+
+    fn call_opened_at_ms(&self) -> Option<u64> {
+        self.calls.call_opened_at_ms()
+    }
 }
 
 impl<B: CallPorts> PhoneCalls<B> {

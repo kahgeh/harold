@@ -9290,6 +9290,7 @@ mod tests {
                 machine_host_icon: "mac".into(),
                 tts_engine: "server".into(),
                 chief_session: "chief".into(),
+                ..Default::default()
             }
         }
 

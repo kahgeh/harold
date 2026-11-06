@@ -2697,6 +2697,7 @@ fn call_response_maps_every_state_and_result() {
                 last_transcript: Some("check the build".into()),
                 last_result: result,
                 model_percent: None,
+                opened_at_ms: None,
             });
             assert_eq!(answer.state, wire_state as i32);
             assert_eq!(answer.last_result, wire_result as i32);
@@ -2710,6 +2711,7 @@ fn call_response_maps_every_state_and_result() {
         last_transcript: None,
         last_result: None,
         model_percent: None,
+        opened_at_ms: None,
     });
     assert_eq!(empty.chief_pane_id, "");
     assert_eq!(empty.last_transcript, "");

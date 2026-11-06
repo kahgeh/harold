@@ -2639,6 +2639,7 @@ impl<P: CallPorts> Call<P> {
             } else {
                 status.state = CallState::Off;
                 status.last_transcript = None;
+                status.opened_at_ms = None;
             }
         }
         if why == Ended::Shutdown {
@@ -2704,6 +2705,7 @@ impl<P: CallPorts> Call<P> {
         status.state = CallState::Off;
         // The transcript is shown only while the call lasts.
         status.last_transcript = None;
+        status.opened_at_ms = None;
     }
 }
 
@@ -2745,7 +2747,11 @@ struct NotOpened<'a, P> {
 impl<P: CallPorts> NotOpened<'_, P> {
     /// Answers START, says why the call ended, and removes its folder.
     async fn close(&self, started: watch::Sender<bool>, why: Ended) {
-        lock(self.status).state = CallState::Off;
+        {
+            let mut status = lock(self.status);
+            status.state = CallState::Off;
+            status.opened_at_ms = None;
+        }
         started.send_replace(true);
         if why == Ended::NoChief {
             // No worker runs yet: the phrase plays from the phrase folder, or else

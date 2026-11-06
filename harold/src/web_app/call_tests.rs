@@ -1559,3 +1559,24 @@ async fn the_phones_screen_shows_connecting_for_at_least_3_s_and_then_listening(
     assert!(rang < Duration::from_millis(3_500), "{rang:?}");
     assert_eq!(phone.calls.view().borrow().state, CallState::Listening);
 }
+
+/// A newer screen that takes the open call over does not make it a new call: the start time
+/// stays the first, and it clears when the call ends.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_takeover_keeps_the_first_start_of_the_phone_call() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
+    let end_desk: EndDeskCall = Arc::new(|| Box::pin(async {}));
+    let calls = AppCalls::new(PhoneCalls::new(FakePorts::new(), true), store, end_desk);
+    assert_eq!(calls.call_opened_at_ms(), None);
+
+    calls.start().await;
+    let first = calls.call_opened_at_ms().expect("an open call has a start");
+    // The real clock does not follow the paused one.
+    std::thread::sleep(Duration::from_millis(5));
+    calls.start().await;
+
+    assert_eq!(calls.call_opened_at_ms(), Some(first));
+    calls.stop(false).await;
+    assert_eq!(calls.call_opened_at_ms(), None);
+}

@@ -30,6 +30,7 @@ impl DaemonCalls {
             last_transcript: None,
             last_result: None,
             model_percent: None,
+            opened_at_ms: None,
         }
     }
 
