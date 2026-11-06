@@ -43,6 +43,7 @@ fn seconds_and_event_id_are_exported_on_a_log_record() {
         let keys: Vec<&str> = record
             .record
             .attributes_iter()
+            .filter(|(key, _)| key.as_str() != "log.target")
             .map(|(key, _)| key.as_str())
             .collect();
         assert!(keys.contains(&"event_id"), "{keys:?}");
@@ -134,6 +135,7 @@ fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["pane_id", "reason"]);
@@ -161,6 +163,7 @@ fn a_pane_write_refused_record_keeps_its_writer_field() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["pane_id", "writer", "reason"]);
@@ -185,6 +188,7 @@ fn the_pod_file_and_stage_fields_leave_a_log_record() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["pod.product", "spec.id", "spec.stage", "file"]);
@@ -203,6 +207,7 @@ fn an_agent_monitor_degraded_record_leaves_with_component_and_reason() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["component", "reason"]);
@@ -221,6 +226,7 @@ fn an_agent_monitor_read_retried_record_leaves_with_elapsed_ms() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["component", "pane_id", "elapsed_ms"]);
@@ -239,6 +245,7 @@ fn the_watch_run_time_fields_leave_a_log_record() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(keys, vec!["watch", "wait_ms", "run_ms"]);
@@ -330,6 +337,7 @@ fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(
@@ -366,6 +374,7 @@ fn the_echo_test_fields_leave_a_log_record_and_text_still_does_not() {
     let keys: Vec<&str> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(key, _)| key.as_str())
         .collect();
     assert_eq!(
@@ -612,6 +621,7 @@ fn only_harold_and_events_log_records_are_exported() {
     let canary = format!("TELEMETRY-CANARY-{}", uuid::Uuid::new_v4());
     let pane = unique_pane();
     // Other crates interpolate errors and paths into their messages, as turso_core does.
+    // Their error lines go out cut. Their warn and error lines stay in harold.log too.
     tracing::error!(target: "turso_core::statement", "{}", canary);
     tracing::error!(target: "reqwest::blocking::client", "request failed: {}", canary);
     tracing::error!(target: "harold_api", "{}", canary);
@@ -626,7 +636,10 @@ fn only_harold_and_events_log_records_are_exported() {
     // Records from other crates still reach harold.log.
     assert!(logs.text().contains(&canary), "{}", logs.text());
     let exported = test_support::exported_text();
-    assert!(!exported.contains(&canary));
+    // The canary has no path, URL or pair, so the cut keeps it: other crates' error lines
+    // are exported, with their target in `log.target`.
+    assert!(exported.contains(&canary));
+    assert!(exported.contains("turso_core::statement"));
     let bodies: Vec<String> = test_support::logs()
         .iter()
         .filter(|l| format!("{:?}", l.record).contains(&pane))
@@ -6224,6 +6237,7 @@ fn an_agent_event_is_exported_with_its_name_and_declared_attributes_only() {
     let attributes: Vec<(String, String)> = record
         .record
         .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
         .map(|(k, v)| (k.to_string(), format!("{v:?}")))
         .collect();
     let keys: Vec<&str> = attributes.iter().map(|(k, _)| k.as_str()).collect();
@@ -6501,4 +6515,154 @@ fn the_slave_link_gauges_follow_the_notes() {
         test_support::gauge_value("harold.slave_link.connected", &[("slave", "noted-slave")]),
         Some(0)
     );
+}
+
+#[test]
+fn cut_message_cuts_paths_urls_emails_and_pairs() {
+    assert_eq!(
+        cut_message("failed to open /Users/me/bin/harold/data/x.db: permission denied"),
+        "failed to open <cut> permission denied"
+    );
+    assert_eq!(
+        cut_message("GET https://h.example/a?b failed"),
+        "GET <cut> failed"
+    );
+    assert_eq!(cut_message("mail me@x.com now"), "mail <cut> now");
+    assert_eq!(cut_message("token=abc12 bad"), "<cut> bad");
+    assert_eq!(cut_message(r"open C:\temp\x"), "open <cut>");
+    assert_eq!(cut_message("plain words only"), "plain words only");
+    let long = "word ".repeat(60);
+    assert!(long.chars().count() > 200);
+    assert!(cut_message(&long).chars().count() <= 200);
+}
+
+#[test]
+fn slatedb_warn_exports_cut() {
+    test_support::install();
+    let marker = format!("slate-{}", uuid::Uuid::new_v4());
+    tracing::warn!(target: "slatedb::db", "{marker} cannot read /Users/me/x.sst");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&marker))
+        .expect("a slatedb warn line is exported");
+    let text = format!("{:?}", record.record.body());
+    assert!(text.contains("<cut>"), "{text}");
+    assert!(!text.contains("/Users/me"), "{text}");
+}
+
+#[test]
+fn slatedb_info_stays_out() {
+    test_support::install();
+    let marker = format!("slate-info-{}", uuid::Uuid::new_v4());
+    tracing::info!(target: "slatedb::db", "{marker}");
+    assert!(
+        !test_support::logs()
+            .iter()
+            .any(|l| format!("{:?}", l.record).contains(&marker))
+    );
+    assert!(exports_log("slatedb::db", Level::WARN));
+    assert!(exports_log("slatedb::db", Level::ERROR));
+    assert!(!exports_log("slatedb::db", Level::INFO));
+    assert!(exports_log("harold::x", Level::DEBUG));
+    assert!(exports_log("events::store", Level::INFO));
+    assert!(exports_log("buckwal", Level::INFO));
+    assert!(!exports_log(HEALTH_TARGET, Level::WARN));
+}
+
+#[test]
+fn tonic_and_opentelemetry_sdk_warn_stay_out() {
+    for target in [
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry_sdk::logs",
+        "opentelemetry-otlp",
+        "opentelemetry_otlp::exporter",
+        "tonic",
+        "tonic::transport",
+        "hyper",
+        "hyper::proto::h1",
+        "h2",
+        "h2::codec",
+        "tower",
+        "tower::buffer",
+        "http",
+        "http::header",
+    ] {
+        assert!(is_telemetry_crate_target(target), "{target}");
+        assert!(!exports_log(target, Level::WARN), "{target}");
+        assert!(!exports_log(target, Level::ERROR), "{target}");
+    }
+    assert!(!is_telemetry_crate_target("hyper_util"));
+    assert!(!is_telemetry_crate_target("httparse"));
+    assert!(exports_log("reqwest::connect", Level::WARN));
+    assert!(is_foreign_target("reqwest"));
+    assert!(!is_foreign_target("harold::x"));
+    assert!(!is_foreign_target("events"));
+    assert!(!is_foreign_target("buckwal::wal"));
+}
+
+#[test]
+fn harold_body_is_not_cut() {
+    test_support::install();
+    let marker = format!("own-{}", uuid::Uuid::new_v4());
+    tracing::warn!("{marker} path /a/b key=value");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&marker))
+        .unwrap();
+    let text = format!("{:?}", record.record.body());
+    assert!(text.contains("/a/b key=value"), "{text}");
+}
+
+/// Where the scope name is lost: Harold hands the exporter the record target. The
+/// bridge's logger name, and so the batch scope name, is empty. The OTLP encoder
+/// (opentelemetry-proto 0.31.0, `group_logs_by_resource_and_scope`) names the scope
+/// from the record target, so the loss is after Harold.
+#[test]
+fn scope_name_of_exported_record() {
+    test_support::install();
+    let marker = format!("scope-{}", uuid::Uuid::new_v4());
+    tracing::info!(event_id = %marker, "scope probe");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&marker))
+        .expect("the record is exported");
+    println!(
+        "scope name {:?}, record target {:?}",
+        record.instrumentation.name(),
+        record.record.target()
+    );
+    assert_eq!(record.instrumentation.name(), "");
+    assert_eq!(
+        record.record.target().map(|t| t.as_ref()),
+        Some("harold::telemetry::tests")
+    );
+}
+
+#[test]
+fn every_exported_line_has_log_target() {
+    test_support::install();
+    let marker = format!("target-{}", uuid::Uuid::new_v4());
+    tracing::info!("{marker} own");
+    tracing::error!(target: "slatedb::db", "{marker} foreign");
+    let logs = test_support::logs();
+    let mut seen = 0;
+    for record in logs
+        .iter()
+        .filter(|l| format!("{:?}", l.record).contains(&marker))
+    {
+        let target = record.record.target().expect("a target is set").to_string();
+        let attr = record
+            .record
+            .attributes_iter()
+            .find(|(k, _)| k.as_str() == "log.target")
+            .map(|(_, v)| format!("{v:?}"))
+            .expect("log.target is set");
+        assert!(attr.contains(&target), "{attr} vs {target}");
+        seen += 1;
+    }
+    assert_eq!(seen, 2);
 }

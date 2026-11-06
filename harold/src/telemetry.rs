@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use opentelemetry::global::{self, BoxedTracer};
-use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
+use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _, UpDownCounter};
 use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
@@ -327,19 +327,81 @@ fn is_agent_attr_key(key: &str) -> bool {
     })
 }
 
-/// Whether a log event with `target` is exported. Only Harold's and the `events`
-/// crate's own events are: a target that is `harold` or starts with `harold::`, or is
-/// `events` or starts with `events::`, apart from the health lines. Other crates, such
-/// as turso and reqwest, interpolate errors and paths into their messages, so their
-/// events (including `log` records the LogTracer bridges) stay in `harold.log` only.
+/// Whether `target` is `name` or starts with `name::`.
+fn target_is(target: &str, name: &str) -> bool {
+    target == name
+        || target
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+/// Whether a log event with `target` is Harold's own: a target that is `harold`,
+/// `events` or `buckwal`, or starts with one of them and `::`, apart from the health
+/// lines. These lines go out at every enabled level and are not cut.
 fn is_exported_log_target(target: &str) -> bool {
-    let ours = |name: &str| {
-        target == name
-            || target
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with("::"))
-    };
-    target != HEALTH_TARGET && (ours("harold") || ours("events") || ours("buckwal"))
+    target != HEALTH_TARGET
+        && (target_is(target, "harold")
+            || target_is(target, "events")
+            || target_is(target, "buckwal"))
+}
+
+/// Whether `target` belongs to a crate that sends or logs the telemetry export itself.
+/// When the collector is down these crates log each failed send. If Harold exported
+/// those lines, each failed send would queue one more line to send.
+fn is_telemetry_crate_target(target: &str) -> bool {
+    [
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry_otlp",
+        "opentelemetry-otlp",
+        "tonic",
+        "hyper",
+        "h2",
+        "tower",
+        "http",
+    ]
+    .iter()
+    .any(|name| target_is(target, name))
+}
+
+/// Whether `target` is another crate's: not Harold's, `events` or `buckwal`.
+fn is_foreign_target(target: &str) -> bool {
+    !(target_is(target, "harold") || target_is(target, "events") || target_is(target, "buckwal"))
+}
+
+/// Whether a log event with `target` and `level` is exported. Harold's own lines go
+/// at every enabled level. Other crates' lines go at warn and error only, and the
+/// telemetry crates' lines and the health lines never go.
+fn exports_log(target: &str, level: Level) -> bool {
+    if target == HEALTH_TARGET {
+        return false;
+    }
+    if is_exported_log_target(target) {
+        return true;
+    }
+    is_foreign_target(target)
+        && !is_telemetry_crate_target(target)
+        && (level == Level::WARN || level == Level::ERROR)
+}
+
+/// The most characters of a message from another crate that leave Harold.
+const CUT_MESSAGE_LIMIT: usize = 200;
+
+/// Cuts the message of another crate before it is exported. Each word that holds `/`,
+/// `\`, `@`, `?` or `=` becomes `<cut>`, and the result has at most 200 characters.
+/// Such a word can hold a path, a URL, an address or a token.
+pub(crate) fn cut_message(text: &str) -> String {
+    let cut: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| {
+            if word.contains(['/', '\\', '@', '?', '=']) {
+                "<cut>"
+            } else {
+                word
+            }
+        })
+        .collect();
+    cut.join(" ").chars().take(CUT_MESSAGE_LIMIT).collect()
 }
 
 /// Whether a span with `target` is buckwal's own.
@@ -2813,16 +2875,16 @@ fn span_export_filter() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Send + Sync
     .with_max_level_hint(LevelFilter::INFO)
 }
 
-/// What becomes an OpenTelemetry log record: the events `level` enables whose target
-/// passes the allow-list in `is_exported_log_target` (Harold's and the `events` crate's
-/// own targets, apart from the health lines). Every other target, including the
-/// exporter's own libraries, is written to `harold.log` only.
+/// What becomes an OpenTelemetry log record: the events `level` enables that
+/// `exports_log` accepts. These are Harold's own lines at every level and other crates'
+/// warn and error lines. The health lines and the exporter's own libraries are written
+/// to `harold.log` only.
 fn log_export_filter<S>(level: &str) -> impl Filter<S> + Send + Sync + use<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     EnvFilter::new(level).and(
-        filter_fn(|meta: &Metadata<'_>| is_exported_log_target(meta.target()))
+        filter_fn(|meta: &Metadata<'_>| exports_log(meta.target(), *meta.level()))
             .with_max_level_hint(LevelFilter::TRACE),
     )
 }
@@ -3125,15 +3187,32 @@ fn allowed_record(record: &SdkLogRecord) -> SdkLogRecord {
     if let Some(number) = record.severity_number() {
         allowed.set_severity_number(number);
     }
+    let foreign = record
+        .target()
+        .is_some_and(|target| is_foreign_target(target));
     if let Some(body) = record.body() {
-        allowed.set_body(body.clone());
+        match body {
+            AnyValue::String(text) if foreign => {
+                allowed.set_body(AnyValue::String(cut_message(text.as_str()).into()));
+            }
+            _ => allowed.set_body(body.clone()),
+        }
     }
     allowed.add_attributes(
         record
             .attributes_iter()
-            .filter(|(key, _)| is_allowed(key.as_str()))
-            .cloned(),
+            .filter(|(key, _)| is_allowed(key.as_str()) && key.as_str() != "log.target")
+            .map(|(key, value)| match value {
+                AnyValue::String(text) if key.as_str() == "panic.message" => (
+                    key.clone(),
+                    AnyValue::String(cut_message(text.as_str()).into()),
+                ),
+                _ => (key.clone(), value.clone()),
+            }),
     );
+    if let Some(target) = record.target() {
+        allowed.add_attribute("log.target", AnyValue::String(target.to_string().into()));
+    }
     allowed
 }
 
