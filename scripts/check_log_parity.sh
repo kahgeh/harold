@@ -11,6 +11,8 @@
 #   unsent   a line that ends with unsent=true
 #   gap      any other line
 # Each unsent line is looked up in otel.otel_logs (same message, time within 1 second): resent or not resent.
+# A line of Harold's own target (harold, events, buckwal) is looked up as it is. A line of another crate is cut first,
+# as Harold cuts it before it exports it: each word with / \\ @ ? or = becomes <cut>, and 200 characters at most remain.
 # The script prints the count of each kind, then the time and message of each gap line and each not-resent line.
 # It never prints a field value. A message is cut at 200 characters.
 # A span prefix with fields (span{k=v}: ) before the target is accepted. A span prefix with no fields is not.
@@ -45,6 +47,9 @@ HEALTH = ("telemetry export failing", "telemetry export recovered")
 EXACT = ("opentelemetry", "tonic", "hyper", "hyper_util", "h2", "tower", "tower_http", "http")
 PREFIXES = ("opentelemetry_", "opentelemetry-", "tonic_")
 UNSENT = " unsent=true"
+OWN_TARGETS = ("harold", "events", "buckwal")
+CUT_MARKS = ("/", "\\", "@", "?", "=")
+CUT_LIMIT = 200
 
 
 def parse_time(text):
@@ -63,6 +68,17 @@ def message_of(rest):
         rest = rest[: -len(UNSENT)]
     match = FIELD.search(rest)
     return rest[: match.start()] if match else rest
+
+
+def is_harolds_own(target):
+    """The rule of `target_is` in telemetry.rs: Harold's, `events` or `buckwal`, or one of them and `::`."""
+    return any(target == name or target.startswith(name + "::") for name in OWN_TARGETS)
+
+
+def cut_message(text):
+    """The cut of `cut_message` in telemetry.rs: a word with / \\ @ ? or = becomes <cut>, one space joins, 200 characters at most."""
+    words = ["<cut>" if any(mark in word for mark in CUT_MARKS) else word for word in text.split()]
+    return " ".join(words)[:CUT_LIMIT]
 
 
 def literal(text):
@@ -118,7 +134,9 @@ def main():
             if message.startswith(HEALTH) or is_telemetry(target):
                 allowed += 1
             elif rest.endswith(UNSENT):
-                if resent(time_text, message):
+                # ClickHouse holds another crate's message after the cut, so look for that text.
+                sent = message if is_harolds_own(target) else cut_message(message)
+                if resent(time_text, sent):
                     unsent_resent += 1
                 else:
                     not_resent.append((time_text, message[:200]))
