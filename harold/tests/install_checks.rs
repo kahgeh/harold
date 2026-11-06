@@ -974,6 +974,20 @@ fn assert_failed(output: &Output) {
     assert_eq!(refusal(output), None);
 }
 
+/// Asserts the daemon, started other than by launchd, exited 1 as before, and logged one
+/// `startup refused` line with `reason="invalid_config"` before it returned its error.
+fn assert_failed_with_invalid_config(output: &Output) {
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(text.matches("startup refused").count(), 1, "{output:?}");
+    let line = refusal(output).unwrap_or_else(|| panic!("no startup refused line: {output:?}"));
+    assert!(line.contains("reason=\"invalid_config\""), "{line}");
+}
+
 fn locked_store(fixture: &Fixture) -> std::fs::File {
     std::fs::create_dir_all(fixture.store()).unwrap();
     let lock = std::fs::File::create(fixture.store().join("harold.lock")).unwrap();
@@ -1008,7 +1022,7 @@ async fn incompatible_store(fixture: &Fixture) {
 fn under_launchd_an_invalid_config_exits_zero_and_says_why() {
     let fixture = Fixture::new(INVALID);
     assert_refused(&fixture.daemon(true), "invalid_config");
-    assert_failed(&fixture.daemon(false));
+    assert_failed_with_invalid_config(&fixture.daemon(false));
 }
 
 #[test]
@@ -1025,7 +1039,7 @@ fn under_launchd_a_config_naming_removed_settings_exits_zero_with_their_sentence
             == format!("Error: invalid configuration: {TELEGRAM_SENTENCE}; {PEERS_SENTENCE}")),
         "{stderr}"
     );
-    assert_failed(&fixture.daemon(false));
+    assert_failed_with_invalid_config(&fixture.daemon(false));
 }
 
 #[test]
