@@ -688,7 +688,7 @@ async fn start_specs_listener(
     let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            warn!(error = %error, "specs listener unavailable");
+            crate::telemetry::log_listener_failed("specs", addr.port(), &error);
             return None;
         }
     };
@@ -725,9 +725,10 @@ pub(crate) async fn start(
     let addr = settings
         .listen_addr()
         .ok_or_else(|| "web_app.listen is not an address and port".to_owned())?;
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| format!("listen on {addr}: {error}"))?;
+    let listener = TcpListener::bind(addr).await.map_err(|error| {
+        crate::telemetry::log_listener_failed("web_app", addr.port(), &error);
+        format!("listen on {addr}: {error}")
+    })?;
     let local_addr = listener
         .local_addr()
         .map_err(|error| format!("listen on {addr}: {error}"))?;

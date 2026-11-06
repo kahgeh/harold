@@ -195,6 +195,52 @@ fn the_pod_file_and_stage_fields_leave_a_log_record() {
 }
 
 #[test]
+fn reason_for_each_error_kind() {
+    use std::io::{Error, ErrorKind};
+    assert_eq!(
+        listener_failure_reason(&Error::from(ErrorKind::AddrInUse)),
+        "address_in_use"
+    );
+    assert_eq!(
+        listener_failure_reason(&Error::from(ErrorKind::PermissionDenied)),
+        "permission_denied"
+    );
+    assert_eq!(
+        listener_failure_reason(&Error::from(ErrorKind::NotFound)),
+        "other"
+    );
+}
+
+#[test]
+fn log_listener_failed_has_component_port_reason_and_no_error_text() {
+    test_support::install();
+    let port = 40000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16;
+    let error = std::io::Error::new(std::io::ErrorKind::AddrInUse, "secret-host-text");
+    log_listener_failed("alerts", port, &error);
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| {
+            let text = format!("{:?}", l.record);
+            text.contains("listener not started") && text.contains(&port.to_string())
+        })
+        .unwrap();
+    let text = format!("{:?}", record.record);
+    assert!(
+        text.contains("alerts") && text.contains("address_in_use"),
+        "{text}"
+    );
+    assert!(!text.contains("secret-host-text"), "{text}");
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .filter(|(key, _)| key.as_str() != "log.target")
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["component", "port", "reason"]);
+}
+
+#[test]
 fn an_agent_monitor_degraded_record_leaves_with_component_and_reason() {
     test_support::install();
     let component = format!("degraded-{}", uuid::Uuid::new_v4());

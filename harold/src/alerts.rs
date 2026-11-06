@@ -495,7 +495,9 @@ pub(crate) async fn start(
     ports: TmuxPorts,
     shutdown: watch::Receiver<()>,
 ) -> std::io::Result<(JoinHandle<()>, AlertQueue)> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await.inspect_err(|error| {
+        crate::telemetry::log_listener_failed("alerts", addr.port(), error);
+    })?;
     info!(address = %addr, "alert address listening");
     Ok(serve_on(listener, chief_folder, ports, shutdown))
 }

@@ -902,6 +902,27 @@ pub(crate) fn register_blocked_long_counters(provider_ids: &[&str]) {
 }
 
 /// Counts one agent that stayed blocked for 15 minutes.
+/// The fixed word for why a listener did not start: `address_in_use`, `permission_denied`
+/// or `other`. It never holds the error text.
+pub(crate) fn listener_failure_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::AddrInUse => "address_in_use",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        _ => "other",
+    }
+}
+
+/// Logs `listener not started` at error level with the `component`, the `port` and the
+/// `reason`. The line holds no host and no error text.
+pub(crate) fn log_listener_failed(component: &'static str, port: u16, error: &std::io::Error) {
+    tracing::error!(
+        component,
+        port,
+        reason = listener_failure_reason(error),
+        "listener not started"
+    );
+}
+
 pub(crate) fn record_blocked_long(provider_id: &str) {
     instruments()
         .agent_blocked_long

@@ -2399,6 +2399,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
+    if let Err(error) = &server_result {
+        log_grpc_listener_failure(error, addr.port());
+    }
+
     if let Some(slave_link) = slave_link {
         slave_link.abort();
     }
@@ -2434,6 +2438,19 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     telemetry.shutdown().await;
     server_result?;
     Ok(())
+}
+
+/// Logs `listener not started` when the gRPC server ended on an I/O error, such as a port in
+/// use. The line goes out before the telemetry flush.
+fn log_grpc_listener_failure(error: &(dyn std::error::Error + 'static), port: u16) {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            telemetry::log_listener_failed("grpc", port, io_error);
+            return;
+        }
+        source = current.source();
+    }
 }
 
 /// Whether launchd started this daemon: its plist sets `HAROLD_LAUNCHD=1`. Then a start that

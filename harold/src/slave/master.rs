@@ -387,7 +387,12 @@ pub(crate) fn serve_slave_link(
         let listener = match tokio::net::TcpListener::bind(&settings.listen).await {
             Ok(listener) => listener,
             Err(error) => {
-                warn!(listen = %settings.listen, error = %error, "slave link listener not started");
+                let port = settings
+                    .listen
+                    .parse::<std::net::SocketAddr>()
+                    .map(|addr| addr.port())
+                    .unwrap_or(0);
+                crate::telemetry::log_listener_failed("slave_link", port, &error);
                 return;
             }
         };
