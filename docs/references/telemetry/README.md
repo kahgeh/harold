@@ -559,7 +559,7 @@ A `result` is `served`, `refused` (with a `reason`), `not_found` or `error` (a 5
 
 A request with no answer after 5 seconds writes the `warn` line `app request waiting` once and adds one to `harold.web_app.requests.waiting`. The `updates` stream answers at once and then stays open, so it never counts here.
 
-The web app's listener is wrapped. Each accepted TCP connection adds one to `harold.web_app.connections`. A connection that closes with no request read on it counts as `no_request`. `tailscale serve` opens such connections.
+The web app's listener is wrapped. Each TCP connection adds one to `harold.web_app.connections` when it closes: as `no_request` if it read no byte, and as `requests` otherwise. A connection that stays open shows its count only when it closes. `tailscale serve` opens connections that close with no request.
 
 Each updates stream adds one to `harold.web_app.updates.open` when it opens and takes one away when it closes. When a stream closes, Harold records its open time and its `reason`, and counts it with `short`.
 
@@ -573,16 +573,18 @@ Each counter starts at 0 for every `route_class`, `reason`, `outcome` and `short
 
 The existing `app device refused` and `app post refused` lines keep their fields and their hourly rule.
 
-**How to tell what happened.** Use the minutes in which the phone failed. Run one query for each row. The queries read `otel.otel_metrics_sum`, `otel.otel_metrics_histogram` and `otel.otel_logs`.
+**How to tell what happened.** Use the minutes in which the phone failed. Four queries cover the four cases: the first covers the first two cases, the second covers the refused case, and the third and fourth cover the slow case. The queries read `otel.otel_metrics_sum`, `otel.otel_metrics_histogram` and `otel.otel_logs`.
 
 | Case | What ClickHouse shows | What it means and what to do |
 |---|---|---|
-| Never reached Harold | `harold.web_app.connections` does not rise at all | The requests never reached Harold's port. Look at the phone's network and at `tailscale serve status`. Harold never runs Tailscale commands |
+| Never reached Harold | `harold.web_app.connections` does not rise at all in those minutes, closes counted | The requests never reached Harold's port. Look at the phone's network and at `tailscale serve status`. Harold never runs Tailscale commands |
 | Reached the port, no request | `harold.web_app.connections` rises with `outcome = no_request`, and `harold.web_app.requests` does not rise | Something reached the port and sent no request. Look at `tailscale serve` and at TLS on the way |
-| Harold refused | `harold.web_app.requests` rises with `result = refused` | Harold answered at once and refused. The `reason` names the cause. A missing device cookie is `no_cookie`. On 2026-11-06 this was the most likely `reason` |
+| Harold refused | `harold.web_app.requests` rises with `result = refused` | Harold answered at once and refused. The `reason` names the cause. A missing device cookie is `no_cookie` |
 | Harold was slow | `harold.web_app.requests` rises with `result = served` and `harold.web_app.request.duration` has a large p95, or `app request waiting` lines exist | Harold was slow on that `route_class`. Read the `app request waiting` lines by `route_class`, then the traces of that class |
 
-The three queries below show each case. Replace the times.
+On 2026-11-06 the most likely `reason` of the refused case was `no_cookie`.
+
+The queries below show each case. Replace the times.
 
 ```
 -- Never reached Harold, or reached the port with no request: the rise of the connections
@@ -595,13 +597,16 @@ SELECT Attributes['result'] AS result, Attributes['reason'] AS reason, max(Value
 FROM otel.otel_metrics_sum
 WHERE MetricName = 'harold.web_app.requests' AND TimeUnix BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
 GROUP BY result, reason;
--- Harold was slow: the lines of requests that waited
-SELECT Timestamp, LogAttributes['route_class'] AS route_class, LogAttributes['waited_ms'] AS waited_ms
-FROM otel.otel_logs
-WHERE ServiceName = 'harold' AND Body = 'app request waiting' AND Timestamp BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
+-- Harold was slow, first part: the rise of the requests that waited 5 seconds, by route class
+SELECT Attributes['route_class'] AS route_class, max(Value) - min(Value) AS rise
+FROM otel.otel_metrics_sum
+WHERE MetricName = 'harold.web_app.requests.waiting' AND TimeUnix BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
+GROUP BY route_class;
+-- Harold was slow, second part: the p95 in seconds by route class, from the histogram buckets
+SELECT route_class, arraySum(counts) AS requests, bounds[greatest(1, least(length(bounds), arrayFirstIndex(c -> c >= 0.95 * arraySum(counts), arrayCumSum(counts))))] AS p95_s FROM (SELECT Attributes['route_class'] AS route_class, sumForEach(bucket_rise) AS counts, anyLast(bounds) AS bounds FROM (SELECT TimeUnix, Attributes, bounds, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before OR empty(buckets_before), buckets, arrayMap((now_count, before_count) -> toUInt64(now_count - before_count), buckets, buckets_before)) AS bucket_rise FROM (SELECT TimeUnix, MetricName, Attributes, toFloat64(Count) AS count, BucketCounts AS buckets, ExplicitBounds AS bounds, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(BucketCounts, 1, CAST([] AS Array(UInt64))) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS buckets_before FROM otel.otel_metrics_histogram WHERE MetricName = 'harold.web_app.request.duration' AND TimeUnix >= '2026-11-06 12:00:00' AND TimeUnix <= '2026-11-06 12:30:00')) WHERE TimeUnix >= '2026-11-06 12:10:00' AND count_rise > 0 GROUP BY route_class)
 ```
 
-Run each query on its own. The rise of a counter assumes no restart of Harold in the window. The card "Web app requests: results and time" applies the counter rule, so use it when a restart is possible.
+Run each query on its own. The second part of the slow case reads the buckets, as the card does, and needs the 10 minutes before the window as a baseline. The rise of a counter assumes no restart of Harold in the window. The card "Web app requests: results and time" applies the counter rule, so use it when a restart is possible.
 
 **What Harold cannot see.** A request that never reached the port leaves no record in Harold: the phone is offline or off the tailnet, a DNS or TLS failure, or `tailscale serve` is down or holds the request. After the phone reconnects, its own browser spans (when browser traces are on) arrive late through `/telemetry/traces` and can show the failed fetches. That is a second view, not a replacement.
 

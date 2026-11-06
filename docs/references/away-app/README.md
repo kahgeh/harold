@@ -430,7 +430,7 @@ When the phone cannot reach the app, check ClickHouse for the minutes of the fai
 
 | What ClickHouse shows | What happened |
 |---|---|
-| `harold.web_app.connections` does not rise | The requests never reached Harold. Look at the phone's network and `tailscale serve status` |
+| `harold.web_app.connections` does not rise in those minutes, closes counted | The requests never reached Harold. Look at the phone's network and `tailscale serve status` |
 | `harold.web_app.connections` rises with `no_request`, and no requests | Something reached the port and sent no request. Look at `tailscale serve` and TLS |
 | `harold.web_app.requests` rises with `result = refused` | Harold refused. Read the `reason`, for example `no_cookie` or `unknown_device` |
 | `harold.web_app.request.duration` has a large p95, or `app request waiting` lines exist | Harold was slow on that `route_class` |
