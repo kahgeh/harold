@@ -245,7 +245,7 @@ fn twelve_mb_of_recent_lines_trims_below_10_mb_keeping_newest() {
     .unwrap();
 
     let after = std::fs::read_to_string(directory.log()).unwrap();
-    assert!((after.len() as u64) <= MAX_BYTES);
+    assert!((after.len() as u64) < MAX_BYTES);
     assert!(log.ends_with(&after));
     assert!(after.starts_with(&stamp(1)));
     assert!(after.contains("line 012287 "));
@@ -298,4 +298,128 @@ fn a_small_file_is_untouched() {
 
     assert_eq!(result.unwrap(), Trimmed::Nothing);
     assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), log);
+}
+
+/// One timed line of exactly `length` bytes, newline included.
+fn line_of(hours: u64, length: usize) -> String {
+    let head = format!("{} ", stamp(hours));
+    format!("{head}{}\n", "z".repeat(length - head.len() - 1))
+}
+
+fn run(directory: &TestDirectory) -> Outcome {
+    trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    )
+}
+
+#[test]
+fn a_line_that_starts_exactly_max_bytes_from_the_end_is_dropped() {
+    let directory = TestDirectory::new();
+    let first = line_of(1, 2000);
+    let second = line_of(1, 2000);
+    let last = line_of(1, MAX_BYTES as usize - 2000);
+    let log = format!("{}{first}{second}{last}", line_of(1, 2000));
+    std::fs::write(directory.log(), &log).unwrap();
+
+    let result = run(&directory).unwrap();
+
+    let after = std::fs::read_to_string(directory.log()).unwrap();
+    assert_eq!(after, last);
+    assert!((after.len() as u64) < MAX_BYTES);
+    assert_eq!(
+        result,
+        Trimmed::Dropped {
+            kept_bytes: last.len() as u64,
+            dropped_bytes: (log.len() - last.len()) as u64,
+        }
+    );
+}
+
+#[test]
+fn a_file_of_exactly_max_bytes_is_untouched() {
+    let directory = TestDirectory::new();
+    let log = format!(
+        "{}{}",
+        line_of(1, 2000),
+        line_of(1, MAX_BYTES as usize - 2000)
+    );
+    std::fs::write(directory.log(), &log).unwrap();
+
+    assert_eq!(run(&directory).unwrap(), Trimmed::Nothing);
+    assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), log);
+}
+
+#[test]
+fn multi_byte_characters_near_the_cut_leave_valid_utf8() {
+    let directory = TestDirectory::new();
+    let filler = "\u{e9}".repeat(500);
+    let log: String = (0..24_000)
+        .map(|number| format!("{} line {number:06} {filler}\n", stamp(1)))
+        .collect();
+    std::fs::write(directory.log(), &log).unwrap();
+
+    run(&directory).unwrap();
+
+    let after = std::fs::read_to_string(directory.log()).expect("valid UTF-8");
+    assert!((after.len() as u64) < MAX_BYTES);
+    assert!(log.ends_with(&after));
+    assert!(after.starts_with(&stamp(1)));
+}
+
+#[test]
+fn a_file_of_untimed_lines_only_is_cut_at_a_line_start() {
+    let directory = TestDirectory::new();
+    let filler = "p".repeat(1000);
+    let log: String = (0..12 * 1024)
+        .map(|number| format!("plain {number:06} {filler}\n"))
+        .collect();
+    std::fs::write(directory.log(), &log).unwrap();
+
+    run(&directory).unwrap();
+
+    let after = std::fs::read_to_string(directory.log()).unwrap();
+    assert!((after.len() as u64) < MAX_BYTES);
+    assert!(after.starts_with("plain "));
+    assert!(log.ends_with(&after));
+    assert!(after.contains("plain 012287 "));
+}
+
+#[test]
+fn the_24_hour_cut_and_the_size_cut_work_together() {
+    let directory = TestDirectory::new();
+    let old = "o".repeat(1000);
+    let old_lines: String = (0..2048)
+        .map(|number| format!("{} old {number:06} {old}\n", stamp(30)))
+        .collect();
+    let log = format!("{old_lines}{}", big_lines(0, 11 * 1024));
+    std::fs::write(directory.log(), &log).unwrap();
+
+    let result = run(&directory).unwrap();
+
+    let after = std::fs::read_to_string(directory.log()).unwrap();
+    assert!((after.len() as u64) < MAX_BYTES);
+    assert!(!after.contains(" old "));
+    assert!(after.contains("line 011263 "));
+    let Trimmed::Dropped {
+        kept_bytes,
+        dropped_bytes,
+    } = result
+    else {
+        panic!("expected a trim");
+    };
+    assert_eq!(kept_bytes, after.len() as u64);
+    assert_eq!(kept_bytes + dropped_bytes, log.len() as u64);
+}
+
+#[test]
+fn a_file_that_is_one_line_over_the_limit_is_left_whole() {
+    let directory = TestDirectory::new();
+    let huge = line_of(1, MAX_BYTES as usize + 100);
+    std::fs::write(directory.log(), &huge).unwrap();
+
+    assert_eq!(run(&directory).unwrap(), Trimmed::Nothing);
+    assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), huge);
 }

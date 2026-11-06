@@ -18,7 +18,8 @@ use tokio::task::JoinHandle;
 
 const KEEP: Duration = Duration::from_secs(24 * 3600);
 const EVERY: Duration = Duration::from_secs(3600);
-/// The file stays at or under this size: the oldest whole lines go first.
+/// The file stays smaller than this size: the oldest whole lines go first. A file of exactly
+/// this size is not trimmed.
 const MAX_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_NAME: &str = "harold.log";
 
@@ -165,11 +166,13 @@ fn cut_offset(contents: &[u8], cutoff: u64) -> usize {
     0
 }
 
-/// The offset to cut at so that the kept part is at most `MAX_BYTES`, never before `from`.
+/// The offset to cut at so that the kept part is smaller than `MAX_BYTES`, never before `from`.
 /// It is the first timed line that starts late enough; else the first line that does; else
 /// the start of the last line, so the newest line stays even when it is over the limit.
 fn size_cut_offset(contents: &[u8], from: usize) -> usize {
-    let earliest = contents.len().saturating_sub(MAX_BYTES as usize).max(from);
+    let earliest = (contents.len() + 1)
+        .saturating_sub(MAX_BYTES as usize)
+        .max(from);
     let mut offset = 0;
     let mut first_any = None;
     let mut last_start = 0;
