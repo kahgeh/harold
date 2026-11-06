@@ -312,3 +312,100 @@ async fn a_same_origin_post_without_datastar_counts_not_datastar() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+/// A router that mounts the layer around one handler. The handler waits `seconds` first.
+fn slow_router(path: &'static str, seconds: u64) -> Router {
+    Router::new()
+        .route(
+            path,
+            get(move || async move {
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                StatusCode::OK
+            }),
+        )
+        .layer(from_fn(track_requests))
+}
+
+fn waiting(class: &str) -> u64 {
+    test_support::exact_counter_value("harold.web_app.requests.waiting", &[("route_class", class)])
+        .unwrap_or(0)
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn handler_held_six_seconds_logs_waiting_once() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let waiting_before = waiting("telemetry");
+    let served_before = requests("telemetry", "served", "2xx", "");
+    let status = status_of(slow_router("/telemetry/slow", 6), "/telemetry/slow", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(waiting("telemetry"), waiting_before + 1);
+    // The request is counted once, when it is answered, and not as a result of waiting.
+    assert_eq!(
+        requests("telemetry", "served", "2xx", ""),
+        served_before + 1
+    );
+    let text = logs.text();
+    assert_eq!(text.matches("app request waiting").count(), 1, "{text}");
+    assert!(text.contains("telemetry"), "{text}");
+    assert!(text.contains("waited_ms"), "{text}");
+    assert!(!text.contains("/telemetry/slow"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn updates_never_logs_waiting() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let before = waiting("updates");
+    let status = status_of(slow_router("/updates", 6), "/updates", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(waiting("updates"), before);
+    assert!(
+        !logs.text().contains("app request waiting"),
+        "{}",
+        logs.text()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn fast_request_arms_no_warning() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let before = waiting("other");
+    let status = status_of(slow_router("/fast-one", 1), "/fast-one", "").await;
+    assert_eq!(status, 200);
+    // Wait past the limit: a timer that was left armed would fire now.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    assert_eq!(waiting("other"), before);
+    assert!(
+        !logs.text().contains("app request waiting"),
+        "{}",
+        logs.text()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn dropped_request_leaves_no_timer() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let before = waiting("pair");
+    let served_before = requests("pair", "served", "2xx", "");
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    let serving = tokio::spawn(async move {
+        let _ = axum::serve(OneConnection(Some(server)), slow_router("/pair", 60)).await;
+    });
+    let request = "GET /pair HTTP/1.1\r\nhost: localhost\r\ncontent-length: 0\r\n\r\n";
+    client.write_all(request.as_bytes()).await.unwrap();
+    // The client leaves after 2 seconds. The server drops the request before the timer is due.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    drop(client);
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    assert_eq!(waiting("pair"), before);
+    assert_eq!(requests("pair", "served", "2xx", ""), served_before);
+    assert!(
+        !logs.text().contains("app request waiting"),
+        "{}",
+        logs.text()
+    );
+    serving.abort();
+}

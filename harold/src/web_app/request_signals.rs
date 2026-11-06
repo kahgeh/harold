@@ -1,14 +1,20 @@
 //! The outermost layer of the web app. It counts each request by route class and result,
 //! and records the time to the first byte. It never reads a header or a body.
 
-use std::time::Instant;
+use std::time::Duration;
+
+use tokio::time::Instant;
+use tracing::warn;
 
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use crate::telemetry::{count_web_request, record_web_request_duration};
+use crate::telemetry::{count_web_request, count_web_request_waiting, record_web_request_duration};
+
+/// A request that has no answer after this time is logged and counted as waiting.
+const WAITING_AFTER: Duration = Duration::from_secs(5);
 
 /// A response extension. A check that refuses a request sets it to the reason, which is
 /// one of `WEB_REFUSAL_REASONS`.
@@ -59,7 +65,26 @@ fn status_class(status: StatusCode) -> &'static str {
 pub(crate) async fn track_requests(request: Request, next: Next) -> Response {
     let class = route_class(request.uri().path());
     let started = Instant::now();
-    let response = next.run(request).await;
+    let handler = next.run(request);
+    tokio::pin!(handler);
+    // The timer is part of this future. If the future drops, the timer drops with it.
+    // A stream of updates stays open on purpose, so it never arms the timer.
+    let response = if class == "updates" {
+        handler.await
+    } else {
+        tokio::select! {
+            response = &mut handler => response,
+            () = tokio::time::sleep(WAITING_AFTER) => {
+                warn!(
+                    route_class = class,
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "app request waiting"
+                );
+                count_web_request_waiting(class);
+                handler.await
+            }
+        }
+    };
     let seconds = started.elapsed().as_secs_f64();
     let status = response.status();
     let refusal = response.extensions().get::<Refusal>().copied();
