@@ -58,6 +58,11 @@
       "id": "agent-signals",
       "title": "Agent signals",
       "collapsed": false
+    },
+    {
+      "id": "logs",
+      "title": "Logs and crashes",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -1393,6 +1398,38 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT sum(rise) FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName = 'harold.telemetry.calls' AND Attributes['outcome'] != 'ok' AND TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now())) WHERE TimeUnix >= now() - INTERVAL 1 DAY"
+      }
+    },
+    {
+      "id": "unsent-log-lines-by-day",
+      "name": "Unsent log lines per day, by outcome",
+      "x": 0,
+      "y": 96,
+      "w": 12,
+      "h": 4,
+      "containerId": "logs",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(TimeUnix) AS day, Attributes['outcome'] AS outcome, sum(rise) AS unsent FROM (SELECT TimeUnix, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.telemetry.log_records.unsent') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY day, outcome ORDER BY day DESC, outcome"
+      }
+    },
+    {
+      "id": "panics-and-refused-starts-by-day",
+      "name": "Panics and refused starts per day",
+      "x": 12,
+      "y": 96,
+      "w": 12,
+      "h": 4,
+      "containerId": "logs",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, Body AS line, LogAttributes['reason'] AS reason, count() AS n FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body IN ('harold panicked', 'start after an unclean exit', 'startup refused', 'listener not started') AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, line, reason ORDER BY day DESC, n DESC"
       }
     }
   ]

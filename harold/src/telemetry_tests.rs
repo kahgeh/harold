@@ -2627,6 +2627,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .chain(AGENT_CARDS.map(str::to_string))
         .chain(WORK_CARDS.map(str::to_string))
         .chain(["Agent signals: calls and refusals".to_string()])
+        .chain(LOG_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2649,6 +2650,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             "Agent signals",
             "Agents and multiplexer",
             "Knowledge index",
+            "Logs and crashes",
             "Notifications (leave the product filter empty)",
             "Phone requests",
             "Pods",
@@ -2801,6 +2803,12 @@ const AGENT_CARDS: [&str; 13] = [
     "Now: agents waiting beside agents working",
     "Work waiting: p50 of the time before it was seen, by bucket",
 ];
+/// The cards of the logs group, in order.
+const LOG_CARDS: [&str; 2] = [
+    "Unsent log lines per day, by outcome",
+    "Panics and refused starts per day",
+];
+
 /// The work records group's cards, in the order the dashboard lists them.
 const WORK_CARDS: [&str; 3] = [
     "Work by priority and status, and long waits",
@@ -2977,6 +2985,8 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("work", false),
         // The calls card reads `harold.telemetry.calls`, which carries no product.
         ("agent-signals", false),
+        // The log cards read the unsent counter and `otel.otel_logs`, which carry no product.
+        ("logs", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -3075,7 +3085,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // The work group adds two: time at each status and the check mismatches.
     // The agent signals group adds one: the refusals of the telemetry tool.
     // The web app requests card adds one.
-    assert_eq!(counted, 34);
+    // The logs group adds one: the unsent log lines.
+    assert_eq!(counted, 35);
 }
 
 #[test]
