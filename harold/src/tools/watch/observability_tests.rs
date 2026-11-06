@@ -447,7 +447,8 @@ async fn run_lines_carry_the_number_of_add_dirs_and_never_a_path() {
         !exported.contains("ADDDIR-CANARY-6643"),
         "path in an export"
     );
-    assert!(!exported.contains("add_dirs"), "add_dirs is exported");
+    // `add_dirs` is an exported count (Choice B). The canary check above shows no path leaves.
+    assert!(exported.contains("add_dirs"), "add_dirs is not exported");
 }
 
 #[tokio::test(start_paused = true)]
