@@ -7409,3 +7409,409 @@ fn the_panic_record_keeps_the_trace_of_the_span_the_caller_entered() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].trace_context().unwrap().trace_id, trace_id);
 }
+
+// ---------------------------------------------------------------------------
+// Tests that open a port
+// ---------------------------------------------------------------------------
+//
+// These tests run only in the container test set and in CI. They use a stand-in collector
+// that serves OTLP logs on `127.0.0.1` and keeps the records it gets.
+
+mod port_tests {
+    use std::net::SocketAddr;
+
+    use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::{
+        LogsService, LogsServiceServer,
+    };
+    use opentelemetry_proto::tonic::collector::logs::v1::{
+        ExportLogsServiceRequest, ExportLogsServiceResponse,
+    };
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+    use opentelemetry_proto::tonic::logs::v1::LogRecord as ProtoRecord;
+    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+
+    use super::*;
+
+    /// The longest wait for a record to arrive.
+    const ARRIVE_WITHIN: Duration = Duration::from_secs(30);
+
+    /// The log records that the stand-in got, in the order they came.
+    #[derive(Clone, Default)]
+    struct KeptRecords(Arc<Mutex<Vec<ProtoRecord>>>);
+
+    impl KeptRecords {
+        fn all(&self) -> Vec<ProtoRecord> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn with_body(&self, body: &str) -> Option<ProtoRecord> {
+            self.all()
+                .into_iter()
+                .find(|record| body_text(record) == body)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl LogsService for KeptRecords {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportLogsServiceRequest>,
+        ) -> Result<tonic::Response<ExportLogsServiceResponse>, tonic::Status> {
+            let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            for resource in request.into_inner().resource_logs {
+                for scope in resource.scope_logs {
+                    kept.extend(scope.log_records);
+                }
+            }
+            Ok(tonic::Response::new(ExportLogsServiceResponse::default()))
+        }
+    }
+
+    /// A tonic server on its own runtime. `stop` ends the runtime, so every socket closes.
+    struct StandInCollector {
+        address: SocketAddr,
+        kept: KeptRecords,
+        runtime: Option<tokio::runtime::Runtime>,
+    }
+
+    impl StandInCollector {
+        /// Starts on a free loopback port.
+        fn start() -> Self {
+            Self::start_on("127.0.0.1:0".parse().unwrap(), KeptRecords::default())
+        }
+
+        fn start_on(address: SocketAddr, kept: KeptRecords) -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            // The port can stay busy for a short time after a stop, so the bind tries again.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let listener = loop {
+                match runtime.block_on(tokio::net::TcpListener::bind(address)) {
+                    Ok(listener) => break listener,
+                    Err(error) if Instant::now() < deadline => {
+                        eprintln!("stand-in bind failed, trying again: {error}");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => panic!("stand-in could not bind {address}: {error}"),
+                }
+            };
+            let address = listener.local_addr().unwrap();
+            let service = LogsServiceServer::new(kept.clone());
+            runtime.spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                    .await;
+            });
+            Self {
+                address,
+                kept,
+                runtime: Some(runtime),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        /// Stops the server and waits until its threads end, so the port is free.
+        fn stop(&mut self) {
+            if let Some(runtime) = self.runtime.take() {
+                runtime.shutdown_timeout(Duration::from_secs(10));
+            }
+        }
+
+        /// Starts again on the same port. The kept records stay.
+        fn restart(&mut self) {
+            self.stop();
+            *self = Self::start_on(self.address, self.kept.clone());
+        }
+    }
+
+    impl Drop for StandInCollector {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// The runtime that holds the exporters' gRPC channel. Build the pipeline while this
+    /// runtime is entered.
+    fn client_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// A pipeline with the real OTLP log exporter and in-memory span and metric exporters.
+    /// Its records are sent in batches, as in production, by `force_flush`.
+    fn pipeline_to(client: &tokio::runtime::Runtime, url: &str, sink: UnsentSink) -> Pipeline {
+        use opentelemetry_otlp::WithExportConfig as _;
+        let _entered = client.enter();
+        let logs = opentelemetry_otlp::LogExporter::builder()
+            .with_tonic()
+            .with_endpoint(url)
+            .with_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        Pipeline::build(
+            InMemorySpanExporter::default(),
+            logs,
+            InMemoryMetricExporter::default(),
+            resource("test-mac"),
+            &ExportHealth::new(Box::new(|_| {})),
+            Processing::Batch,
+            sink,
+        )
+    }
+
+    /// Calls `check` again and again until it is true or `ARRIVE_WITHIN` has passed.
+    fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + ARRIVE_WITHIN;
+        while !check() {
+            assert!(Instant::now() < deadline, "waited too long for: {what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn body_text(record: &ProtoRecord) -> String {
+        match record.body.as_ref().and_then(|body| body.value.as_ref()) {
+            Some(ProtoValue::StringValue(text)) => text.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn attribute<'a>(record: &'a ProtoRecord, key: &str) -> Option<&'a ProtoValue> {
+        record
+            .attributes
+            .iter()
+            .find(|pair| pair.key == key)
+            .and_then(|pair| pair.value.as_ref())
+            .and_then(|value| value.value.as_ref())
+    }
+
+    fn text_attribute(record: &ProtoRecord, key: &str) -> Option<String> {
+        match attribute(record, key) {
+            Some(ProtoValue::StringValue(text)) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    fn number_attribute(record: &ProtoRecord, key: &str) -> Option<i64> {
+        match attribute(record, key) {
+            Some(ProtoValue::IntValue(number)) => Some(*number),
+            _ => None,
+        }
+    }
+
+    fn unix_nanos(time: std::time::SystemTime) -> u64 {
+        u64::try_from(
+            time.duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn real_exporter_sends_then_fails_over_then_resends() {
+        let _turn = UNSENT_COUNTER_TURN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        test_support::install();
+        register_phone_counters();
+        let resent_before = unsent_count("resent");
+        let mut collector = StandInCollector::start();
+        let client = client_runtime();
+        let (lines, sink) = recording_sink();
+        let pipeline = pipeline_to(&client, &collector.url(), sink);
+
+        // The collector is up: the record arrives with its allowed fields only.
+        tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+            tracing::info!(
+                target: "harold::port_test",
+                pane_id = "%7",
+                secret_field = "top secret",
+                "sent while up"
+            );
+        });
+        wait_until("the first record at the stand-in", || {
+            let _ = pipeline.force_flush();
+            collector.kept.with_body("sent while up").is_some()
+        });
+        let arrived = collector.kept.with_body("sent while up").unwrap();
+        assert_eq!(text_attribute(&arrived, "pane_id").as_deref(), Some("%7"));
+        assert!(attribute(&arrived, "secret_field").is_none());
+        assert!(
+            lines.lock().unwrap().is_empty(),
+            "no line goes to the writer while the collector works"
+        );
+
+        // The collector is down: the line goes to the writer with `unsent=true`.
+        collector.stop();
+        let before = unix_nanos(std::time::SystemTime::now());
+        tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+            tracing::info!(target: "harold::port_test", pane_id = "%8", "kept while down");
+        });
+        let after = unix_nanos(std::time::SystemTime::now());
+        wait_until("the unsent line", || {
+            let _ = pipeline.force_flush();
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("kept while down") && line.ends_with("unsent=true"))
+        });
+        assert!(
+            !lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("sent while up")),
+            "a record that arrived has no unsent line"
+        );
+
+        // The collector is back on the same port: the kept record arrives, with the
+        // times of its first try.
+        collector.restart();
+        let mut probe = 0;
+        wait_until("the kept record at the stand-in", || {
+            probe += 1;
+            tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+                tracing::info!(target: "harold::port_test", probe, "probe");
+            });
+            let _ = pipeline.force_flush();
+            collector.kept.with_body("kept while down").is_some()
+        });
+        let resent = collector.kept.with_body("kept while down").unwrap();
+        for time in [resent.time_unix_nano, resent.observed_time_unix_nano] {
+            assert!(
+                (before..=after).contains(&time),
+                "{time} is not in {before}..={after}"
+            );
+        }
+        assert!(unsent_count("resent") - resent_before >= 1);
+
+        pipeline.shutdown_within(Duration::from_secs(2));
+        collector.stop();
+    }
+
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn a_refused_start_reaches_the_collector_before_the_function_returns() {
+        let collector = StandInCollector::start();
+        let client = client_runtime();
+        // The settings that the early read gives when `otlp_endpoint` names the stand-in.
+        let settings = TelemetrySettings {
+            export: true,
+            otlp_endpoint: Some(collector.url()),
+            ..TelemetrySettings::default()
+        };
+        let (guard, build_failed) = {
+            let _entered = client.enter();
+            TelemetryGuard::for_settings(&settings, "test-mac")
+        };
+        assert!(build_failed.is_none());
+        assert!(guard.exporting());
+        let subscriber = guard.pipeline.as_ref().unwrap().subscriber_for_test();
+
+        // The task runs on this thread, so the subscriber that is set here sees the line.
+        let driver = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            driver.block_on(crate::log_refusal_and_flush(3, Some(guard)));
+        });
+
+        // The function returned: the record is at the stand-in now, with no wait.
+        let refused = collector
+            .kept
+            .with_body("startup refused")
+            .expect("the record reached the stand-in before the function returned");
+        assert_eq!(
+            text_attribute(&refused, "reason").as_deref(),
+            Some("invalid_config")
+        );
+        assert_eq!(number_attribute(&refused, "errors"), Some(3));
+    }
+
+    /// A sink that takes nothing. A listener that cannot bind never uses it.
+    struct NoSink;
+
+    impl crate::slave::master::MasterSink for NoSink {
+        fn apply_snapshot(&self, _slave: &str, _snapshot: harold_api::harold::AgentStateSnapshot) {}
+        fn apply_turn(
+            &self,
+            _slave: &str,
+            _turn: harold_api::harold::slave::v1::Turn,
+        ) -> crate::slave::master::Applied {
+            crate::slave::master::Applied::Failed
+        }
+        fn apply_lock(&self, _slave: &str, _locked: bool) -> crate::slave::master::Applied {
+            crate::slave::master::Applied::Failed
+        }
+        fn link_changed(&self, _slave: &str, _up: bool) {}
+    }
+
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn a_used_port_reaches_the_collector_as_listener_not_started() {
+        let collector = StandInCollector::start();
+        let client = client_runtime();
+        let (_lines, sink) = recording_sink();
+        let pipeline = pipeline_to(&client, &collector.url(), sink);
+
+        // This test holds the port, so the link listener cannot bind it.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = held.local_addr().unwrap();
+        let settings = crate::settings::SlavesSettings {
+            listen: address.to_string(),
+            names: Vec::new(),
+        };
+        let data = std::env::temp_dir();
+
+        // The listener task runs on this thread, so the subscriber that is set here sees
+        // its line.
+        let driver = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+            driver.block_on(async {
+                let handle =
+                    crate::slave::master::serve_slave_link(&settings, &data, Arc::new(NoSink));
+                handle.await.unwrap();
+            });
+        });
+
+        wait_until("the listener line at the stand-in", || {
+            let _ = pipeline.force_flush();
+            collector.kept.with_body("listener not started").is_some()
+        });
+        let refused = collector.kept.with_body("listener not started").unwrap();
+        assert_eq!(
+            text_attribute(&refused, "component").as_deref(),
+            Some("slave_link")
+        );
+        assert_eq!(
+            text_attribute(&refused, "reason").as_deref(),
+            Some("address_in_use")
+        );
+        assert_eq!(
+            number_attribute(&refused, "port"),
+            Some(i64::from(address.port()))
+        );
+        drop(held);
+        pipeline.shutdown_within(Duration::from_secs(2));
+    }
+}

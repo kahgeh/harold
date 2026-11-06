@@ -2513,11 +2513,17 @@ async fn refuse_invalid_config(
     telemetry: Option<telemetry::TelemetryGuard>,
 ) -> ! {
     eprintln!("Error: {message}");
+    log_refusal_and_flush(errors, telemetry).await;
+    std::process::exit(0)
+}
+
+/// Logs `startup refused`, then stops telemetry so that the line is exported when this
+/// function returns. A test calls it, because `refuse_invalid_config` ends the process.
+async fn log_refusal_and_flush(errors: usize, telemetry: Option<telemetry::TelemetryGuard>) {
     tracing::warn!(reason = "invalid_config", errors, "startup refused");
     if let Some(telemetry) = telemetry {
         telemetry.shutdown().await;
     }
-    std::process::exit(0)
 }
 
 fn mark_clean(guard: crash_guard::CrashGuard) {

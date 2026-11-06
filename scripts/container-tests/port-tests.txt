@@ -1,2 +1,5 @@
 slave::master::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link
 web_app::counted_listener_tests::a_real_connection_closed_with_no_request_counts_no_request
+telemetry::tests::port_tests::real_exporter_sends_then_fails_over_then_resends
+telemetry::tests::port_tests::a_refused_start_reaches_the_collector_before_the_function_returns
+telemetry::tests::port_tests::a_used_port_reaches_the_collector_as_listener_not_started
