@@ -422,6 +422,12 @@ pub(crate) fn init_phone_calls(calls: Arc<dyn LineTaker>) {
     );
 }
 
+/// When the open phone call started, in milliseconds since the Unix epoch. `None` when Harold
+/// has no phone calls or no phone call is open.
+pub(crate) fn phone_call_opened_at_ms() -> Option<u64> {
+    PHONE_CALLS.get()?.call_opened_at_ms()
+}
+
 /// Says `line` in the phone's open call, from a blocking thread, and returns once it has
 /// ended. `None` when Harold has no phone calls or no phone call is open: then it neither
 /// blocks nor needs a runtime. The projector asks this before the screen lock decides, so a

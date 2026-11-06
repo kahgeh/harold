@@ -583,6 +583,10 @@ impl Harold for HaroldService {
         _: Request<GetHaroldStateRequest>,
     ) -> Result<Response<GetHaroldStateResponse>, Status> {
         let view = &self.state_view;
+        let (call_open, call_where, call_opened_at_ms) = call_fields(
+            voice_input::daemon_calls().and_then(|calls| calls.call_opened_at_ms()),
+            voice_input::phone_call_opened_at_ms(),
+        );
         Ok(Response::new(GetHaroldStateResponse {
             tts_muted: Some(self.snapshots.tts_muted()),
             messaging_paused: Some(self.snapshots.messaging_paused()),
@@ -600,7 +604,9 @@ impl Harold for HaroldService {
             machine_host_icon: view.machine_host_icon.clone(),
             tts_engine: view.tts_engine.clone(),
             chief_session: view.chief_session.clone(),
-            ..Default::default()
+            call_open: Some(call_open),
+            call_where: call_where.to_owned(),
+            call_opened_at_ms: i64::try_from(call_opened_at_ms).unwrap_or(0),
         }))
     }
 
@@ -855,6 +861,17 @@ impl Harold for HaroldService {
 }
 
 /// A call's status as the `Call` RPC answers it.
+/// The call fields of the state answer, from the start of the open desk call and of the open
+/// phone call: whether a call is open, where, and since when. A phone call ends a desk call,
+/// so both open is a moment between, and the phone's wins.
+fn call_fields(desk: Option<u64>, phone: Option<u64>) -> (bool, &'static str, u64) {
+    match (desk, phone) {
+        (_, Some(opened)) => (true, "phone", opened),
+        (Some(opened), None) => (true, "desk", opened),
+        (None, None) => (false, "", 0),
+    }
+}
+
 fn call_response(status: &voice_input::CallStatus) -> CallResponse {
     use voice_input::{CallState, TurnResult};
     let state = match status.state {
