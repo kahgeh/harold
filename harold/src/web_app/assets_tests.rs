@@ -1297,3 +1297,15 @@ fn the_call_script_posts_its_signals_with_post_signals_and_reports_a_call_with_n
     );
     assert!(no_id.find("postCheck").unwrap() < no_id.find("end(current)").unwrap());
 }
+
+#[test]
+fn the_collection_frame_follows_the_app_surface_and_colour_scheme() {
+    let css = include_str!("../../static/web_app/app.css");
+    let start = css
+        .find(".collection-frame {")
+        .expect("app.css lacks the .collection-frame rule");
+    let rule = &css[start..start + css[start..].find('}').expect("the rule has no end")];
+    assert!(rule.contains("background: var(--surface-1);"));
+    assert!(rule.contains("color-scheme: light dark;"));
+    assert!(!rule.contains("#fff"));
+}

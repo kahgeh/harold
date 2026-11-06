@@ -1252,5 +1252,6 @@ body:has(#alerts:not([hidden])) {
   width: calc(100% - 16px);
   margin: var(--header-height) 0 0 16px;
   border: 0;
-  background: #fff;
+  background: var(--surface-1);
+  color-scheme: light dark;
 }
