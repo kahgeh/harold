@@ -382,6 +382,13 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
 | `harold.web_app.collection_pages` | counter, `{page}` | `collection` (a name from `[[web_app.collections]]`, or `unknown`; never a path), `result` (`ok`, `not_found`, `refused`, `too_big`, `unreadable`) |
+| `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
+| `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
+| `harold.web_app.request.duration` | histogram, `s`, buckets 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | `route_class`, never `updates`. The time from the request's arrival to the first byte of the answer |
+| `harold.web_app.connections` | counter, `{connection}` | `outcome` (`requests`: the connection carried a request; `no_request`: it closed with no request read) |
+| `harold.web_app.updates.open` | gauge, `{stream}` | none. The updates streams that are open now |
+| `harold.web_app.updates.duration` | histogram, `s`, buckets 1, 5, 15, 60, 300, 900, 3600, 14400, 86400 | `reason` (`client_gone`, `server_end`, `shutdown`). How long one stream stayed open |
+| `harold.web_app.updates.closed` | counter, `{stream}` | `reason` (`client_gone`, `server_end`, `shutdown`), `short` (`true` when the stream stayed open less than 60 seconds) |
 | `harold.app_spans.not_forwarded` | counter, `{span}` | `reason` (`collector_unreachable`, `collector_refused`, `timed_out`, `queue_full`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by`, `role`, `pod.product` when the pane is in a pod |
@@ -541,6 +548,70 @@ Export never slows Harold:
 - An unreachable collector logs one `telemetry export failing (collector unreachable at <endpoint>)` line, and one `telemetry export recovered` line when sends work again. It never logs one line per batch.
 
 An `otlp_endpoint` that cannot be used at all logs `telemetry export off: the collector address could not be used`, and Harold runs with export off.
+
+## Web app requests
+
+These signals answer one question: did the phone's requests reach Harold, did Harold refuse them, and did Harold answer in time? The web app listens on `127.0.0.1:4330`, and `tailscale serve` hands it the phone's requests.
+
+One outermost request layer counts every request that reaches the web app. It runs before the policy, login, device and origin layers. It does not run on the specs listener. For each request it records the `route_class`, the `result`, the `status` class and the time to the first byte. A `route_class` is a fixed name from the router, such as `thread`, `updates`, `replies`, `todos`, `notes`, `specs`, `pages`, `call`, `pair`, `static`, `telemetry`, `page_events` or `other`. It is never a raw path.
+
+A `result` is `served`, `refused` (with a `reason`), `not_found` or `error` (a 5xx answer). The login, device and origin checks tell the layer their `reason`. Their rules stay as they were. The counter counts every refusal. The log line for a refusal keeps its rule of once per hour.
+
+A request with no answer after 5 seconds writes the `warn` line `app request waiting` once and adds one to `harold.web_app.requests.waiting`. The `updates` stream answers at once and then stays open, so it never counts here.
+
+The web app's listener is wrapped. Each accepted TCP connection adds one to `harold.web_app.connections`. A connection that closes with no request read on it counts as `no_request`. `tailscale serve` opens such connections.
+
+Each updates stream adds one to `harold.web_app.updates.open` when it opens and takes one away when it closes. When a stream closes, Harold records its open time and its `reason`, and counts it with `short`.
+
+Each counter starts at 0 for every `route_class`, `reason`, `outcome` and `short` value, so a first rise shows. `harold.web_app.requests.waiting` starts at 0 for every `route_class` except `updates`.
+
+| Line | Fields |
+|---|---|
+| `app request waiting` | `route_class`, `waited_ms` (the time the request had waited when the line was written). `warn`, once for each request that waits 5 seconds. Not written for `updates` |
+| `app login refused` | `route_class`. `info`, once per hour: the login check found no `Tailscale-User-Login` header. The counter counts every one |
+| `app updates closed` | `reason` (`client_gone`, `server_end`, `shutdown`), `open_s` (the seconds the stream was open), `short` (`true` when `open_s` is under 60). `info` |
+
+The existing `app device refused` and `app post refused` lines keep their fields and their hourly rule.
+
+**How to tell what happened.** Use the minutes in which the phone failed. Run one query for each row. The queries read `otel.otel_metrics_sum`, `otel.otel_metrics_histogram` and `otel.otel_logs`.
+
+| Case | What ClickHouse shows | What it means and what to do |
+|---|---|---|
+| Never reached Harold | `harold.web_app.connections` does not rise at all | The requests never reached Harold's port. Look at the phone's network and at `tailscale serve status`. Harold never runs Tailscale commands |
+| Reached the port, no request | `harold.web_app.connections` rises with `outcome = no_request`, and `harold.web_app.requests` does not rise | Something reached the port and sent no request. Look at `tailscale serve` and at TLS on the way |
+| Harold refused | `harold.web_app.requests` rises with `result = refused` | Harold answered at once and refused. The `reason` names the cause. A missing device cookie is `no_cookie`. On 2026-11-06 this was the most likely `reason` |
+| Harold was slow | `harold.web_app.requests` rises with `result = served` and `harold.web_app.request.duration` has a large p95, or `app request waiting` lines exist | Harold was slow on that `route_class`. Read the `app request waiting` lines by `route_class`, then the traces of that class |
+
+The three queries below show each case. Replace the times.
+
+```
+-- Never reached Harold, or reached the port with no request: the rise of the connections
+SELECT Attributes['outcome'] AS outcome, max(Value) - min(Value) AS rise
+FROM otel.otel_metrics_sum
+WHERE MetricName = 'harold.web_app.connections' AND TimeUnix BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
+GROUP BY outcome;
+-- Harold refused: the rise of the requests by result and reason
+SELECT Attributes['result'] AS result, Attributes['reason'] AS reason, max(Value) - min(Value) AS rise
+FROM otel.otel_metrics_sum
+WHERE MetricName = 'harold.web_app.requests' AND TimeUnix BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
+GROUP BY result, reason;
+-- Harold was slow: the lines of requests that waited
+SELECT Timestamp, LogAttributes['route_class'] AS route_class, LogAttributes['waited_ms'] AS waited_ms
+FROM otel.otel_logs
+WHERE ServiceName = 'harold' AND Body = 'app request waiting' AND Timestamp BETWEEN '2026-11-06 12:10:00' AND '2026-11-06 12:30:00'
+```
+
+Run each query on its own. The rise of a counter assumes no restart of Harold in the window. The card "Web app requests: results and time" applies the counter rule, so use it when a restart is possible.
+
+**What Harold cannot see.** A request that never reached the port leaves no record in Harold: the phone is offline or off the tailnet, a DNS or TLS failure, or `tailscale serve` is down or holds the request. After the phone reconnects, its own browser spans (when browser traces are on) arrive late through `/telemetry/traces` and can show the failed fetches. That is a second view, not a replacement.
+
+**The card.** The card "Web app requests: results and time" in the Web app group is one table of rows: requests by result and reason over the last day; the p95 and the mean of `thread` and `replies` this week and last week (the p95 from the buckets of `harold.web_app.request.duration`, the mean from the rise of its count and sum); connections by outcome; waiting requests by `route_class`; closes of the updates stream by `short`; and the p50 of `harold.web_app.updates.duration` this week and last week. It is a card, not an alert. It ends with five note rows (info):
+
+- refusals with `no_cookie` or `unknown_device` above 3 in 10 minutes: a phone lost its pairing;
+- `error` above 0 in a day: a request failed with a 5xx answer;
+- a p95 above 1 second for `thread` or `replies` over an hour: the app answers slowly;
+- `no_request` connections above 5 in 10 minutes with no requests: bytes reached the port and no request followed;
+- more than 10 closes with `short = true` in an hour: the updates stream churns.
 
 ## Browser spans
 
@@ -750,6 +821,7 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Web app | Thread opened at the oldest row, 7 days | the share of `browser.thread_opened` spans with `harold.opened_at = oldest_on_page` over the last 7 days. A share above 10% means the 50-row page is too short for how long you are away: a backlog item. A wrong position shows as `newest` with `harold.unread` above 0, or `first_unread` right after a reply; the span's trace id and the `app page connected` line at the same second show whether a reconnect patch landed late. Info only: no alert | SQL table |
 | Web app | Web app posts refused, by route, per day | the `app post refused` lines for each of the last 7 days, by `route`. Expected: none after the release. Any count is a page that still posts without Datastar, which the asset test should have caught: look at once. Info only: no alert | SQL table over `otel.otel_logs` |
 | Web app | Pages closed without a hidden report, share per day | the `app page disconnected` lines for each of the last 7 days: the number, the share with `hidden_reported = false`, and the number with `repeated`. A share over 20% on a day with at least 10 closes means the phone drops the hidden reports often and they hold back pushes: the user then decides whether to keep the three hide-time posts through Datastar. A `repeated` above 0 means a report reached Harold twice, which no retry should cause. Info only: no alert | SQL table over `otel.otel_logs` |
+| Web app | Web app requests: results and time | one table: `harold.web_app.requests` by `result` and `reason` over the last day; the p95 and the mean of `thread` and `replies` this week and last week from `harold.web_app.request.duration`; `harold.web_app.connections` by `outcome`; `harold.web_app.requests.waiting` by `route_class`; `harold.web_app.updates.closed` by `short`; the p50 of `harold.web_app.updates.duration`. Card notes (info): `no_cookie` or `unknown_device` refusals above 3 in 10 minutes; `error` above 0 in a day; a p95 above 1 s for `thread` or `replies` over an hour; `no_request` above 5 in 10 minutes with no requests; more than 10 closes with `short = true` in an hour. See [Web app requests](#web-app-requests) | SQL table: the counter rule on the counters, and the rule over the histograms' count, sum and buckets. It has no earlier tile |
 | TTS server | TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days | for each day, machine, `loaded` and `device`: the number of `harold.tts.speak` spans and the p50 and p95 of `first_audio_ms`, for lines that were spoken. The aims, with the model loaded: a p95 under 150 ms on the RTX 4090 (`device = gpu`), and under 500 ms on the Mac and on a CPU fallback. A model change is judged by it | SQL table over `harold.tts.speak` spans |
 | TTS server | TTS failures per day, by machine, caller and reason | the `tts failed` lines for each of the last 7 days, by machine, `caller` (`desk`, `call`) and `reason`. A failure that affects only calls shows here. Info only: no alert, because you hear a missing line | SQL table over the logs |
 | Notifications | Spoken lines dropped while locked, by pane, per day | the `spoken line dropped (screen locked)` lines for each of the last 7 days, by `pane_id`. More than 3 drops on a day from one pane means that agent speaks while the user is away: change its skill to send text instead. Expected: under 3 a day for each pane, since the chief's lines go to the web app as text. Info only: no alert | SQL table over `otel.otel_logs` |
@@ -868,6 +940,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by` of `imessage` and `unknown`, never `web_app`;
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
 - `harold.web_app.collection_pages`, for each configured `collection` and for `unknown`, with each `result`;
+- `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
 - `harold.agent.blocked_long`, for each configured provider;
@@ -1361,6 +1434,7 @@ The check prints `check_hyperdx_alerts: ok, <n> alerts` and exits 0 when HyperDX
 The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked by tests that read the files. The alerts and their webhooks were applied to the local stack on 2026-10-24, and `scripts/check_hyperdx_alerts.sh` checks that the stack holds them. Untested until real use:
 
 - data arriving in HyperDX from either Mac;
+- the next time the phone cannot reach the web app: the diagnosis table of [Web app requests](#web-app-requests);
 - the dashboards, panels and the counter rule's SQL working as written in HyperDX 2.40, including the field names and the SQL tiles in ClickHouse;
 - each alert firing in HyperDX as its file says;
 - the counting from 0 at start reaching HyperDX as a first point of 0;

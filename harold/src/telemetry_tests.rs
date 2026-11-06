@@ -2638,7 +2638,7 @@ const KNOWLEDGE_CARDS: [&str; 6] = [
 ];
 
 /// The web app's cards, in the order the dashboard lists them.
-const WEB_APP_CARDS: [&str; 8] = [
+const WEB_APP_CARDS: [&str; 9] = [
     "Web app errors per day",
     "Phone page load (p50, p95)",
     "Browser spans not forwarded per day",
@@ -2647,6 +2647,7 @@ const WEB_APP_CARDS: [&str; 8] = [
     "Thread opened at the oldest row, 7 days",
     "Web app posts refused, by route, per day",
     "Pages closed without a hidden report, share per day",
+    "Web app requests: results and time",
 ];
 /// The TTS server's cards, in the order the dashboard lists them.
 const TTS_CARDS: [&str; 2] = [
@@ -2942,7 +2943,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
     // The work waiting card makes one more.
     // The work group adds two: time at each status and the check mismatches.
     // The agent signals group adds one: the refusals of the telemetry tool.
-    assert_eq!(counted, 33);
+    // The web app requests card adds one.
+    assert_eq!(counted, 34);
 }
 
 #[test]

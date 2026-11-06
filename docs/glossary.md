@@ -104,6 +104,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | away channel | iMessage, the channel that texts the phone and reads its replies. Code and the skill name call it `away` (`notify_away`, `AwayText`, `send-message-to-away-device`) | — |
 | web app | The home-screen app on the phone that holds the chief's thread | "away app", "home-screen app" |
 | thread | The web app's one conversation with the chief | — |
+| route class | The fixed name of a group of the web app's paths, such as `thread`, `updates` or `pages`, used in its signals as `route_class` in place of the path | "endpoint", "path", "route" alone |
+| web request refusal | A request that the login, device or origin check answers with a refusal, with its reason | "error" for it |
 | `web_app.app_name` | The setting for the name under the web app's icon on the home screen and in its title; "Chief" when left out | "app title", "display name" |
 | `web_app.icon` | The setting for the PNG picture, the icon, that marks the web app on the home screen | "favicon", "app icon" |
 | phone notification | Any message Harold sends to the phone, tagged with its machine and pane: a turn-end update, an agent message or a spoken line, sent by iMessage or the web app | "notification" alone, "phone message" |

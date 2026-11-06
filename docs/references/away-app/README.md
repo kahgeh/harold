@@ -422,6 +422,19 @@ With `[web_app]` set, the chief's messages always go into the app's thread. Once
 
 The route applies only to messages that would reach the phone today. At the desk, with the screen unlocked, the chief's spoken lines are still said aloud. While Harold cannot list the tmux panes, it cannot tell which pane is the chief's, so the chief's messages go to iMessage as before.
 
+## What Harold records about requests
+
+An outermost request layer counts every request to the web app by `route_class` and `result`, with the refusal `reason`, and times each answer. The listener counts each connection, and the updates stream counts how long it stays open. The metrics are `harold.web_app.requests`, `harold.web_app.requests.waiting`, `harold.web_app.request.duration`, `harold.web_app.connections`, `harold.web_app.updates.open`, `harold.web_app.updates.duration` and `harold.web_app.updates.closed`. The [telemetry reference](../telemetry/README.md#web-app-requests) describes them, and the card "Web app requests: results and time" shows them.
+
+When the phone cannot reach the app, check ClickHouse for the minutes of the failure:
+
+| What ClickHouse shows | What happened |
+|---|---|
+| `harold.web_app.connections` does not rise | The requests never reached Harold. Look at the phone's network and `tailscale serve status` |
+| `harold.web_app.connections` rises with `no_request`, and no requests | Something reached the port and sent no request. Look at `tailscale serve` and TLS |
+| `harold.web_app.requests` rises with `result = refused` | Harold refused. Read the `reason`, for example `no_cookie` or `unknown_device` |
+| `harold.web_app.request.duration` has a large p95, or `app request waiting` lines exist | Harold was slow on that `route_class` |
+
 ## What the app records
 
 With telemetry export on (the default), the page records its page loads, requests and script errors, and when a row of the thread is drawn, as OpenTelemetry spans in the browser. It posts them to Harold's `POST /telemetry/traces`, which keeps only the fields it allows (paths without queries, no text you typed; a script error's message is cut to 200 characters) and forwards them to the local collector, where they are stored under `harold-web-app`. A Send, and a todo answer, then show as one trace from the tap, through the chief's turn, to the answer on the phone. The page downloads one extra script of about 72 KB, kept by the phone until its name changes. With export off none of this is served or kept. The [telemetry reference](../telemetry/README.md#browser-spans) has the details.
@@ -571,6 +584,9 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app thread older not read` | `reason` (`store_unread`), logged as a warning; the `#older` line stays and asks again |
 | `app page not connected` | `reason` (`store_unread` or `render_failed`) |
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected, and `hidden_reported` (`true` for one `POST /page/hidden` during the stream, `false` for none, `repeated` for more than one). Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
+| `app request waiting` | WARN. A request with no answer after 5 seconds: `route_class` and `waited_ms`. Once for each request. Never for `updates`. |
+| `app login refused` | `route_class`. INFO, once per hour: the login check found no `Tailscale-User-Login` header. |
+| `app updates closed` | `reason` (`client_gone`, `server_end` or `shutdown`), `open_s` (the seconds the stream was open) and `short` (`true` under 60 seconds). INFO. |
 | `app post refused` | WARN. A post from the app's own origin without `Datastar-Request: true`, on a route that needs it: `route` (the path without its query) and `reason` `not_datastar`. No body. Expected rate: 0. |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
@@ -604,7 +620,7 @@ Six other lines report failures, and none carries content:
 - `web app thread not pruned` and `web app photos not pruned` carry no field;
 - `app reply state not recorded` carries the reply's event id and the store's error.
 
-A request refused by the login check, or by the Host check, writes no line at all. A post from the app's own origin without `Datastar-Request: true`, on a route that needs it, writes WARN `app post refused` with `route` (the path without its query) and `reason` `not_datastar`, and no body. A post from another site writes no line.
+A request refused by the login check writes the INFO line `app login refused`, once per hour, with its `route_class`. A request refused by the Host check writes no line. A post from the app's own origin without `Datastar-Request: true`, on a route that needs it, writes WARN `app post refused` with `route` (the path without its query) and `reason` `not_datastar`, and no body. A post from another site writes no line.
 
 The same lines reach Harold's exported telemetry. A turn started by a reply typed in the app counts as `started_by = phone`, as a phone reply through iMessage does.
 
