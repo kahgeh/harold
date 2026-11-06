@@ -1935,8 +1935,8 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     // Telemetry starts before the config loads, so a refused start reaches the collector.
     // Only the modes that run on past the config start it: the other modes start none.
     let telemetry = if matches!(mode, cli::Mode::Daemon | cli::Mode::Diagnostics { .. }) {
-        let (early, machine) = settings::early_telemetry();
-        let guard = init_telemetry(settings::EARLY_LOG_LEVEL, &early, &machine);
+        let (early, machine, level) = settings::early_telemetry();
+        let guard = init_telemetry(&level, &early, &machine);
         if let Some(flush) = guard.flusher() {
             telemetry::install_panic_hook(flush);
         }

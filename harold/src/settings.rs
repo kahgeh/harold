@@ -1002,8 +1002,6 @@ pub(crate) fn tts_models_path() -> std::path::PathBuf {
 
 #[derive(Debug, Deserialize)]
 pub struct LogSettings {
-    /// The early start uses `EARLY_LOG_LEVEL`, so nothing reads this yet.
-    #[allow(dead_code)]
     pub level: String,
 }
 
@@ -1769,7 +1767,6 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) control_tower: ControlTowerSettings,
     pub tts: TtsSettings,
-    #[allow(dead_code)]
     pub log: LogSettings,
     pub store: StoreSettings,
     pub notify: NotifySettings,
@@ -2008,18 +2005,17 @@ fn has_key(config: &Config, key: &str) -> bool {
     config.get::<config::Value>(key).is_ok()
 }
 
-/// The log level of the early start, before the settings load. It is the level `default.toml`
-/// gives; `RUST_LOG` still wins.
-pub(crate) const EARLY_LOG_LEVEL: &str = "info";
+/// The log level the early read gives when `[log] level` is not a string or cannot be read.
+const EARLY_LOG_LEVEL: &str = "info";
 
 /// The collector address the early start uses when the config cannot be read.
 const STANDARD_COLLECTOR: &str = "http://localhost:4317";
 
-/// The `[telemetry]` table and `machine_name`, read before `Settings::load` so that
-/// telemetry starts first. Only these two keys are read, so another setting that fails
+/// The `[telemetry]` table, `machine_name` and `[log] level`, read before `Settings::load` so that
+/// telemetry starts first. Only these keys are read, so another setting that fails
 /// validation does not stop it. Any read failure gives the standard collector with export
 /// on, and the host name.
-pub(crate) fn early_telemetry() -> (TelemetrySettings, String) {
+pub(crate) fn early_telemetry() -> (TelemetrySettings, String, String) {
     early_telemetry_from(merged_config())
 }
 
@@ -2028,17 +2024,19 @@ pub(crate) fn early_telemetry() -> (TelemetrySettings, String) {
 fn early_telemetry_in(
     config_dir: &str,
     vars: HashMap<String, String>,
-) -> (TelemetrySettings, String) {
+) -> (TelemetrySettings, String, String) {
     early_telemetry_from(merged_config_in(config_dir, "local", Some(vars)))
 }
 
-fn early_telemetry_from(config: Result<Config, ConfigError>) -> (TelemetrySettings, String) {
+fn early_telemetry_from(
+    config: Result<Config, ConfigError>,
+) -> (TelemetrySettings, String, String) {
     let fallback = || TelemetrySettings {
         otlp_endpoint: Some(STANDARD_COLLECTOR.into()),
         ..TelemetrySettings::default()
     };
     let Ok(config) = config else {
-        return (fallback(), default_machine_name());
+        return (fallback(), default_machine_name(), EARLY_LOG_LEVEL.into());
     };
     let telemetry = config
         .get::<TelemetrySettings>("telemetry")
@@ -2046,7 +2044,12 @@ fn early_telemetry_from(config: Result<Config, ConfigError>) -> (TelemetrySettin
     let machine = config
         .get::<String>("machine_name")
         .unwrap_or_else(|_| default_machine_name());
-    (telemetry, machine)
+    // A string only: the config crate would turn a number into a string.
+    let level = match config.get::<config::Value>("log.level").map(|v| v.kind) {
+        Ok(config::ValueKind::String(level)) => level,
+        _ => EARLY_LOG_LEVEL.into(),
+    };
+    (telemetry, machine, level)
 }
 
 /// The fixed sentences for each setting the config names that Harold no longer reads. Key
@@ -4797,7 +4800,7 @@ encryption_key_file = "/work/key"
         (dir, guard)
     }
 
-    fn early_read(dir: &std::path::Path) -> (super::TelemetrySettings, String) {
+    fn early_read(dir: &std::path::Path) -> (super::TelemetrySettings, String, String) {
         super::early_telemetry_in(
             dir.to_str().expect("utf-8 temp dir"),
             std::collections::HashMap::new(),
@@ -4812,7 +4815,7 @@ encryption_key_file = "/work/key"
                 "machine_name = \"studio\"\n[telemetry]\notlp_endpoint = \"http://collector.test:4317\"\n",
             ),
         );
-        let (telemetry, machine) = early_read(&dir);
+        let (telemetry, machine, _) = early_read(&dir);
         assert_eq!(
             telemetry.otlp_endpoint.as_deref(),
             Some("http://collector.test:4317")
@@ -4824,19 +4827,32 @@ encryption_key_file = "/work/key"
     #[test]
     fn early_read_falls_back_when_local_toml_is_not_toml() {
         let (dir, _guard) = early_dir("early-bad-toml", Some("this is [not toml"));
-        let (telemetry, machine) = early_read(&dir);
+        let (telemetry, machine, level) = early_read(&dir);
         assert_eq!(
             telemetry.otlp_endpoint.as_deref(),
             Some("http://localhost:4317")
         );
         assert!(telemetry.export);
         assert_eq!(machine, super::default_machine_name());
+        assert_eq!(level, "info");
+    }
+
+    #[test]
+    fn early_read_returns_the_configured_log_level() {
+        let (dir, _guard) = early_dir("early-level", Some("[log]\nlevel = \"debug\"\n"));
+        assert_eq!(early_read(&dir).2, "debug");
+    }
+
+    #[test]
+    fn early_read_log_level_is_info_when_not_a_string() {
+        let (dir, _guard) = early_dir("early-level-num", Some("[log]\nlevel = 7\n"));
+        assert_eq!(early_read(&dir).2, "info");
     }
 
     #[test]
     fn early_read_export_false_gives_no_pipeline() {
         let (dir, _guard) = early_dir("early-export-off", Some("[telemetry]\nexport = false\n"));
-        let (telemetry, machine) = early_read(&dir);
+        let (telemetry, machine, _) = early_read(&dir);
         assert!(!telemetry.export);
         let guard = crate::telemetry::TelemetryGuard::for_settings(&telemetry, &machine).0;
         assert!(!guard.exporting());
@@ -4850,7 +4866,7 @@ encryption_key_file = "/work/key"
                 "[grpc]\nport = \"not a port\"\n[log]\nlevel = 7\n[telemetry]\notlp_endpoint = \"http://collector.test:4317\"\n",
             ),
         );
-        let (telemetry, _) = early_read(&dir);
+        let (telemetry, _, _) = early_read(&dir);
         assert_eq!(
             telemetry.otlp_endpoint.as_deref(),
             Some("http://collector.test:4317")
