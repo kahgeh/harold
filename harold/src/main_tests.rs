@@ -4876,3 +4876,10 @@ async fn no_recap_for_slave_agents() {
     assert!(service.recaps.targets().is_empty());
     task.abort();
 }
+
+#[test]
+fn a_refused_start_counts_its_problems_and_a_load_error_counts_one() {
+    let problems = vec!["one".to_string(), "two".to_string()];
+    assert_eq!(super::refused_errors_count(&problems), 2);
+    assert_eq!(super::refused_errors_count(&[]), 1);
+}

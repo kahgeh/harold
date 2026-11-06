@@ -1002,6 +1002,8 @@ pub(crate) fn tts_models_path() -> std::path::PathBuf {
 
 #[derive(Debug, Deserialize)]
 pub struct LogSettings {
+    /// The early start uses `EARLY_LOG_LEVEL`, so nothing reads this yet.
+    #[allow(dead_code)]
     pub level: String,
 }
 
@@ -1767,6 +1769,7 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) control_tower: ControlTowerSettings,
     pub tts: TtsSettings,
+    #[allow(dead_code)]
     pub log: LogSettings,
     pub store: StoreSettings,
     pub notify: NotifySettings,
@@ -2003,6 +2006,47 @@ fn local_config_in(
 
 fn has_key(config: &Config, key: &str) -> bool {
     config.get::<config::Value>(key).is_ok()
+}
+
+/// The log level of the early start, before the settings load. It is the level `default.toml`
+/// gives; `RUST_LOG` still wins.
+pub(crate) const EARLY_LOG_LEVEL: &str = "info";
+
+/// The collector address the early start uses when the config cannot be read.
+const STANDARD_COLLECTOR: &str = "http://localhost:4317";
+
+/// The `[telemetry]` table and `machine_name`, read before `Settings::load` so that
+/// telemetry starts first. Only these two keys are read, so another setting that fails
+/// validation does not stop it. Any read failure gives the standard collector with export
+/// on, and the host name.
+pub(crate) fn early_telemetry() -> (TelemetrySettings, String) {
+    early_telemetry_from(merged_config())
+}
+
+/// `early_telemetry` for the config folder `config_dir` and the environment `vars`.
+#[cfg(test)]
+fn early_telemetry_in(
+    config_dir: &str,
+    vars: HashMap<String, String>,
+) -> (TelemetrySettings, String) {
+    early_telemetry_from(merged_config_in(config_dir, "local", Some(vars)))
+}
+
+fn early_telemetry_from(config: Result<Config, ConfigError>) -> (TelemetrySettings, String) {
+    let fallback = || TelemetrySettings {
+        otlp_endpoint: Some(STANDARD_COLLECTOR.into()),
+        ..TelemetrySettings::default()
+    };
+    let Ok(config) = config else {
+        return (fallback(), default_machine_name());
+    };
+    let telemetry = config
+        .get::<TelemetrySettings>("telemetry")
+        .unwrap_or_else(|_| fallback());
+    let machine = config
+        .get::<String>("machine_name")
+        .unwrap_or_else(|_| default_machine_name());
+    (telemetry, machine)
 }
 
 /// The fixed sentences for each setting the config names that Harold no longer reads. Key
@@ -4736,6 +4780,81 @@ encryption_key_file = "/work/key"
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// Writes `default.toml` and `local.toml` (when given) into a new temp folder.
+    fn early_dir(name: &str, local: Option<&str>) -> (std::path::PathBuf, TempDirGuard) {
+        let dir = unique_temp_dir(name);
+        let guard = TempDirGuard(dir.clone());
+        std::fs::copy(
+            format!("{}/config/default.toml", env!("CARGO_MANIFEST_DIR")),
+            dir.join("default.toml"),
+        )
+        .expect("copy default.toml");
+        if let Some(local) = local {
+            std::fs::write(dir.join("local.toml"), local).expect("write local.toml");
+        }
+        (dir, guard)
+    }
+
+    fn early_read(dir: &std::path::Path) -> (super::TelemetrySettings, String) {
+        super::early_telemetry_in(
+            dir.to_str().expect("utf-8 temp dir"),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn early_read_uses_telemetry_table() {
+        let (dir, _guard) = early_dir(
+            "early-table",
+            Some(
+                "machine_name = \"studio\"\n[telemetry]\notlp_endpoint = \"http://collector.test:4317\"\n",
+            ),
+        );
+        let (telemetry, machine) = early_read(&dir);
+        assert_eq!(
+            telemetry.otlp_endpoint.as_deref(),
+            Some("http://collector.test:4317")
+        );
+        assert!(telemetry.export);
+        assert_eq!(machine, "studio");
+    }
+
+    #[test]
+    fn early_read_falls_back_when_local_toml_is_not_toml() {
+        let (dir, _guard) = early_dir("early-bad-toml", Some("this is [not toml"));
+        let (telemetry, machine) = early_read(&dir);
+        assert_eq!(
+            telemetry.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
+        assert!(telemetry.export);
+        assert_eq!(machine, super::default_machine_name());
+    }
+
+    #[test]
+    fn early_read_export_false_gives_no_pipeline() {
+        let (dir, _guard) = early_dir("early-export-off", Some("[telemetry]\nexport = false\n"));
+        let (telemetry, machine) = early_read(&dir);
+        assert!(!telemetry.export);
+        let guard = crate::telemetry::TelemetryGuard::for_settings(&telemetry, &machine).0;
+        assert!(!guard.exporting());
+    }
+
+    #[test]
+    fn early_read_ignores_other_settings_that_fail_validation() {
+        let (dir, _guard) = early_dir(
+            "early-other-invalid",
+            Some(
+                "[grpc]\nport = \"not a port\"\n[log]\nlevel = 7\n[telemetry]\notlp_endpoint = \"http://collector.test:4317\"\n",
+            ),
+        );
+        let (telemetry, _) = early_read(&dir);
+        assert_eq!(
+            telemetry.otlp_endpoint.as_deref(),
+            Some("http://collector.test:4317")
+        );
     }
 
     #[test]

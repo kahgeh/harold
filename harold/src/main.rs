@@ -1932,6 +1932,18 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::Master(_)
     );
     let launchd = started_by_launchd(&mode);
+    // Telemetry starts before the config loads, so a refused start reaches the collector.
+    // Only the modes that run on past the config start it: the other modes start none.
+    let telemetry = if matches!(mode, cli::Mode::Daemon | cli::Mode::Diagnostics { .. }) {
+        let (early, machine) = settings::early_telemetry();
+        let guard = init_telemetry(settings::EARLY_LOG_LEVEL, &early, &machine);
+        if let Some(flush) = guard.flusher() {
+            telemetry::install_panic_hook(flush);
+        }
+        Some(guard)
+    } else {
+        None
+    };
     // Before `load`, which would deserialise (or reject) the settings this names.
     let removed = settings::removed_setting_messages();
     if !removed.is_empty() {
@@ -1943,14 +1955,16 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         }
         let message = format!("invalid configuration: {}", removed.join("; "));
         if launchd {
-            refuse_invalid_config(&message);
+            refuse_invalid_config(&message, refused_errors_count(&removed), telemetry).await;
         }
         return Err(message.into());
     }
     let settings = match settings::Settings::load() {
         Ok(settings) => settings,
         Err(_) if is_probe => return Err("invalid configuration".into()),
-        Err(error) if launchd => refuse_invalid_config(&error.to_string()),
+        Err(error) if launchd => {
+            refuse_invalid_config(&error.to_string(), refused_errors_count(&[]), telemetry).await
+        }
         Err(error) => return Err(error.into()),
     };
 
@@ -1961,7 +1975,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         }
         let message = format!("invalid configuration: {}", errors.join("; "));
         if launchd {
-            refuse_invalid_config(&message);
+            refuse_invalid_config(&message, refused_errors_count(&errors), telemetry).await;
         }
         return Err(message.into());
     }
@@ -2069,14 +2083,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
 
-    let telemetry = init_telemetry(
-        &settings.log.level,
-        &settings.telemetry,
-        &settings.machine_name,
-    );
-    if let Some(flush) = telemetry.flusher() {
-        telemetry::install_panic_hook(flush);
-    }
+    // Only the daemon and the diagnostics mode reach this line, and both started telemetry.
+    let Some(telemetry) = telemetry else {
+        return Err("telemetry did not start".into());
+    };
     if telemetry.exporting() {
         crate::telemetry::register_phone_counters();
         crate::telemetry::register_turn_token_counters();
@@ -2462,17 +2472,26 @@ async fn refuse_start(reason: &'static str, telemetry: telemetry::TelemetryGuard
     std::process::exit(0)
 }
 
-/// Refuses launchd's start of a configuration that does not validate. Logging is not set up
-/// yet, so the error and the refusal go to standard error, which the plist sends to the log.
-fn refuse_invalid_config(message: &str) -> ! {
+/// The number of problems a refused configuration reports: one for a load error, which
+/// has no list.
+fn refused_errors_count(problems: &[String]) -> usize {
+    problems.len().max(1)
+}
+
+/// Refuses launchd's start of a configuration that does not validate. The refusal goes
+/// through the normal subscriber, and telemetry is shut down first so the line is exported
+/// when the exporter is on. The problem text goes to standard error, which the plist sends
+/// to the log.
+async fn refuse_invalid_config(
+    message: &str,
+    errors: usize,
+    telemetry: Option<telemetry::TelemetryGuard>,
+) -> ! {
     eprintln!("Error: {message}");
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::warn!(reason = "invalid_config", "startup refused");
-    });
+    tracing::warn!(reason = "invalid_config", errors, "startup refused");
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown().await;
+    }
     std::process::exit(0)
 }
 
