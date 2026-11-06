@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use askama::Template;
 use axum::extract::{Query, State};
@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use datastar::prelude::{ElementPatchMode, PatchElements, PatchSignals};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
@@ -89,6 +90,53 @@ struct Seen {
 struct Link {
     patches: mpsc::Sender<Result<Event, Infallible>>,
     open: OpenPage,
+}
+
+/// Counts one updates stream while it is open. It adds one to the open count when it
+/// starts. When it drops, in every case, it subtracts one, records why and how long the
+/// stream was open, and logs `app updates closed`.
+struct StreamSignals {
+    opened: Instant,
+    /// The close reason for the metric, once the stream knows it.
+    reason: Option<&'static str>,
+    /// Changes the open count. A test can replace it.
+    open_add: fn(i64),
+}
+
+impl StreamSignals {
+    fn new() -> Self {
+        Self::with_open_add(telemetry::web_updates_open_add)
+    }
+
+    fn with_open_add(open_add: fn(i64)) -> Self {
+        open_add(1);
+        Self {
+            opened: Instant::now(),
+            reason: None,
+            open_add,
+        }
+    }
+
+    /// Sets the close reason from the reason `send_patches` returns.
+    fn ended(&mut self, reason: &str) {
+        self.reason = Some(match reason {
+            "shutdown" => "shutdown",
+            "store_stopped" => "server_end",
+            _ => "client_gone",
+        });
+    }
+}
+
+impl Drop for StreamSignals {
+    fn drop(&mut self) {
+        (self.open_add)(-1);
+        // A stream that drops with no reason was cancelled or it panicked: the page's
+        // side is the likely cause.
+        let reason = self.reason.unwrap_or("client_gone");
+        let open = self.opened.elapsed();
+        telemetry::record_web_updates_closed(reason, open.as_secs_f64());
+        info!(reason, open_s = open.as_secs(), "app updates closed");
+    }
 }
 
 /// What the page shows of one row, to tell a changed row from an unchanged one.
@@ -182,9 +230,11 @@ async fn follow_thread(
     todos_shown: String,
     link: Link,
 ) {
-    let connected = Instant::now();
+    let mut signals = StreamSignals::new();
+    let connected = std::time::Instant::now();
     let hidden = link.open.hidden_reports();
     let reason = send_patches(state, changes, call, seen, dots, todos_shown, link).await;
+    signals.ended(reason);
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
@@ -465,3 +515,7 @@ fn shown(messages: &[AppMessage]) -> HashMap<String, Shown> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "updates_signals_tests.rs"]
+mod updates_signals_tests;
