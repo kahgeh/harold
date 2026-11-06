@@ -2847,7 +2847,8 @@ pub(crate) type PanicFlush = Arc<dyn Fn(Duration) -> bool + Send + Sync>;
 /// A source location as text. A relative path stays as it is. An absolute path keeps
 /// its last two parts, so that a path under a home folder does not leave Harold.
 fn location_text(file: &str, line: u32, column: u32) -> String {
-    let path = if file.starts_with('/') || file.starts_with('\\') || file.contains(":\\") {
+    let drive = file.as_bytes().get(1) == Some(&b':');
+    let path = if file.starts_with('/') || file.starts_with('\\') || drive {
         let parts: Vec<&str> = file
             .split(['/', '\\'])
             .filter(|part| !part.is_empty())
@@ -2864,26 +2865,44 @@ fn panic_location(location: &std::panic::Location) -> String {
     location_text(location.file(), location.line(), location.column())
 }
 
-/// Logs the panic, then flushes the logs for at most `limit`. When the flush fails or
-/// takes too long, it calls `previous`, which writes the panic to the file. When the
-/// flush works, nothing goes to the file.
+/// Logs the panic, then flushes the logs, for at most `limit` in all. The event and the
+/// flush run on one new thread, with the panicking thread's span and subscriber, so that
+/// a lock held by the panicking thread, which the log path needs, cannot hold the hook.
+/// When the work fails or takes too long, it calls `previous`, which writes the panic to
+/// the file. When the work succeeds, nothing goes to the file.
 fn report_panic(
     thread: &str,
     location: &std::panic::Location,
     message: &str,
-    flush: &dyn Fn(Duration) -> bool,
+    flush: PanicFlush,
     limit: Duration,
     previous: &dyn Fn(),
 ) {
-    tracing::event!(
-        target: "harold::panic",
-        tracing::Level::ERROR,
-        thread = %thread,
-        location = %panic_location(location),
-        panic.message = %message,
-        "harold panicked"
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let (thread, location, message) = (
+        thread.to_owned(),
+        panic_location(location),
+        message.to_owned(),
     );
-    if !flush(limit) {
+    let (done, result) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("harold-panic-report".into())
+        .spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _entered = span.enter();
+                tracing::event!(
+                    target: "harold::panic",
+                    tracing::Level::ERROR,
+                    thread = %thread,
+                    location = %location,
+                    panic.message = %message,
+                    "harold panicked"
+                );
+            });
+            let _ = done.send(flush(limit));
+        });
+    if !spawned.is_ok_and(|_| result.recv_timeout(limit).unwrap_or(false)) {
         previous();
     }
 }
@@ -2891,7 +2910,7 @@ fn report_panic(
 /// The hook function: takes the facts from `info` and runs `report_panic`.
 fn panic_hook(
     info: &std::panic::PanicHookInfo<'_>,
-    flush: &dyn Fn(Duration) -> bool,
+    flush: &PanicFlush,
     previous: &dyn Fn(&std::panic::PanicHookInfo<'_>),
 ) {
     let payload = info.payload();
@@ -2906,7 +2925,7 @@ fn panic_hook(
             thread.name().unwrap_or("<unnamed>"),
             location,
             message,
-            flush,
+            Arc::clone(flush),
             PANIC_FLUSH_LIMIT,
             &|| previous(info),
         ),
@@ -2924,7 +2943,7 @@ fn panic_hook(
 pub(crate) fn install_panic_hook(flush: PanicFlush) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        panic_hook(info, &*flush, &|info| previous(info));
+        panic_hook(info, &flush, &|info| previous(info));
     }));
 }
 

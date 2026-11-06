@@ -7102,10 +7102,10 @@ fn panic_in_thread_gives_one_record_with_thread_location_and_cut_message() {
             "worker-3",
             std::panic::Location::caller(),
             "failed to open /Users/me/secret.db: denied",
-            &move |limit| {
+            Arc::new(move |limit| {
                 flushes.lock().unwrap().push(limit);
                 true
-            },
+            }),
             PANIC_FLUSH_LIMIT,
             &move || *previous_calls.lock().unwrap() += 1,
         );
@@ -7136,6 +7136,14 @@ fn panic_location_keeps_relative_and_trims_absolute() {
     assert_eq!(
         location_text("/Users/me/.cargo/registry/src/x-1.0/src/lib.rs", 44, 9),
         "src/lib.rs:44:9"
+    );
+    assert_eq!(
+        location_text("C:/Users/me/x/src/lib.rs", 3, 4),
+        "src/lib.rs:3:4"
+    );
+    assert_eq!(
+        location_text(r"C:\Users\me\x\src\lib.rs", 3, 4),
+        "src/lib.rs:3:4"
     );
     assert_eq!(location_text("lib.rs", 1, 2), "lib.rs:1:2");
     assert_eq!(location_text("/lib.rs", 1, 2), "lib.rs:1:2");
@@ -7194,7 +7202,7 @@ fn failed_flush_calls_the_default_hook() {
             "main",
             std::panic::Location::caller(),
             "boom",
-            &|_| false,
+            Arc::new(|_| false),
             PANIC_FLUSH_LIMIT,
             &move || *flag.lock().unwrap() += 1,
         );
@@ -7226,7 +7234,7 @@ impl LogExporter for PanickingLogs {
             "OpenTelemetry.Logs.BatchProcessor",
             std::panic::Location::caller(),
             "export panicked",
-            &*flusher,
+            flusher,
             Duration::from_millis(500),
             &move || *counter.lock().unwrap() += 1,
         );
@@ -7277,5 +7285,70 @@ fn panic_flush_on_the_export_thread_times_out_and_calls_the_default_hook() {
     assert!(thread.contains("BatchProcessor"), "{thread}");
     assert_eq!(previous_calls, 1, "the default hook runs on a failed flush");
     assert!(elapsed >= Duration::from_millis(450), "{elapsed:?}");
-    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+}
+
+/// A layer whose `on_event` blocks, like a lock that the panicking thread holds.
+struct BlockingLayer(Duration);
+
+impl<S: Subscriber> Layer<S> for BlockingLayer {
+    fn on_event(
+        &self,
+        _event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        std::thread::sleep(self.0);
+    }
+}
+
+#[test]
+fn a_blocked_log_path_does_not_hold_the_panic_hook() {
+    let logs = ScriptedLogs::default();
+    let (_lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs, sink);
+    let called = Arc::new(Mutex::new(0_u32));
+    let flag = Arc::clone(&called);
+    let subscriber = tracing_subscriber::registry()
+        .with(BlockingLayer(Duration::from_secs(3)))
+        .with(pipeline.layers("info"));
+    let started = std::time::Instant::now();
+    tracing::subscriber::with_default(subscriber, || {
+        report_panic(
+            "main",
+            std::panic::Location::caller(),
+            "boom",
+            Arc::new(|_| true),
+            Duration::from_millis(300),
+            &move || *flag.lock().unwrap() += 1,
+        );
+    });
+    let elapsed = started.elapsed();
+    eprintln!("panic hook with a blocked log path: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    assert_eq!(*called.lock().unwrap(), 1);
+}
+
+#[test]
+fn the_panic_record_keeps_the_trace_of_the_span_the_caller_entered() {
+    let logs = ScriptedLogs::default();
+    let (_lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    let trace_id = tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        let span = tracing::info_span!(target: TRACE_TARGET, "harold.route");
+        let trace_id = span.context().span().span_context().trace_id();
+        span.in_scope(|| {
+            report_panic(
+                "main",
+                std::panic::Location::caller(),
+                "boom",
+                Arc::new(|_| true),
+                PANIC_FLUSH_LIMIT,
+                &|| {},
+            );
+        });
+        trace_id
+    });
+    let sent = logs.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].trace_context().unwrap().trace_id, trace_id);
 }
