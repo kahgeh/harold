@@ -50,7 +50,17 @@ impl DaemonCalls {
         Self::not_set_up()
     }
 
+    /// Always `None`: a build without `calls` has no open call.
+    pub(crate) fn call_opened_at_ms(&self) -> Option<u64> {
+        None
+    }
+
     pub(crate) async fn shutdown(&self) {}
+}
+
+/// Always `None`: a build without `calls` has no phone call.
+pub(crate) fn phone_call_opened_at_ms() -> Option<u64> {
+    None
 }
 
 /// Always `None`: a build without `calls` has no desk calls.
