@@ -5,7 +5,7 @@
 -- The rows read pod.inventory.item_days (item-days), pod.inventory.items (specs) and pod.inventory.oldest_hours (the oldest spec, shown in days), by list.
 -- The row "item-days: all lists" is the total of the item-days. The row "oldest days: all lists" is the oldest age of any list.
 -- The row "work records: released" reads harold.work.records at status released, summed over the priorities. It has no product.
--- The product filter applies to the pod.inventory rows only. A week with no export gives no number for that week.
+-- The product filter applies to the work-waiting rows only. A week with no export gives no number for that week.
 -- Columns: series, this_week, last_week.
 SELECT
     concat(what, ': ', list) AS series,

@@ -2028,6 +2028,10 @@ const METRICS: &[&str] = &[
     "harold.work.lead_time",
     "harold.work.slices",
     "harold.telemetry.calls",
+    "pod.inventory.items",
+    "pod.inventory.oldest_hours",
+    "pod.inventory.item_days",
+    "pod.slots.idle_with_work",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -2091,6 +2095,11 @@ const ATTRIBUTES: &[&str] = &[
     "priority",
     "status",
     "kind",
+    "list",
+    "spec.size",
+    "model",
+    "step",
+    "cause",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -2373,6 +2382,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "alert-watch-cost-high.json",
             "alert-work-rotation-failed.json",
             "alert-wrong-agent.json",
+            "big-picture.json",
             "dashboard.json",
             "machine.json",
             "trends.json",
