@@ -448,7 +448,10 @@ async fn run_lines_carry_the_number_of_add_dirs_and_never_a_path() {
         "path in an export"
     );
     // `add_dirs` is an exported count (Choice B). The canary check above shows no path leaves.
-    assert!(exported.contains("add_dirs"), "add_dirs is missing from the export");
+    assert!(
+        exported.contains("add_dirs"),
+        "add_dirs is missing from the export"
+    );
 }
 
 #[tokio::test(start_paused = true)]
