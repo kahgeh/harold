@@ -430,6 +430,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.lead_time` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `phase` (`whole`, `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check`). Recorded at closing |
 | `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
 | `harold.telemetry.calls` | counter, `{call}` | `prefix` (`chief`, a product, or `unknown` for a bad name or a made-up prefix), `kind` (`declare`, `count`, `gauge`, `event`, `remove`), `outcome` (`ok` or the reason word of a refusal). Seeded at 0 for each prefix, kind and outcome |
+| `harold.telemetry.log_records.unsent` | counter, `{record}` | `outcome` (`resent`, `file_only`). A log record that the collector did not get in the first send writes its line, ending `unsent=true`, to `harold.log`. `resent` counts the records sent to the collector again after it recovers. `file_only` counts the records that only the file holds: the queue of 5000 was full, so the oldest left, or the record was still queued when Harold stopped. Seeded at 0 for both outcomes |
 | `agent.<name>` | counter or gauge, no unit | `agent.attr.<key>` for each declared attribute. See [Agent signals](#what-leaves-harold) |
 | `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 
@@ -969,6 +970,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.web_app.collection_pages`, for each configured `collection` and for `unknown`, with each `result`;
 - `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
+- `harold.telemetry.log_records.unsent`, for each `outcome` (`resent`, `file_only`);
 - `harold.agent.recap_read`, for each `result` (`found`, `none`, `failed`) of each provider that has a recap adapter (today `claude`);
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;

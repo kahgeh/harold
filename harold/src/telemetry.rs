@@ -7,7 +7,7 @@
 //! missing collector never slows Harold down. An unreachable collector is reported in
 //! `harold.log` once when exports start failing and once when they recover.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
     Link, SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
 };
-use opentelemetry::{Context, KeyValue};
+use opentelemetry::{Context, InstrumentationScope, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
@@ -525,6 +525,8 @@ pub(crate) struct Instruments {
     pub telemetry_calls: Counter<u64>,
     /// `harold.slave_link.reports`, `{report}`, by `slave`, `kind` and `outcome`.
     pub slave_link_reports: Counter<u64>,
+    /// `harold.telemetry.log_records.unsent`, `{record}`, by `outcome`.
+    pub log_records_unsent: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -655,6 +657,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         telemetry_calls: counter("harold.telemetry.calls", "{call}"),
         slave_link_reports: counter("harold.slave_link.reports", "{report}"),
+        log_records_unsent: counter("harold.telemetry.log_records.unsent", "{record}"),
     }
 }
 
@@ -799,6 +802,17 @@ pub(crate) fn count_app_spans_not_forwarded(spans: u64, reason: &'static str) {
         .add(spans, &[KeyValue::new("reason", reason)]);
 }
 
+/// Every `outcome` of `harold.telemetry.log_records.unsent`: the record went to the
+/// collector later (`resent`), or only the file holds it (`file_only`).
+pub(crate) const LOG_RECORDS_UNSENT_OUTCOMES: [&str; 2] = ["resent", "file_only"];
+
+/// Counts `records` log records that the collector did not get in the first send.
+fn count_log_records_unsent(records: u64, outcome: &'static str) {
+    instruments()
+        .log_records_unsent
+        .add(records, &[KeyValue::new("outcome", outcome)]);
+}
+
 /// Every `channel` a phone request can carry.
 #[cfg(feature = "imessage")]
 pub(crate) const PHONE_CHANNELS: [&str; 2] = ["imessage", "unknown"];
@@ -819,6 +833,9 @@ pub(crate) fn register_phone_counters() {
     }
     for reason in APP_SPANS_NOT_FORWARDED_REASONS {
         count_app_spans_not_forwarded(0, reason);
+    }
+    for outcome in LOG_RECORDS_UNSENT_OUTCOMES {
+        count_log_records_unsent(0, outcome);
     }
     for channel in PHONE_CHANNELS {
         for resolved_by in ResolvedBy::ALL {
@@ -2926,7 +2943,7 @@ pub(crate) enum Processing {
 }
 
 /// The tracer, logger and meter providers, each sending through `FieldFilter` and
-/// `HealthWatch` to its exporter.
+/// `HealthWatch` to its exporter. The logger also sends through `UnsentLines`.
 pub(crate) struct Pipeline {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
@@ -2944,6 +2961,7 @@ impl Pipeline {
         resource: Resource,
         health: &Arc<ExportHealth>,
         processing: Processing,
+        unsent_sink: UnsentSink,
     ) -> Self
     where
         S: SpanExporter + 'static,
@@ -2951,7 +2969,11 @@ impl Pipeline {
         M: PushMetricExporter,
     {
         let spans = FieldFilter(HealthWatch::new(spans, health));
-        let logs = FieldFilter(HealthWatch::new(logs, health));
+        let logs = UnsentLines::new(
+            FieldFilter(HealthWatch::new(logs, health)),
+            unsent_sink,
+            RESEND_CAP,
+        );
         let metrics = Arc::new(HealthWatch::new(metrics, health));
 
         let tracer_provider = SdkTracerProvider::builder().with_resource(resource.clone());
@@ -3029,6 +3051,7 @@ impl Pipeline {
             resource(machine),
             &health,
             Processing::Batch,
+            Box::new(write_unsent_line_to_stderr),
         ))
     }
 
@@ -3284,6 +3307,201 @@ impl<E: LogExporter> LogExporter for FieldFilter<E> {
 
     fn set_resource(&mut self, resource: &Resource) {
         self.0.set_resource(resource);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unsent log lines
+// ---------------------------------------------------------------------------
+
+/// Where `UnsentLines` writes the line of a record that the collector did not get.
+pub(crate) type UnsentSink = Box<dyn Fn(&str) + Send + Sync>;
+
+/// How many records `UnsentLines` keeps for a resend. A full queue drops its oldest record.
+pub(crate) const RESEND_CAP: usize = 5_000;
+/// How many records one resend sends.
+const RESEND_BATCH: usize = 512;
+
+/// The production sink: one line on standard error, which the service manager writes to
+/// `harold.log`.
+fn write_unsent_line_to_stderr(line: &str) {
+    use std::io::Write as _;
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+}
+
+/// Keeps the log records that the collector did not get. It sits outside `FieldFilter`, so
+/// it sees every field. When a send fails, it writes one line for each record through
+/// `sink` and queues the records. After the next send that works, it sends the queue
+/// through `inner`, which cuts the fields. A resend that fails leaves the queue as it was
+/// and writes no second line.
+pub(crate) struct UnsentLines<E> {
+    inner: E,
+    queue: Mutex<VecDeque<(SdkLogRecord, InstrumentationScope)>>,
+    sink: UnsentSink,
+    cap: usize,
+}
+
+impl<E> std::fmt::Debug for UnsentLines<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnsentLines")
+            .field("cap", &self.cap)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E> UnsentLines<E> {
+    pub(crate) fn new(inner: E, sink: UnsentSink, cap: usize) -> Self {
+        Self {
+            inner,
+            queue: Mutex::new(VecDeque::new()),
+            sink,
+            cap,
+        }
+    }
+
+    fn queue(&self) -> MutexGuard<'_, VecDeque<(SdkLogRecord, InstrumentationScope)>> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Puts `records` at the back (`front` false) or at the front of the queue. Over `cap`,
+    /// the oldest records leave, and each counts as `file_only`.
+    fn keep(&self, records: Vec<(SdkLogRecord, InstrumentationScope)>, front: bool) {
+        let mut queue = self.queue();
+        if front {
+            for entry in records.into_iter().rev() {
+                queue.push_front(entry);
+            }
+        } else {
+            queue.extend(records);
+        }
+        let over = queue.len().saturating_sub(self.cap);
+        queue.drain(..over);
+        drop(queue);
+        if over > 0 {
+            count_log_records_unsent(over as u64, "file_only");
+        }
+    }
+}
+
+impl<E: LogExporter> UnsentLines<E> {
+    /// Sends the queue through `inner`, `RESEND_BATCH` records at a time. At the first
+    /// failure the records not yet sent go back to the front of the queue.
+    async fn resend(&self) {
+        let mut waiting: VecDeque<_> = std::mem::take(&mut *self.queue());
+        while !waiting.is_empty() {
+            let take = waiting.len().min(RESEND_BATCH);
+            let chunk: Vec<_> = waiting.drain(..take).collect();
+            let borrowed: Vec<_> = chunk
+                .iter()
+                .map(|(record, scope)| (record, scope))
+                .collect();
+            if self.inner.export(LogBatch::new(&borrowed)).await.is_err() {
+                let mut rest = chunk;
+                rest.extend(waiting);
+                self.keep(rest, true);
+                return;
+            }
+            count_log_records_unsent(chunk.len() as u64, "resent");
+        }
+    }
+}
+
+/// The text of `record` as the `harold.log` layer writes an event: time, level, target,
+/// message and fields, then ` unsent=true`. The layer's span prefix is not in a record, so
+/// a line from inside a span lacks it.
+pub(crate) fn unsent_line(record: &SdkLogRecord) -> String {
+    use std::fmt::Write as _;
+    let time = record
+        .timestamp()
+        .or(record.observed_timestamp())
+        .unwrap_or_else(std::time::SystemTime::now);
+    let time = OffsetDateTime::from(time)
+        .format(
+            &time::format_description::parse(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z",
+            )
+            .expect("the time layout is valid"),
+        )
+        .unwrap_or_default();
+    let level = match record.severity_number() {
+        Some(number) => match number as u8 {
+            1..=4 => "TRACE",
+            5..=8 => "DEBUG",
+            9..=12 => "INFO",
+            13..=16 => "WARN",
+            _ => "ERROR",
+        },
+        None => "INFO",
+    };
+    let mut line = format!("{time} {level:>5} ");
+    if let Some(target) = record.target() {
+        let _ = write!(line, "{target}: ");
+    }
+    if let Some(body) = record.body() {
+        match body {
+            AnyValue::String(text) => line.push_str(text.as_str()),
+            other => {
+                let _ = write!(line, "{other:?}");
+            }
+        }
+    }
+    for (key, value) in record.attributes_iter() {
+        if key.as_str() == "log.target" {
+            continue;
+        }
+        let _ = match value {
+            AnyValue::String(text) => write!(line, " {key}={:?}", text.as_str()),
+            AnyValue::Int(number) => write!(line, " {key}={number}"),
+            AnyValue::Double(number) => write!(line, " {key}={number}"),
+            AnyValue::Boolean(flag) => write!(line, " {key}={flag}"),
+            other => write!(line, " {key}={other:?}"),
+        };
+    }
+    line.push_str(" unsent=true");
+    line
+}
+
+impl<E: LogExporter> LogExporter for UnsentLines<E> {
+    async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+        let pairs: Vec<_> = batch.iter().collect();
+        let result = self.inner.export(LogBatch::new(&pairs)).await;
+        if result.is_ok() {
+            self.resend().await;
+            return result;
+        }
+        let mut kept = Vec::new();
+        for (record, scope) in pairs {
+            (self.sink)(&unsent_line(record));
+            let mut record = record.clone();
+            // The record time stays the first one, as the resend goes later.
+            record.set_timestamp(
+                record
+                    .timestamp()
+                    .or(record.observed_timestamp())
+                    .unwrap_or_else(std::time::SystemTime::now),
+            );
+            kept.push((record, scope.clone()));
+        }
+        self.keep(kept, false);
+        result
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        let left = std::mem::take(&mut *self.queue()).len();
+        if left > 0 {
+            count_log_records_unsent(left as u64, "file_only");
+        }
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn shutdown(&self) -> OTelSdkResult {
+        self.shutdown_with_timeout(Duration::from_secs(5))
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.inner.set_resource(resource);
     }
 }
 
@@ -4132,6 +4350,7 @@ pub(crate) mod test_support {
                 super::resource(MACHINE),
                 &ExportHealth::new(Box::new(|_| {})),
                 Processing::Simple,
+                Box::new(|_| {}),
             );
             // The capturing `fmt` layer writes as `harold.log` does, without the time and
             // colours, and keeps only the lines of a thread that is capturing.

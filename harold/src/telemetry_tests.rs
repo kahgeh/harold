@@ -2119,6 +2119,7 @@ const METRICS: &[&str] = &[
     "harold.work.lead_time",
     "harold.work.slices",
     "harold.telemetry.calls",
+    "harold.telemetry.log_records.unsent",
     "pod.inventory.items",
     "pod.inventory.oldest_hours",
     "pod.inventory.item_days",
@@ -6702,4 +6703,369 @@ fn file_line_allowed_table() {
     ));
     assert!(!file_line_allowed("tonic", Level::INFO, true));
     assert!(!file_line_allowed("slatedb", Level::WARN, true));
+}
+
+// ---------------------------------------------------------------------------
+// Unsent log lines
+// ---------------------------------------------------------------------------
+
+/// A log exporter with no socket. Each send takes the next value of `script`: `false` fails
+/// it. With the script empty, a send works. `sent` holds the records that were sent.
+#[derive(Clone, Debug, Default)]
+struct ScriptedLogs {
+    script: Arc<Mutex<std::collections::VecDeque<bool>>>,
+    sent: Arc<Mutex<Vec<SdkLogRecord>>>,
+}
+
+impl ScriptedLogs {
+    fn with_script(script: &[bool]) -> Self {
+        let logs = Self::default();
+        logs.script.lock().unwrap().extend(script.iter().copied());
+        logs
+    }
+
+    fn sent_bodies(&self) -> Vec<String> {
+        self.sent.lock().unwrap().iter().map(body_of).collect()
+    }
+}
+
+impl LogExporter for ScriptedLogs {
+    async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+        let works = self.script.lock().unwrap().pop_front().unwrap_or(true);
+        if !works {
+            return Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                "collector down".into(),
+            ));
+        }
+        let mut sent = self.sent.lock().unwrap();
+        sent.extend(batch.iter().map(|(record, _)| record.clone()));
+        Ok(())
+    }
+}
+
+fn body_of(record: &SdkLogRecord) -> String {
+    match record.body() {
+        Some(AnyValue::String(text)) => text.as_str().to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn sample_record(body: &str, observed: std::time::SystemTime) -> SdkLogRecord {
+    let logger = SdkLoggerProvider::builder().build().logger("unsent-test");
+    let mut record = logger.create_log_record();
+    record.set_body(AnyValue::String(body.to_owned().into()));
+    record.set_target("harold::unsent_test");
+    record.set_severity_number(opentelemetry::logs::Severity::Warn);
+    record.set_observed_timestamp(observed);
+    record.add_attribute("pane_id", AnyValue::String("%7".into()));
+    record.add_attribute("secret_field", AnyValue::String("top secret".into()));
+    record
+}
+
+fn export_records(exporter: &impl LogExporter, records: &[SdkLogRecord]) -> OTelSdkResult {
+    let scope = InstrumentationScope::builder("unsent-test").build();
+    let pairs: Vec<_> = records.iter().map(|record| (record, &scope)).collect();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(exporter.export(LogBatch::new(&pairs)))
+}
+
+type Lines = Arc<Mutex<Vec<String>>>;
+
+fn recording_sink() -> (Lines, UnsentSink) {
+    let lines: Lines = Arc::default();
+    let writer = Arc::clone(&lines);
+    (
+        lines,
+        Box::new(move |line| writer.lock().unwrap().push(line.to_owned())),
+    )
+}
+
+/// The counters are process-wide, so the tests that read them take turns.
+static UNSENT_COUNTER_TURN: Mutex<()> = Mutex::new(());
+
+fn unsent_count(outcome: &str) -> u64 {
+    test_support::exact_counter_value(
+        "harold.telemetry.log_records.unsent",
+        &[("outcome", outcome)],
+    )
+    .unwrap_or(0)
+}
+
+fn first_time() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)
+}
+
+#[test]
+fn failed_batch_writes_unsent_lines() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let (lines, sink) = recording_sink();
+    let exporter = UnsentLines::new(ScriptedLogs::with_script(&[false]), sink, 10);
+    let records = [
+        sample_record("one", first_time()),
+        sample_record("two", first_time()),
+    ];
+    assert!(export_records(&exporter, &records).is_err());
+    let lines = lines.lock().unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains(" one "), "{}", lines[0]);
+    assert!(lines[1].contains(" two "), "{}", lines[1]);
+}
+
+#[test]
+fn lines_end_with_unsent_true_and_keep_all_fields() {
+    let record = sample_record("hello", first_time());
+    let line = unsent_line(&record);
+    assert_eq!(
+        line,
+        "2020-09-13T12:26:40.000000Z  WARN harold::unsent_test: hello \
+         pane_id=\"%7\" secret_field=\"top secret\" unsent=true"
+    );
+}
+
+/// The layout is the one of the `fmt` layer: this test writes one event through both.
+#[test]
+fn unsent_line_matches_the_fmt_layer_line() {
+    use opentelemetry_sdk::logs::InMemoryLogExporter;
+    let fmt_buffer = SharedBuffer::default();
+    let writer = fmt_buffer.clone();
+    let memory = InMemoryLogExporter::default();
+    let provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(memory.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone()),
+        )
+        .with(OpenTelemetryTracingBridge::new(&provider));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!(
+            target: "harold::unsent_layout",
+            pane_id = "%7",
+            count = 3_u64,
+            ok = true,
+            "reply not typed"
+        );
+        tracing::info!(target: "harold::unsent_layout", "no fields");
+    });
+    let fmt_lines = fmt_buffer.lines_without_timestamps();
+    let logs = memory.get_emitted_logs().unwrap();
+    assert_eq!(fmt_lines.len(), 2);
+    assert_eq!(logs.len(), 2);
+    for (fmt_line, log) in fmt_lines.iter().zip(&logs) {
+        let line = unsent_line(&log.record);
+        let (time, rest) = line.split_once(' ').unwrap();
+        assert!(time.ends_with('Z') && time.len() == 27, "{time}");
+        assert_eq!(rest, format!("{fmt_line} unsent=true"));
+    }
+}
+
+#[test]
+fn kept_records_resend_with_first_timestamps_after_recovery() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    test_support::install();
+    register_phone_counters();
+    let resent_before = unsent_count("resent");
+    let inner = ScriptedLogs::with_script(&[false, true, true]);
+    let (_lines, sink) = recording_sink();
+    let exporter = UnsentLines::new(inner.clone(), sink, 10);
+    // No record time is set, as the tracing bridge sets none.
+    export_records(&exporter, &[sample_record("early", first_time())]).unwrap_err();
+    let later = first_time() + Duration::from_secs(3600);
+    export_records(&exporter, &[sample_record("late", later)]).unwrap();
+    assert_eq!(inner.sent_bodies(), ["late", "early"]);
+    let sent = inner.sent.lock().unwrap();
+    assert_eq!(sent[1].timestamp(), Some(first_time()));
+    assert_eq!(sent[1].observed_timestamp(), Some(first_time()));
+    assert_eq!(exporter.queue().len(), 0);
+    assert_eq!(unsent_count("resent") - resent_before, 1);
+}
+
+#[test]
+fn resend_that_fails_again_keeps_the_queue_and_writes_no_second_line() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    test_support::install();
+    register_phone_counters();
+    let resent_before = unsent_count("resent");
+    let inner = ScriptedLogs::with_script(&[false, true, false]);
+    let (lines, sink) = recording_sink();
+    let exporter = UnsentLines::new(inner.clone(), sink, 10);
+    export_records(&exporter, &[sample_record("a", first_time())]).unwrap_err();
+    assert_eq!(lines.lock().unwrap().len(), 1);
+    // The new batch works. The resend after it fails.
+    export_records(&exporter, &[sample_record("b", first_time())]).unwrap();
+    assert_eq!(lines.lock().unwrap().len(), 1, "no second line");
+    assert_eq!(exporter.queue().len(), 1);
+    assert_eq!(unsent_count("resent"), resent_before);
+    // The next send works, and so does the resend.
+    export_records(&exporter, &[sample_record("c", first_time())]).unwrap();
+    assert_eq!(inner.sent_bodies(), ["b", "c", "a"]);
+    assert_eq!(exporter.queue().len(), 0);
+    assert_eq!(unsent_count("resent") - resent_before, 1);
+}
+
+#[test]
+fn queue_over_cap_drops_oldest_as_file_only() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    test_support::install();
+    register_phone_counters();
+    let file_only_before = unsent_count("file_only");
+    let (lines, sink) = recording_sink();
+    let inner = ScriptedLogs::with_script(&[false]);
+    let exporter = UnsentLines::new(inner.clone(), sink, 3);
+    let records: Vec<_> = ["r1", "r2", "r3", "r4", "r5"]
+        .iter()
+        .map(|body| sample_record(body, first_time()))
+        .collect();
+    export_records(&exporter, &records).unwrap_err();
+    assert_eq!(lines.lock().unwrap().len(), 5, "every record has its line");
+    assert_eq!(unsent_count("file_only") - file_only_before, 2);
+    export_records(&exporter, &[sample_record("r6", first_time())]).unwrap();
+    assert_eq!(inner.sent_bodies(), ["r6", "r3", "r4", "r5"]);
+}
+
+#[test]
+fn shutdown_counts_remaining_as_file_only() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    test_support::install();
+    register_phone_counters();
+    let file_only_before = unsent_count("file_only");
+    let (_lines, sink) = recording_sink();
+    let exporter = UnsentLines::new(ScriptedLogs::with_script(&[false]), sink, 10);
+    let records = [
+        sample_record("one", first_time()),
+        sample_record("two", first_time()),
+    ];
+    export_records(&exporter, &records).unwrap_err();
+    assert_eq!(unsent_count("file_only"), file_only_before);
+    exporter.shutdown().unwrap();
+    assert_eq!(unsent_count("file_only") - file_only_before, 2);
+    assert_eq!(exporter.queue().len(), 0);
+}
+
+#[test]
+fn resent_record_keeps_only_allowed_fields() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let inner = ScriptedLogs::with_script(&[false]);
+    let (lines, sink) = recording_sink();
+    let exporter = UnsentLines::new(FieldFilter(inner.clone()), sink, 10);
+    export_records(&exporter, &[sample_record("kept", first_time())]).unwrap_err();
+    assert!(lines.lock().unwrap()[0].contains("secret_field"));
+    export_records(&exporter, &[sample_record("next", first_time())]).unwrap();
+    let sent = inner.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    for record in sent.iter() {
+        let keys: Vec<&str> = record
+            .attributes_iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert!(keys.contains(&"pane_id"), "{keys:?}");
+        assert!(!keys.contains(&"secret_field"), "{keys:?}");
+    }
+    assert_eq!(body_of(&sent[1]), "kept");
+    assert_eq!(sent[1].timestamp(), Some(first_time()));
+}
+
+#[test]
+fn the_unsent_counter_is_seeded_at_zero() {
+    test_support::install();
+    register_phone_counters();
+    for outcome in LOG_RECORDS_UNSENT_OUTCOMES {
+        assert!(
+            test_support::exact_counter_value(
+                "harold.telemetry.log_records.unsent",
+                &[("outcome", outcome)]
+            )
+            .is_some(),
+            "{outcome}"
+        );
+    }
+}
+
+/// A pipeline of test exporters, whose log exporter is `logs`, and a subscriber that
+/// exports to it.
+fn pipeline_with_logs(logs: ScriptedLogs, sink: UnsentSink) -> Pipeline {
+    Pipeline::build(
+        opentelemetry_sdk::trace::InMemorySpanExporter::default(),
+        logs,
+        opentelemetry_sdk::metrics::InMemoryMetricExporter::default(),
+        resource("test-mac"),
+        &ExportHealth::new(Box::new(|_| {})),
+        Processing::Simple,
+        sink,
+    )
+}
+
+#[test]
+fn no_line_reaches_the_test_writer_while_the_exporter_works() {
+    let logs = ScriptedLogs::default();
+    let (lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        tracing::info!(target: "harold::unsent_pipeline", "works one");
+        tracing::warn!(target: "harold::unsent_pipeline", "works two");
+    });
+    assert_eq!(logs.sent_bodies(), ["works one", "works two"]);
+    assert!(
+        lines.lock().unwrap().is_empty(),
+        "{:?}",
+        lines.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_pipeline_writes_the_line_of_a_record_the_exporter_refused() {
+    let _turn = UNSENT_COUNTER_TURN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let logs = ScriptedLogs::with_script(&[false]);
+    let (lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        tracing::info!(target: "harold::unsent_pipeline", pane_id = "%7", "refused");
+        tracing::info!(target: "harold::unsent_pipeline", "sent again with the next");
+    });
+    let lines = lines.lock().unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].ends_with("harold::unsent_pipeline: refused pane_id=\"%7\" unsent=true"));
+    assert_eq!(logs.sent_bodies(), ["sent again with the next", "refused"]);
+}
+
+#[test]
+fn the_file_filter_while_exporting_keeps_health_and_telemetry_warnings_only() {
+    let buffer = SharedBuffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .with_filter(harold_log_filter(
+                tracing_subscriber::EnvFilter::new("info"),
+                true,
+            )),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(target: "harold::pane", "an ordinary line");
+        tracing::info!(target: HEALTH_TARGET, "telemetry export recovered");
+        tracing::warn!(target: "tonic", "transport error");
+    });
+    let lines = buffer.lines_without_timestamps();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("telemetry export recovered"));
+    assert!(lines[1].contains("transport error"));
 }
