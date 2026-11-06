@@ -1954,10 +1954,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             return Err("invalid configuration".into());
         }
         let message = format!("invalid configuration: {}", removed.join("; "));
+        let errors = refused_errors_count(&removed);
         if launchd {
-            refuse_invalid_config(&message, refused_errors_count(&removed), telemetry).await;
+            refuse_invalid_config(&message, errors, telemetry).await;
         }
-        return Err(message.into());
+        return Err(refuse_by_hand(message, errors, telemetry).await);
     }
     let settings = match settings::Settings::load() {
         Ok(settings) => settings,
@@ -1965,7 +1966,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) if launchd => {
             refuse_invalid_config(&error.to_string(), refused_errors_count(&[]), telemetry).await
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            let errors = refused_errors_count(&[]);
+            return Err(refuse_by_hand(error.to_string(), errors, telemetry).await);
+        }
     };
 
     let errors = settings.validate();
@@ -1974,10 +1978,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             return Err("invalid configuration".into());
         }
         let message = format!("invalid configuration: {}", errors.join("; "));
+        let count = refused_errors_count(&errors);
         if launchd {
-            refuse_invalid_config(&message, refused_errors_count(&errors), telemetry).await;
+            refuse_invalid_config(&message, count, telemetry).await;
         }
-        return Err(message.into());
+        return Err(refuse_by_hand(message, count, telemetry).await);
     }
 
     match mode {
@@ -2530,6 +2535,18 @@ fn log_unclean_start(started: &crash_guard::CrashGuard) {
             "start after an unclean exit"
         );
     }
+}
+
+/// Refuses a start by hand, outside launchd: logs `startup refused`, stops telemetry so the
+/// line is exported, and only then gives the error that `main` returns. Without telemetry,
+/// it only logs the line.
+async fn refuse_by_hand(
+    message: String,
+    errors: usize,
+    telemetry: Option<telemetry::TelemetryGuard>,
+) -> Box<dyn std::error::Error> {
+    log_refusal_and_flush(errors, telemetry).await;
+    message.into()
 }
 
 fn mark_clean(guard: crash_guard::CrashGuard) {

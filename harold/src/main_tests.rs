@@ -4924,3 +4924,28 @@ fn a_start_after_a_clean_exit_logs_no_unclean_line() {
 
     assert!(lines_with(&logs, "start after an unclean exit").is_empty());
 }
+
+#[tokio::test]
+async fn a_refused_config_outside_launchd_logs_and_exports_the_refusal_and_returns_its_error() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let refused_before = crate::telemetry::test_support::exported_text()
+        .matches("startup refused")
+        .count();
+
+    let error =
+        super::refuse_by_hand("invalid configuration: one; two; three".into(), 3, None).await;
+
+    assert_eq!(error.to_string(), "invalid configuration: one; two; three");
+    let lines = lines_with(&logs, "startup refused");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("reason=\"invalid_config\""), "{lines:?}");
+    assert!(lines[0].contains("errors=3"), "{lines:?}");
+    let refused_after = crate::telemetry::test_support::exported_text()
+        .matches("startup refused")
+        .count();
+    assert_eq!(
+        refused_after,
+        refused_before + 1,
+        "the refusal reaches the exporter"
+    );
+}
