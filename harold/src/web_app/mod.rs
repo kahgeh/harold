@@ -74,6 +74,7 @@ pub(crate) mod pages;
 pub(crate) mod pair;
 pub(crate) mod push;
 pub(crate) mod replies;
+pub(crate) mod request_signals;
 pub(crate) mod route;
 pub(crate) mod specs;
 pub(crate) mod speech_check;
@@ -636,6 +637,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), pair::require_device))
         .layer(from_fn_with_state(state.clone(), login::require_login))
         .layer(from_fn(pages::add_policy))
+        // The last layer added is the outermost: it sees every request and every refusal.
+        .layer(from_fn(request_signals::track_requests))
         .with_state(state)
 }
 
@@ -745,6 +748,7 @@ pub(crate) async fn start(
     prune(&store).await;
     let collections = Arc::new(collections::Collections::new(settings.collections.clone()));
     crate::telemetry::register_collection_counters(&collections.names());
+    crate::telemetry::register_web_request_counters();
     let state = AppState {
         store: Arc::clone(&store),
         allowed_login: Arc::from(settings.allowed_login.as_str()),
@@ -929,6 +933,10 @@ async fn prune_every_hour(store: Arc<HaroldStore>, mut shutdown: watch::Receiver
         }
     }
 }
+
+#[cfg(test)]
+#[path = "request_signals_tests.rs"]
+mod request_signals_tests;
 
 #[cfg(test)]
 #[path = "server_tests.rs"]
