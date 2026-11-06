@@ -164,3 +164,28 @@ fn a_missing_folder_is_created() {
     runs(&file, T);
     assert_eq!(std::fs::read_to_string(file).unwrap(), "running\n");
 }
+
+#[test]
+fn clean_start_has_zero_unclean_starts() {
+    let directory = TestDirectory::new();
+    assert_eq!(runs(&directory.file(), T).unclean_starts(), 0);
+    runs(&directory.file(), T + 1)
+        .mark_clean()
+        .expect("mark clean");
+    assert_eq!(runs(&directory.file(), T + 2).unclean_starts(), 0);
+}
+
+#[test]
+fn start_after_running_line_counts_it() {
+    let directory = TestDirectory::new();
+    directory.write("running\n");
+    assert_eq!(runs(&directory.file(), T).unclean_starts(), 1);
+}
+
+#[test]
+fn two_recent_unclean_starts_count_two() {
+    let directory = TestDirectory::new();
+    directory.write("running\n");
+    runs(&directory.file(), T);
+    assert_eq!(runs(&directory.file(), T + 60).unclean_starts(), 2);
+}

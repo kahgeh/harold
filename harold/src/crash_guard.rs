@@ -35,9 +35,15 @@ pub(crate) enum Start {
 /// Held by a running Harold; [`CrashGuard::mark_clean`] records a clean shutdown.
 pub(crate) struct CrashGuard {
     file: PathBuf,
+    unclean_starts: usize,
 }
 
 impl CrashGuard {
+    /// The unclean starts in the last [`WINDOW`], this one included. It is 0 after a clean exit.
+    pub(crate) fn unclean_starts(&self) -> usize {
+        self.unclean_starts
+    }
+
     /// Marks the run clean, which also forgets the unclean starts before it.
     pub(crate) fn mark_clean(self) -> std::io::Result<()> {
         write(&self.file, CLEAN, &[])
@@ -74,6 +80,7 @@ pub(crate) fn begin(file: &Path, now: SystemTime) -> std::io::Result<Start> {
     write(file, RUNNING, &times)?;
     Ok(Start::Run(CrashGuard {
         file: file.to_path_buf(),
+        unclean_starts: if state == RUNNING { times.len() } else { 0 },
     }))
 }
 

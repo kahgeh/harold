@@ -2138,7 +2138,15 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if launchd {
         let file = crash_guard::crash_file(std::path::Path::new(&store_path));
         match crash_guard::begin(&file, std::time::SystemTime::now()) {
-            Ok(crash_guard::Start::Run(started)) => guard = Some(started),
+            Ok(crash_guard::Start::Run(started)) => {
+                if started.unclean_starts() > 0 {
+                    tracing::warn!(
+                        count = started.unclean_starts(),
+                        "start after an unclean exit"
+                    );
+                }
+                guard = Some(started);
+            }
             Ok(crash_guard::Start::Refuse) => refuse_start("crash_loop", telemetry).await,
             Err(error) => tracing::warn!(error = %error, "crash guard unavailable"),
         }
