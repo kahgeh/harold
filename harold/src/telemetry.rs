@@ -2814,6 +2814,11 @@ impl TelemetryGuard {
         self.pipeline.is_some()
     }
 
+    /// The flush that the panic hook calls, or none when telemetry is off.
+    pub(crate) fn flusher(&self) -> Option<PanicFlush> {
+        self.pipeline.as_ref().map(Pipeline::log_flusher)
+    }
+
     /// Flushes and stops the exporters, waiting at most `SHUTDOWN_BUDGET` (2 s) in all.
     pub async fn shutdown(self) {
         let Some(pipeline) = self.pipeline else {
@@ -2823,6 +2828,104 @@ impl TelemetryGuard {
             tokio::task::spawn_blocking(move || pipeline.shutdown_within(SHUTDOWN_BUDGET));
         let _ = tokio::time::timeout(SHUTDOWN_BUDGET, stopping).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Panic hook
+// ---------------------------------------------------------------------------
+
+/// The target of the panic record. `allowed_record` keeps `panic.message` only here.
+const PANIC_TARGET: &str = "harold::panic";
+const PANIC_MESSAGE_KEY: &str = "panic.message";
+
+/// The longest wait for the flush of a panic.
+pub(crate) const PANIC_FLUSH_LIMIT: Duration = Duration::from_secs(2);
+
+/// A flush that waits at most the given time and answers whether it worked.
+pub(crate) type PanicFlush = Arc<dyn Fn(Duration) -> bool + Send + Sync>;
+
+/// A source location as text. A relative path stays as it is. An absolute path keeps
+/// its last two parts, so that a path under a home folder does not leave Harold.
+fn location_text(file: &str, line: u32, column: u32) -> String {
+    let path = if file.starts_with('/') || file.starts_with('\\') || file.contains(":\\") {
+        let parts: Vec<&str> = file
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .collect();
+        parts[parts.len().saturating_sub(2)..].join("/")
+    } else {
+        file.to_owned()
+    };
+    format!("{path}:{line}:{column}")
+}
+
+/// The location of a panic as text.
+fn panic_location(location: &std::panic::Location) -> String {
+    location_text(location.file(), location.line(), location.column())
+}
+
+/// Logs the panic, then flushes the logs for at most `limit`. When the flush fails or
+/// takes too long, it calls `previous`, which writes the panic to the file. When the
+/// flush works, nothing goes to the file.
+fn report_panic(
+    thread: &str,
+    location: &std::panic::Location,
+    message: &str,
+    flush: &dyn Fn(Duration) -> bool,
+    limit: Duration,
+    previous: &dyn Fn(),
+) {
+    tracing::event!(
+        target: "harold::panic",
+        tracing::Level::ERROR,
+        thread = %thread,
+        location = %panic_location(location),
+        panic.message = %message,
+        "harold panicked"
+    );
+    if !flush(limit) {
+        previous();
+    }
+}
+
+/// The hook function: takes the facts from `info` and runs `report_panic`.
+fn panic_hook(
+    info: &std::panic::PanicHookInfo<'_>,
+    flush: &dyn Fn(Duration) -> bool,
+    previous: &dyn Fn(&std::panic::PanicHookInfo<'_>),
+) {
+    let payload = info.payload();
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("Box<dyn Any>");
+    let thread = std::thread::current();
+    match info.location() {
+        Some(location) => report_panic(
+            thread.name().unwrap_or("<unnamed>"),
+            location,
+            message,
+            flush,
+            PANIC_FLUSH_LIMIT,
+            &|| previous(info),
+        ),
+        None => {
+            if !flush(PANIC_FLUSH_LIMIT) {
+                previous(info);
+            }
+        }
+    }
+}
+
+/// Sets the global panic hook. It logs the panic and flushes with `flush`. It keeps the
+/// default hook and calls it when the flush fails. Tests call `panic_hook` and do not
+/// call this function, because the hook is global.
+pub(crate) fn install_panic_hook(flush: PanicFlush) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        panic_hook(info, &*flush, &|info| previous(info));
+    }));
 }
 
 /// Installs the global log subscriber: `harold.log` as before and, when export is on and
@@ -3089,6 +3192,24 @@ impl Pipeline {
         spans.and(logs).and(metrics)
     }
 
+    /// A flush of the log provider alone, for the panic hook. It waits at most the
+    /// limit it gets, and it answers `true` only when the flush worked in that time.
+    /// The flush runs on its own thread, so that the limit holds when the panic is on
+    /// the log processor's own thread: that flush waits for the thread that waits for it.
+    pub(crate) fn log_flusher(&self) -> PanicFlush {
+        let logs = self.logger_provider.clone();
+        Arc::new(move |limit| {
+            let (done, result) = std::sync::mpsc::channel();
+            let logs = logs.clone();
+            let spawned = std::thread::Builder::new()
+                .name("harold-panic-flush".into())
+                .spawn(move || {
+                    let _ = done.send(logs.force_flush().is_ok());
+                });
+            spawned.is_ok() && result.recv_timeout(limit).unwrap_or(false)
+        })
+    }
+
     fn install_global_providers(&self) {
         global::set_tracer_provider(self.tracer_provider.clone());
         global::set_meter_provider(self.meter_provider.clone());
@@ -3244,9 +3365,14 @@ fn allowed_record(record: &SdkLogRecord) -> SdkLogRecord {
     allowed.add_attributes(
         record
             .attributes_iter()
-            .filter(|(key, _)| is_allowed(key.as_str()) && key.as_str() != "log.target")
+            .filter(|(key, _)| {
+                key.as_str() != "log.target"
+                    && (is_allowed(key.as_str())
+                        || (key.as_str() == PANIC_MESSAGE_KEY
+                            && record.target().is_some_and(|t| t.as_ref() == PANIC_TARGET)))
+            })
             .map(|(key, value)| match value {
-                AnyValue::String(text) if key.as_str() == "panic.message" => (
+                AnyValue::String(text) if key.as_str() == PANIC_MESSAGE_KEY => (
                     key.clone(),
                     AnyValue::String(cut_message(text.as_str()).into()),
                 ),

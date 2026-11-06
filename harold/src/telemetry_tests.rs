@@ -7069,3 +7069,213 @@ fn the_file_filter_while_exporting_keeps_health_and_telemetry_warnings_only() {
     assert!(lines[0].contains("telemetry export recovered"));
     assert!(lines[1].contains("transport error"));
 }
+
+// ---------------------------------------------------------------------------
+// Panic hook
+// ---------------------------------------------------------------------------
+
+fn attr_of<'a>(record: &'a SdkLogRecord, key: &str) -> Option<&'a AnyValue> {
+    record
+        .attributes_iter()
+        .find(|(name, _)| name.as_str() == key)
+        .map(|(_, value)| value)
+}
+
+fn attr_text(record: &SdkLogRecord, key: &str) -> Option<String> {
+    match attr_of(record, key) {
+        Some(AnyValue::String(text)) => Some(text.as_str().to_owned()),
+        _ => None,
+    }
+}
+
+#[test]
+fn panic_in_thread_gives_one_record_with_thread_location_and_cut_message() {
+    let logs = ScriptedLogs::default();
+    let (lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    let flushes = Arc::new(Mutex::new(Vec::new()));
+    let previous_calls = Arc::new(Mutex::new(0_u32));
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        let flushes = Arc::clone(&flushes);
+        let previous_calls = Arc::clone(&previous_calls);
+        report_panic(
+            "worker-3",
+            std::panic::Location::caller(),
+            "failed to open /Users/me/secret.db: denied",
+            &move |limit| {
+                flushes.lock().unwrap().push(limit);
+                true
+            },
+            PANIC_FLUSH_LIMIT,
+            &move || *previous_calls.lock().unwrap() += 1,
+        );
+    });
+    let sent = logs.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let record = &sent[0];
+    assert_eq!(body_of(record), "harold panicked");
+    assert_eq!(record.target().map(|t| t.as_ref()), Some("harold::panic"));
+    assert_eq!(attr_text(record, "thread").as_deref(), Some("worker-3"));
+    let location = attr_text(record, "location").unwrap();
+    assert!(location.contains("telemetry_tests.rs:"), "{location}");
+    assert_eq!(
+        attr_text(record, "panic.message").as_deref(),
+        Some("failed to open <cut> denied")
+    );
+    assert_eq!(*flushes.lock().unwrap(), [PANIC_FLUSH_LIMIT]);
+    assert_eq!(*previous_calls.lock().unwrap(), 0, "the flush worked");
+    assert!(lines.lock().unwrap().is_empty());
+}
+
+#[test]
+fn panic_location_keeps_relative_and_trims_absolute() {
+    assert_eq!(
+        location_text("harold/src/alerts.rs", 498, 5),
+        "harold/src/alerts.rs:498:5"
+    );
+    assert_eq!(
+        location_text("/Users/me/.cargo/registry/src/x-1.0/src/lib.rs", 44, 9),
+        "src/lib.rs:44:9"
+    );
+    assert_eq!(location_text("lib.rs", 1, 2), "lib.rs:1:2");
+    assert_eq!(location_text("/lib.rs", 1, 2), "lib.rs:1:2");
+    let here = panic_location(std::panic::Location::caller());
+    assert!(here.contains("telemetry_tests.rs:"), "{here}");
+}
+
+#[test]
+fn panic_message_dropped_on_other_targets() {
+    let logs = ScriptedLogs::default();
+    let (_lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        tracing::event!(target: "harold::other", tracing::Level::ERROR, panic.message = "leak", "not a panic");
+        tracing::event!(target: "harold::panic", tracing::Level::ERROR, panic.message = "kept /a/b c", "harold panicked");
+    });
+    let sent = logs.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(attr_of(&sent[0], "panic.message").is_none());
+    assert_eq!(
+        attr_text(&sent[1], "panic.message").as_deref(),
+        Some("kept <cut> c")
+    );
+}
+
+#[test]
+fn startup_refused_keeps_errors() {
+    let logs = ScriptedLogs::default();
+    let (_lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs.clone(), sink);
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        tracing::warn!(target: "harold", reason = "invalid_config", errors = 2_u64, "startup refused");
+    });
+    let sent = logs.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(body_of(&sent[0]), "startup refused");
+    assert!(matches!(
+        attr_of(&sent[0], "errors"),
+        Some(AnyValue::Int(2))
+    ));
+    assert_eq!(
+        attr_text(&sent[0], "reason").as_deref(),
+        Some("invalid_config")
+    );
+}
+
+#[test]
+fn failed_flush_calls_the_default_hook() {
+    let logs = ScriptedLogs::default();
+    let (_lines, sink) = recording_sink();
+    let pipeline = pipeline_with_logs(logs, sink);
+    let called = Arc::new(Mutex::new(0_u32));
+    let flag = Arc::clone(&called);
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        report_panic(
+            "main",
+            std::panic::Location::caller(),
+            "boom",
+            &|_| false,
+            PANIC_FLUSH_LIMIT,
+            &move || *flag.lock().unwrap() += 1,
+        );
+    });
+    assert_eq!(*called.lock().unwrap(), 1);
+}
+
+/// A log exporter whose export runs the panic logic on the processor's own thread, as a
+/// panic inside `export` does. `flusher` is the pipeline's flush, set after the build.
+#[derive(Clone)]
+struct PanickingLogs {
+    flusher: Arc<OnceLock<PanicFlush>>,
+    outcome: Arc<Mutex<Option<(Duration, u32, String)>>>,
+}
+
+impl std::fmt::Debug for PanickingLogs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PanickingLogs")
+    }
+}
+
+impl LogExporter for PanickingLogs {
+    async fn export(&self, _batch: LogBatch<'_>) -> OTelSdkResult {
+        let flusher = Arc::clone(self.flusher.get().expect("flusher set"));
+        let previous_calls = Arc::new(Mutex::new(0_u32));
+        let counter = Arc::clone(&previous_calls);
+        let started = std::time::Instant::now();
+        report_panic(
+            "OpenTelemetry.Logs.BatchProcessor",
+            std::panic::Location::caller(),
+            "export panicked",
+            &*flusher,
+            Duration::from_millis(500),
+            &move || *counter.lock().unwrap() += 1,
+        );
+        let calls = *previous_calls.lock().unwrap();
+        let thread = std::thread::current().name().unwrap_or("").to_owned();
+        *self.outcome.lock().unwrap() = Some((started.elapsed(), calls, thread));
+        Ok(())
+    }
+}
+
+#[test]
+fn panic_flush_on_the_export_thread_times_out_and_calls_the_default_hook() {
+    let flusher = Arc::new(OnceLock::new());
+    let outcome = Arc::new(Mutex::new(None));
+    let logs = PanickingLogs {
+        flusher: Arc::clone(&flusher),
+        outcome: Arc::clone(&outcome),
+    };
+    let pipeline = Pipeline::build(
+        opentelemetry_sdk::trace::InMemorySpanExporter::default(),
+        logs,
+        opentelemetry_sdk::metrics::InMemoryMetricExporter::default(),
+        resource("test-mac"),
+        &ExportHealth::new(Box::new(|_| {})),
+        Processing::Batch,
+        Box::new(|_| {}),
+    );
+    flusher.set(pipeline.log_flusher()).ok().unwrap();
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        tracing::info!(target: "harold::panic_export", "one record");
+    });
+    // The batch processor sends on its own thread, after its delay or on a flush.
+    let waited = std::time::Instant::now();
+    loop {
+        if outcome.lock().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            waited.elapsed() < Duration::from_secs(10),
+            "export never ran"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (elapsed, previous_calls, thread) = outcome.lock().unwrap().clone().unwrap();
+    eprintln!(
+        "panic flush on export thread: {elapsed:?} on {thread}, previous hook calls {previous_calls}"
+    );
+    assert!(thread.contains("BatchProcessor"), "{thread}");
+    assert_eq!(previous_calls, 1, "the default hook runs on a failed flush");
+    assert!(elapsed >= Duration::from_millis(450), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+}

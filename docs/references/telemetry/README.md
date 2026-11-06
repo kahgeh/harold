@@ -477,6 +477,7 @@ These fields were added so that the log lines of the collector work show their i
 | `log.target` | The target of the line, such as `harold::tools::watch::obs`. It is a module name, never a path. On every exported line |
 | `thread`, `location` | The name of the thread of a panic and its source location. On `harold panicked` |
 | `errors` | A count of the problems of the config, never their text. On `startup refused` |
+| `panic.message` | The text of a panic, cut as the cut of other crates' messages. It is kept on `harold::panic` records only, and dropped on every other record. On `harold panicked` |
 
 `text`, `msg`, `raw_output`, `tag`, `error`, `listen` and `address` stay off the list. They hold message text, an error text, a host or an address. Use `reason` or `port` to diagnose.
 
