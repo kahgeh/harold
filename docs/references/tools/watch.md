@@ -358,7 +358,7 @@ No line carries the text of a reminder or any of the skill's text, its `allowed-
 
 To find out why a run is slow, read the two run lines: a large `wait_ms` means another watch held the model, and a large `run_ms` means the Claude Code start or the skill was slow. To find out why runs fail, filter `harold.watch.run` spans by a failure `outcome`: `watch` and `run` name the run, `reason` the failure, and the `harold.watch.model` child's `result` and duration tell a timeout (`killed` at the watch's run limit, 120 seconds unless `--run-limit` sets another) from a process that did not start (`failed_to_start`: Claude Code is missing or logged out). For `unreadable_answer` the answer is not logged, so run the skill by hand with the same facts.
 
-`add_dirs` is the number of `add-dirs` folders the run was given (0 when the skill names none, or could not be read), never the paths. It goes to `harold.log` only, not to the exported fields. Beside a report about a file the run could not read, `add_dirs=0` means the skill names no folder, and above 0 means it names a folder, but not the right one.
+`add_dirs` is the number of `add-dirs` folders the run was given (0 when the skill names none, or could not be read), never the paths. It is an exported field. Beside a report about a file the run could not read, `add_dirs=0` means the skill names no folder, and above 0 means it names a folder, but not the right one.
 
 ## Data
 

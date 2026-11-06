@@ -135,7 +135,7 @@ An event's version is its log sequence number plus one, so the first event in an
 
 Harold delivers only events that the log has written to the filesystem. Each append returns after the log's `flush()` has written the record to the filesystem, and Harold opens the log so that its reads return only flushed records (`ReadVisibility::Remote`). A record the log has not flushed is therefore never projected or delivered. Flushed records survive Harold being killed. The log's local store does not call `fsync`, so whether they survive a power loss is untested.
 
-On a disk fault, such as a full disk, Harold marks its store failing within 30 seconds and carries on without it until the disk recovers. A write to the disk can hang: SlateDB retries a failed write to the filesystem with no limit, 100 ms to 1 s apart, so the log's `flush()` does not return until the write succeeds. Harold therefore gives each append 30 seconds. An append still waiting then returns an error, and Harold marks the store failing. The delivery loop's three writes to `harold-state.db` (recording a failed try, marking a row undeliverable, marking a row delivered) mark it failing too, when one fails or takes over 30 seconds. Harold logs `store failing` at warning level, with `component = "store"` and `reason` (`write_timed_out` or `state_write_failed`). With the alert address on, it types `harold alert: store-failing firing` into the chief's pane (see the [telemetry reference](../telemetry/README.md#how-an-alert-reaches-the-chief)). On a full disk `harold.log` may not be written, but the exported copy of each line reaches telemetry over the network.
+On a disk fault, such as a full disk, Harold marks its store failing within 30 seconds and carries on without it until the disk recovers. A write to the disk can hang: SlateDB retries a failed write to the filesystem with no limit, 100 ms to 1 s apart, so the log's `flush()` does not return until the write succeeds. Harold therefore gives each append 30 seconds. An append still waiting then returns an error, and Harold marks the store failing. The delivery loop's three writes to `harold-state.db` (recording a failed try, marking a row undeliverable, marking a row delivered) mark it failing too, when one fails or takes over 30 seconds. Harold logs `store failing` at warning level, with `component = "store"` and `reason` (`write_timed_out` or `state_write_failed`). With the alert address on, it types `harold alert: store-failing firing` into the chief's pane (see the [telemetry reference](../telemetry/README.md#how-an-alert-reaches-the-chief)). On a full disk `harold.log` may not be written, but each line reaches the collector over the network.
 
 While the store is failing, Harold refuses every event-log append and every one of those three delivery writes at once, with one exception: the first write tried 30 seconds after the last try ended is let through as a new try, with the same 30-second limit. When a try succeeds, Harold logs `store recovered` at info level (`reason = try_succeeded`), types `harold alert: store-failing cleared` if it typed `firing`, and every write goes through again. Meanwhile each part of Harold that writes does this:
 
@@ -282,7 +282,7 @@ The `PATH` in the unit holds the folder of `rex`, `~/.local/bin`, `/usr/local/bi
 | `active_state` | The unit's `ActiveState`, such as `active` or `failed` |
 | `n_restarts` | The unit's `NRestarts`: how many times systemd started Harold again |
 
-`journalctl --user -u harold` shows the start and stop lines of systemd. The lines of Harold are in `harold.log` in the installation, as on the Mac.
+`journalctl --user -u harold` shows the start and stop lines of systemd. Read the lines of Harold in ClickHouse, through HyperDX, as on the Mac. `harold.log` in the installation holds a line only when the collector cannot be reached.
 
 systemd stops the user's services when the user logs out, unless lingering is on for that user. The installer checks this and prints a warning. It never changes the setting. To keep Harold running after logout, run `loginctl enable-linger` yourself.
 
@@ -347,8 +347,8 @@ The alert `slave-link-down` fires when a slave's `harold.slave_link.connected` s
 
 1. Check that the slave's machine is on and awake.
 2. Check that Harold runs on the slave: run `haroldctl status`.
-3. Read the `slave link` lines in the slave's `harold.log`. `slave link not opened` has a `reason`: `no_secret` (the slave has no `master.secret`), `refused` (the secret does not match) or `version` (the versions differ).
-4. Read the `slave link refused` and `slave link closed` lines in the master's `harold.log`. A `refused` line with `unknown_slave` means the slave's `machine_name` is not in `[slaves] names`, or the master has no secret for it.
+3. Read the `slave link` lines of the slave in ClickHouse, through HyperDX (in the slave's `harold.log` when its collector cannot be reached). `slave link not opened` has a `reason`: `no_secret` (the slave has no `master.secret`), `refused` (the secret does not match) or `version` (the versions differ).
+4. Read the `slave link refused` and `slave link closed` lines of the master in ClickHouse, through HyperDX (in the master's `harold.log` when its collector cannot be reached). A `refused` line with `unknown_slave` means the slave's `machine_name` is not in `[slaves] names`, or the master has no secret for it.
 5. Check that the `tailscale serve` command of the pairing step 4 is still active: `tailscale serve status`.
 6. Pair again when the secret does not match: run `harold slaves unpair` and `harold slaves pair`, then `harold master pair`.
 
@@ -439,7 +439,8 @@ Send `{"paused": false}` to resume. The RPC handler flips the in-process switch 
 ## Inventory timeout
 
 If the control-tower reports `MONITOR DEGRADED inventory:timeout`, check
-`~/bin/harold/harold.log` for the component's failure and recovery messages.
+ClickHouse, through HyperDX, for the component's failure and recovery messages. Use
+`~/bin/harold/harold.log` only when the collector cannot be reached.
 Inventory scans can take longer when macOS schedules Harold in the background.
 The inventory deadline defaults to 3000 ms and can be overridden in local.toml:
 

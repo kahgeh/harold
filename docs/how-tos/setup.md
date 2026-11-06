@@ -28,7 +28,7 @@ The installer needs `rex`, `grpcurl`, `lsof`, `systemctl` and `curl`. It stops, 
 
 On Linux, `haroldctl status` prints the Mac fields and two more. `active_state` is the unit's `ActiveState`. `n_restarts` is the number of times systemd started Harold again.
 
-`journalctl --user -u harold` shows the start and stop lines of systemd. The lines of Harold are in `harold.log`.
+`journalctl --user -u harold` shows the start and stop lines of systemd. Read the lines of Harold in ClickHouse, through HyperDX. `harold.log` holds a line only when the collector cannot be reached, or for telemetry's own failures.
 
 systemd stops your user services when you log out, unless lingering is on. The installer only warns you about this. To keep Harold running after logout, run `loginctl enable-linger`. The decision is yours.
 
@@ -93,7 +93,7 @@ The default layout is:
   skills/send-message-to-away-device/SKILL.md
   data/store/
   data/events/     kept from an earlier install, if present
-  harold.log (the last 24 hours)
+  harold.log (telemetry's own failures and unsent log lines; the last 24 hours, less than 10 MB)
 ~/bin/haroldctl
 ```
 
@@ -239,7 +239,7 @@ Service commands are:
 ~/bin/haroldctl restart
 ```
 
-After changing `~/bin/harold/config/local.toml`, restart Harold. For a startup failure, inspect `~/bin/harold/harold.log`, which holds the last 24 hours (older lines are in ClickHouse, `otel.otel_logs`, when export is on); configuration errors and an incompatible existing database require correction before readiness can succeed.
+After changing `~/bin/harold/config/local.toml`, restart Harold. For a startup failure, look in ClickHouse, through HyperDX, for the lines `startup refused` and `listener not started`. When the collector cannot be reached, or export is off, inspect `~/bin/harold/harold.log`, which holds the last 24 hours. Configuration errors and an incompatible existing database require correction before readiness can succeed.
 
 ## 4. Reinstall or update
 

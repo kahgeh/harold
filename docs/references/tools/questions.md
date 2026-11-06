@@ -228,7 +228,7 @@ If Harold stops while a batch is being typed, or between typing and marking, the
 
 ## Log lines
 
-Thirteen fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`, `kind`, `count`, `after`, `waiting`, `minutes` and `never`, and `error` on `picks not saved`, which stays in `harold.log`. No question or answer text is ever logged.
+Thirteen fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`, `kind`, `count`, `after`, `waiting`, `minutes` and `never`, and `error` on `picks not saved`, which does not leave Harold. No question or answer text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |

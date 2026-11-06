@@ -540,7 +540,7 @@ A throwaway page, run once on the iPhone in the installed app, that shows how Sa
 | `GET /speech-check` | The page. |
 | `POST /speech-check/runs` | The run as the page's signals, sent through Datastar as one JSON object: `standalone` and the `check<n>_…` fields above, all optional. Only booleans, whole numbers (at most 600,000 ms, 5 restarts, 3 sentences, 20 words) and error names from the recognizer's list (plus `missing`, `start-failed` and `other`) are accepted. In a check 4 time list, `""` means no final result, the same as `null`: Datastar 1.0.2 sends `""` for a `null` inside a list. Any other text there is refused. `204` once logged; `400` for any other field, type or name, with the reason and field in the `app speech check not logged` line; `413` over 4 KB. Same-origin only, like every post. |
 
-**Reading the results.** Search `harold.log` for `app speech check`. It is one line per run with every field above, for example `check0_error="network" check3_started=5 check4_final_at_ms="5100,5100,5100"`.
+**Reading the results.** Search ClickHouse, through HyperDX, for `app speech check` (`harold.log` only when the collector cannot be reached). It is one line per run with every field above, for example `check0_error="network" check3_started=5 check4_final_at_ms="5100,5100,5100"`.
 
 ## Echo test
 
@@ -567,7 +567,7 @@ A hidden page that measures how much of Harold's voice the phone's mic picks up 
 
 ## Logs and privacy
 
-### What `harold.log` holds
+### What the logs hold
 
 Harold logs no message text, no reply, no push address and no key. The app adds these lines, each fixed text with only the fields listed:
 

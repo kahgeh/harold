@@ -106,7 +106,7 @@ A run that cannot start, exits with an error, gives no `say`, or takes more than
 | `model_ms` | time of the `claude -p` run |
 | `cost_micros`, `input_tokens`, `output_tokens` | from the run's JSON |
 
-A failed run also writes the WARN line `call answer failed` with `reason`, and the exit status in `error`, which stays in `harold.log`.
+A failed run also writes the WARN line `call answer failed` with `reason`, and the exit status in `error`, which does not leave Harold.
 
 Hand-over lines carry `hand_over_id` and never the request: `hand-over typed` (`pane_id`, `typed_while_busy`, `wait_ms`), `hand-over waiting` (once, with `reason`, the first time a check refuses) and `hand-over not typed` (WARN, after 30 minutes).
 

@@ -139,6 +139,6 @@ The build uses fakes and fake servers only. These checks are for the user to run
 
 ## Troubleshooting
 
-- A line is silent on the Mac: read `tts failed` in `harold.log`. `model_downloading` means Kokoro is not on the machine yet. Run `harold tool tts models`.
+- A line is silent on the Mac: read `tts failed` in ClickHouse, through HyperDX (in `harold.log` when the collector cannot be reached). `model_downloading` means Kokoro is not on the machine yet. Run `harold tool tts models`.
 - `tts gpu unavailable` on the Omarchy machine: the voice runs on the CPU. Check `nvidia-smi` and the CUDA 12 packages in the worker's environment.
 - A model stays `waiting_for_approval`: it is not in `tts-models.toml`, or the file is writable by other users.

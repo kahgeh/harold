@@ -333,7 +333,7 @@ env -i PATH=/usr/bin:/bin HOME=$(mktemp -d) HF_HUB_CACHE=$(mktemp -d) \
 
 ### Log lines
 
-Messages are fixed text, with values in fields, as harold-telemetry's test `every_log_message_is_fixed_text` requires. These are the lines the call writes to `harold.log`:
+Messages are fixed text, with values in fields, as harold-telemetry's test `every_log_message_is_fixed_text` requires. These are the lines the call logs. Read them in ClickHouse, through HyperDX:
 
 | Level | Message | Fields |
 |---|---|---|
@@ -358,7 +358,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 
 `call ended` is also logged for a call that ended before it started listening, without a `call started`.
 
-harold-telemetry exports only fields on its allowed list. `pane_id`, `reason`, `busy_reason`, `heard_ms`, `first_heard_ms`, `background`, `loudest`, `loud_frames`, `speech_cut`, `cause`, `model`, `bytes`, `total_bytes`, `ms`, `load_ms` and `started_by` go out; each is a count, a level or a fixed word. `words` and `error` are not on the list, so they stay in `harold.log` only. No transcript and no spoken line is in any log line, event or exported record; a test with a canary transcript checks this.
+harold-telemetry exports only fields on its allowed list. `pane_id`, `reason`, `busy_reason`, `heard_ms`, `first_heard_ms`, `background`, `loudest`, `loud_frames`, `speech_cut`, `cause`, `model`, `bytes`, `total_bytes`, `ms`, `load_ms` and `started_by` go out; each is a count, a level or a fixed word. `words` and `error` are not on the list, so they do not leave Harold. They reach `harold.log` only on an unsent log line. No transcript and no spoken line is in any log line, event or exported record; a test with a canary transcript checks this.
 
 ## Latency of one turn
 
