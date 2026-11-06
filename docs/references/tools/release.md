@@ -86,7 +86,7 @@ The release tool also publishes the work waiting in its "merged since the releas
 - For each product it records three gauges with `list` = `merged_not_released`. They are the number of specs (`pod.inventory.items`), the age of the oldest spec in hours (`pod.inventory.oldest_hours`) and the sum of the ages in days (`pod.inventory.item_days`).
 - An age counts from the merge.
 - The names and units are the constants that `harold/src/pod_stats.rs` exports. Pod stats records the other three lists (`awaiting_approval`, `approved_not_started` and `in_progress`) under the same names. See [Work waiting](../telemetry/README.md#spec-states).
-- A paused product, and a product with no git answer, has no series. A product that leaves the registry ends its series. A failed read keeps the last numbers.
+- A paused product, a product with no git answer and a product with no release tag have no series. The first release tag of a product brings its series back. The command still lists the last 14 days of merges for a product with no release. A product that leaves the registry ends its series. A failed read keeps the last numbers.
 - The tool still only reads. It writes nothing in the pod folder and keeps no database. Pod stats does not call the release tool (ADR 0004).
 
 ## The paused key

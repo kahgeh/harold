@@ -44,8 +44,8 @@ pub(super) const PERIOD: Duration = Duration::from_secs(600);
 /// The value of the `list` attribute of this module's series.
 const LIST: &str = "merged_not_released";
 
-/// The stats of the list of each product that has a read. A paused product and a product
-/// with no git answer have no entry.
+/// The stats of the list of each product that has a read. A paused product, a product
+/// with no git answer and a product with no release tag have no entry.
 static STORE: Mutex<BTreeMap<String, Entry>> = Mutex::new(BTreeMap::new());
 
 /// The stats of one product and the registry that listed it. A publish drops only the
@@ -125,7 +125,9 @@ pub(super) async fn publish<G: Git>(
         entry.registry != registry || products.iter().any(|product| &product.name == name)
     });
     for product in products {
-        if product.paused || product.unavailable.is_some() {
+        // A product with no release tag has no release to wait for. Its list holds the last
+        // 14 days of merges for the command only, so the gauge leaves it out.
+        if product.paused || product.unavailable.is_some() || product.release.is_empty() {
             store.remove(&product.name);
             continue;
         }

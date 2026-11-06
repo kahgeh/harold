@@ -78,9 +78,40 @@ fn merge_on(fixture: &Fixture, id: &str, time: &str) {
     );
 }
 
-/// A service on a product `name` with two merged specs, 2 and 4 days old at `NOW`. The
-/// fixture owns the folders, so the caller keeps it until the end of the test.
+/// The arguments of the git call that finds the newest release tag.
+const DESCRIBE: [&str; 6] = [
+    "describe",
+    "--tags",
+    "--abbrev=0",
+    "--match",
+    "v[0-9]*",
+    "origin/main",
+];
+
+/// The answers of git for a product whose newest release is `v1.0.0`, tagged before both merges.
+fn with_tag(git: FakeGit) -> FakeGit {
+    let unix = OffsetDateTime::parse("2026-10-01T00:00:00Z", &Rfc3339)
+        .expect("a valid time")
+        .unix_timestamp()
+        .to_string();
+    git.answer(&DESCRIBE, true, "v1.0.0\n").answer(
+        &["log", "-1", "--format=%ct", "v1.0.0"],
+        true,
+        &unix,
+    )
+}
+
+/// A service on a product `name` with two merged specs, 2 and 4 days old at `NOW`, and a
+/// release tag. The fixture owns the folders, so the caller keeps it until the end of the test.
 fn two_merged(folder: &TempFolder, name: &str) -> (ReleaseToolService<FakeGit>, Fixture) {
+    let (_, fixture) = two_merged_no_tag(folder, name);
+    let registry = folder.0.join("products.toml");
+    let service = ReleaseToolService::with_git(Some(registry), with_tag(fixture.git()));
+    (service, fixture)
+}
+
+/// The same product with no release tag.
+fn two_merged_no_tag(folder: &TempFolder, name: &str) -> (ReleaseToolService<FakeGit>, Fixture) {
     let fixture = Fixture::new();
     merge_on(&fixture, "alpha", "2026-11-01T00:00:00Z");
     merge_on(&fixture, "beta", "2026-10-30T00:00:00Z");
@@ -312,4 +343,105 @@ async fn shutdown_drops_a_publish_in_flight() {
     // No time passes: the task ends at once and does not wait for the git calls.
     assert!(task.is_finished());
     task.await.expect("the task does not panic");
+}
+
+#[tokio::test]
+async fn a_product_with_no_release_tag_publishes_no_merged_not_released_series() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = two_merged_no_tag(&folder, &name);
+
+    publish(&service, now(), UtcOffset::UTC).await;
+
+    for metric in [
+        INVENTORY_ITEMS.0,
+        INVENTORY_OLDEST_HOURS.0,
+        INVENTORY_ITEM_DAYS.0,
+    ] {
+        let attrs = [
+            ("pod.product", name.as_str()),
+            ("list", "merged_not_released"),
+        ];
+        assert_eq!(test_support::gauge_value(metric, &attrs), None, "{metric}");
+        assert_eq!(
+            test_support::gauge_f64_value(metric, &attrs),
+            None,
+            "{metric}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_command_list_of_a_product_with_no_release_tag_keeps_the_last_14_days() {
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = two_merged_no_tag(&folder, &name);
+
+    let products = service
+        .products("", now(), UtcOffset::UTC)
+        .await
+        .expect("the lists");
+
+    let product = products
+        .iter()
+        .find(|product| product.name == name)
+        .expect("the product");
+    assert_eq!(product.release, "");
+    assert_eq!(product.merged.len(), 2);
+    assert_eq!(product.merged_at.len(), 2);
+}
+
+#[tokio::test]
+async fn a_first_release_tag_brings_the_series_back() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (untagged, fixture) = two_merged_no_tag(&folder, &name);
+    publish(&untagged, now(), UtcOffset::UTC).await;
+    assert_eq!(items_of(&name), None);
+
+    let registry = folder.0.join("products.toml");
+    let tagged = ReleaseToolService::with_git(Some(registry), with_tag(fixture.git()));
+    publish(&tagged, now(), UtcOffset::UTC).await;
+
+    assert_eq!(items_of(&name), Some(2));
+}
+
+#[tokio::test]
+async fn a_product_that_loses_its_tag_ends_its_series() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (tagged, fixture) = two_merged(&folder, &name);
+    publish(&tagged, now(), UtcOffset::UTC).await;
+    assert_eq!(items_of(&name), Some(2));
+
+    let registry = folder.0.join("products.toml");
+    let untagged = ReleaseToolService::with_git(Some(registry), fixture.git());
+    publish(&untagged, now(), UtcOffset::UTC).await;
+
+    assert_eq!(items_of(&name), None);
+}
+
+#[tokio::test]
+async fn this_module_publishes_only_the_merged_not_released_list() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = two_merged(&folder, &name);
+
+    publish(&service, now(), UtcOffset::UTC).await;
+
+    // The other three lists belong to pod stats. This module never writes them, so the
+    // skip of a product with no tag cannot reach them.
+    for list in ["awaiting_approval", "approved_not_started", "in_progress"] {
+        let attrs = [("pod.product", name.as_str()), ("list", list)];
+        assert_eq!(test_support::gauge_value(INVENTORY_ITEMS.0, &attrs), None);
+    }
+    assert_eq!(items_of(&name), Some(2));
 }
