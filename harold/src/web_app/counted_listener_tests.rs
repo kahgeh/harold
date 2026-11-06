@@ -1,6 +1,7 @@
-//! The counted listener counts each connection once, when it closes. No test opens a port:
-//! every connection is an in-memory pipe. Most tests use a local recorder, so no other test
-//! can change the values they check. One test checks the link to the global counter.
+//! The counted listener counts each connection once, when it closes. Almost every connection
+//! is an in-memory pipe. One ignored test opens a loopback port: it runs only in the container
+//! test set and in CI. Most tests use a local recorder, so no other test can change the values
+//! they check. One test checks the link to the global counter.
 
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -136,6 +137,25 @@ async fn served_connections_count_by_whether_they_sent_a_request() {
     idle_client.read_to_end(&mut rest).await.unwrap();
     wait_for(&seen, &["requests", "no_request"]).await;
     serving.abort();
+}
+
+/// This test opens a port, so it runs only in the container test set and in CI.
+#[tokio::test]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn a_real_connection_closed_with_no_request_counts_no_request() {
+    use axum::serve::Listener;
+
+    let (seen, record) = recorder();
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = tcp.local_addr().unwrap();
+    let mut listener = CountedListener::with_recorder(tcp, record);
+    let client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (mut stream, _) = listener.accept().await;
+    drop(client);
+    let mut buffer = [0u8; 8];
+    assert_eq!(stream.read(&mut buffer).await.unwrap(), 0);
+    drop(stream);
+    wait_for(&seen, &["no_request"]).await;
 }
 
 /// Other tests start the real server and add to the global counter at the same time, so

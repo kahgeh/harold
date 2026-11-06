@@ -1,1 +1,2 @@
 slave::master::master_tests::serve_slave_link_listens_on_the_configured_address_and_only_for_the_link
+web_app::counted_listener_tests::a_real_connection_closed_with_no_request_counts_no_request
