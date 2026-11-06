@@ -743,9 +743,10 @@ fn harold_log_lines_are_those_of_the_old_subscriber_without_harold_trace_spans()
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(move || new_writer.clone())
-            .with_filter(harold_log_filter(tracing_subscriber::EnvFilter::new(
-                "info",
-            ))),
+            .with_filter(harold_log_filter(
+                tracing_subscriber::EnvFilter::new("info"),
+                false,
+            )),
     );
     tracing::subscriber::with_default(new_subscriber, write_sample_lines);
 
@@ -6675,4 +6676,30 @@ fn every_exported_line_has_log_target() {
         seen += 1;
     }
     assert_eq!(seen, 2);
+}
+
+#[test]
+fn file_line_allowed_table() {
+    for level in [
+        Level::TRACE,
+        Level::DEBUG,
+        Level::INFO,
+        Level::WARN,
+        Level::ERROR,
+    ] {
+        assert!(file_line_allowed("harold::pane", level, false));
+        assert!(file_line_allowed("slatedb", level, false));
+    }
+    assert!(!file_line_allowed("harold::pane", Level::INFO, true));
+    assert!(!file_line_allowed("harold::pane", Level::ERROR, true));
+    assert!(file_line_allowed(HEALTH_TARGET, Level::INFO, true));
+    assert!(file_line_allowed(HEALTH_TARGET, Level::WARN, true));
+    assert!(file_line_allowed("tonic", Level::WARN, true));
+    assert!(file_line_allowed(
+        "opentelemetry_sdk::logs",
+        Level::ERROR,
+        true
+    ));
+    assert!(!file_line_allowed("tonic", Level::INFO, true));
+    assert!(!file_line_allowed("slatedb", Level::WARN, true));
 }

@@ -2820,7 +2820,7 @@ pub fn init_telemetry(level: &str, telemetry: &TelemetrySettings, machine: &str)
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     let harold_log = fmt::layer()
         .log_internal_errors(true)
-        .with_filter(harold_log_filter(env_filter));
+        .with_filter(harold_log_filter(env_filter, guard.exporting()));
     let export = guard
         .pipeline
         .as_ref()
@@ -2849,12 +2849,32 @@ fn is_trace_span(meta: &Metadata<'_>) -> bool {
 }
 
 /// What `harold.log` writes: what `env_filter` enables, apart from the exported spans,
-/// so its lines get no new span prefixes.
-pub(crate) fn harold_log_filter<S>(env_filter: EnvFilter) -> impl Filter<S> + Send + Sync + 'static
+/// so its lines get no new span prefixes. While `exporting` is true, the log events are
+/// also cut as `file_line_allowed` says.
+pub(crate) fn harold_log_filter<S>(
+    env_filter: EnvFilter,
+    exporting: bool,
+) -> impl Filter<S> + Send + Sync + 'static
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    env_filter.and(not_a_trace_span())
+    let quiet_while_exporting = filter_fn(move |meta: &Metadata<'_>| {
+        meta.is_span() || file_line_allowed(meta.target(), *meta.level(), exporting)
+    })
+    .with_max_level_hint(LevelFilter::TRACE);
+    env_filter
+        .and(not_a_trace_span())
+        .and(quiet_while_exporting)
+}
+
+/// Whether `harold.log` writes a line. When export is off, it writes every line. When
+/// export is on, the collector holds the lines, so the file keeps only the health lines
+/// and the warn and error lines of the telemetry crates.
+pub(crate) fn file_line_allowed(meta_target: &str, level: Level, exporting: bool) -> bool {
+    if !exporting || meta_target == HEALTH_TARGET {
+        return true;
+    }
+    is_telemetry_crate_target(meta_target) && (level == Level::WARN || level == Level::ERROR)
 }
 
 /// Everything but the exported spans. Its level hint is `TRACE`, so that combining it
