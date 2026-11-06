@@ -62,7 +62,7 @@ def message_of(rest):
     if rest.endswith(UNSENT):
         rest = rest[: -len(UNSENT)]
     match = FIELD.search(rest)
-    return (rest[: match.start()] if match else rest)[:200]
+    return rest[: match.start()] if match else rest
 
 
 def literal(text):
@@ -121,9 +121,9 @@ def main():
                 if resent(time_text, message):
                     unsent_resent += 1
                 else:
-                    not_resent.append((time_text, message))
+                    not_resent.append((time_text, message[:200]))
             else:
-                gaps.append((time_text, message))
+                gaps.append((time_text, message[:200]))
 
     print(f"allowed: {allowed}")
     print(f"unsent resent: {unsent_resent}")

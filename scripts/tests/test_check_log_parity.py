@@ -101,6 +101,18 @@ class CheckLogParityTest(unittest.TestCase):
         line = "2026-11-07T09:34:00.000000Z  INFO harold::x: " + "a" * 300 + " k=v\n"
         self.assertIn("gap: 2026-11-07T09:34:00.000000Z " + "a" * 200 + "\n", run(line).stdout)
 
+    def test_long_unsent_message_is_looked_up_in_full(self):
+        message = "b" * 300
+        line = f"2026-11-07T09:34:00.000000Z  INFO harold::x: {message} k=v unsent=true\n"
+        fake = f"#!/usr/bin/env bash\nsql=$(cat)\ncase \"$sql\" in\n*'{message}'*) echo 1 ;;\n*) echo 0 ;;\nesac\n"
+        result = run(line, logq_text=fake)
+        self.assertIn("unsent resent: 1", result.stdout)
+        self.assertNotIn("b" * 201, result.stdout)
+        # printed form is capped on a not-resent line too
+        other = run(line).stdout
+        self.assertIn("not resent: 2026-11-07T09:34:00.000000Z " + "b" * 200 + "\n", other)
+        self.assertNotIn("b" * 201, other)
+
     def test_failing_logq_exits_two(self):
         result = run(LOG, logq_text="#!/usr/bin/env bash\ncat >/dev/null\necho boom >&2\nexit 1\n")
         self.assertEqual(result.returncode, 2)
