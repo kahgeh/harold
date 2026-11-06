@@ -1642,7 +1642,9 @@ fn print_help() {
     println!("  harold --check-config   Validate config and print address/store JSON; no writes");
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
     println!("  harold get THING        Print one thing of the Harold state as JSON: voice,");
-    println!("                          messaging, version, machine, multiplexer, hosts, chief, call");
+    println!(
+        "                          messaging, version, machine, multiplexer, hosts, chief, call"
+    );
     println!("  harold accept EVENT --pane ID --adapter NAME");
     println!(
         "                          Report a pane working (turn-started, still-working) or done"
