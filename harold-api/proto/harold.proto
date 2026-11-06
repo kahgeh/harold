@@ -311,6 +311,13 @@ message GetHaroldStateResponse {
   string machine_host_icon = 7;
   string tts_engine = 8;
   string chief_session = 9;
+  // Whether a call is open, at the Mac (desk) or in the web app (phone). Optional so a false
+  // is written on the wire.
+  optional bool call_open = 10;
+  // "desk" or "phone"; empty when no call is open.
+  string call_where = 11;
+  // The start of the open call in milliseconds since the Unix epoch; 0 when no call is open.
+  int64 call_opened_at_ms = 12;
 }
 
 message RexHostIcon {

@@ -370,11 +370,33 @@ fn get_harold_state_fields_are_pinned() {
         ("machine_host_icon", 7),
         ("tts_engine", 8),
         ("chief_session", 9),
+        ("call_open", 10),
+        ("call_where", 11),
+        ("call_opened_at_ms", 12),
     ]
     .into_iter()
     .map(|(name, number)| (name.to_string(), number))
     .collect();
     assert_eq!(message_fields("GetHaroldStateResponse"), expected);
+}
+
+#[test]
+fn get_harold_state_call_open_is_written_when_false() {
+    let response = GetHaroldStateResponse {
+        call_open: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(response.encode_to_vec(), vec![0x50, 0x00]);
+    let open = GetHaroldStateResponse {
+        call_open: Some(true),
+        call_where: "phone".to_string(),
+        call_opened_at_ms: 1_762_000_000_000,
+        ..Default::default()
+    };
+    let decoded = round_trip(&open);
+    assert_eq!(decoded.call_open, Some(true));
+    assert_eq!(decoded.call_where, "phone");
+    assert_eq!(decoded.call_opened_at_ms, 1_762_000_000_000);
 }
 
 #[test]
