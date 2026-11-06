@@ -4,30 +4,47 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::telemetry::count_web_connection;
 
+/// Takes the outcome of one closed connection: `requests` or `no_request`.
+pub(crate) type Recorder = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+/// The recorder of the production code: it adds to the global connection counter.
+fn global_recorder() -> Recorder {
+    Arc::new(count_web_connection)
+}
+
 /// A stream that remembers if it read any byte. It counts the connection when it drops.
 pub(crate) struct CountedStream<S> {
     inner: S,
     read_any: bool,
+    record: Recorder,
 }
 
 impl<S> CountedStream<S> {
+    /// Counts into the global counter. Only the listener makes streams in production code.
+    #[cfg(test)]
     pub(crate) fn new(inner: S) -> Self {
+        Self::with_recorder(inner, global_recorder())
+    }
+
+    pub(crate) fn with_recorder(inner: S, record: Recorder) -> Self {
         Self {
             inner,
             read_any: false,
+            record,
         }
     }
 }
 
 impl<S> Drop for CountedStream<S> {
     fn drop(&mut self) {
-        count_web_connection(if self.read_any {
+        (self.record)(if self.read_any {
             "requests"
         } else {
             "no_request"
@@ -83,11 +100,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CountedStream<S> {
 /// A listener that gives each accepted connection as a `CountedStream`.
 pub(crate) struct CountedListener<L> {
     inner: L,
+    record: Recorder,
 }
 
 impl<L> CountedListener<L> {
     pub(crate) fn new(inner: L) -> Self {
-        Self { inner }
+        Self::with_recorder(inner, global_recorder())
+    }
+
+    pub(crate) fn with_recorder(inner: L, record: Recorder) -> Self {
+        Self { inner, record }
     }
 }
 
@@ -97,7 +119,10 @@ impl<L: axum::serve::Listener> axum::serve::Listener for CountedListener<L> {
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         let (io, addr) = self.inner.accept().await;
-        (CountedStream::new(io), addr)
+        (
+            CountedStream::with_recorder(io, Arc::clone(&self.record)),
+            addr,
+        )
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {

@@ -1,34 +1,40 @@
 //! The counted listener counts each connection once, when it closes. No test opens a port:
-//! every connection is an in-memory pipe.
+//! every connection is an in-memory pipe. Most tests use a local recorder, so no other test
+//! can change the values they check. One test checks the link to the global counter.
 
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::sync::Mutex;
 
-use super::counted_listener::{CountedListener, CountedStream};
+use super::counted_listener::{CountedListener, CountedStream, Recorder};
 use crate::telemetry::test_support;
 
-/// The counters are global. Each test holds this lock, so no other test adds to them
-/// while it compares the values before and after.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
+/// The outcomes that one test records.
+type Seen = Arc<StdMutex<Vec<&'static str>>>;
 
-fn connections(outcome: &str) -> u64 {
-    test_support::exact_counter_value("harold.web_app.connections", &[("outcome", outcome)])
-        .unwrap_or(0)
+fn recorder() -> (Seen, Recorder) {
+    let seen: Seen = Default::default();
+    let sink = Arc::clone(&seen);
+    let record: Recorder = Arc::new(move |outcome| sink.lock().unwrap().push(outcome));
+    (seen, record)
 }
 
-/// Waits until the counter for `outcome` is `expected`, or fails after two seconds.
-async fn wait_for(outcome: &str, expected: u64) {
+fn seen_now(seen: &Seen) -> Vec<&'static str> {
+    seen.lock().unwrap().clone()
+}
+
+/// Waits until `seen` holds `expected`, or fails after two seconds.
+async fn wait_for(seen: &Seen, expected: &[&str]) {
     for _ in 0..200 {
-        if connections(outcome) == expected {
+        if seen_now(seen) == expected {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(connections(outcome), expected, "outcome {outcome}");
+    assert_eq!(seen_now(seen), expected);
 }
 
 /// A listener that hands out in-memory connections one by one and then waits for ever.
@@ -52,38 +58,33 @@ impl axum::serve::Listener for PipeListener {
 
 #[tokio::test]
 async fn connection_closed_with_no_bytes_counts_no_request() {
-    let _lock = ONE_AT_A_TIME.lock().await;
+    let (seen, record) = recorder();
     let (client, server) = tokio::io::duplex(1024);
-    let (requests_before, none_before) = (connections("requests"), connections("no_request"));
-    let mut stream = CountedStream::new(server);
+    let mut stream = CountedStream::with_recorder(server, record);
     drop(client);
     let mut buffer = [0u8; 8];
     assert_eq!(stream.read(&mut buffer).await.unwrap(), 0);
     drop(stream);
-    assert_eq!(connections("no_request"), none_before + 1);
-    assert_eq!(connections("requests"), requests_before);
+    assert_eq!(seen_now(&seen), ["no_request"]);
 }
 
 #[tokio::test]
 async fn connection_with_one_request_counts_requests() {
-    let _lock = ONE_AT_A_TIME.lock().await;
+    let (seen, record) = recorder();
     let (mut client, server) = tokio::io::duplex(1024);
-    let (requests_before, none_before) = (connections("requests"), connections("no_request"));
-    let mut stream = CountedStream::new(server);
+    let mut stream = CountedStream::with_recorder(server, record);
     client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
     let mut buffer = [0u8; 64];
     assert!(stream.read(&mut buffer).await.unwrap() > 0);
     drop(stream);
-    assert_eq!(connections("requests"), requests_before + 1);
-    assert_eq!(connections("no_request"), none_before);
+    assert_eq!(seen_now(&seen), ["requests"]);
 }
 
 #[tokio::test]
 async fn connection_with_several_reads_counts_requests_once() {
-    let _lock = ONE_AT_A_TIME.lock().await;
+    let (seen, record) = recorder();
     let (mut client, server) = tokio::io::duplex(1024);
-    let (requests_before, none_before) = (connections("requests"), connections("no_request"));
-    let mut stream = CountedStream::new(server);
+    let mut stream = CountedStream::with_recorder(server, record);
     let mut buffer = [0u8; 4];
     for _ in 0..3 {
         client.write_all(b"abcd").await.unwrap();
@@ -92,35 +93,32 @@ async fn connection_with_several_reads_counts_requests_once() {
     drop(client);
     assert_eq!(stream.read(&mut buffer).await.unwrap(), 0);
     drop(stream);
-    assert_eq!(connections("requests"), requests_before + 1);
-    assert_eq!(connections("no_request"), none_before);
+    assert_eq!(seen_now(&seen), ["requests"]);
 }
 
 #[tokio::test]
 async fn writes_pass_through_and_do_not_count_as_a_request() {
-    let _lock = ONE_AT_A_TIME.lock().await;
+    let (seen, record) = recorder();
     let (mut client, server) = tokio::io::duplex(1024);
-    let (requests_before, none_before) = (connections("requests"), connections("no_request"));
-    let mut stream = CountedStream::new(server);
+    let mut stream = CountedStream::with_recorder(server, record);
     stream.write_all(b"hello").await.unwrap();
     let mut buffer = [0u8; 5];
     client.read_exact(&mut buffer).await.unwrap();
     assert_eq!(&buffer, b"hello");
     drop(stream);
-    assert_eq!(connections("no_request"), none_before + 1);
-    assert_eq!(connections("requests"), requests_before);
+    assert_eq!(seen_now(&seen), ["no_request"]);
 }
 
 #[tokio::test]
 async fn served_connections_count_by_whether_they_sent_a_request() {
-    let _lock = ONE_AT_A_TIME.lock().await;
-    let (requests_before, none_before) = (connections("requests"), connections("no_request"));
-    // `pop` hands out the last connection first: the one with no request comes second.
+    let (seen, record) = recorder();
+    // `pop` hands out the last connection first: the one with a request comes first.
     let (mut idle_client, idle_server) = tokio::io::duplex(64 * 1024);
     let (mut client, server) = tokio::io::duplex(64 * 1024);
     let app = Router::new().route("/", get(|| async { "ok" }));
     let serving = tokio::spawn(async move {
-        let listener = CountedListener::new(PipeListener(vec![idle_server, server]));
+        let listener =
+            CountedListener::with_recorder(PipeListener(vec![idle_server, server]), record);
         let _ = axum::serve(listener, app).await;
     });
 
@@ -131,13 +129,32 @@ async fn served_connections_count_by_whether_they_sent_a_request() {
     let mut reply = Vec::new();
     client.read_to_end(&mut reply).await.unwrap();
     assert!(String::from_utf8_lossy(&reply).starts_with("HTTP/1.1 200"));
-    wait_for("requests", requests_before + 1).await;
-    assert_eq!(connections("no_request"), none_before);
+    wait_for(&seen, &["requests"]).await;
 
     idle_client.shutdown().await.unwrap();
     let mut rest = Vec::new();
     idle_client.read_to_end(&mut rest).await.unwrap();
-    wait_for("no_request", none_before + 1).await;
-    assert_eq!(connections("requests"), requests_before + 1);
+    wait_for(&seen, &["requests", "no_request"]).await;
     serving.abort();
+}
+
+/// Other tests start the real server and add to the global counter at the same time, so
+/// this test checks for at least one more, not for an exact value.
+#[tokio::test]
+async fn the_production_listener_adds_to_the_global_counter() {
+    let count = |outcome| {
+        test_support::exact_counter_value("harold.web_app.connections", &[("outcome", outcome)])
+            .unwrap_or(0)
+    };
+    let (requests_before, none_before) = (count("requests"), count("no_request"));
+    let (mut client, server) = tokio::io::duplex(1024);
+    let mut stream = CountedStream::new(server);
+    client.write_all(b"x").await.unwrap();
+    let mut buffer = [0u8; 1];
+    stream.read_exact(&mut buffer).await.unwrap();
+    drop(stream);
+    assert!(count("requests") > requests_before);
+    let (_client, server) = tokio::io::duplex(1024);
+    drop(CountedStream::new(server));
+    assert!(count("no_request") > none_before);
 }
