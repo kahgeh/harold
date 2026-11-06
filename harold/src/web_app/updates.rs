@@ -119,11 +119,16 @@ impl StreamSignals {
 
     /// Sets the close reason from the reason `send_patches` returns.
     fn ended(&mut self, reason: &str) {
-        self.reason = Some(match reason {
-            "shutdown" => "shutdown",
-            "store_stopped" => "server_end",
-            _ => "client_gone",
-        });
+        self.reason = Some(close_reason(reason));
+    }
+}
+
+/// The close reason for the metric, from the reason `send_patches` returns.
+fn close_reason(ended: &str) -> &'static str {
+    match ended {
+        "shutdown" => "shutdown",
+        "store_stopped" => "server_end",
+        _ => "client_gone",
     }
 }
 
@@ -135,7 +140,12 @@ impl Drop for StreamSignals {
         let reason = self.reason.unwrap_or("client_gone");
         let open = self.opened.elapsed();
         telemetry::record_web_updates_closed(reason, open.as_secs_f64());
-        info!(reason, open_s = open.as_secs(), "app updates closed");
+        info!(
+            reason,
+            open_s = open.as_secs(),
+            short = telemetry::is_short_stream(open.as_secs_f64()),
+            "app updates closed"
+        );
     }
 }
 

@@ -1641,11 +1641,16 @@ pub(crate) fn web_updates_open_add(delta: i64) {
     instruments().web_app_updates_open.add(delta, &[]);
 }
 
+/// Whether a stream that was open for `open_seconds` is short: under 60 seconds.
+pub(crate) fn is_short_stream(open_seconds: f64) -> bool {
+    open_seconds < UPDATES_SHORT_SECONDS
+}
+
 /// Records one updates stream that closes: counts it by `reason` and `short`, and records
 /// how long it was open.
 pub(crate) fn record_web_updates_closed(reason: &str, open_seconds: f64) {
     let instruments = instruments();
-    let short = open_seconds < UPDATES_SHORT_SECONDS;
+    let short = is_short_stream(open_seconds);
     instruments.web_app_updates_closed.add(
         1,
         &[

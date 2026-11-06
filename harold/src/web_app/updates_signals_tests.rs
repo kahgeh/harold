@@ -135,10 +135,9 @@ async fn updates_stream_closed_by_client_records_client_gone_and_open_time() {
     drop(stream.client);
     let line = closed_line(&logs).await;
     assert!(line.contains(r#"reason="client_gone""#), "{line}");
-    // The open and the close are read in the same paused time: 90 s, and no more than
-    // the 1 s that the tasks need to notice the close.
-    let open = open_seconds(&line);
-    assert!((90..=91).contains(&open), "{line}");
+    // The open and the close are read in the same paused time.
+    assert_eq!(open_seconds(&line), 90, "{line}");
+    assert!(line.contains("short=false"), "{line}");
     // Other tests share the counter: a rise of at least one is the exact check possible.
     assert!(closed("client_gone", false) > before);
     let _ = std::fs::remove_dir_all(stream.directory);
@@ -154,7 +153,8 @@ async fn short_stream_counts_short_true() {
     drop(stream.client);
     let line = closed_line(&logs).await;
     assert!(line.contains(r#"reason="client_gone""#), "{line}");
-    assert!((10..=11).contains(&open_seconds(&line)), "{line}");
+    assert_eq!(open_seconds(&line), 10, "{line}");
+    assert!(line.contains("short=true"), "{line}");
     assert!(closed("client_gone", true) > before);
     let _ = std::fs::remove_dir_all(stream.directory);
 }
@@ -172,6 +172,18 @@ async fn shutdown_records_shutdown() {
     assert!(closed("shutdown", true) > before);
     drop(stream.client);
     let _ = std::fs::remove_dir_all(stream.directory);
+}
+
+#[test]
+fn close_reason_maps_each_end_reason() {
+    for (ended, reason) in [
+        ("shutdown", "shutdown"),
+        ("page_gone", "client_gone"),
+        ("store_stopped", "server_end"),
+        ("anything_else", "client_gone"),
+    ] {
+        assert_eq!(super::close_reason(ended), reason, "{ended}");
+    }
 }
 
 thread_local! {

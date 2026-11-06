@@ -5527,6 +5527,13 @@ fn the_web_request_functions_count_and_a_waiting_request_is_not_a_result() {
 }
 
 #[test]
+fn stream_is_short_below_sixty_seconds() {
+    for (seconds, short) in [(0.0, true), (59.9, true), (60.0, false), (90.0, false)] {
+        assert_eq!(is_short_stream(seconds), short, "{seconds}");
+    }
+}
+
+#[test]
 fn web_request_fields_are_allowed() {
     for field in ["route_class", "result", "waited_ms", "open_s", "short"] {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
