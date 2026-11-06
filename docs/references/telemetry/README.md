@@ -555,7 +555,7 @@ These signals answer one question: did the phone's requests reach Harold, did Ha
 
 One outermost request layer counts every request that reaches the web app. It runs before the policy, login, device and origin layers. It does not run on the specs listener. For each request it records the `route_class`, the `result`, the `status` class and the time to the first byte. A `route_class` is a fixed name from the router, such as `thread`, `updates`, `replies`, `todos`, `notes`, `specs`, `pages`, `call`, `pair`, `static`, `telemetry`, `page_events` or `other`. It is never a raw path.
 
-A `result` is `served`, `refused` (with a `reason`), `not_found` or `error` (a 5xx answer). The login, device and origin checks tell the layer their `reason`. Their rules stay as they were. The counter counts every refusal. The log line for a refusal keeps its rule of once per hour.
+A `result` is `served`, `refused` (with a `reason`), `not_found` or `error` (a 5xx answer). The login, device and origin checks tell the layer their `reason`. Their rules stay as they were. The counter counts every refusal. The log line for a refusal keeps its rule of once per hour. A refusal can have the status `2xx`: a request with no device cookie for a page gets the pair screen with status 200, and it counts `refused` with the reason `no_cookie`. The result `served` also covers other 4xx answers that are not 404 and carry no refusal, for example 400, 405 and 413.
 
 A request with no answer after 5 seconds writes the `warn` line `app request waiting` once and adds one to `harold.web_app.requests.waiting`. The `updates` stream answers at once and then stays open, so it never counts here.
 
@@ -568,7 +568,7 @@ Each counter starts at 0 for every `route_class`, `reason`, `outcome` and `short
 | Line | Fields |
 |---|---|
 | `app request waiting` | `route_class`, `waited_ms` (the time the request had waited when the line was written). `warn`, once for each request that waits 5 seconds. Not written for `updates` |
-| `app login refused` | `route_class`. `info`, once per hour: the login check found no `Tailscale-User-Login` header. The counter counts every one |
+| `app login refused` | `route_class`. `info`, once per hour: the login check found no `Tailscale-User-Login` header, or a header with a login that is not the allowed login. The counter counts every one |
 | `app updates closed` | `reason` (`client_gone`, `server_end`, `shutdown`), `open_s` (the seconds the stream was open), `short` (`true` when `open_s` is under 60). `info` |
 
 The existing `app device refused` and `app post refused` lines keep their fields and their hourly rule.

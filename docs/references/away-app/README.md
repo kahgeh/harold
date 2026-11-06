@@ -585,7 +585,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app page not connected` | `reason` (`store_unread` or `render_failed`) |
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected, and `hidden_reported` (`true` for one `POST /page/hidden` during the stream, `false` for none, `repeated` for more than one). Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app request waiting` | WARN. A request with no answer after 5 seconds: `route_class` and `waited_ms`. Once for each request. Never for `updates`. |
-| `app login refused` | `route_class`. INFO, once per hour: the login check found no `Tailscale-User-Login` header. |
+| `app login refused` | `route_class`. INFO, once per hour: the login check found no `Tailscale-User-Login` header, or a header with a login that is not the allowed login. |
 | `app updates closed` | `reason` (`client_gone`, `server_end` or `shutdown`), `open_s` (the seconds the stream was open) and `short` (`true` under 60 seconds). INFO. |
 | `app post refused` | WARN. A post from the app's own origin without `Datastar-Request: true`, on a route that needs it: `route` (the path without its query) and `reason` `not_datastar`. No body. Expected rate: 0. |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
