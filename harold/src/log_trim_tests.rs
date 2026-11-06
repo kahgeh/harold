@@ -221,3 +221,81 @@ fn the_read_to_set_length_step_runs_inside_the_hold() {
     assert_eq!(seen.0, log);
     assert_eq!(seen.1, colored(2, "new"));
 }
+
+/// Lines of about 1 KiB, all from the last hour, numbered from `first`.
+fn big_lines(first: usize, count: usize) -> String {
+    let filler = "x".repeat(1000);
+    (first..first + count)
+        .map(|number| format!("{} line {number:06} {filler}\n", stamp(1)))
+        .collect()
+}
+
+#[test]
+fn twelve_mb_of_recent_lines_trims_below_10_mb_keeping_newest() {
+    let directory = TestDirectory::new();
+    let log = big_lines(0, 12 * 1024);
+    std::fs::write(directory.log(), &log).unwrap();
+
+    let result = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    )
+    .unwrap();
+
+    let after = std::fs::read_to_string(directory.log()).unwrap();
+    assert!((after.len() as u64) <= MAX_BYTES);
+    assert!(log.ends_with(&after));
+    assert!(after.starts_with(&stamp(1)));
+    assert!(after.contains("line 012287 "));
+    assert_eq!(
+        result,
+        Trimmed::Dropped {
+            kept_bytes: after.len() as u64,
+            dropped_bytes: (log.len() - after.len()) as u64,
+        }
+    );
+}
+
+#[test]
+fn one_line_larger_than_the_limit_keeps_the_newest_line_not_an_empty_file() {
+    let directory = TestDirectory::new();
+    let huge = format!("{} {}\n", stamp(1), "y".repeat(MAX_BYTES as usize + 10));
+    let log = format!("{}{huge}", big_lines(0, 3));
+    std::fs::write(directory.log(), &log).unwrap();
+
+    let result = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), huge);
+    assert_eq!(
+        result,
+        Trimmed::Dropped {
+            kept_bytes: huge.len() as u64,
+            dropped_bytes: (log.len() - huge.len()) as u64,
+        }
+    );
+}
+
+#[test]
+fn a_small_file_is_untouched() {
+    let directory = TestDirectory::new();
+    let log = big_lines(0, 10);
+    std::fs::write(directory.log(), &log).unwrap();
+
+    let result = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    );
+
+    assert_eq!(result.unwrap(), Trimmed::Nothing);
+    assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), log);
+}
