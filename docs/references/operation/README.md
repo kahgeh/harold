@@ -384,19 +384,23 @@ These direct commands use the invoking process's normal configuration environmen
 | `multiplexer` | `{"multiplexer":"rex"}` | `tmux` or `rex`. |
 | `hosts` | `{"hosts":[{"label":"omarchy","host_icon":"arch"}]}` | The Rex hosts. The list is empty with none: `{"hosts":[]}`. |
 | `chief` | `{"chief_session":"chief"}` | The chief's session. The value is empty with none. |
+| `call` | `{"state":"open","where":"phone","since":"2026-11-04T09:12:03+11:00"}` or `{"state":"closed"}` | `state` is `open` while a call is open. `where` is `desk` for a [desk call](../../glossary.md) and `phone` for a [phone call](../../glossary.md). `since` is the start of the call in local time. A call is open from the ring, because a refresh must not cut in. |
 
 For `voice` and `messaging`, `off` always means that the switch stops the thing. Standard output holds JSON only, and only with exit 0. Standard error holds every error line.
 
 | Case | Line on standard error | Exit |
 | --- | --- | --- |
-| No thing, extra words, or a name that is not in the table | `unknown thing "NAME": voice, messaging, version, machine, multiplexer, hosts, chief` | 2 |
+| No thing, extra words, or a name that is not in the table | `unknown thing "NAME": voice, messaging, version, machine, multiplexer, hosts, chief, call` | 2 |
 | The daemon does not answer within 3 seconds | `the Harold daemon did not answer within 3 seconds` | 1 |
 | The configuration holds an invalid daemon address | `invalid configuration` | 1 |
 | No daemon on the address | `the Harold daemon is not reachable` | 1 |
 | An older Harold without the call (`Unimplemented`) | `this Harold is too old for harold get` | 1 |
+| For `call` only: a Harold that answers but has no call fields | `this Harold is too old for harold get call` | 1 |
 | Another gRPC error | `the Harold daemon refused the call` | 1 |
 
 A script that needs the voice state runs `harold get voice`. On any exit that is not 0, the script treats the voice as possibly on. Do not read the voice state from the control-tower screen.
+
+A script that must not cut into a call runs `harold get call`. On any exit that is not 0, the script treats the call as possibly open.
 
 The answer never holds a token, key, pairing code, HyperDX key, phone number, iMessage recipient, TTS command line or path.
 
