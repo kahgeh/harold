@@ -2113,8 +2113,14 @@ fn a_call_is_open_in_every_state_but_off_and_not_set_up() {
         lock(&calls.status).state = state;
         assert_eq!(calls.call_opened_at_ms(), Some(1_000), "{state:?}");
     }
+    // A call just spawned has not shown a state yet, and is open.
+    lock(&calls.status).state = CallState::Off;
+    assert_eq!(calls.call_opened_at_ms(), Some(1_000));
     for state in [CallState::Off, CallState::NotSetUp] {
-        lock(&calls.status).state = state;
+        let mut status = lock(&calls.status);
+        status.state = state;
+        status.opened_at_ms = None;
+        drop(status);
         assert_eq!(calls.call_opened_at_ms(), None, "{state:?}");
     }
 }

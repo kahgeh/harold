@@ -860,7 +860,6 @@ impl Harold for HaroldService {
     }
 }
 
-/// A call's status as the `Call` RPC answers it.
 /// The call fields of the state answer, from the start of the open desk call and of the open
 /// phone call: whether a call is open, where, and since when. A phone call ends a desk call,
 /// so both open is a moment between, and the phone's wins.
@@ -872,6 +871,7 @@ fn call_fields(desk: Option<u64>, phone: Option<u64>) -> (bool, &'static str, u6
     }
 }
 
+/// A call's status as the `Call` RPC answers it.
 fn call_response(status: &voice_input::CallStatus) -> CallResponse {
     use voice_input::{CallState, TurnResult};
     let state = match status.state {

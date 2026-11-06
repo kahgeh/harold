@@ -211,14 +211,11 @@ impl<P: CallPorts> CallControl<P> {
         status
     }
 
-    /// When the open call started, in milliseconds since the Unix epoch. `None` when the
-    /// state is `Off` or `NotSetUp`.
+    /// When the open call started, in milliseconds since the Unix epoch. `None` when no call
+    /// is open. A call is open from the moment `start` spawns it, before it first shows a
+    /// state, until each way it ends clears the time.
     pub(crate) fn call_opened_at_ms(&self) -> Option<u64> {
-        let status = lock(&self.status);
-        match status.state {
-            CallState::Off | CallState::NotSetUp => None,
-            _ => status.opened_at_ms,
-        }
+        lock(&self.status).opened_at_ms
     }
 
     /// Starts a call, and answers once it listens or has ended. With a call already on,
