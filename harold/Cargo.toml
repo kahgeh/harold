@@ -58,3 +58,4 @@ sysinfo = { version = "=0.35.2", default-features = false, features = ["disk", "
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["test-util"] }
 opentelemetry_sdk = { version = "=0.31.0", default-features = false, features = ["trace", "logs", "metrics", "testing"] }
+opentelemetry-proto = { version = "=0.31.0", default-features = false, features = ["gen-tonic"] }
