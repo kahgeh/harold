@@ -4883,3 +4883,44 @@ fn a_refused_start_counts_its_problems_and_a_load_error_counts_one() {
     assert_eq!(super::refused_errors_count(&problems), 2);
     assert_eq!(super::refused_errors_count(&[]), 1);
 }
+
+/// Starts twice on a temporary folder with no clean exit between: the second start is the
+/// one unclean start.
+fn guard_after_unclean_starts(starts: usize) -> crate::crash_guard::CrashGuard {
+    // The crash file sits beside the store path, so the store path is one level down.
+    let directory = TestDirectory::new();
+    let file = crate::crash_guard::crash_file(&directory.0.join("store"));
+    let now = std::time::SystemTime::now();
+    let mut last = None;
+    for _ in 0..starts {
+        match crate::crash_guard::begin(&file, now).unwrap() {
+            crate::crash_guard::Start::Run(started) => last = Some(started),
+            crate::crash_guard::Start::Refuse => panic!("the start was refused"),
+        }
+    }
+    last.expect("at least one start")
+}
+
+#[test]
+fn a_start_after_an_unclean_exit_logs_the_count() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let started = guard_after_unclean_starts(2);
+    assert_eq!(started.unclean_starts(), 1);
+
+    super::log_unclean_start(&started);
+
+    let lines = lines_with(&logs, "start after an unclean exit");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("count=1"), "{lines:?}");
+}
+
+#[test]
+fn a_start_after_a_clean_exit_logs_no_unclean_line() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let started = guard_after_unclean_starts(1);
+    assert_eq!(started.unclean_starts(), 0);
+
+    super::log_unclean_start(&started);
+
+    assert!(lines_with(&logs, "start after an unclean exit").is_empty());
+}

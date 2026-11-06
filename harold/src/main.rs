@@ -2139,12 +2139,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         let file = crash_guard::crash_file(std::path::Path::new(&store_path));
         match crash_guard::begin(&file, std::time::SystemTime::now()) {
             Ok(crash_guard::Start::Run(started)) => {
-                if started.unclean_starts() > 0 {
-                    tracing::warn!(
-                        count = started.unclean_starts(),
-                        "start after an unclean exit"
-                    );
-                }
+                log_unclean_start(&started);
                 guard = Some(started);
             }
             Ok(crash_guard::Start::Refuse) => refuse_start("crash_loop", telemetry).await,
@@ -2523,6 +2518,17 @@ async fn log_refusal_and_flush(errors: usize, telemetry: Option<telemetry::Telem
     tracing::warn!(reason = "invalid_config", errors, "startup refused");
     if let Some(telemetry) = telemetry {
         telemetry.shutdown().await;
+    }
+}
+
+/// Logs `start after an unclean exit` with the count when the last run did not exit
+/// cleanly. A test calls it, because the check sits in the start path of `main`.
+fn log_unclean_start(started: &crash_guard::CrashGuard) {
+    if started.unclean_starts() > 0 {
+        tracing::warn!(
+            count = started.unclean_starts(),
+            "start after an unclean exit"
+        );
     }
 }
 
