@@ -7815,3 +7815,30 @@ mod port_tests {
         pipeline.shutdown_within(Duration::from_secs(2));
     }
 }
+
+#[test]
+fn a_panic_on_a_panic_helper_thread_calls_previous_and_spawns_nothing() {
+    for name in ["harold-panic-report", "harold-panic-flush"] {
+        let calls = Arc::new(Mutex::new(0_u32));
+        let counter = Arc::clone(&calls);
+        let handled = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || reentered_on_helper_thread(&move || *counter.lock().unwrap() += 1))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(handled, "{name}");
+        assert_eq!(*calls.lock().unwrap(), 1, "{name}");
+    }
+    let calls = Arc::new(Mutex::new(0_u32));
+    let counter = Arc::clone(&calls);
+    assert!(!reentered_on_helper_thread(&move || *counter
+        .lock()
+        .unwrap() += 1));
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn the_unsent_sink_writes_a_line_with_its_newline_in_one_piece() {
+    assert_eq!(unsent_bytes("a line unsent=true"), b"a line unsent=true\n");
+}

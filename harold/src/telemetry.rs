@@ -2928,12 +2928,29 @@ fn report_panic(
     }
 }
 
+/// Calls `previous` and answers `true` when the current thread is one of the hook's own
+/// helper threads. A panic there must not start another helper thread.
+fn reentered_on_helper_thread(previous: &dyn Fn()) -> bool {
+    let thread = std::thread::current();
+    let helper = matches!(
+        thread.name(),
+        Some("harold-panic-report" | "harold-panic-flush")
+    );
+    if helper {
+        previous();
+    }
+    helper
+}
+
 /// The hook function: takes the facts from `info` and runs `report_panic`.
 fn panic_hook(
     info: &std::panic::PanicHookInfo<'_>,
     flush: &PanicFlush,
     previous: &dyn Fn(&std::panic::PanicHookInfo<'_>),
 ) {
+    if reentered_on_helper_thread(&|| previous(info)) {
+        return;
+    }
     let payload = info.payload();
     let message = payload
         .downcast_ref::<&str>()
@@ -3493,7 +3510,13 @@ const RESEND_BATCH: usize = 512;
 fn write_unsent_line_to_stderr(line: &str) {
     use std::io::Write as _;
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.write_all(&unsent_bytes(line));
+}
+
+/// The bytes of one unsent line, with its newline. One write sends them all, so that
+/// another writer cannot land between the text and the newline.
+fn unsent_bytes(line: &str) -> Vec<u8> {
+    format!("{line}\n").into_bytes()
 }
 
 /// Keeps the log records that the collector did not get. It sits outside `FieldFilter`, so
