@@ -1002,6 +1002,8 @@ pub(crate) fn tts_models_path() -> std::path::PathBuf {
 
 #[derive(Debug, Deserialize)]
 pub struct LogSettings {
+    /// The early start reads this key itself in `early_telemetry`, so the loaded value stays unread; the field keeps the key valid for the config check.
+    #[allow(dead_code)]
     pub level: String,
 }
 
@@ -1767,6 +1769,7 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) control_tower: ControlTowerSettings,
     pub tts: TtsSettings,
+    #[allow(dead_code)]
     pub log: LogSettings,
     pub store: StoreSettings,
     pub notify: NotifySettings,
