@@ -6588,12 +6588,22 @@ fn tonic_and_opentelemetry_sdk_warn_stay_out() {
         "tower::buffer",
         "http",
         "http::header",
+        "opentelemetry_http",
+        "opentelemetry_proto::transform",
+        "opentelemetry_appender_tracing::layer",
+        "opentelemetry-http",
+        "tonic_prost",
+        "tonic_health::server",
+        "hyper_util::client::legacy",
+        "tower_http::trace",
     ] {
         assert!(is_telemetry_crate_target(target), "{target}");
         assert!(!exports_log(target, Level::WARN), "{target}");
         assert!(!exports_log(target, Level::ERROR), "{target}");
     }
-    assert!(!is_telemetry_crate_target("hyper_util"));
+    assert!(!is_telemetry_crate_target("httpx"));
+    assert!(!is_telemetry_crate_target("tonic2"));
+    assert!(!is_telemetry_crate_target("tower2"));
     assert!(!is_telemetry_crate_target("httparse"));
     assert!(exports_log("reqwest::connect", Level::WARN));
     assert!(is_foreign_target("reqwest"));

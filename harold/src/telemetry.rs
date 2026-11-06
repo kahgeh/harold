@@ -348,20 +348,20 @@ fn is_exported_log_target(target: &str) -> bool {
 /// Whether `target` belongs to a crate that sends or logs the telemetry export itself.
 /// When the collector is down these crates log each failed send. If Harold exported
 /// those lines, each failed send would queue one more line to send.
-fn is_telemetry_crate_target(target: &str) -> bool {
-    [
+pub(crate) fn is_telemetry_crate_target(target: &str) -> bool {
+    let crate_name = target.split("::").next().unwrap_or(target);
+    const EXACT: [&str; 8] = [
         "opentelemetry",
-        "opentelemetry_sdk",
-        "opentelemetry_otlp",
-        "opentelemetry-otlp",
         "tonic",
         "hyper",
+        "hyper_util",
         "h2",
         "tower",
+        "tower_http",
         "http",
-    ]
-    .iter()
-    .any(|name| target_is(target, name))
+    ];
+    const PREFIXES: [&str; 3] = ["opentelemetry_", "opentelemetry-", "tonic_"];
+    EXACT.contains(&crate_name) || PREFIXES.iter().any(|prefix| crate_name.starts_with(prefix))
 }
 
 /// Whether `target` is another crate's: not Harold's, `events` or `buckwal`.
