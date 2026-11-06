@@ -245,6 +245,76 @@ fn the_watch_run_time_fields_leave_a_log_record() {
 }
 
 #[test]
+fn new_fields_reach_the_exporter() {
+    test_support::install();
+    let marker = format!("new-fields-{}", uuid::Uuid::new_v4());
+    tracing::info!(
+        duration_ms = 1_u64,
+        tool = "backlog",
+        why = "newer_report",
+        item_id = %marker,
+        note_id = 2_u64,
+        question_id = 3_u64,
+        rows = 4_u64,
+        chars = 5_u64,
+        kept_bytes = 6_u64,
+        dropped_bytes = 7_u64,
+        name = "morning",
+        add_dirs = 1_u64,
+        port = 8080_u64,
+        log.target = "harold::tools::watch::obs",
+        thread = "main",
+        location = "src/main.rs:1:1",
+        errors = 2_u64,
+        error = "TELEMETRY-CANARY-9001",
+        listen = "TELEMETRY-CANARY-9002",
+        address = "TELEMETRY-CANARY-9003",
+        text = "TELEMETRY-CANARY-9004",
+        msg = "TELEMETRY-CANARY-9005",
+        "new fields line"
+    );
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&marker))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    for field in [
+        "duration_ms",
+        "tool",
+        "why",
+        "item_id",
+        "note_id",
+        "question_id",
+        "rows",
+        "chars",
+        "kept_bytes",
+        "dropped_bytes",
+        "name",
+        "add_dirs",
+        "port",
+        "log.target",
+        "thread",
+        "location",
+        "errors",
+    ] {
+        assert!(keys.contains(&field), "{field} is not exported: {keys:?}");
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    for field in ["error", "listen", "address", "text", "msg"] {
+        assert!(!keys.contains(&field), "{field} is exported: {keys:?}");
+    }
+    assert!(!ALLOWED_FIELDS.contains(&"panic.message"));
+    for n in 9001..=9005 {
+        assert!(!test_support::exported_text().contains(&format!("TELEMETRY-CANARY-{n}")));
+    }
+}
+
+#[test]
 fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
     test_support::install();
     let pane = unique_pane();

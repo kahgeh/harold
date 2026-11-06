@@ -457,6 +457,28 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 
 **Allowed fields.** Exported spans and log records keep only the attributes on `ALLOWED_FIELDS` in [`harold/src/telemetry.rs`](../../../harold/src/telemetry.rs). That list is the only source: each field on it is an id, a count, a time, a fixed word or a short name, never free text. A change to what leaves Harold is a change to that list, made in a spec and reviewed with it. A test checks that each field on the list is in a fields table under `docs/references`.
 
+These fields were added so that the log lines of the collector work show their ids, counts and names. Each holds an id, a count, a fixed code or a name that Harold sets. None holds a path, a secret or message text.
+
+| Fields | Meaning |
+|---|---|
+| `duration_ms` | The time of a watch run, in milliseconds. On `watch run finished` |
+| `tool` | The fixed name of a tool, such as `backlog`. On the backlog and questions tool lines |
+| `why` | A fixed code, such as `newer_report`. On the slave report lines |
+| `item_id` | The id of a backlog item. On `backlog item stored` and `backlog item removed` |
+| `note_id` | The number of a backlog note. On `backlog note added` |
+| `question_id` | The id of a question. On the questions tool lines |
+| `rows` | A count of rows. On `app page served` |
+| `chars` | A count of characters, never the text. On `sending iMessage` |
+| `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
+| `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |
+| `add_dirs` | A count of the folders that a watch skill names, never the paths. On `watch run finished` and `watch run failed` |
+| `port` | A port number, never the host or a path. On the listen failure lines |
+| `log.target` | The target of the line, such as `harold::tools::watch::obs`. It is a module name, never a path. On every exported line |
+| `thread`, `location` | The name of the thread of a panic and its source location. On `harold panicked` |
+| `errors` | A count of the problems of the config, never their text. On `startup refused` |
+
+`text`, `msg`, `raw_output`, `tag`, `error`, `listen` and `address` stay off the list. They hold message text, an error text, a host or an address. Use `reason` or `port` to diagnose.
+
 `model` is a model name from the settings, a Hugging Face repository for the voice or the `[watch] model` setting, never a path or a token. Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
 
 **Which log records are exported.** Only records whose target is `harold`, starts with `harold::`, is `events` or starts with `events::`, or is `buckwal` or starts with `buckwal::`. Other crates' lines, such as Turso's and reqwest's, interpolate errors and paths into their text, so they stay in `harold.log` only. The collector-health lines also stay in `harold.log` only.

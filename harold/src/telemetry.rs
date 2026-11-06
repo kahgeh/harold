@@ -274,6 +274,23 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "own",
     "version",
     "report_no",
+    "duration_ms",
+    "tool",
+    "why",
+    "item_id",
+    "note_id",
+    "question_id",
+    "rows",
+    "chars",
+    "kept_bytes",
+    "dropped_bytes",
+    "name",
+    "add_dirs",
+    "port",
+    "log.target",
+    "thread",
+    "location",
+    "errors",
 ];
 
 /// How long shutting the exporters down may take in all.
