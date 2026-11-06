@@ -65,6 +65,7 @@ pub(crate) mod browser_traces;
 pub(crate) mod call;
 pub(crate) mod chief;
 pub(crate) mod collections;
+mod counted_listener;
 #[cfg(feature = "calls")]
 pub(crate) mod echo_test;
 pub(crate) mod login;
@@ -802,7 +803,11 @@ pub(crate) async fn start(
     let specs_addr = specs_listener.as_ref().map(|listener| listener.addr);
     let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));
     let mut server_shutdown = shutdown;
-    let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
+    let server = axum::serve(
+        counted_listener::CountedListener::new(listener),
+        router(state),
+    )
+    .with_graceful_shutdown(async move {
         let _ = server_shutdown.changed().await;
     });
     let mut server = tokio::spawn(async move { server.await });
@@ -933,6 +938,10 @@ async fn prune_every_hour(store: Arc<HaroldStore>, mut shutdown: watch::Receiver
         }
     }
 }
+
+#[cfg(test)]
+#[path = "counted_listener_tests.rs"]
+mod counted_listener_tests;
 
 #[cfg(test)]
 #[path = "request_signals_tests.rs"]
