@@ -17,7 +17,7 @@ Workers run on omarchy under the Mac's pod-coordination, and the control-tower m
    - Amended 2026-11-02: Harold counts failed scans of the host, not failed listings. A scan fails when a call to list the slots or to read a process fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan.
    - Amended 2026-11-02 (rex-exited-block): a host scan leaves an unreadable block out, and an exited block holds no agent. The scan fails only when no block answers, when the call to list the slots fails, or when the scan passes its 10-second limit. A failed status call does not fail the scan.
 5. Harold reads the state of an agent on a Rex host with one `program_status` call for each agent block in each scan. It starts no `rex events` stream over the network. It also reads the `host_id` of each host once, with `rex -S <label> whoami --json`, to find two labels for one server.
-   - Amended 2026-11-07 (opencode-states): for a provider with `idle_after_working = "done"`, a record that goes from working or blocked to idle with the same pid gives done.
+   - Amended 2026-11-08 (opencode-states): for a provider with `idle_after_working = "done"`, a record that goes from working or blocked to idle with the same pid gives done.
 
 ## Consequences
 
