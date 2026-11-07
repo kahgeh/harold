@@ -20,6 +20,7 @@ fn settings() -> AgentSettings {
         screen_adapter: ScreenAdapter::GenericV1,
         screen_history_lines: 2000,
         recap_adapter: crate::settings::RecapAdapter::None,
+        idle_after_working: crate::settings::IdleAfterWorking::Idle,
     }])
 }
 

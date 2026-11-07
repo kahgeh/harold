@@ -2785,6 +2785,7 @@ fn provider() -> AgentProviderSettings {
         summary_line_prefixes: vec!["Task: ".into()],
         screen_adapter: crate::settings::ScreenAdapter::GenericV1,
         recap_adapter: crate::settings::RecapAdapter::None,
+        idle_after_working: crate::settings::IdleAfterWorking::Idle,
         screen_history_lines: 2000,
     }
 }

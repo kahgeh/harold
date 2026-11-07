@@ -584,6 +584,17 @@ pub(crate) enum RecapAdapter {
     ClaudeTranscriptV1,
 }
 
+/// What a record that goes from working to idle shows for a provider.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum IdleAfterWorking {
+    /// The row shows idle, as the record says.
+    #[default]
+    Idle,
+    /// The row shows done: the provider reports idle at the end of a turn.
+    Done,
+}
+
 fn default_screen_history_lines() -> u16 {
     2000
 }
@@ -603,6 +614,8 @@ pub(crate) struct AgentProviderSettings {
     pub screen_adapter: ScreenAdapter,
     #[serde(default)]
     pub recap_adapter: RecapAdapter,
+    #[serde(default)]
+    pub idle_after_working: IdleAfterWorking,
     #[serde(default = "default_screen_history_lines")]
     pub screen_history_lines: u16,
 }
@@ -2779,6 +2792,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             summary_line_prefixes: vec![">".to_string()],
             screen_adapter: crate::settings::ScreenAdapter::GenericV1,
             recap_adapter: super::RecapAdapter::None,
+            idle_after_working: super::IdleAfterWorking::Idle,
             screen_history_lines: 2000,
         }
     }
@@ -2869,6 +2883,69 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             crate::agent::recap::recap_provider_ids(&providers),
             ["claude"]
         );
+    }
+
+    #[test]
+    fn idle_after_working_defaults_to_idle_and_reads_both_names() {
+        let parsed = parse_agent_config(&[r#"[[agents]]
+            id = "custom"
+            display_name = "Custom"
+            command_contains = ["custom"]
+
+            [[agents]]
+            id = "other"
+            display_name = "Other"
+            command_contains = ["other"]
+            idle_after_working = "done"
+
+            [[agents]]
+            id = "third"
+            display_name = "Third"
+            command_contains = ["third"]
+            idle_after_working = "idle"
+        "#]);
+        let AgentSettings(providers) = parsed.agents;
+        assert_eq!(
+            providers[0].idle_after_working,
+            super::IdleAfterWorking::Idle
+        );
+        assert_eq!(
+            providers[1].idle_after_working,
+            super::IdleAfterWorking::Done
+        );
+        assert_eq!(
+            providers[2].idle_after_working,
+            super::IdleAfterWorking::Idle
+        );
+    }
+
+    #[test]
+    fn an_unknown_idle_after_working_value_is_refused() {
+        let text = r#"[[agents]]
+            id = "custom"
+            display_name = "Custom"
+            command_contains = ["custom"]
+            idle_after_working = "bogus"
+        "#;
+        let loaded: Result<AgentConfigFixture, _> = Config::builder()
+            .add_source(File::from_str(text, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize);
+        assert!(loaded.is_err());
+    }
+
+    #[test]
+    fn default_toml_sets_idle_after_working_to_done_on_opencode_only() {
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        let AgentSettings(providers) = shipped.agents;
+        for provider in &providers {
+            let expected = if provider.id == "opencode" {
+                super::IdleAfterWorking::Done
+            } else {
+                super::IdleAfterWorking::Idle
+            };
+            assert_eq!(provider.idle_after_working, expected, "{}", provider.id);
+        }
     }
 
     #[test]

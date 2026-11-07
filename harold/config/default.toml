@@ -137,6 +137,9 @@ display_name = "OpenCode"
 command_contains = ["opencode"]
 busy_all = ["esc interrupt"]
 idle_all = ["agents", "commands"]
+# opencode reports idle at the end of a turn. A host agent that goes from working to
+# idle shows done.
+idle_after_working = "done"
 # OpenCode 1.4.10 renders prompt and user-message rows with the same visible
 # prefix, so no safe provider-specific fallback summary prefix is configured.
 

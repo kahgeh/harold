@@ -41,6 +41,7 @@ fn provider() -> AgentProviderSettings {
         summary_line_prefixes: vec!["›".to_string(), ">".to_string()],
         screen_adapter: crate::settings::ScreenAdapter::GenericV1,
         recap_adapter: crate::settings::RecapAdapter::None,
+        idle_after_working: crate::settings::IdleAfterWorking::Idle,
         screen_history_lines: 2000,
     }
 }
@@ -645,6 +646,7 @@ fn claude_provider() -> AgentProviderSettings {
         summary_line_prefixes: vec!["❯".to_string()],
         screen_adapter: crate::settings::ScreenAdapter::ClaudeV1,
         recap_adapter: crate::settings::RecapAdapter::None,
+        idle_after_working: crate::settings::IdleAfterWorking::Idle,
         screen_history_lines: 2000,
     }
 }

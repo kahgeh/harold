@@ -341,6 +341,7 @@ mod reader {
             summary_line_prefixes: Vec::new(),
             screen_adapter: Default::default(),
             recap_adapter: adapter,
+            idle_after_working: crate::settings::IdleAfterWorking::Idle,
             screen_history_lines: 10,
         }
     }
