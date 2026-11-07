@@ -22,7 +22,7 @@ use super::rex::{
 use super::rex::{PROCESS_WIDTH, parallel_map};
 use super::rex::{StatusRecord, parse_program_status};
 use super::screen::{current_stop, stop_requested};
-use crate::settings::AgentSettings;
+use crate::settings::{AgentSettings, IdleAfterWorking};
 use crate::telemetry::{MultiplexerOperation, MultiplexerOutcome, record_call};
 
 /// A call to a host that takes longer than this fails.
@@ -83,10 +83,13 @@ pub(crate) struct HostScan {
 pub(crate) type HostClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub(crate) type HostProgram = Arc<dyn Fn() -> Result<PathBuf, RexError> + Send + Sync>;
 
-/// What Harold last saw in one block: the agent pid and when Harold first saw it.
+/// What Harold last saw in one block: the agent pid, when Harold first saw it and the last
+/// state that it showed.
 struct Seen {
     pid: u32,
     first_seen_ms: i64,
+    /// The last state that a record gave for this pid. `None` before a record.
+    state: Option<ObservedAgentState>,
 }
 
 #[derive(Default)]
@@ -277,6 +280,14 @@ impl RexHostInventory {
         parse_program_status(&text)
     }
 
+    /// Whether the provider asks that idle after working shows done.
+    fn asks_done(&self, provider_id: &str) -> bool {
+        let AgentSettings(providers) = &self.settings;
+        providers.iter().any(|provider| {
+            provider.id == provider_id && provider.idle_after_working == IdleAfterWorking::Done
+        })
+    }
+
     fn scan_agents(&self) -> Result<Vec<RexHostAgent>, RexError> {
         let slots = self.slots()?;
         let now = (self.clock)();
@@ -345,8 +356,10 @@ impl RexHostInventory {
                 .block_id
                 .strip_prefix(BLOCK_PREFIX)
                 .unwrap_or(&slot.block_id);
+            let asks_done = self.asks_done(&provider_id);
             found.push((
                 slot.block_id.clone(),
+                asks_done,
                 RexHostAgent {
                     host: self.label.clone(),
                     host_pane_id: host_pane_id(&self.label, id),
@@ -370,17 +383,38 @@ impl RexHostInventory {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let mut next = HashMap::new();
         let mut agents = Vec::new();
-        for (block_id, mut agent) in found {
-            let first_seen_ms = match seen.get(&block_id) {
-                Some(old) if old.pid == agent.pid => old.first_seen_ms,
-                _ => agent.first_seen_ms,
-            };
+        for (block_id, asks_done, mut agent) in found {
+            let old = seen.get(&block_id).filter(|old| old.pid == agent.pid);
+            let first_seen_ms = old.map_or(agent.first_seen_ms, |old| old.first_seen_ms);
+            let before = old.and_then(|old| old.state);
             agent.first_seen_ms = first_seen_ms;
+            // A provider that reports idle at the end of a turn asks for done: a record that
+            // goes from working or blocked to idle with the same pid shows done. A record
+            // that gave no state (a failed call) keeps what Harold showed before.
+            let state = match agent.state {
+                HostAgentState::Observed(ObservedAgentState::Idle)
+                    if asks_done
+                        && matches!(
+                            before,
+                            Some(
+                                ObservedAgentState::Working
+                                    | ObservedAgentState::Blocked
+                                    | ObservedAgentState::Done
+                            )
+                        ) =>
+                {
+                    agent.state = HostAgentState::Observed(ObservedAgentState::Done);
+                    Some(ObservedAgentState::Done)
+                }
+                HostAgentState::Observed(state) => Some(state),
+                HostAgentState::Unknown => before,
+            };
             next.insert(
                 block_id,
                 Seen {
                     pid: agent.pid,
                     first_seen_ms,
+                    state,
                 },
             );
             agents.push(agent);

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use crate::settings::{AgentProviderSettings, AgentSettings, ScreenAdapter};
+use crate::settings::{AgentProviderSettings, AgentSettings, IdleAfterWorking, ScreenAdapter};
 use crate::test_support::fake_program::{Language, write_fake_program};
 
 use super::domain::{EffectiveAgentState, ObservedAgentState};
@@ -138,11 +138,28 @@ impl Fake {
         mark: Option<&str>,
         clock: Arc<AtomicI64>,
     ) -> RexHostInventory {
+        self.inventory_for(label, mark, clock, settings())
+    }
+
+    /// An inventory whose provider `alpha` asks that idle after working shows done.
+    fn done_inventory(&self, clock: Arc<AtomicI64>) -> RexHostInventory {
+        let AgentSettings(mut providers) = settings();
+        providers[0].idle_after_working = IdleAfterWorking::Done;
+        self.inventory_for("omarchy", None, clock, AgentSettings(providers))
+    }
+
+    fn inventory_for(
+        &self,
+        label: &str,
+        mark: Option<&str>,
+        clock: Arc<AtomicI64>,
+        settings: AgentSettings,
+    ) -> RexHostInventory {
         let path: &Path = &self.dir.join("rex");
         let path = path.to_path_buf();
         RexHostInventory::with_program(
             label.to_string(),
-            settings(),
+            settings,
             mark.map(str::to_string),
             Arc::new(move || clock.load(Ordering::SeqCst)),
             Arc::new(move || Ok::<_, RexError>(path.clone())),
@@ -585,4 +602,118 @@ fn the_local_whoami_call_records_an_empty_host() {
     assert_eq!(count("whoami-metric-host"), 0);
     let _ = inventory.scan();
     assert_eq!(count("whoami-metric-host"), 1);
+}
+
+const WORKING: HostAgentState = HostAgentState::Observed(ObservedAgentState::Working);
+const IDLE: HostAgentState = HostAgentState::Observed(ObservedAgentState::Idle);
+const DONE: HostAgentState = HostAgentState::Observed(ObservedAgentState::Done);
+
+/// The state of the agent after one more scan with the record `word`.
+fn scan_with(fake: &Fake, inventory: &RexHostInventory, word: &str) -> HostAgentState {
+    fake.status(200, word, "");
+    inventory.scan().agents.remove(0).state
+}
+
+#[test]
+fn a_record_that_goes_from_working_to_idle_gives_done_and_done_stays() {
+    let fake = Fake::new("done-rule");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+    assert_eq!(
+        DONE.effective(),
+        ObservedAgentState::Done.effective(),
+        "the control tower marks a done row as waiting"
+    );
+}
+
+#[test]
+fn blocked_then_idle_gives_done() {
+    let fake = Fake::new("done-blocked");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(
+        scan_with(&fake, &inventory, "blocked"),
+        HostAgentState::Observed(ObservedAgentState::Blocked)
+    );
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+}
+
+#[test]
+fn working_again_after_done_gives_working_and_idle_after_that_gives_done_again() {
+    let fake = Fake::new("done-again");
+    let inventory = fake.done_inventory(clock(1));
+    for (word, expected) in [
+        ("working", WORKING),
+        ("idle", DONE),
+        ("working", WORKING),
+        ("idle", DONE),
+    ] {
+        assert_eq!(scan_with(&fake, &inventory, word), expected, "{word}");
+    }
+}
+
+#[test]
+fn an_idle_record_with_no_working_before_it_gives_idle() {
+    let fake = Fake::new("done-idle-first");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
+}
+
+#[test]
+fn a_new_pid_after_working_gives_idle_not_done() {
+    let fake = Fake::new("done-new-pid");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    fake.agent_process(201);
+    fake.status(201, "idle", "");
+    assert_eq!(inventory.scan().agents.remove(0).state, IDLE);
+}
+
+#[test]
+fn a_provider_without_the_setting_keeps_idle() {
+    let fake = Fake::new("done-not-asked");
+    let inventory = fake.inventory("omarchy", None, clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
+}
+
+#[test]
+fn a_failed_scan_between_working_and_idle_still_gives_done() {
+    let fake = Fake::new("done-failed-scan");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    let listing = std::fs::read_to_string(fake.dir.join("ls.json")).unwrap();
+    std::fs::remove_file(fake.dir.join("ls.json")).unwrap();
+    assert!(inventory.scan().outcome.is_err());
+    fake.put("ls.json", &listing);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+}
+
+#[test]
+fn a_failed_status_call_between_working_and_idle_keeps_the_working_memory() {
+    let fake = Fake::new("done-failed-status");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    fake.put("status-b1.json", "not json");
+    assert_eq!(
+        inventory.scan().agents.remove(0).state,
+        HostAgentState::Unknown
+    );
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+}
+
+#[test]
+fn an_agent_that_leaves_the_block_forgets_its_working() {
+    let fake = Fake::new("done-forgets");
+    let inventory = fake.done_inventory(clock(1));
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    fake.put(
+        "process-b1.json",
+        r#"{"child":{"pid":100,"name":"bash","argv0":"bash","cwd":"/home"}}"#,
+    );
+    assert!(inventory.scan().agents.is_empty());
+    fake.agent_process(200);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
 }
