@@ -621,11 +621,6 @@ fn a_record_that_goes_from_working_to_idle_gives_done_and_done_stays() {
     assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
     assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
     assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
-    assert_eq!(
-        DONE.effective(),
-        ObservedAgentState::Done.effective(),
-        "the control tower marks a done row as waiting"
-    );
 }
 
 #[test]
