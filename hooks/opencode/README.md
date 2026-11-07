@@ -93,6 +93,29 @@ opencode debug info
 The `plugins:` section must list `harold-plugin.js`, with no `failed to load
 plugin` message.
 
+## OpenCode 2.2.6 notes
+
+The worker probed OpenCode 2.2.6 on omarchy, read-only, on 2026-11-07. These facts
+matter for a later plugin change. The notes come from memory of the probe, not from
+a raw log.
+
+- OpenCode 2.2.6 discovers plugins in `.opencode/plugin/` and `.opencode/plugins/`.
+- A plugin must export a default definition: `export default { id, setup(ctx) }`.
+  A module with only a named export of hooks fails with "Plugin must export a default
+  definition with an id and an effect or setup function."
+- The plugin runs in OpenCode's background server (`opencode serve --service`), not in
+  the process of the Rex block. The plugin has no `REX_BLOCK` and no terminal of the block.
+- `ctx.experimental.terminal` has only `read`. A plugin cannot write to the terminal.
+- `ctx.event.subscribe` takes one argument. In one probe turn it gave no events.
+- The binary holds the event names `permission.asked`, `permission.replied`,
+  `session.error`, `session.idle` and `session.status`. The property names of the
+  events are not known.
+- OpenCode 2.2.6 writes its own program status record in a Rex block: `state=working`
+  during a turn and `state=idle` after it, with `app=opencode` and its own pid as owner.
+  It writes no `blocked`, `done` or `error` record.
+- Harold turns an idle record after a working record into done for a Rex host agent,
+  through the setting `idle_after_working = "done"`.
+
 ## Tests
 
 The suite uses only Node's built-in test runner and does not install anything:
