@@ -3710,6 +3710,75 @@ fn an_unknown_size_word_is_unsized() {
 }
 
 #[test]
+fn kind_line_reads_each_kind() {
+    assert_eq!(
+        spec_kind("# T\n**Size.** small\n**Kind.** feature\n"),
+        SpecKind::Feature
+    );
+    assert_eq!(spec_kind("**Kind.** fix"), SpecKind::Fix);
+    assert_eq!(spec_kind("**Kind.** other\n"), SpecKind::Other);
+    assert_eq!(SpecKind::Feature.as_str(), "feature");
+    assert_eq!(SpecKind::Fix.as_str(), "fix");
+    assert_eq!(SpecKind::Other.as_str(), "other");
+    assert_eq!(SpecKind::Unkinded.as_str(), "unkinded");
+}
+
+#[test]
+fn kind_line_ignores_case_and_trailing_text() {
+    assert_eq!(spec_kind("**Kind.** Feature\n"), SpecKind::Feature);
+    assert_eq!(
+        spec_kind("**Kind.** fix (a bug in the store).\n"),
+        SpecKind::Fix
+    );
+    assert_eq!(
+        spec_kind("**Kind.** product feature (`feature`): one use is a load.\n"),
+        SpecKind::Unkinded
+    );
+}
+
+#[test]
+fn no_kind_line_or_an_unknown_word_is_unkinded() {
+    assert_eq!(spec_kind("# T\n\nSome text.\n"), SpecKind::Unkinded);
+    assert_eq!(spec_kind(""), SpecKind::Unkinded);
+    assert_eq!(spec_kind("**Kind.** chore\n"), SpecKind::Unkinded);
+    assert_eq!(spec_kind("**Kind.**\n"), SpecKind::Unkinded);
+    assert_eq!(SpecFacts::default().kind, SpecKind::Unkinded);
+}
+
+#[tokio::test]
+async fn the_effort_gauge_carries_the_spec_kind() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let spec = SpecFacts {
+        id: "kinded".into(),
+        state: SpecState::InProgress,
+        state_at: OffsetDateTime::now_utc(),
+        kind: SpecKind::Fix,
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![spec])]),
+        ..PodSnapshot::default()
+    };
+    let effort = |kind: &str| {
+        test_support::gauge_f64_value(
+            "pod.spec.effort",
+            &[
+                ("pod.product", product.as_str()),
+                ("spec.id", "kinded"),
+                ("measure", "revisions"),
+                ("spec.kind", kind),
+            ],
+        )
+    };
+    assert_eq!(effort("fix"), Some(0.0));
+    assert_eq!(effort("unkinded"), None);
+
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
+#[test]
 fn awaiting_is_true_only_for_the_exact_first_line() {
     assert!(spec_awaiting("Waiting for your approval.\n\nText"));
     assert!(spec_awaiting("  Waiting for your approval.  \nText"));

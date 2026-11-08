@@ -857,6 +857,8 @@ pub(crate) struct SpecFacts {
     pub revised_after_approval: u32,
     /// The size from the `**Size.**` line of the spec.
     pub size: SpecSize,
+    /// The kind from the `**Kind.**` line of the spec.
+    pub kind: SpecKind,
     /// True when the first line of the spec is `Waiting for your approval.`.
     pub awaiting: bool,
     /// False when `approvals/<id>.md` names (`spec-sha256:`) another text than the spec
@@ -886,6 +888,7 @@ impl Default for SpecFacts {
             redo_seconds: 0,
             revised_after_approval: 0,
             size: SpecSize::Unsized,
+            kind: SpecKind::Unkinded,
             awaiting: false,
             approval_current: true,
         }
@@ -910,6 +913,52 @@ impl SpecSize {
             Self::Large => "large",
             Self::Unsized => "unsized",
         }
+    }
+}
+
+/// The kind a spec states on its `**Kind.**` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpecKind {
+    /// A product feature, which counts its uses.
+    Feature,
+    /// A bug fix, which a confirmed file confirms.
+    Fix,
+    /// Work that gives no use count.
+    Other,
+    /// The spec has no kind line, or the word is not a kind.
+    Unkinded,
+}
+
+impl SpecKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Feature => "feature",
+            Self::Fix => "fix",
+            Self::Other => "other",
+            Self::Unkinded => "unkinded",
+        }
+    }
+}
+
+/// The kind from the first line that starts with `**Kind.**`. The word is compared in
+/// lower case. Text after the word is ignored.
+pub(crate) fn spec_kind(markdown: &str) -> SpecKind {
+    let Some(rest) = markdown
+        .lines()
+        .find_map(|line| line.strip_prefix("**Kind.**"))
+    else {
+        return SpecKind::Unkinded;
+    };
+    let word = rest
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|part| !part.is_empty())
+        .unwrap_or_default()
+        .to_lowercase();
+    match word.as_str() {
+        "feature" => SpecKind::Feature,
+        "fix" => SpecKind::Fix,
+        "other" => SpecKind::Other,
+        _ => SpecKind::Unkinded,
     }
 }
 
@@ -1333,6 +1382,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let spec_text = read_text(&spec);
     let words = spec_text.as_deref().map_or(0, spec_words);
     let size = spec_text.as_deref().map_or(SpecSize::Unsized, spec_size);
+    let kind = spec_text.as_deref().map_or(SpecKind::Unkinded, spec_kind);
     let awaiting = spec_text.as_deref().is_some_and(spec_awaiting);
     let approval_text = read_text(&pod.join("approvals").join(format!("{id}.md")));
     let approval_current = approval_is_current(approval_text.as_deref(), spec_text.as_deref());
@@ -1354,6 +1404,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         redo_seconds: redo_seconds(&entries, started, worked_to),
         revised_after_approval: revised_after_approval(&entries, approved_at),
         size,
+        kind,
         awaiting,
         approval_current,
     };
@@ -2644,6 +2695,7 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                                 ));
                             }
                             attributes.push(KeyValue::new("spec.size", spec.size.as_str()));
+                            attributes.push(KeyValue::new("spec.kind", spec.kind.as_str()));
                             for (measure, value) in effort_measures(spec)
                                 .into_iter()
                                 .chain(extra_effort_measures(spec))

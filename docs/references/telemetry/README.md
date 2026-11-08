@@ -204,6 +204,8 @@ GROUP BY 1
 
 **Spec size.** `spec.size` comes from the `**Size.**` line under the spec's title: `small` (under half a day of build), `medium` (up to a day) or `large` (split before approval). A spec with no size line is `unsized`.
 
+**Spec kind.** `spec.kind` comes from the `**Kind.**` line under the `**Size.**` line: `feature` (a product feature), `fix` or `other`. A spec with no kind line is `unkinded`.
+
 **Free slots with work waiting** (`pod.slots.idle_with_work`) is a gauge for each product. Harold polls every 60 s, but it exports metrics every 30 s, so each polled value appears in two points. Its value is the product's free slots while one of its specs is approved and not started, on or after the cutoff of ADR 0021. Otherwise its value is 0. `pod.slots.free` and the `slot-idle` alert stay as they are, and count every free slot. To get slot hours, multiply the sum of the points by 30 and divide by 3600. A plain sum of points doubles the hours.
 
 **Work waiting** has three gauges for each product and `list`: `pod.inventory.items` (the number of specs), `pod.inventory.oldest_hours` (the age of the oldest spec, in hours) and `pod.inventory.item_days` (the sum of the ages, in days). The lists are:
@@ -415,7 +417,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
-| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), `spec.kind` (`feature`, `fix`, `other`, `unkinded`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
 | `pod.slots.idle_with_work` | gauge, `{slot}` | `pod.product` |
 | `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`) |
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |

@@ -2244,6 +2244,7 @@ const ATTRIBUTES: &[&str] = &[
     "kind",
     "list",
     "spec.size",
+    "spec.kind",
     "model",
     "step",
     "cause",

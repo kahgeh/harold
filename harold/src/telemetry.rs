@@ -151,6 +151,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "merged_at",
     "spec.words",
     "spec.size",
+    "spec.kind",
     "list",
     "spec.revisions",
     "spec.stage",
