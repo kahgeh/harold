@@ -229,10 +229,7 @@ pub(crate) async fn get_updates(
     } else {
         info!(
             rows = window.rows.len(),
-            bytes,
-            page_id,
-            streams_for_page,
-            "app page connected"
+            bytes, page_id, streams_for_page, "app page connected"
         );
     }
     let seen = Seen {

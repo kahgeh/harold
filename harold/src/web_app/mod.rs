@@ -240,6 +240,7 @@ impl OpenPages {
 
     /// Gives a stream the next number; it leaves the open set when the guard drops, for any
     /// reason. Opening a stream does not count as hearing from the page.
+    #[cfg(test)]
     pub(crate) fn open(self: &Arc<Self>) -> OpenPage {
         self.open_page(None)
     }

@@ -1615,5 +1615,8 @@ fn open_pages_counts_distinct_page_ids_and_not_streams() {
 fn a_new_page_id_is_random_and_not_empty() {
     let (one, two) = (super::pages::new_page_id(), super::pages::new_page_id());
     assert!(!one.is_empty() && one != two, "{one} {two}");
-    assert!(one.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{one}");
+    assert!(
+        one.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        "{one}"
+    );
 }
