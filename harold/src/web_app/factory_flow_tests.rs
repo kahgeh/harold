@@ -170,7 +170,7 @@ fn body() -> String {
         ("approval", "7", "68400", 1),
         ("build", "4", "181440.5", 1),
         ("merge", "1", "3600", 1),
-        ("release", "17", "null", 1),
+        ("release", "17", "7200", 1),
         ("installed", "null", "null", 0),
     ];
     rows.iter()
@@ -246,7 +246,7 @@ async fn a_good_answer_gives_eight_rows_and_sends_the_user_the_url_and_the_query
     let release = &read.rows[6];
     assert_eq!(
         (release.items, release.median_wait_s, release.has_data),
-        (Some(17.0), None, true)
+        (Some(17.0), Some(7200.0), true)
     );
     let idea = &read.rows[0];
     assert_eq!(
@@ -705,7 +705,8 @@ async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query(
     assert!(stage_block(&page, "build").contains("4 waiting"));
     assert!(stage_block(&page, "build").contains("median 2.1 d"));
     assert!(stage_block(&page, "release").contains("17 waiting"));
-    assert!(stage_block(&page, "release").contains("wait not recorded yet"));
+    assert!(stage_block(&page, "release").contains("median 2 h"));
+    assert!(!stage_block(&page, "release").contains("wait not recorded yet"));
     assert!(stage_block(&page, "merge").contains("1 waiting"));
     assert!(stage_block(&page, "merge").contains("median 1 h"));
     assert!(!stage_block(&page, "merge").contains("no data yet"));

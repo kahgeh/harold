@@ -18,7 +18,8 @@
 -- started_to_ready of the same spec, joined by spec.id, when the spec has a ready file; else approved_to_started plus started_to_completed, as before.
 -- A spec with no approved_to_started, or with neither started_to_ready nor started_to_completed, gives no wait.
 -- merge: items = ready_not_merged. The wait is the phase ready_to_completed of each spec that has it (empty when none has it).
--- release: items = merged_not_released. The wait is not recorded yet: median_wait_s is empty and has_data is 1.
+-- release: items = merged_not_released. The wait is the phase merged_to_released of each spec that has it (empty when none has it).
+-- A spec that restarts its series gives more than one rise: its wait is the mean of them, so it counts once.
 -- This query reads no product filter. It stands alone, so bin/logq --named factory-flow and Harold print the same rows.
 -- Columns: stage, items, median_wait_s, has_data.
 WITH
@@ -89,7 +90,9 @@ per_spec AS (
         sumIf(wait_s, phase = 'started_to_completed') AS completed_s,
         countIf(phase = 'started_to_completed') AS has_completed,
         sumIf(wait_s, phase = 'ready_to_completed') AS merge_s,
-        countIf(phase = 'ready_to_completed') AS has_merge
+        countIf(phase = 'ready_to_completed') AS has_merge,
+        avgIf(wait_s, phase = 'merged_to_released') AS release_s,
+        countIf(phase = 'merged_to_released') AS has_release
     FROM rises
     GROUP BY spec_id
 )
@@ -148,7 +151,7 @@ FROM (
         7,
         'release',
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'merged_not_released'), 0)),
-        NULL,
+        (SELECT if(countIf(has_release > 0) = 0, NULL, quantileExactIf(0.5)(release_s, has_release > 0)) FROM per_spec),
         1
     UNION ALL
     SELECT 8, 'installed', NULL, NULL, 0
