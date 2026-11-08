@@ -9,7 +9,7 @@ use time::{OffsetDateTime, UtcOffset};
 use tonic::{Request, Response, Status};
 
 use super::check::{Env, SpecReport, check_product};
-use super::chief_line::{ChiefLine, NoChief, tell_missing};
+use super::chief_line::{ChiefLine, FILES, NoChief, tell_missing};
 use crate::clickhouse_read::{ClickhouseSource, ReqwestSource};
 use crate::pod_stats::{Git, Product, SystemGit, read_registry};
 use crate::settings::FactoryFlowSettings;
@@ -109,7 +109,11 @@ impl<G: Git> EvidenceToolService<G> {
             source: self.source.as_ref(),
             settings: &self.settings,
         };
-        let reports = check_product(&env, product, only, now, offset).await;
+        let reports = {
+            // A rewrite of an evidence file waits for a `tell_missing` that is running.
+            let _rewrite = FILES.lock().await;
+            check_product(&env, product, only, now, offset).await
+        };
         tell_missing(self.chief.as_ref(), product, now, offset).await;
         reports
     }

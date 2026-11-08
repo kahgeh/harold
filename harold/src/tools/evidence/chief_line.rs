@@ -27,8 +27,8 @@ pub(crate) enum LineResult {
     NotTyped(&'static str),
 }
 
-/// Types one line into the chief's pane. It never waits for a busy pane: the caller tries
-/// again at the next check.
+/// Types one line into the chief's pane. A busy pane gets a few short retries, about 3
+/// seconds in all. After that the line waits: the caller tries again at the next check.
 pub(crate) trait ChiefLine: Send + Sync {
     fn type_line<'a>(
         &'a self,
@@ -79,6 +79,14 @@ fn evidence_ids(pod: &Path) -> Vec<String> {
 /// Types the line for each `missing` spec of `product` that has no `told:` line, then adds
 /// `told:` to its file. A line that is not typed leaves the file as it is, so the next call
 /// tries again.
+/// The lock that the pass holds while it rewrites an evidence file, so a rewrite never meets
+/// `tell_missing` between its read of a file and its `told:` write.
+pub(super) static FILES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The ids whose line was typed and whose `told:` write failed. They get no second line in
+/// this run of Harold. The next call writes `told:` again.
+static TYPED_NOT_TOLD: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) async fn tell_missing(
     chief: &dyn ChiefLine,
     product: &Product,
@@ -86,8 +94,7 @@ pub(crate) async fn tell_missing(
     offset: UtcOffset,
 ) {
     // The daily pass and a chief turn end may meet: one at a time, so no line goes twice.
-    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _one = ONE_AT_A_TIME.lock().await;
+    let _one = FILES.lock().await;
     let pod = product.repo.join(POD_FOLDER);
     for id in evidence_ids(&pod) {
         let Some(file) = read_evidence(&pod, &id) else {
@@ -102,18 +109,39 @@ pub(crate) async fn tell_missing(
             .filter(|result| !result.present)
             .cloned()
             .collect();
+        let key = pod.join("evidence").join(&id);
+        let typed_before = TYPED_NOT_TOLD.lock().is_ok_and(|held| held.contains(&key));
+        if typed_before {
+            write_told(&pod, &id, &key, now.to_offset(offset));
+            continue;
+        }
         let line = evidence_line(&product.name, &id, &absent);
         match chief.type_line(&line).await {
             LineResult::Typed => {
                 telemetry::count_evidence_line("typed");
                 telemetry::feature_used("evidence-follow-up");
                 info!(spec.id = %id, "evidence line typed");
-                if let Err(error) = add_told_once(&pod, &id, now.to_offset(offset)) {
-                    warn!(spec.id = %id, %error, "evidence told line not written");
-                }
+                write_told(&pod, &id, &key, now.to_offset(offset));
             }
             LineResult::NoChief => not_typed(&id, "no_chief", "no_chief"),
             LineResult::NotTyped(reason) => not_typed(&id, "not_typed", reason),
+        }
+    }
+}
+
+/// Adds `told:`. When the write fails, the id stays in `TYPED_NOT_TOLD`, so the line is not
+/// typed again.
+fn write_told(pod: &Path, id: &str, key: &PathBuf, at: OffsetDateTime) {
+    let Ok(mut held) = TYPED_NOT_TOLD.lock() else {
+        return;
+    };
+    match add_told_once(pod, id, at) {
+        Ok(_) => held.retain(|entry| entry != key),
+        Err(error) => {
+            warn!(spec.id = %id, %error, "evidence told line not written");
+            if !held.contains(key) {
+                held.push(key.clone());
+            }
         }
     }
 }

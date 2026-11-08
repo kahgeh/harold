@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use time::{OffsetDateTime, UtcOffset};
 
 use super::check_tests::{FakeSource, SERIAL, SQL, tagged};
-use super::chief_line::{ChiefLine, LineResult, evidence_line};
+use super::chief_line::{ChiefLine, LineResult, evidence_line, tell_missing};
 use super::service::EvidenceToolService;
 use super::state::QueryResult;
 use crate::pod_stats::SystemGit;
@@ -184,6 +184,46 @@ async fn no_chief_gives_no_told_line_and_the_next_pass_tries_again() {
     assert!(std::fs::read_to_string(&path).unwrap().contains("told:"));
     assert_eq!(counted("typed"), typed + 1);
     assert_eq!(chief.lines().len(), 3);
+}
+
+#[tokio::test]
+async fn a_failed_told_write_does_not_type_the_line_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let (fixture, _registry) = missing_product();
+    let chief = FakeChief::new(vec![LineResult::Typed]);
+    let product = fixture.product();
+    let folder = fixture.pod().join("evidence");
+    let open = std::fs::metadata(&folder).unwrap().permissions();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    for day in ["2026-11-20", "2026-11-21"] {
+        tell_missing(
+            chief.as_ref(),
+            &product,
+            at(&format!("{day}T10:00:00Z")),
+            UtcOffset::UTC,
+        )
+        .await;
+    }
+    std::fs::set_permissions(&folder, open).unwrap();
+    assert_eq!(
+        chief.lines().len(),
+        1,
+        "typed once, though no told: line was written"
+    );
+    tell_missing(
+        chief.as_ref(),
+        &product,
+        at("2026-11-22T10:00:00Z"),
+        UtcOffset::UTC,
+    )
+    .await;
+    assert_eq!(chief.lines().len(), 1);
+    let text = std::fs::read_to_string(folder.join("s.md")).unwrap();
+    assert_eq!(
+        text.matches("told: 2026-11-22T10:00:00Z").count(),
+        1,
+        "{text}"
+    );
 }
 
 #[tokio::test]

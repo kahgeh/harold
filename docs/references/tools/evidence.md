@@ -30,7 +30,7 @@ EVIDENCE harold evidence-check missing: evidence-check-2 (no_use_yet)
 
 The form is `EVIDENCE <product> <id> missing: <query> (<reason>)`. For more than one absent query, the line names each, separated by commas. The line holds names and fixed reason words only. It is not an alert and does not go to the phone.
 
-- The tool types the line with the writer of the other tools, `Writer::Tool("evidence")`, and the chief lookup of the restart reminder. It never waits for a busy pane, so the line never cuts into a turn.
+- The tool types the line with the writer of the other tools, `Writer::Tool("evidence")`, and the chief lookup of the restart reminder. It types only into an idle pane with an empty input box, so the line never cuts into a turn. A busy pane gets a few short retries, about 3 seconds in all, and then the line waits.
 - After the line is typed, the tool adds `told: <time>` to the evidence file.
 - With no chief found, or with a busy pane, nothing is typed and the file has no `told:` line. The tool tries again at the end of the next turn of the chief and at the next daily check.
 - The chief gives the line to the PnEM, who writes the fix spec `<id>-evidence`.
@@ -69,7 +69,7 @@ query: evidence-check-2 absent no_ok_read
 
 `released:` is empty while no tag holds the merge. The file holds no message text. A rewrite keeps the lines that a later step added, such as `told:`.
 
-`told: <time>` is the line that the evidence tool adds after it types the `EVIDENCE` line for a `missing` spec into the chief's pane. Each rewrite of the file keeps it. So the daily check and a manual `harold tool evidence check <product> <id>` give the chief one line for each spec, and no second line.
+`told: <time>` is the line that the evidence tool adds after it types the `EVIDENCE` line for a `missing` spec into the chief's pane. Each rewrite of the file keeps it. So the daily check and a manual `harold tool evidence check <product> <id>` give the chief one line for each spec, and no second line. The tool sends one line for each spec in all: a spec that goes from `missing` to `present` and back to `missing` gets no new line. If the write of `told:` fails after the line is typed, Harold keeps the spec in memory, writes `told:` again at the next check and types no second line.
 
 `confirmed/<id>.md` is written once, for a spec of kind `fix`, when its state becomes `present`. It has the lines `confirmed:` and `evidence:`. Each file goes to a temporary name first and is then renamed, so a reader never sees half a file.
 
