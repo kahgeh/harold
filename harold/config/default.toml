@@ -196,6 +196,27 @@ machine_audio_output = ["chief-of-pods"]
 hourly_rate = 100   # a whole number above 0, in the currency below
 currency = "AUD"    # three capital letters (ISO 4217)
 
+[prices]
+# List prices and the exchange rate. The HyperDX Inventory cost card prices the tokens with them.
+# Change them in local.toml. A price change here prices the whole stock again.
+# List prices: USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
+# on 2026-11-08. cache_write is the 5-minute cache write price.
+# Exchange rate: AUD for 1 USD on 2026-11-06 (1.6250 AUD per EUR divided by 1.1165 USD per EUR),
+# from the ECB euro reference rates, https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/
+exchange_rate_usd_to_aud = 1.4554
+
+[prices.list.claude-opus-5-5]
+input = 4.0
+output = 20.0
+cache_write = 5.0
+cache_read = 0.20
+
+[prices.list.claude-sonnet-5-5]
+input = 2.0
+output = 10.0
+cache_write = 2.50
+cache_read = 0.10
+
 # Timed prompts: none by default. Add [[timed_prompts]] entries in local.toml.
 # See docs/references/timed-prompts/README.md.
 

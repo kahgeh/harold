@@ -591,6 +591,72 @@ impl AttentionSettings {
     }
 }
 
+/// The list price of one model, in USD per million tokens, for each token kind.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ModelPrices {
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+}
+
+impl ModelPrices {
+    /// The four token kinds with their list prices, in the order Harold exports them.
+    pub(crate) fn by_kind(&self) -> [(&'static str, f64); 4] {
+        [
+            ("input", self.input),
+            ("output", self.output),
+            ("cache_write", self.cache_write),
+            ("cache_read", self.cache_read),
+        ]
+    }
+}
+
+/// The `[prices]` table: the list price of each model and token kind (USD per million
+/// tokens) and the number of AUD for 1 USD. Harold sends them as the gauges
+/// `harold.list_price.per_mtok` and `harold.exchange_rate.usd_to_aud`, so the HyperDX
+/// Inventory cost card can price the tokens.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PricesSettings {
+    /// The number of AUD for 1 USD. Above 0.
+    pub exchange_rate_usd_to_aud: f64,
+    /// The list prices, with the model id as the key.
+    pub list: BTreeMap<String, ModelPrices>,
+}
+
+impl Default for PricesSettings {
+    fn default() -> Self {
+        Self {
+            exchange_rate_usd_to_aud: 1.0,
+            list: BTreeMap::new(),
+        }
+    }
+}
+
+impl PricesSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if !(self.exchange_rate_usd_to_aud.is_finite() && self.exchange_rate_usd_to_aud > 0.0) {
+            errors.push("prices.exchange_rate_usd_to_aud must be a number above 0".into());
+        }
+        for (model, prices) in &self.list {
+            if !valid_model_name(model) {
+                errors.push(format!("prices.list.{model} is not a model name"));
+            }
+            for (kind, price) in prices.by_kind() {
+                if !(price.is_finite() && price >= 0.0) {
+                    errors.push(format!(
+                        "prices.list.{model}.{kind} must be a number from 0 up"
+                    ));
+                }
+            }
+        }
+        errors
+    }
+}
+
 /// Whether `model` is a model name: at most 128 ASCII token characters.
 fn valid_model_name(model: &str) -> bool {
     !model.is_empty()
@@ -1865,6 +1931,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) attention: AttentionSettings,
     #[serde(default)]
+    pub(crate) prices: PricesSettings,
+    #[serde(default)]
     pub(crate) restart_reminder: RestartReminderSettings,
     #[serde(default)]
     pub(crate) agents: AgentSettings,
@@ -1976,6 +2044,7 @@ impl Settings {
         errors.extend(tts_errors(&self.tts));
         errors.extend(self.call_answerer.validate());
         errors.extend(self.attention.validate());
+        errors.extend(self.prices.validate());
         errors.extend(self.restart_reminder.validate());
         errors.extend(away_messages_only_from_error(
             self.notify.away_messages_only_from.as_deref(),
@@ -2918,6 +2987,80 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             .build()
             .and_then(Config::try_deserialize::<AttentionFixture>);
         assert!(negative.is_err());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PricesFixture {
+        #[serde(default)]
+        prices: super::PricesSettings,
+    }
+
+    fn parse_prices(sources: &[&str]) -> super::PricesSettings {
+        let mut builder = Config::builder();
+        for source in sources {
+            builder = builder.add_source(File::from_str(source, FileFormat::Toml));
+        }
+        builder
+            .build()
+            .and_then(Config::try_deserialize::<PricesFixture>)
+            .expect("prices fixture should deserialize")
+            .prices
+    }
+
+    #[test]
+    fn prices_settings_ship_two_models_with_four_kinds_and_a_rate() {
+        let shipped = parse_prices(&[include_str!("../config/default.toml")]);
+        assert!(shipped.exchange_rate_usd_to_aud > 0.0);
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5"] {
+            let prices = shipped.list.get(model).expect("a shipped model");
+            assert_eq!(prices.by_kind().len(), 4);
+            assert!(prices.by_kind().iter().all(|(_, price)| *price > 0.0));
+        }
+        assert!(shipped.validate().is_empty());
+    }
+
+    #[test]
+    fn prices_settings_local_toml_overrides_a_price_and_the_rate() {
+        let settings = parse_prices(&[
+            include_str!("../config/default.toml"),
+            "[prices]\nexchange_rate_usd_to_aud = 1.6\n[prices.list.claude-opus-5-5]\ninput = 9.0\n",
+        ]);
+        assert_eq!(settings.exchange_rate_usd_to_aud, 1.6);
+        let opus = &settings.list["claude-opus-5-5"];
+        assert_eq!(opus.input, 9.0);
+        assert!(opus.output > 0.0, "the other kinds keep the shipped price");
+        assert!(settings.validate().is_empty());
+    }
+
+    #[test]
+    fn prices_settings_reject_a_bad_rate_or_price() {
+        for (source, part) in [
+            (
+                "[prices]\nexchange_rate_usd_to_aud = 0.0\n",
+                "exchange_rate_usd_to_aud",
+            ),
+            (
+                "[prices]\nexchange_rate_usd_to_aud = -1.0\n",
+                "exchange_rate_usd_to_aud",
+            ),
+            (
+                "[prices.list.claude-opus-5-5]\ninput = -1.0\n",
+                "claude-opus-5-5.input",
+            ),
+        ] {
+            let errors = parse_prices(&[include_str!("../config/default.toml"), source]).validate();
+            assert_eq!(errors.len(), 1, "{source}");
+            assert!(errors[0].contains(part), "{source}");
+        }
+        // An unknown kind is refused at load.
+        let unknown = Config::builder()
+            .add_source(File::from_str(
+                "[prices.list.claude-opus-5-5]\nbatch = 1.0\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .and_then(Config::try_deserialize::<PricesFixture>);
+        assert!(unknown.is_err());
     }
 
     #[derive(Debug, Deserialize)]
