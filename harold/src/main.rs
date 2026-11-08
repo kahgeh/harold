@@ -2303,6 +2303,16 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             data_folder,
         )) as Arc<dyn restart_reminder::TurnEnds>
     });
+    // At a turn end of the chief, the evidence tool types the lines that wait. It hands
+    // each turn end on to the restart reminder.
+    let restart_reminder = Some(Arc::new(tools::evidence::EvidenceTurnEnds::new(
+        Arc::new(
+            timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone())
+                .with_chief(&cfg.notify),
+        ),
+        cfg.telemetry.pod_registry_path(),
+        restart_reminder,
+    )) as Arc<dyn restart_reminder::TurnEnds>);
     // Only Rex has status records. tmux never creates the shared status.
     let current_steps = if cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex {
         agent::rex::status().steps()

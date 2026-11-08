@@ -8893,6 +8893,7 @@ mod tests {
         let handle = crate::tools::evidence::start(crate::tools::evidence::Launch {
             registry: Some(registry),
             settings: Default::default(),
+            chief_line: std::sync::Arc::new(crate::tools::evidence::NoChief),
             shutdown,
         })
         .await

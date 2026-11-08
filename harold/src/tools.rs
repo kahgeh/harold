@@ -190,6 +190,8 @@ pub(crate) struct Extras {
     pub(crate) watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
     /// The `[factory_flow]` settings, which the evidence tool reads ClickHouse with.
     pub(crate) factory_flow: FactoryFlowSettings,
+    /// Types the evidence line into the chief's pane, as `Writer::Tool("evidence")`.
+    pub(crate) evidence_chief_line: Arc<dyn evidence::ChiefLine>,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -277,6 +279,7 @@ pub(crate) async fn start(
         grpc_addr: cfg.grpc.addr().ok(),
         watch_counts,
         factory_flow: cfg.factory_flow.clone(),
+        evidence_chief_line: Arc::new(evidence::TmuxChiefLine::new(Arc::clone(&ports))),
     };
     let pane_folder = SnapshotPaneFolder { ports };
     start_with(
@@ -308,6 +311,7 @@ async fn start_with(
     let evidence_launch = evidence::Launch {
         registry: extras.pod_registry.clone(),
         settings: extras.factory_flow.clone(),
+        chief_line: Arc::clone(&extras.evidence_chief_line),
         shutdown: shutdown.clone(),
     };
     let knowledge_launch = extras.knowledge.clone();

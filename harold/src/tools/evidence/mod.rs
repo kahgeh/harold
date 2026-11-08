@@ -16,6 +16,10 @@ mod schedule;
 mod service;
 mod state;
 
+#[cfg(test)]
+pub(crate) use chief_line::NoChief;
+pub(crate) use chief_line::{ChiefLine, EvidenceTurnEnds, TmuxChiefLine};
+
 pub(crate) const NAME: &str = "evidence";
 
 /// What the host gives the evidence tool: the path of `products.toml`, the `[factory_flow]`
@@ -23,6 +27,8 @@ pub(crate) const NAME: &str = "evidence";
 pub(crate) struct Launch {
     pub registry: Option<PathBuf>,
     pub settings: FactoryFlowSettings,
+    /// Types the evidence line into the chief's pane.
+    pub chief_line: std::sync::Arc<dyn ChiefLine>,
     pub shutdown: tokio::sync::watch::Receiver<()>,
 }
 
@@ -30,11 +36,12 @@ pub(crate) struct Launch {
 pub(crate) async fn start(launch: Launch) -> Result<ToolHandle, ToolError> {
     crate::telemetry::register_evidence_counters();
     // The pass has its own service value: the service holds no state.
-    let passer = std::sync::Arc::new(service::EvidenceToolService::new(
-        launch.registry.clone(),
-        launch.settings.clone(),
-    ));
-    let service = service::EvidenceToolService::new(launch.registry, launch.settings);
+    let passer = std::sync::Arc::new(
+        service::EvidenceToolService::new(launch.registry.clone(), launch.settings.clone())
+            .with_chief(launch.chief_line.clone()),
+    );
+    let service = service::EvidenceToolService::new(launch.registry, launch.settings)
+        .with_chief(launch.chief_line);
     // Ends on a shutdown signal and when the sender is dropped.
     let task = tokio::spawn(schedule::run_every(
         schedule::PERIOD,

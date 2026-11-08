@@ -83,6 +83,7 @@ pub(crate) fn no_extras() -> Extras {
         pod_signals: PodSignals::none(),
         watch_counts: Arc::new(tokio::sync::watch::channel(WatchCounts::default()).0),
         factory_flow: Default::default(),
+        evidence_chief_line: Arc::new(crate::tools::evidence::NoChief),
     }
 }
 
