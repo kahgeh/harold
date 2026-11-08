@@ -829,6 +829,56 @@ impl ControlTowerSettings {
     }
 }
 
+/// `[factory_flow]`: where the factory flow page reads its numbers and its levers.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct FactoryFlowSettings {
+    /// The ClickHouse HTTP address. The host must be a loopback address.
+    pub clickhouse_url: String,
+    /// The file that holds the `hyperdx_ro` password. Unset: the page is not set up.
+    pub users_file: Option<String>,
+    /// The levers table (`levers.md`), read only. Unset: each stage shows "no levers file".
+    pub levers_file: Option<String>,
+}
+
+impl Default for FactoryFlowSettings {
+    fn default() -> Self {
+        Self {
+            clickhouse_url: "http://localhost:8123/".to_string(),
+            users_file: None,
+            levers_file: None,
+        }
+    }
+}
+
+impl FactoryFlowSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        if is_loopback_http_url(&self.clickhouse_url) {
+            return Vec::new();
+        }
+        vec!["factory_flow.clickhouse_url must be an http URL with a loopback host".into()]
+    }
+}
+
+/// True for an `http` URL whose host is `localhost` or a loopback IP address.
+fn is_loopback_http_url(text: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(text) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
 /// The multiplexer that holds the panes Harold works with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Multiplexer {
@@ -1785,6 +1835,8 @@ pub struct Settings {
     pub(crate) agent_monitor: AgentMonitorSettings,
     #[serde(default)]
     pub(crate) control_tower: ControlTowerSettings,
+    #[serde(default)]
+    pub(crate) factory_flow: FactoryFlowSettings,
     pub tts: TtsSettings,
     #[allow(dead_code)]
     pub log: LogSettings,
@@ -1879,6 +1931,7 @@ impl Settings {
         errors.extend(host_marks_errors(&self.agent_monitor, &self.machine_name));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.control_tower.validate());
+        errors.extend(self.factory_flow.validate());
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
         errors.extend(self.work.validate());
@@ -3189,6 +3242,65 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             errors,
             vec!["control_tower.host_marker must be \"glyph\", \"emoji\" or \"text\"".to_string()]
         );
+    }
+
+    fn factory_flow_errors(overrides: &str) -> Vec<String> {
+        crate::settings::settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|e| e.contains("factory_flow"))
+            .collect()
+    }
+
+    #[test]
+    fn factory_flow_defaults_to_the_local_clickhouse_and_no_files() {
+        let shipped = crate::settings::settings_with("");
+        assert_eq!(shipped.factory_flow.clickhouse_url, "http://localhost:8123/");
+        assert!(shipped.factory_flow.users_file.is_none());
+        assert!(shipped.factory_flow.levers_file.is_none());
+        assert!(factory_flow_errors("").is_empty());
+    }
+
+    #[test]
+    fn factory_flow_reads_its_two_paths() {
+        let set = crate::settings::settings_with(
+            "[factory_flow]\nusers_file = \"/x/users.sql\"\nlevers_file = \"/x/levers.md\"\n",
+        );
+        assert_eq!(set.factory_flow.users_file.as_deref(), Some("/x/users.sql"));
+        assert_eq!(set.factory_flow.levers_file.as_deref(), Some("/x/levers.md"));
+    }
+
+    #[test]
+    fn factory_flow_accepts_loopback_urls() {
+        for url in [
+            "http://localhost:8123/",
+            "http://127.0.0.1:8123/",
+            "http://127.1.2.3:9000/",
+            "http://[::1]:8123/",
+        ] {
+            let errors = factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
+            assert!(errors.is_empty(), "{url}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn factory_flow_refuses_a_url_whose_host_is_not_loopback() {
+        for url in [
+            "http://clickhouse.example.com:8123/",
+            "http://10.0.0.5:8123/",
+            "http://localhost.evil.example/",
+            "http://127.0.0.1.evil.example/",
+            "ftp://localhost/",
+            "not a url",
+            "",
+        ] {
+            let errors = factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
+            assert_eq!(
+                errors,
+                vec!["factory_flow.clickhouse_url must be an http URL with a loopback host".to_string()],
+                "{url}"
+            );
+        }
     }
 
     #[test]

@@ -146,6 +146,11 @@ idle_after_working = "done"
 # OpenCode 1.4.10 renders prompt and user-message rows with the same visible
 # prefix, so no safe provider-specific fallback summary prefix is configured.
 
+[factory_flow]
+# The factory flow page reads ClickHouse over HTTP as hyperdx_ro. The host must be a loopback
+# address. Set users_file and levers_file in local.toml.
+clickhouse_url = "http://localhost:8123/"
+
 [tts]
 command = "say"
 # What speaks the desk's lines: "command" runs `command` below, "server" uses the TTS server
