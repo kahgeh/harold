@@ -997,9 +997,18 @@ async fn a_server_that_never_answers_is_a_timeout() {
 fn the_real_client_follows_no_redirect() {
     // A redirect could carry the password to another host. The client's Debug output does not
     // list its proxies, so `no_proxy()` in `ReqwestSource::client` is checked by reading the code.
-    let shown = format!("{:?}", ReqwestSource::client());
+    let shown = format!("{:?}", ReqwestSource::client().expect("the client builds"));
     assert!(
         shown.contains(r#"redirect_policy: "Policy(None)""#),
         "{shown}"
     );
+}
+
+#[tokio::test]
+async fn a_client_that_failed_to_build_gives_unreachable_and_sends_nothing() {
+    let dir = TestDirectory::new();
+    let users = dir.file("users.sql", &users_file_text(CANARY));
+    let read = read_factory_flow(&settings(Some(users)), &ReqwestSource::from_client(None)).await;
+    assert_eq!(read.outcome, FlowOutcome::Unreachable);
+    assert!(read.rows.is_empty());
 }

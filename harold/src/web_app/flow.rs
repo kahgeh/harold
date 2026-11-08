@@ -133,23 +133,27 @@ pub(crate) trait FlowSource: Send + Sync {
 
 /// ClickHouse over HTTP, with `reqwest`.
 pub(crate) struct ReqwestSource {
-    client: reqwest::Client,
+    /// None when the client could not be built. Then no request goes out.
+    client: Option<reqwest::Client>,
 }
 
 impl ReqwestSource {
     pub(crate) fn new() -> Self {
-        Self {
-            client: Self::client(),
-        }
+        Self::from_client(Self::client())
+    }
+
+    /// A source over `client`; with none, every query fails as `Unreachable`.
+    pub(crate) fn from_client(client: Option<reqwest::Client>) -> Self {
+        Self { client }
     }
 
     /// The client: no redirect and no proxy, so the password goes only to the configured URL.
-    pub(crate) fn client() -> reqwest::Client {
+    pub(crate) fn client() -> Option<reqwest::Client> {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
-            .unwrap_or_default()
+            .ok()
     }
 
     /// The HTTP request for `request`: the user and the password in headers, the limits and
@@ -182,8 +186,9 @@ impl FlowSource for ReqwestSource {
         request: &'a FlowRequest,
     ) -> Pin<Box<dyn Future<Output = Result<String, SourceFailure>> + Send + 'a>> {
         Box::pin(async move {
-            let built = Self::build(&self.client, request).map_err(|_| SourceFailure::Refused)?;
-            let response = self.client.execute(built).await.map_err(failure_of)?;
+            let client = self.client.as_ref().ok_or(SourceFailure::Unreachable)?;
+            let built = Self::build(client, request).map_err(|_| SourceFailure::Refused)?;
+            let response = client.execute(built).await.map_err(failure_of)?;
             if !response.status().is_success() {
                 return Err(SourceFailure::Refused);
             }
