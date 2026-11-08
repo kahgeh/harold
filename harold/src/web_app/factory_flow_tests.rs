@@ -686,6 +686,49 @@ fn a_wait_shows_in_hours_below_two_days_and_in_days_from_two_days() {
     assert_eq!(format_wait(0.0), "0 h");
 }
 
+/// The eight rows with the count of the installed row.
+fn rows_with_installed(count: &str) -> String {
+    body_with(&[
+        ("idea", "4", "21600", 1),
+        ("spec", "2", "7200", 1),
+        ("architect review", "3", "10800", 1),
+        ("approval", "7", "68400", 1),
+        ("build", "4", "181440.5", 1),
+        ("merge", "1", "3600", 1),
+        ("release", "17", "7200", 1),
+        ("installed", count, "null", 0),
+    ])
+}
+
+#[tokio::test]
+async fn the_installed_stage_shows_a_count_of_specs_without_evidence_and_no_line_for_0() {
+    let page = page_for(Ok(rows_with_installed("2")), None).await;
+    assert!(stage_block(&page, "installed").contains("2 installed without evidence"));
+    // The line is one count. Only the installed stage has it.
+    assert_eq!(page.matches("installed without evidence").count(), 1);
+    let none = page_for(Ok(rows_with_installed("0")), None).await;
+    assert!(!none.contains("without evidence"), "{none}");
+    let unknown = page_for(Ok(rows_with_installed("null")), None).await;
+    assert!(!unknown.contains("without evidence"), "{unknown}");
+}
+
+#[tokio::test]
+async fn a_count_on_another_stage_row_shows_no_evidence_line() {
+    let page = page_for(Ok(body()), None).await;
+    assert!(!page.contains("without evidence"), "{page}");
+}
+
+#[test]
+fn the_query_counts_the_evidence_gauge_of_the_last_10_minutes_by_its_newest_point() {
+    for piece in [
+        "'pod.evidence.missing'",
+        "INTERVAL 10 MINUTE",
+        "argMax(Value, TimeUnix)",
+    ] {
+        assert!(FACTORY_FLOW_SQL.contains(piece), "{piece}");
+    }
+}
+
 #[tokio::test]
 async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query() {
     let page = page_for(Ok(body()), Some(LEVERS)).await;

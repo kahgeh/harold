@@ -26,7 +26,8 @@
 {% for stage in stages %}<li data-stage="{{ stage.name }}" class="flow-stage {{ stage.class }}">
 <h3 class="flow-name">{{ stage.name }}</h3>
 <p class="flow-numbers">{{ stage.summary }}</p>
-<p class="flow-levers">{% if stage.levers.is_empty() %}{{ stage.levers_note }}{% else %}{% for lever in stage.levers %}{% if !loop.first %} &middot; {% endif %}{{ lever.name }} ({{ lever.owner }}){% endfor %}{% endif %}</p>
+{% if !stage.note.is_empty() %}<p class="flow-note">{{ stage.note }}</p>
+{% endif %}<p class="flow-levers">{% if stage.levers.is_empty() %}{{ stage.levers_note }}{% else %}{% for lever in stage.levers %}{% if !loop.first %} &middot; {% endif %}{{ lever.name }} ({{ lever.owner }}){% endfor %}{% endif %}</p>
 </li>
 {% endfor %}</ol>
 {% if !unread.is_empty() %}<h3 class="notes-head">Rows not read</h3>

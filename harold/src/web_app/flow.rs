@@ -293,6 +293,9 @@ struct StageView {
     /// `flow-red`, `flow-grey` or empty.
     class: &'static str,
     summary: String,
+    /// A line under the numbers, or empty. The installed stage gives `N installed without
+    /// evidence` when N is more than 0.
+    note: String,
     levers: Vec<Lever>,
     /// Shown when the stage has no levers: "no levers file" or "no levers".
     levers_note: &'static str,
@@ -330,6 +333,17 @@ fn summary_of(row: &StageRow) -> String {
     }
 }
 
+/// The count of specs installed without evidence, as one line. Empty for 0, for no count
+/// and for any other stage.
+fn note_of(stage: &str, row: &StageRow) -> String {
+    match row.items {
+        Some(count) if stage == "installed" && count >= 0.5 => {
+            format!("{} installed without evidence", count.round() as i64)
+        }
+        _ => String::new(),
+    }
+}
+
 fn build_view(read: &FlowRead, levers: LeversRead) -> (Vec<StageView>, Vec<String>) {
     let highest = read
         .rows
@@ -359,6 +373,7 @@ fn build_view(read: &FlowRead, levers: LeversRead) -> (Vec<StageView>, Vec<Strin
                     ""
                 },
                 summary: row.map_or_else(|| "no data yet".to_string(), summary_of),
+                note: row.map(|row| note_of(name, row)).unwrap_or_default(),
                 levers: std::mem::take(&mut per_stage[at]),
                 levers_note: note,
             }

@@ -1,6 +1,6 @@
 -- Note: The flow stage with the highest median wait is the first one to ask about.
 -- Waits for: nothing
--- Empty: installed: no data yet (has_data is 0 and the numbers are empty)
+-- Empty: installed: no data yet (has_data is 0 and the median is empty); its items is the count of specs installed without evidence
 -- The factory flow, one row for each flow stage, in order: idea, spec, architect review, approval, build, merge, release, installed. All products together.
 -- Items: the newest export of pod.inventory.items for the list of the stage, summed over the products. It is the rule of work-waiting.sql
 -- (rows "specs: <list>", the first SELECT of "this" week), with one change: it takes the newest export of each list,
@@ -19,6 +19,8 @@
 -- A spec with no approved_to_started, or with neither started_to_ready nor started_to_completed, gives no wait.
 -- merge: items = ready_not_merged. The wait is the phase ready_to_completed of each spec that has it (empty when none has it).
 -- release: items = merged_not_released. The wait is the phase merged_to_released of each spec that has it (empty when none has it).
+-- installed: items = the specs whose newest pod.evidence.missing point of the last 10 minutes is 1 (the evidence file says missing). It is a count of
+-- specs, with no spec id. The median is empty and has_data stays 0: the stage has no wait. It adds no new reader of ClickHouse (ADR 0037).
 -- A spec that restarts its series gives more than one rise: its wait is the mean of them, so it counts once.
 -- This query reads no product filter. It stands alone, so bin/logq --named factory-flow and Harold print the same rows.
 -- Columns: stage, items, median_wait_s, has_data.
@@ -154,6 +156,19 @@ FROM (
         (SELECT if(countIf(has_release > 0) = 0, NULL, quantileExactIf(0.5)(release_s, has_release > 0)) FROM per_spec),
         1
     UNION ALL
-    SELECT 8, 'installed', NULL, NULL, 0
+    SELECT
+        8,
+        'installed',
+        toNullable(toFloat64((
+            SELECT countIf(newest = 1)
+            FROM (
+                SELECT argMax(Value, TimeUnix) AS newest
+                FROM otel.otel_metrics_gauge
+                WHERE MetricName = 'pod.evidence.missing' AND TimeUnix > now() - INTERVAL 10 MINUTE
+                GROUP BY Attributes['pod.product'], Attributes['spec.id']
+            )
+        ))),
+        NULL,
+        0
 )
 ORDER BY ord
