@@ -165,8 +165,8 @@ fn settings(users_file: Option<String>) -> FactoryFlowSettings {
 fn body() -> String {
     let rows = [
         ("idea", "null", "null", 0),
-        ("spec", "null", "null", 0),
-        ("architect review", "null", "null", 0),
+        ("spec", "2", "7200", 1),
+        ("architect review", "3", "10800", 1),
         ("approval", "7", "68400", 1),
         ("build", "4", "181440.5", 1),
         ("merge", "null", "null", 0),
@@ -692,15 +692,21 @@ async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query(
     }
     assert!(stage_block(&page, "approval").contains("7 waiting"));
     assert!(stage_block(&page, "approval").contains("median 19 h"));
+    assert!(stage_block(&page, "spec").contains("2 waiting"));
+    assert!(stage_block(&page, "spec").contains("median 2 h"));
+    assert!(stage_block(&page, "architect review").contains("3 waiting"));
+    assert!(stage_block(&page, "architect review").contains("median 3 h"));
     assert!(stage_block(&page, "build").contains("4 waiting"));
     assert!(stage_block(&page, "build").contains("median 2.1 d"));
     assert!(stage_block(&page, "release").contains("17 waiting"));
     assert!(stage_block(&page, "release").contains("wait not recorded yet"));
-    for stage in ["idea", "spec", "architect review", "merge", "installed"] {
+    for stage in ["idea", "merge", "installed"] {
         assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
         assert!(stage_block(&page, stage).contains("flow-grey"), "{stage}");
     }
-    assert!(!stage_block(&page, "approval").contains("flow-grey"));
+    for stage in ["spec", "architect review", "approval"] {
+        assert!(!stage_block(&page, stage).contains("flow-grey"), "{stage}");
+    }
     assert!(page.contains("<title>Factory flow</title>"));
     assert!(page.contains(r#"data-back="/c""#));
     assert!(page.contains("/static/back-swipe.js"));

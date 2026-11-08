@@ -7,6 +7,7 @@
 -- so a rise holds one lead time. Two lead times within one export would stand as their mean.
 -- The rows "work: <phase>" read harold.work.lead_time (idea to your check, by phase).
 -- The rows "spec: <phase>" read pod.spec.lead_time (spec time, open to merged). They show a number until the work rows have data.
+-- The "spec:" rows keep four phases. The phases spec_writing, architect_review and approval_wait split open_to_approved, so they are not rows.
 -- The product filter applies to the "spec:" rows only. A week with no new observation gives no number for that week.
 -- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
 -- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
@@ -73,6 +74,7 @@ FROM (
             FROM otel.otel_metrics_histogram
             WHERE MetricName = 'pod.spec.lead_time'
               AND TimeUnix > now() - INTERVAL 21 DAY
+              AND Attributes['phase'] IN ('open_to_approved', 'approved_to_started', 'started_to_completed', 'merged_to_released')
               AND $__filters
         )
     )
