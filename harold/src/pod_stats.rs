@@ -1937,11 +1937,12 @@ pub(crate) fn first_merged_file(pod: &Path, offset: UtcOffset) -> Option<OffsetD
         .min()
 }
 
-/// The gauge of the specs in a list of work waiting, and its unit.
 /// The `list` value of the ideas: the backlog items with no spec file.
 const IDEA_LIST: &str = "idea";
 
-/// The idea count of each product, as the backlog tool last reported it.
+/// The idea count of each product, as the backlog tool last reported it. It is one shared
+/// snapshot for the process, as the spec says. A product that leaves the registry keeps its
+/// last count until Harold restarts.
 static IDEA_COUNTS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
 
 /// What the backlog tool tells pod stats about the ideas. The backlog tool keeps its own
@@ -1996,6 +1997,7 @@ impl IdeaSignals for PodSignals {
     }
 }
 
+/// The gauge of the specs in a list of work waiting, and its unit.
 pub(crate) const INVENTORY_ITEMS: (&str, &str) = ("pod.inventory.items", "{spec}");
 /// The gauge of the age of the oldest spec in a list of work waiting, and its unit.
 pub(crate) const INVENTORY_OLDEST_HOURS: (&str, &str) = ("pod.inventory.oldest_hours", "h");
