@@ -273,6 +273,18 @@ A second listener serves the browser on the Mac at `http://127.0.0.1:4331` (`[we
 
 Harold logs `app spec shown` (INFO) with `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`) and `ms`, and adds `product` and `id` only when the product is in the registry and the id passes the id pattern. It logs `app spec shared` (INFO) with `product`, `id` and `sha` when a **Share** reply is stored. No log line holds a path or a spec's text.
 
+## Factory flow
+
+The row **Factory flow** on the Pages screen opens `/flow`. The page shows the eight flow stages in order: idea, spec, architect review, approval, build, merge, release, installed. On a phone the stages stack from top to bottom. On a wide screen they run from left to right. The back button leads to Pages.
+
+- **The numbers.** Approval and build show their items waiting and their median wait. Release shows its items waiting and "wait not recorded yet". Idea, spec, architect review, merge and installed show "no data yet", in grey. A wait shows in hours below 2 days, else in days. The stage with the highest median wait is red. With no median, no stage is red.
+- **The source.** The numbers come from one named query, `docs/references/telemetry/queries/factory-flow.sql`. Harold sends it to ClickHouse over HTTP as the user `hyperdx_ro`, with `readonly=1`, `max_execution_time=5` and a limit of 5 seconds. `bin/logq --named factory-flow` prints the same rows. See [ADR 0037](../../adr/0037-harold-reads-clickhouse-only-for-the-factory-flow-page.md).
+- **The settings.** The section `[factory_flow]` holds `clickhouse_url` (the default is `http://localhost:8123/`; a host that is not a loopback address stops Harold at start), `users_file` (the file that holds the `hyperdx_ro` password; no default) and `levers_file` (the chief's `levers.md`; no default). Set both paths in `local.toml`. Harold reads the password at each load and drops it after the request. It never writes the password to a log line or a span, and never shows it on the page.
+- **The levers.** At each load, the page reads the first table of `levers_file` that has the columns `Flow stage`, `Lever`, `What it changes` and `Owner`. It shows the lever and its owner under each stage. A row whose flow stage is not one of the eight goes in the list "Rows not read" at the foot of the page. With no file, each stage shows "no levers file".
+- **A failed read.** Every stage shows "no data yet", under one line with the reason. With no `users_file` setting, the line reads "The factory flow read is not set up".
+- **What the page shows.** Only stage names, numbers, levers and owners. It has no spec id, no title and no message text. It has no POST and no auto-refresh. A reload reads again. It goes through the login check and the device check, as `/specs` does.
+- **Telemetry.** The counter `harold.factory_flow.reads` counts each load by `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`). The span `factory_flow.read` and the log line `factory flow read` carry `outcome` and `elapsed_ms`. The card **Factory flow reads** on the Harold dashboard shows them.
+
 ## Page collections
 
 A page collection is a folder of pages that Harold serves at `/c/<name>`. The chief writes the pages, such as explainers, and you read them on the phone or at the desk. A new kind of page needs one `[[web_app.collections]]` entry and a restart of Harold. It needs no new code. See [ADR 0030](../../adr/0030-harold-serves-page-collections-sandboxed.md).
@@ -592,6 +604,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
 | `app spec shown` | INFO. `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`), `ms`, and `product` and `id` when the product is in the registry and the id passes the id pattern |
 | `app spec shared` | INFO. `product`, `id` and `sha`, logged when a **Share** reply is stored |
+| `factory flow read` | INFO for `ok`, WARN for each other outcome. `outcome` (`ok`, `unreachable`, `refused`, `timeout` or `not_set_up`) and `elapsed_ms`. No password, no SQL text and no row value |
 | `app page shown` | INFO. `listener` (`web_app` or `specs`), `collection` (a configured name, or `unknown`), `result` (`ok`, `not_found`, `refused`, `too_big` or `unreadable`) and `ms`. No file name and no text |
 | `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
 | `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
