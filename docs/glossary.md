@@ -82,6 +82,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | product feature | A part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. Not the Cargo feature | "feature flag" for it |
 | kind (of a spec) | `feature` (a product feature), `fix` or `other`, from the spec's `**Kind.**` line | "type". Not the Cargo feature |
 | feature-use count | The counter `<product>.feature.used` with `spec.id`, which rises at each use of a product feature | "usage metric". Not the Cargo feature |
+| evidence query | A named query file in `queries/evidence/` that returns `present` and `reason` for one Done-when item of a spec, after `{since}` | "proof query", "evidence SQL", "check query" |
+| evidence check | Harold's run of a spec's evidence queries, which writes the evidence file and, for a fix, the confirmed file | "verification", "evidence run", "the audit" |
+| evidence file | The file `evidence/<id>.md` in a pod folder, with the state `waiting`, `present` or `missing` | "evidence report", "proof file" |
 | confirmed file | The file `confirmed/<id>.md` in a pod folder, which the evidence check writes when the evidence query of a fix finds its signal. It sits beside the approval, merged and withdrawn files | |
 | spec size | Small (under half a day of build), medium (up to a day) or large (split before approval), in the spec's `**Size.**` line | "estimate", "points" |
 | item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |
@@ -325,7 +328,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | queue | The chief's own list of things to do, with one Now item. The work records replace it in the chief's use (work-records) | — |
 | Now item | The queue's current item | — |
 | queue item age | How long ago a queue item's text was added or last changed. Moving the item does not change it | "last updated" (a move is not an update) |
-| evidence | A pointer, such as a file and line, that backs an item | — |
+| evidence | A pointer, such as a file and line, that backs an item. Not the same as an evidence query | — |
 | work record | The chief's record of one piece of work: its priority, status, what it waits for, its next step, its decisions and its links. The work tool keeps it. A work record is not a program status record | "record" alone (the glossary also has the program status record), "ticket", "task card" |
 | priority (of a work record) | `focus`, `next` or `later`. At most two open work records are in focus | — |
 | status (of a work record) | Where the work is, from `idea` to `checked by the user`. It is not an agent state | "state" for it |
