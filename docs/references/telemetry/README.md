@@ -206,7 +206,7 @@ GROUP BY 1
 
 **Spec kind.** `spec.kind` comes from the `**Kind.**` line under the `**Size.**` line: `feature` (a product feature), `fix` or `other`. A spec with no kind line is `unkinded`.
 
-**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`: one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
+**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check` and `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
 
 **Confirmed fixes.** The evidence check writes `confirmed/<id>.md` in the pod folder when the evidence query of a fix spec returns `present = 1` after its release. The file has the lines `confirmed:` (RFC 3339 time) and `evidence:` (the name of the evidence query, with no message text). Pod stats reads it and exports the gauge `pod.fix.confirmed_at` for each confirmed file: its value is the `confirmed:` time in Unix seconds, with `spec.id` and `pod.product`. A restart exports the same times again, so the query counts the `spec.id` values whose time falls in the window, not a rise. A file with no valid `confirmed:` time gives no gauge point and one unreadable-file notice.
 
@@ -414,6 +414,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.web_app.collection_pages` | counter, `{page}` | `collection` (a name from `[[web_app.collections]]`, or `unknown`; never a path), `result` (`ok`, `not_found`, `refused`, `too_big`, `unreadable`) |
 | `harold.factory_flow.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`). One for each load of the page `/flow` |
 | `harold.evidence.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`). One for each read of one evidence query by the evidence check |
+| `harold.evidence.lines` | counter, `{line}` | `outcome` (`typed`, `no_chief`, `not_typed`). One for each try to type an `EVIDENCE` line into the chief's pane. Each outcome starts at 0 |
 | `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
 | `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
 | `harold.web_app.request.duration` | histogram, `s`, buckets 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | `route_class`, never `updates`. The time from the request's arrival to the first byte of the answer |
@@ -653,6 +654,10 @@ The evidence tool reads the evidence queries of each merged spec once a day and 
 | `confirmed` | On `evidence file written`: `true` when the check also wrote `confirmed/<id>.md` |
 
 The lines also use `spec.id`, `outcome`, `elapsed_ms` and `state` (`waiting`, `present` or `missing`).
+
+**The evidence line.** When a spec's evidence file says `missing` and has no `told:` line, the evidence tool types one line into the chief's pane. The line is `EVIDENCE <product> <id> missing: <query> (<reason>)`, with more queries separated by commas. It holds names and fixed reason words only. It is not an alert and does not go to the phone. Each try counts once on `harold.evidence.lines` with its `outcome`. The log line `evidence line typed` (`info`) has `spec.id`. The log line `evidence line not typed` (`warn`) has `spec.id` and `reason` (`no_chief`, `pane_busy`, `no_pane`, `type_failed` or `several_agents_in_folder`). `no_chief` points at the chief's folder in the registry. A `missing` file that has no `told:` line after a day is a defect: the daily check counts it as `not_typed` again.
+
+**The factory flow count.** The installed row of `factory-flow.sql` gives, in `items`, the count of specs whose newest `pod.evidence.missing` point of the last 10 minutes is 1. The page shows `N installed without evidence` under the installed stage when N is more than 0. It shows a count and no spec ids. This extends the one query of the page and adds no new reader of ClickHouse. Evidence: `evidence/evidence-follow-up-1.sql`.
 
 ## Web app requests
 
@@ -1058,6 +1063,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.web_app.collection_pages`, for each configured `collection` and for `unknown`, with each `result`;
 - `harold.factory_flow.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`);
 - `harold.evidence.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`);
+- `harold.evidence.lines`, for each `outcome` (`typed`, `no_chief`, `not_typed`);
 - `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.telemetry.log_records.unsent`, for each `outcome` (`resent`, `file_only`);
@@ -1065,7 +1071,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.work.checked`, for each `priority`;
-- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`);
+- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check` and `evidence-follow-up`);
 - `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 

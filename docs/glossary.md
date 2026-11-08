@@ -84,7 +84,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | feature-use count | The counter `<product>.feature.used` with `spec.id`, which rises at each use of a product feature | "usage metric". Not the Cargo feature |
 | evidence query | A named query file in `queries/evidence/` that returns `present` and `reason` for one Done-when item of a spec, after `{since}` | "proof query", "evidence SQL", "check query" |
 | evidence check | Harold's run of a spec's evidence queries, which writes the evidence file and, for a fix, the confirmed file | "verification", "evidence run", "the audit" |
-| evidence file | The file `evidence/<id>.md` in a pod folder, with the state `waiting`, `present` or `missing` | "evidence report", "proof file" |
+| evidence file | The file `evidence/<id>.md` in a pod folder, with the state `waiting`, `present` or `missing`, and the `told:` line when the chief has the `EVIDENCE` line for it | "evidence report", "proof file" |
+| evidence missing | The list in `harold tool release next`, and the state of a spec whose evidence query still returns 0 seven days after its release | "unproven", "no evidence" (alone) |
 | confirmed file | The file `confirmed/<id>.md` in a pod folder, which the evidence check writes when the evidence query of a fix finds its signal. It sits beside the approval, merged and withdrawn files | |
 | spec size | Small (under half a day of build), medium (up to a day) or large (split before approval), in the spec's `**Size.**` line | "estimate", "points" |
 | item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |

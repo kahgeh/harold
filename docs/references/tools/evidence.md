@@ -20,6 +20,24 @@ The command prints one line for each spec: `<id> <state> <query> <present|absent
 3. It sends the query with `param_since`, the merge time in UTC, through the shared ClickHouse read (`harold/src/clickhouse_read.rs`). The user is `hyperdx_ro`, the query has `readonly=1` and `max_execution_time=5`, and the address must be loopback. The settings are `[factory_flow] clickhouse_url` and `[factory_flow] users_file`. The password is read at each read and dropped after it.
 4. It applies the state rule and writes `evidence/<id>.md`.
 
+## The line to the chief
+
+When a spec's file says `state: missing` and has no `told:` line, the tool types one line into the chief's pane:
+
+```
+EVIDENCE harold evidence-check missing: evidence-check-2 (no_use_yet)
+```
+
+The form is `EVIDENCE <product> <id> missing: <query> (<reason>)`. For more than one absent query, the line names each, separated by commas. The line holds names and fixed reason words only. It is not an alert and does not go to the phone.
+
+- The tool types the line with the writer of the other tools, `Writer::Tool("evidence")`, and the chief lookup of the restart reminder. It never waits for a busy pane, so the line never cuts into a turn.
+- After the line is typed, the tool adds `told: <time>` to the evidence file.
+- With no chief found, or with a busy pane, nothing is typed and the file has no `told:` line. The tool tries again at the end of the next turn of the chief and at the next daily check.
+- The chief gives the line to the PnEM, who writes the fix spec `<id>-evidence`.
+- The list **evidence missing** of `harold tool release next` and the line `N installed without evidence` of the factory flow page show the same specs. A spec whose evidence becomes `present` leaves both at the next check.
+
+## When the check runs
+
 The pass runs once at the start of Harold and then each 24 hours. A release install restarts Harold, so each release gets a check at once. A spec in a final state (`present` or `missing`) is not checked again by the pass.
 
 ## The state
@@ -51,6 +69,8 @@ query: evidence-check-2 absent no_ok_read
 
 `released:` is empty while no tag holds the merge. The file holds no message text. A rewrite keeps the lines that a later step added, such as `told:`.
 
+`told: <time>` is the line that the evidence tool adds after it types the `EVIDENCE` line for a `missing` spec into the chief's pane. Each rewrite of the file keeps it. So the daily check and a manual `harold tool evidence check <product> <id>` give the chief one line for each spec, and no second line.
+
 `confirmed/<id>.md` is written once, for a spec of kind `fix`, when its state becomes `present`. It has the lines `confirmed:` and `evidence:`. Each file goes to a temporary name first and is then renamed, so a reader never sees half a file.
 
 ## Telemetry
@@ -59,6 +79,9 @@ query: evidence-check-2 absent no_ok_read
 | --- | --- |
 | `pod.evidence.missing` (gauge, `spec.id`, `pod.product`) | 1 when the state is `missing`, else 0. Pod stats exports it from the evidence files. |
 | `harold.evidence.reads` (counter, `outcome`) | One for each read of one evidence query. Each outcome starts at 0. |
+| `harold.evidence.lines` (counter, `outcome`) | One for each try to type the line: `typed`, `no_chief` or `not_typed`. Each outcome starts at 0. |
+| `harold.feature.used` with `spec.id=evidence-follow-up` | One count each time a line is typed. |
+| log `evidence line typed`, `evidence line not typed` | `spec.id`, and `reason` for the second. `info` and `warn`. |
 | `harold.feature.used` with `spec.id=evidence-check` | One count each time a spec's state first becomes `present` or `missing`. |
 | log `evidence query read` | `spec.id`, `evidence.query`, `outcome`, `elapsed_ms`. No SQL. `info` for `ok`, `warn` for the others. |
 | log `evidence file written` | `spec.id`, `state`, `confirmed`. |
