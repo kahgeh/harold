@@ -323,7 +323,15 @@ impl RexVisibleScreen {
         };
         // A record of another pid belongs to an agent that is gone.
         (record.pid == pane.incarnation.agent_pid).then(|| {
-            let state = self.shown_state(block_id, record.pid, record.state.observed(), provider);
+            let (worked, removed) = self.status.take_note(block_id);
+            let state = self.shown_state(
+                block_id,
+                record.pid,
+                record.state.observed(),
+                worked,
+                removed,
+                provider,
+            );
             let observation = ScreenObservation {
                 incarnation: pane.incarnation.clone(),
                 state: Some(state),
@@ -343,6 +351,8 @@ impl RexVisibleScreen {
         block_id: &str,
         pid: u32,
         recorded: ObservedAgentState,
+        worked: bool,
+        removed: bool,
         provider: &AgentProviderSettings,
     ) -> ObservedAgentState {
         let asks_done = provider.idle_after_working == IdleAfterWorking::Done;
@@ -350,11 +360,19 @@ impl RexVisibleScreen {
             return recorded;
         }
         let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
+        // A block that went away forgets its mark.
+        if removed {
+            marks.remove(block_id);
+        }
         // A new pid is a new agent: the old mark does not count.
-        let before = marks
+        let mut before = marks
             .get(block_id)
             .filter(|mark| mark.pid == pid)
             .map(|mark| mark.shown);
+        // The stream read a working or blocked record since the last scan, so a turn ran.
+        if worked {
+            before = Some(ObservedAgentState::Working);
+        }
         let shown = super::rex_hosts::state_after(asks_done, before, recorded);
         marks.insert(block_id.to_string(), BlockMark { pid, shown });
         shown

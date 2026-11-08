@@ -754,3 +754,73 @@ fn feed_fails_fast_when_the_program_never_opens_the_fifo() {
     );
     script.feed("never read");
 }
+
+// -- the notes for the observer ------------------------------------------------------
+
+#[test]
+fn a_working_or_blocked_record_leaves_a_worked_note_that_one_take_clears() {
+    let script = Script::new("noteworked", true);
+    let (status, _) = status_of(Api::default(), &script);
+    let running = AtomicBool::new(false);
+    for state in [RecordState::Working, RecordState::Blocked] {
+        status
+            .shared
+            .store(1, &running, "block:a", record(state, 20, None), || false);
+        assert_eq!(status.take_note("block:a"), (true, false));
+        assert_eq!(status.take_note("block:a"), (false, false));
+    }
+}
+
+#[test]
+fn an_idle_record_leaves_no_note_and_keeps_an_earlier_one() {
+    let script = Script::new("noteidle", true);
+    let (status, _) = status_of(Api::default(), &script);
+    let running = AtomicBool::new(false);
+    let store = |state| {
+        status
+            .shared
+            .store(1, &running, "block:a", record(state, 20, None), || false)
+    };
+    store(RecordState::Idle);
+    assert_eq!(status.take_note("block:a"), (false, false));
+    store(RecordState::Working);
+    store(RecordState::Idle);
+    assert_eq!(status.take_note("block:a"), (true, false));
+}
+
+#[test]
+fn a_removed_record_leaves_a_removed_note_and_drops_the_worked_note() {
+    let script = Script::new("noteremoved", true);
+    let (status, _) = status_of(Api::default(), &script);
+    let running = AtomicBool::new(false);
+    status.shared.store(
+        1,
+        &running,
+        "block:a",
+        record(RecordState::Working, 20, None),
+        || false,
+    );
+    status.shared.remove(1, &running, "block:a");
+    assert_eq!(status.take_note("block:a"), (false, true));
+    // A new block with the same id works again: the note shows both.
+    status.shared.remove(1, &running, "block:a");
+    status.shared.store(
+        1,
+        &running,
+        "block:a",
+        record(RecordState::Working, 21, None),
+        || false,
+    );
+    assert_eq!(status.take_note("block:a"), (true, true));
+}
+
+#[test]
+fn a_block_that_leaves_the_inventory_leaves_a_removed_note() {
+    let script = Script::new("noteleft", true);
+    let (status, _) = status_of(Api::default(), &script);
+    status.sync(&[slot("session:s1", "block:a"), slot("session:s1", "block:b")]);
+    status.sync(&[slot("session:s1", "block:b")]);
+    assert_eq!(status.take_note("block:a"), (false, true));
+    assert_eq!(status.take_note("block:b"), (false, false));
+    status.stop_all();
+}

@@ -865,6 +865,8 @@ mod rex_observer {
         blocks: Vec<String>,
         /// The `program_status` reply for each block. A block with none fails.
         statuses: Mutex<HashMap<String, Value>>,
+        /// Replies that `program_status` gives before the reply above, in order.
+        queued: Mutex<HashMap<String, VecDeque<Value>>>,
         /// The first calls to `program_status` that fail, before the replies above apply.
         fail_first: std::sync::atomic::AtomicUsize,
         calls: Mutex<Vec<String>>,
@@ -923,6 +925,15 @@ mod rex_observer {
                     );
                     if failing.is_ok() {
                         return Err(RexError::Failed);
+                    }
+                    if let Some(next) = self
+                        .queued
+                        .lock()
+                        .unwrap()
+                        .get_mut(block)
+                        .and_then(VecDeque::pop_front)
+                    {
+                        return Ok(next);
                     }
                     self.statuses
                         .lock()
@@ -1505,6 +1516,75 @@ mod rex_observer {
             state_of(&screen, &asking());
             say(&api, Some(reply("idle", 20)));
             assert_eq!(state_of(&screen, &asking()), Some(Done));
+        }
+
+        fn changed_event(block: &str) -> String {
+            json!({"type": "program_status_changed", "payload": {"block_id": block}}).to_string()
+        }
+
+        #[test]
+        fn a_turn_shorter_than_one_scan_gives_done_when_the_stream_read_it() {
+            let block = "block:short-turn";
+            let mut api = CountingRex {
+                blocks: vec![block.to_string()],
+                ..CountingRex::default()
+            };
+            // The first read of the stream sees working. The event call sees idle.
+            api.queued.lock().unwrap().insert(
+                block.to_string(),
+                VecDeque::from([reply("working", 20), reply("idle", 20)]),
+            );
+            api.statuses
+                .lock()
+                .unwrap()
+                .insert(block.to_string(), reply("idle", 20));
+            let api = Arc::new(api);
+            let script = FakeEvents::new("shortturn", &[changed_event(block)]);
+            let (screen, status) = streaming_screen(&api, &script, block);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while api.count("program_status") < 2 {
+                assert!(Instant::now() < deadline, "the event call did not come");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            while !matches!(
+                status.lookup(block),
+                Lookup::Stream(Some(record)) if record.state.observed() == Idle
+            ) {
+                assert!(Instant::now() < deadline, "the idle record did not come");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The scan sees only idle, and the stream saw working.
+            assert_eq!(state_of_block(&screen, block, &asking()), Some(Done));
+            // The note is read once: the next idle scan stays done by the mark.
+            assert_eq!(state_of_block(&screen, block, &asking()), Some(Done));
+            status.stop_all();
+        }
+
+        fn state_of_block(
+            screen: &RexVisibleScreen,
+            block: &str,
+            provider: &AgentProviderSettings,
+        ) -> Option<ObservedAgentState> {
+            let _one_at_a_time = crate::agent::rex::directory_test_lock();
+            screen.observe(&pane(block), provider).unwrap().state
+        }
+
+        #[test]
+        fn a_block_that_leaves_the_inventory_forgets_its_working_mark() {
+            let block = "block:leaves";
+            let api = api_with(block, Some(reply("working", 20)));
+            let script = FakeEvents::new("leaves", &[]);
+            let (screen, status) = streaming_screen(&api, &script, block);
+            assert_eq!(state_of_block(&screen, block, &asking()), Some(Working));
+            // The block leaves the inventory. A new block with the same id and pid shows
+            // idle, so it starts with no working mark.
+            status.sync(&[]);
+            api.statuses
+                .lock()
+                .unwrap()
+                .insert(block.to_string(), reply("idle", 20));
+            assert_eq!(state_of_block(&screen, block, &asking()), Some(Idle));
+            status.stop_all();
         }
 
         #[test]

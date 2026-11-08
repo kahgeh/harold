@@ -284,10 +284,23 @@ pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// A record with the generation of the stream that wrote it.
 type Records = Mutex<HashMap<String, (u64, StatusRecord)>>;
 
+/// What the stream saw in one block since the observer last looked. A stream turn that ends
+/// between two scans leaves `worked`. A block that closed or left the inventory leaves
+/// `removed`, so the observer drops what it keeps for the block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BlockNote {
+    worked: bool,
+    removed: bool,
+}
+
+type Notes = Mutex<HashMap<String, BlockNote>>;
+
 struct Shared {
     api: Arc<dyn RexApi>,
     steps: CurrentSteps,
     records: Records,
+    /// The notes for the observer. Code that takes this lock holds no other lock after it.
+    notes: Notes,
     /// The blocks whose last trigger call failed, with the generation of the stream that
     /// saw it. Code that takes this lock holds the records lock first.
     call_failed: Mutex<HashMap<String, u64>>,
@@ -372,6 +385,12 @@ impl Shared {
             return;
         }
         self.steps.set(block_id, record.pid, record.step());
+        if matches!(record.state, RecordState::Working | RecordState::Blocked) {
+            lock(&self.notes)
+                .entry(block_id.to_string())
+                .or_default()
+                .worked = true;
+        }
         records.insert(block_id.to_string(), (generation, record));
         self.clear_failed(generation, block_id);
     }
@@ -392,6 +411,15 @@ impl Shared {
         }
         records.remove(block_id);
         self.steps.clear_block(block_id);
+        self.note_removed(block_id);
+    }
+
+    /// The block has no record now. The observer drops what it keeps for the block.
+    fn note_removed(&self, block_id: &str) {
+        *lock(&self.notes).entry(block_id.to_string()).or_default() = BlockNote {
+            worked: false,
+            removed: true,
+        };
     }
 }
 
@@ -491,6 +519,7 @@ impl RexStatus {
                 api,
                 steps,
                 records: Mutex::new(HashMap::new()),
+                notes: Mutex::new(HashMap::new()),
                 call_failed: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(1),
                 dispatch: dispatcher::get_default(Dispatch::clone),
@@ -515,6 +544,12 @@ impl RexStatus {
             return;
         }
         let mut sessions: Vec<(&str, Vec<String>)> = Vec::new();
+        // A block that left the inventory gets a removed note.
+        for block_id in registry.owners.keys() {
+            if !slots.iter().any(|slot| &slot.block_id == block_id) {
+                self.shared.note_removed(block_id);
+            }
+        }
         registry.owners.clear();
         for slot in slots {
             registry
@@ -644,6 +679,15 @@ impl RexStatus {
             return Lookup::CallFailed;
         }
         Lookup::Stream(record)
+    }
+
+    /// What the stream saw in the block since the last call, as `(worked, removed)`. The
+    /// call clears the note.
+    pub(crate) fn take_note(&self, block_id: &str) -> (bool, bool) {
+        let note = lock(&self.shared.notes)
+            .remove(block_id)
+            .unwrap_or_default();
+        (note.worked, note.removed)
     }
 
     /// The generation of each session's stream. Tests use it to see a restart.
