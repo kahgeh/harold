@@ -327,6 +327,7 @@ inventory_timeout_ms = 3000
 screen_interval_ms = 2000
 hook_grace_ms = 2000
 report_grace_ms = 30000
+host_unknown_after_ms = 180000
 
 [[agents]]
 id = "codex"
@@ -348,6 +349,7 @@ screen_history_lines = 2000
 | `agent_monitor.multiplexer` | `"tmux"` (the default) or `"rex"`; the one multiplexer Harold works with. Harold reads it once, at start. Any other value stops Harold at start with `agent_monitor.multiplexer must be "tmux" or "rex"` |
 | `agent_monitor.rex` | Optional path to the `rex` program. When it is not set, Harold tries the running server's own copy (`~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`), then `rex` on the `PATH`, then `/Applications/Rex*.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex` |
 | `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Working` report can be before the screen decides, and how long the screen must read `Working` without a break to replace an at-rest report (done, idle or error) |
+| `agent_monitor.host_unknown_after_ms` | Non-negative, default 180000 (3 minutes); how long the agents of a Rex host that Harold cannot read keep their last state, counted from the last good read, before they show `unknown`. The same time applies to a block whose `process` call fails. `0` shows `unknown` at the first failed read |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
 | `agents[].display_name` | Non-empty display label |
 | `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively against the process's program, not its whole command line. The program is the file name of the `ps` command's first word; when that is `node`, `bun`, `deno`, `python` or `python3`, it is the file name of the second word instead |
@@ -421,7 +423,7 @@ The route runs before any lock, log line, `tmux` call or `rex` call. `rex::find_
 
 ### When a host is offline
 
-The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. The host's `session.view`, `process` and `program_status` calls each run in a pool of at most 8, so a slow call holds only its own place. One read of a host has a limit of 10 seconds. A read is a scan of the host, and a scan fails when a call to list the slots fails, when no block answers its `process` call, or when the scan passes its 10-second limit. A scan leaves out a block whose `process` call fails. A failed status call does not fail the scan. After 3 failed reads in a row, Harold tries that host only every 30 seconds. While a host is offline, its agents stay in the control-tower with the state `unknown`. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one. Harold also reads the `host_id` of this Mac's own Rex server once, with `rex whoami --json`. A label that has this `host_id` is left out and logs a warning. If that read fails, Harold leaves out no label for this reason. Harold calls `whoami --json` on a host again only 30 seconds after a failed call, so an older Rex without it gets few calls.
+The Mac's own scan never waits for a Rex host. Each host has its own task, and each call has a 2-second limit. The host's `session.view`, `process` and `program_status` calls each run in a pool of at most 8, so a slow call holds only its own place. One read of a host has a limit of 10 seconds. A read is a scan of the host, and a scan fails when a call to list the slots fails, when no block answers its `process` call, or when the scan passes its 10-second limit. A failed status call does not fail the scan. After 3 failed reads in a row, Harold tries that host only every 30 seconds. While a host is offline, its agents keep their last state for up to `host_unknown_after_ms`, then show `unknown`. A block whose `process` call fails keeps its row for the same time. A host that never answered has no agents. When two labels in `rex_hosts` lead to one Rex server (the same `host_id`), Harold keeps the first label and leaves out the later one. Harold also reads the `host_id` of this Mac's own Rex server once, with `rex whoami --json`. A label that has this `host_id` is left out and logs a warning. If that read fails, Harold leaves out no label for this reason. Harold calls `whoami --json` on a host again only 30 seconds after a failed call, so an older Rex without it gets few calls.
 
 ### Grouping
 

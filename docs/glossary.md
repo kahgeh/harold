@@ -152,7 +152,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | done | The agent finished a turn | "finished", "complete" |
 | idle | The agent waits at its prompt | "free", "ready" |
 | error | The agent stopped with a failure | "failed", "crashed" |
-| unknown | An agent runs in the pane, and no evidence gives its state yet | "Unknown" with a capital, "unknown" for a pane with no agent |
+| unknown | An agent runs in the pane, and no evidence gives its state yet, or Harold has not read its Rex host for longer than `host_unknown_after_ms` | "Unknown" with a capital, "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
 | turn tokens | The input, output, cache-read and cache-write tokens of one Claude Code turn, from its transcript | "cost" (tokens are not dollars), "usage" alone |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
