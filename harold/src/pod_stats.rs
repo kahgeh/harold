@@ -862,6 +862,9 @@ pub(crate) struct SpecFacts {
     /// The `confirmed:` time of `confirmed/<id>.md`, which the evidence check writes when
     /// the evidence of a fix is present.
     pub confirmed_at: Option<OffsetDateTime>,
+    /// From `evidence/<id>.md`: `Some(true)` when its state is `missing`, `Some(false)` for
+    /// `waiting` and `present`. None when the spec has no readable evidence file.
+    pub evidence_missing: Option<bool>,
     /// True when the first line of the spec is `Waiting for your approval.`.
     pub awaiting: bool,
     /// False when `approvals/<id>.md` names (`spec-sha256:`) another text than the spec
@@ -893,6 +896,7 @@ impl Default for SpecFacts {
             size: SpecSize::Unsized,
             kind: SpecKind::Unkinded,
             confirmed_at: None,
+            evidence_missing: None,
             awaiting: false,
             approval_current: true,
         }
@@ -1164,6 +1168,16 @@ fn parse_merged(pairs: &HashMap<&str, &str>) -> Option<MergedFile> {
     })
 }
 
+/// The `state:` of `evidence/<id>.md` as the missing flag: true for `missing`, false for
+/// `waiting` and `present`, none for any other word.
+fn parse_evidence_missing(pairs: &HashMap<&str, &str>) -> Option<bool> {
+    match *pairs.get("state")? {
+        "missing" => Some(true),
+        "waiting" | "present" => Some(false),
+        _ => None,
+    }
+}
+
 /// The merges of one spec that the older sources show: the newest merge without a stage
 /// and the newest stage merge.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1315,11 +1329,14 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let (merged_file, merged_notice) = read_pod_file(pod, "merged", id, parse_merged).split();
     let (confirmed_file, confirmed_notice) =
         read_pod_file(pod, "confirmed", id, parse_confirmed).split();
+    let (evidence_file, evidence_notice) =
+        read_pod_file(pod, "evidence", id, parse_evidence_missing).split();
     let mut notices: Vec<Notice> = [
         withdrawn_notice,
         started_notice,
         merged_notice,
         confirmed_notice,
+        evidence_notice,
     ]
     .into_iter()
     .flatten()
@@ -1421,6 +1438,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         size,
         kind,
         confirmed_at: confirmed_file,
+        evidence_missing: evidence_file,
         awaiting,
         approval_current,
     };
@@ -2592,6 +2610,7 @@ struct Gauges {
     _words: ObservableGauge<u64>,
     _effort: ObservableGauge<f64>,
     _confirmed: ObservableGauge<f64>,
+    _evidence_missing: ObservableGauge<u64>,
     _pods: ObservableGauge<u64>,
     _agents: ObservableGauge<u64>,
     _idle_with_work: ObservableGauge<u64>,
@@ -2630,6 +2649,7 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
         let words = Arc::clone(&snapshot);
         let effort = Arc::clone(&snapshot);
         let confirmed = Arc::clone(&snapshot);
+        let evidence = Arc::clone(&snapshot);
         let pods = Arc::clone(&snapshot);
         let agents = Arc::clone(&snapshot);
         let idle = Arc::clone(&snapshot);
@@ -2739,6 +2759,27 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                             };
                             observer.observe(
                                 at.unix_timestamp() as f64,
+                                &[
+                                    KeyValue::new("pod.product", product.clone()),
+                                    KeyValue::new("spec.id", spec.id.clone()),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
+            // One point for each spec with an evidence file: 1 when its state is `missing`.
+            _evidence_missing: meter
+                .u64_observable_gauge("pod.evidence.missing")
+                .with_unit("{spec}")
+                .with_callback(move |observer| {
+                    for (product, specs) in &lock(&evidence).specs {
+                        for spec in specs {
+                            let Some(missing) = spec.evidence_missing else {
+                                continue;
+                            };
+                            observer.observe(
+                                u64::from(missing),
                                 &[
                                     KeyValue::new("pod.product", product.clone()),
                                     KeyValue::new("spec.id", spec.id.clone()),

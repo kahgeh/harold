@@ -3919,6 +3919,93 @@ async fn the_confirmed_gauge_carries_unix_seconds_with_the_spec_and_product() {
     *snapshot.lock().unwrap() = PodSnapshot::default();
 }
 
+// --- evidence files and pod.evidence.missing ---
+
+fn put_evidence(dir: &Path, id: &str, state: &str) {
+    write(
+        &dir.join(format!("evidence/{id}.md")),
+        &format!(
+            "# Evidence: {id}\n\nchecked: 2026-11-20T09:00:00Z\nsince: 2026-11-12T03:05:00Z\nreleased:\nstate: {state}\nquery: {id}-1 absent no_use_yet\n"
+        ),
+    );
+}
+
+#[tokio::test]
+async fn an_evidence_file_gives_the_spec_its_missing_flag() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    for (id, state) in [("a", "missing"), ("b", "waiting"), ("c", "present")] {
+        put_spec(&files, id);
+        put_evidence(&files, id, state);
+    }
+    put_spec(&files, "none");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["a"].evidence_missing, Some(true));
+    assert_eq!(specs["b"].evidence_missing, Some(false));
+    assert_eq!(specs["c"].evidence_missing, Some(false));
+    assert_eq!(specs["none"].evidence_missing, None);
+}
+
+#[tokio::test]
+async fn a_bad_evidence_file_gives_no_flag_and_one_notice() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    put_spec(&files, "s");
+    write(&files.join("evidence/s.md"), "state: maybe\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    let logs = CapturedLogs::start();
+    stats.poll().await;
+    stats.poll().await;
+    let line = format!(
+        "pod file unreadable pod.product={} spec.id=s file=evidence/s.md",
+        pod.name
+    );
+    let text = logs.text();
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert_eq!(
+        snapshot.lock().unwrap().specs[&pod.name][0].evidence_missing,
+        None
+    );
+}
+
+#[tokio::test]
+async fn the_evidence_gauge_is_1_for_missing_0_for_the_others_and_no_point_without_a_file() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let spec = |id: &str, flag: Option<bool>| SpecFacts {
+        id: id.into(),
+        evidence_missing: flag,
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(
+            product.clone(),
+            vec![
+                spec("gone", Some(true)),
+                spec("fine", Some(false)),
+                spec("none", None),
+            ],
+        )]),
+        ..PodSnapshot::default()
+    };
+    let read = |id: &str| {
+        test_support::gauge_value(
+            "pod.evidence.missing",
+            &[("pod.product", product.as_str()), ("spec.id", id)],
+        )
+    };
+    assert_eq!(read("gone"), Some(1));
+    assert_eq!(read("fine"), Some(0));
+    assert_eq!(read("none"), None);
+
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
 // --- free slots with work waiting, and work waiting ---
 
 /// Writes a spec with an approval, and no other file, in the pod folder of `repo`.
