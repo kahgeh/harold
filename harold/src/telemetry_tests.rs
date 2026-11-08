@@ -6118,7 +6118,7 @@ fn tokens(input: u64, output: u64, cache_read: u64, cache_write: u64) -> TurnTok
 }
 
 #[test]
-fn record_turn_tokens_adds_four_kinds_and_two_by_spec_for_a_build_worker() {
+fn record_turn_tokens_adds_four_kinds_and_four_by_spec_for_a_build_worker() {
     test_support::install();
     let product = unique("p");
     let spec = unique("s");
@@ -6149,20 +6149,25 @@ fn record_turn_tokens_adds_four_kinds_and_two_by_spec_for_a_build_worker() {
             "{kind}"
         );
     }
-    assert_eq!(
-        test_support::exact_counter_value(
-            "harold.turn.tokens.by_spec",
-            &[("spec.id", &spec), ("kind", "input")]
-        ),
-        Some(1 + 3 + 4)
-    );
-    assert_eq!(
-        test_support::exact_counter_value(
-            "harold.turn.tokens.by_spec",
-            &[("spec.id", &spec), ("kind", "output")]
-        ),
-        Some(2)
-    );
+    for (kind, want) in [
+        ("input", 1),
+        ("output", 2),
+        ("cache_read", 3),
+        ("cache_write", 4),
+    ] {
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.turn.tokens.by_spec",
+                &[
+                    ("spec.id", &spec),
+                    ("kind", kind),
+                    ("model", "claude-sonnet-5-5"),
+                ]
+            ),
+            Some(want),
+            "{kind}"
+        );
+    }
 }
 
 #[test]
@@ -6227,23 +6232,35 @@ fn a_strange_model_string_counts_as_other() {
 }
 
 #[test]
-fn by_spec_input_is_input_plus_cache() {
+fn by_spec_records_the_four_kinds_and_the_model() {
     test_support::install();
     let spec = unique("s");
     record_turn_tokens(
         &tokens(10, 7, 100, 1000),
-        "claude-opus-4-1",
+        "claude-opus-5-5",
         "build_worker",
         None,
         Some(&spec),
     );
-    assert_eq!(
-        test_support::exact_counter_value(
-            "harold.turn.tokens.by_spec",
-            &[("spec.id", &spec), ("kind", "input")]
-        ),
-        Some(1110)
-    );
+    for (kind, want) in [
+        ("input", 10),
+        ("output", 7),
+        ("cache_read", 100),
+        ("cache_write", 1000),
+    ] {
+        assert_eq!(
+            test_support::exact_counter_value(
+                "harold.turn.tokens.by_spec",
+                &[
+                    ("spec.id", &spec),
+                    ("kind", kind),
+                    ("model", "claude-opus-5-5")
+                ]
+            ),
+            Some(want),
+            "{kind}"
+        );
+    }
 }
 
 #[test]

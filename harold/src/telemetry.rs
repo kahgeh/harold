@@ -457,7 +457,8 @@ pub(crate) struct Instruments {
     pub turns: Counter<u64>,
     /// `harold.turn.tokens`, `{token}`.
     pub turn_tokens: Counter<u64>,
-    /// `harold.turn.tokens.by_spec`, `{token}`.
+    /// `harold.turn.tokens.by_spec`, `{token}`. Four series for each spec and model (the four
+    /// kinds), so the 2,000-series limit holds about 500 specs on one model.
     pub turn_tokens_by_spec: Counter<u64>,
     /// `harold.turn.duration`, seconds.
     pub turn_duration: Histogram<f64>,
@@ -2758,7 +2759,7 @@ fn counted_model(model: &str) -> &str {
 }
 
 /// Adds one turn's tokens to `harold.turn.tokens`, and for a `build_worker` turn with a
-/// spec id to `harold.turn.tokens.by_spec`. A turn with no tokens adds nothing.
+/// spec id to `harold.turn.tokens.by_spec` with the same four kinds and the model. A turn with no tokens adds nothing.
 pub(crate) fn record_turn_tokens(
     tokens: &TurnTokens,
     model: &str,
@@ -2791,16 +2792,13 @@ pub(crate) fn record_turn_tokens(
     let (true, Some(spec_id)) = (role == "build_worker", spec_id) else {
         return;
     };
-    let input = tokens
-        .input
-        .saturating_add(tokens.cache_read)
-        .saturating_add(tokens.cache_write);
-    for (kind, count) in [("input", input), ("output", tokens.output)] {
+    for (kind, count) in kinds {
         instruments.turn_tokens_by_spec.add(
             count,
             &[
                 KeyValue::new("spec.id", spec_id.to_owned()),
                 KeyValue::new("kind", kind),
+                KeyValue::new("model", model.to_owned()),
             ],
         );
     }

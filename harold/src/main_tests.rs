@@ -2225,7 +2225,7 @@ mod one_trace_per_turn {
     }
 
     #[tokio::test]
-    async fn turn_complete_from_a_build_worker_adds_two_by_spec_counts() {
+    async fn turn_complete_from_a_build_worker_adds_four_by_spec_counts() {
         let _snapshot = crate::pod_stats::GAUGE_SNAPSHOT_TESTS.lock().await;
         let pane = unique_pane();
         let product = format!("prod-{}", uuid::Uuid::new_v4().simple());
@@ -2237,22 +2237,27 @@ mod one_trace_per_turn {
             Some(&spec),
         );
 
-        complete_with_tokens(&pane, "claude-opus-4-1", [10, 7, 100, 1000]).await;
+        complete_with_tokens(&pane, "claude-opus-5-5", [10, 7, 100, 1000]).await;
 
-        assert_eq!(
-            test_support::exact_counter_value(
-                "harold.turn.tokens.by_spec",
-                &[("spec.id", &spec), ("kind", "input")]
-            ),
-            Some(1110)
-        );
-        assert_eq!(
-            test_support::exact_counter_value(
-                "harold.turn.tokens.by_spec",
-                &[("spec.id", &spec), ("kind", "output")]
-            ),
-            Some(7)
-        );
+        for (kind, want) in [
+            ("input", 10),
+            ("output", 7),
+            ("cache_read", 100),
+            ("cache_write", 1000),
+        ] {
+            assert_eq!(
+                test_support::exact_counter_value(
+                    "harold.turn.tokens.by_spec",
+                    &[
+                        ("spec.id", &spec),
+                        ("kind", kind),
+                        ("model", "claude-opus-5-5")
+                    ]
+                ),
+                Some(want),
+                "{kind}"
+            );
+        }
     }
 
     #[tokio::test]
