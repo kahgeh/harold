@@ -2410,7 +2410,6 @@ const HISTOGRAM_RULE: [&str; 4] = [
     "FROM $__sourceTable(histogram)",
 ];
 
-/// The spec's trends table, in order.
 /// The tiles of "Harold trends" that read a named query file of `queries/`. The Python test
 /// `scripts/tests/test_big_picture.py` checks that each holds the text of its file and that
 /// every file follows the counter rule. The comments of those files say "rise", so the
@@ -2423,6 +2422,7 @@ const NAMED_QUERY_TILES: [&str; 5] = [
     "clarification-requests",
 ];
 
+/// The spec's trends table, in order.
 const TREND_PANELS: [&str; 12] = [
     "Slots",
     "Merges to main",

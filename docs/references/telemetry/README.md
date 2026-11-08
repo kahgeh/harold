@@ -468,7 +468,7 @@ A `screen_read` call also has the attribute `purpose`, which tells why Harold re
 
 **Turn tokens.** `harold.turn.tokens` adds a count for each of the four kinds on each turn that has tokens. A kind with the value 0 adds 0, so every kind has a series for a real model. A turn with no token fields adds nothing. `model` is the turn's last model if it is `claude-` followed by 1 to 40 of `a-z`, `0-9` and `-`. Any other string counts as `other`, so a caller cannot add series. A turn that sends no model uses `none`. The counter has about 150 series: 4 kinds, a few models, 5 roles and the products.
 
-`harold.turn.tokens.by_spec` has 2 series for each build-worker spec (`input` and `output`). The 2,000-series limit of an instrument then holds about 1,000 specs. Past the limit, new series fall into the overflow series (`otel.metric.overflow = true`), and the counts stay in the total. The card "Tokens and turns" shows a note when the overflow series appears.
+`harold.turn.tokens.by_spec` has 2 series for each build-worker spec (`input` and `output`). The 2,000-series limit of an instrument then holds about 1,000 specs. Past the limit, new series fall into the overflow series (`otel.metric.overflow = true`), and the counts stay in the total. No tile shows the overflow series: `bin/logq --named tokens-and-turns` and `bin/logq --named inventory-cost` return the column `overflow`.
 
 ## What leaves Harold
 

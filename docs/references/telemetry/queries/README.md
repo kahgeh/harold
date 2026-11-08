@@ -11,7 +11,7 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
 | `value-created.sql` | A stub that returns no row until the spec value-created-signals fills it: the card "Value created". Columns `value`, `value_change_pct` | none |
 | `delivery-lead-time-tile.sql` | A stub that returns no row until the spec delivery-lead-time-tile fills it: the card "Delivery lead time" of the big picture. Columns `days`, `days_change_pct` | none |
-| `delivery-lead-time.sql` | The p50 days of each phase, from idea to the user's check, and the spec time from open to merged: the card "Delivery lead time" | none |
+| `delivery-lead-time.sql` | The p50 days of each phase, from idea to the user's check, and the spec time from open to merged: the table "Delivery lead time" on "Harold trends" | none |
 | `work-waiting.sql` | The items in each list, the oldest age in days and the item-days, with a total: the card "Work waiting" | none |
 | `waste.sql` | Hours of free slots with work waiting plus redo hours, in whole hours, and the change: the card "Waste". Columns `hours`, `hours_change_pct` | none |
 | `tokens-and-turns.sql` | Tokens in M, turns, their changes and the overflow flag: the card "Tokens and turns". Columns `tokens_m`, `tokens_m_change_pct`, `turns`, `turns_change_pct`, `overflow` | none |
