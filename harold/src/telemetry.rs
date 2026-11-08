@@ -4480,6 +4480,8 @@ pub(crate) const HAROLD_FEATURES: [&str; 1] = ["factory-flow-page"];
 
 /// Counts one use of the product feature `spec_id`.
 pub(crate) fn feature_used(spec_id: &str) {
+    #[cfg(test)]
+    note_work(WorkNoted::FeatureUsed(spec_id.to_owned()));
     instruments()
         .feature_used
         .add(1, &[KeyValue::new("spec.id", spec_id.to_owned())]);
@@ -4549,6 +4551,8 @@ pub(crate) enum WorkNoted {
     },
     Rotation(&'static str),
     Checked(&'static str),
+    /// A use of the product feature with this `spec.id`.
+    FeatureUsed(String),
     LeadTime {
         phase: &'static str,
         seconds: f64,

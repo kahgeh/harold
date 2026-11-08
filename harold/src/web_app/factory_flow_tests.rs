@@ -840,6 +840,25 @@ async fn the_page_answers_only_after_the_login_and_device_checks() {
 }
 
 #[tokio::test]
+async fn a_load_that_shows_the_stages_counts_one_use_of_factory_flow_page() {
+    crate::telemetry::take_noted_work();
+    page_for(Ok(body()), None).await;
+    assert_eq!(
+        crate::telemetry::take_noted_work(),
+        vec![crate::telemetry::WorkNoted::FeatureUsed(
+            "factory-flow-page".to_owned()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_load_that_shows_no_stage_counts_no_use() {
+    crate::telemetry::take_noted_work();
+    page_for(Err(SourceFailure::Unreachable), None).await;
+    assert_eq!(crate::telemetry::take_noted_work(), vec![]);
+}
+
+#[tokio::test]
 async fn a_load_does_not_ask_the_source_for_any_other_url_than_the_configured_one() {
     let dir = TestDirectory::new();
     let mut flow_settings = settings(Some(dir.file("users.sql", &users_file_text(CANARY))));

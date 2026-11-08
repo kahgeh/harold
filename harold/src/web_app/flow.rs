@@ -530,6 +530,10 @@ pub(crate) async fn get_flow(State(state): State<AppState>) -> Response {
     let read = read_factory_flow(&flow.settings, flow.source.as_ref()).await;
     let levers = read_levers(flow.settings.levers_file.as_deref()).await;
     let (stages, unread) = build_view(&read, levers);
+    // One use of the product feature: a load that shows the stages.
+    if read.outcome == FlowOutcome::Ok {
+        crate::telemetry::feature_used("factory-flow-page");
+    }
     let page = FlowPage {
         app_name: state.identity.name.clone(),
         has_icon: state.identity.icon.is_some(),
