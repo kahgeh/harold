@@ -2645,7 +2645,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             CALL_ANSWERER_SPEND_CARD.to_string(),
         ])
         .chain(WEB_APP_CARDS.map(str::to_string))
-        .chain([FACTORY_FLOW_CARD.to_string()])
+        .chain([FACTORY_FLOW_CARD.to_string(), EVIDENCE_CARD.to_string()])
         .chain(KNOWLEDGE_CARDS.map(str::to_string))
         .chain(TTS_CARDS.map(str::to_string))
         .chain([
@@ -5731,6 +5731,35 @@ fn the_factory_flow_reads_card_shows_the_outcomes_and_goes_red_after_three_failu
         assert!(sql.contains(piece), "{piece} in {sql}");
     }
     // The card reads the outcome only, never a row value, a query or a password.
+    assert!(!sql.contains("password") && !sql.contains("SELECT *"));
+}
+
+/// The card for the evidence reads, in the group "Web app (the phone's browser)", beside
+/// the factory flow reads.
+const EVIDENCE_CARD: &str = "Evidence reads";
+
+#[test]
+fn the_evidence_reads_card_shows_the_outcomes_and_goes_red_after_three_failures() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == EVIDENCE_CARD)
+        .expect("the evidence reads card");
+    assert_eq!(card["config"]["displayType"], "table");
+    assert_eq!(card["containerId"], "web-app");
+    let sql = card["config"]["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "otel.otel_logs",
+        "Body = 'evidence query read'",
+        "LogAttributes['outcome'] AS outcome",
+        "GROUP BY day, outcome",
+        "ORDER BY Timestamp DESC LIMIT 3",
+        "'red'",
+        "!= 'ok'",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
+    // The card reads the outcome only, never a query, a row value or a password.
     assert!(!sql.contains("password") && !sql.contains("SELECT *"));
 }
 

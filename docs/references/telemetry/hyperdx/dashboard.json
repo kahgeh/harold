@@ -921,6 +921,22 @@
       }
     },
     {
+      "id": "evidence-reads",
+      "name": "Evidence reads",
+      "x": 0,
+      "y": 63,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, LogAttributes['outcome'] AS outcome, count() AS reads, (SELECT if(count() = 3 AND countIf(last_outcome != 'ok') = 3, 'red', 'ok') FROM (SELECT LogAttributes['outcome'] AS last_outcome FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'evidence query read' ORDER BY Timestamp DESC LIMIT 3)) AS state FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'evidence query read' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, outcome ORDER BY day DESC, outcome"
+      }
+    },
+    {
       "id": "knowledge-hours-since-good-pass",
       "name": "Knowledge index: hours since the last good pass (info; the line is 2)",
       "x": 0,
