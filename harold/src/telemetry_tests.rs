@@ -8432,3 +8432,10 @@ mod value_created_fixture {
         );
     }
 }
+
+#[test]
+fn the_page_id_and_streams_for_page_are_allowed_fields() {
+    for field in ["page_id", "streams_for_page"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}

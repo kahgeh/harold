@@ -99,6 +99,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "reason",
     "route",
     "hidden_reported",
+    "page_id",
+    "streams_for_page",
     "pages",
     "outcome",
     "channel",
