@@ -814,6 +814,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_other_result_speaks_the_fallback_sentence_with_its_reason() {
+        // No other test writes this text, and it is not part of another test's text.
+        const CANARY: &str = "CALL-UPDATE-FALLBACK-CANARY-6183";
         let exited = |stdout: &str, ok: bool| RunResult::Exited {
             stdout: stdout.as_bytes().to_vec(),
             ok,
@@ -828,14 +830,14 @@ mod tests {
             (RunResult::Killed, "timeout"),
             (exited("", false), "failed"),
             (
-                exited(r#"{"is_error":true,"result":"CANARY-9"}"#, true),
+                exited(&format!(r#"{{"is_error":true,"result":"{CANARY}"}}"#), true),
                 "failed",
             ),
             (exited("not json", true), "failed"),
             (exited(&long, true), "too_long"),
             (
                 exited(
-                    r#"{"is_error":false,"result":"The agent fixed it. CANARY-9"}"#,
+                    &format!(r#"{{"is_error":false,"result":"The agent fixed it. {CANARY}"}}"#),
                     true,
                 ),
                 "no_name",
@@ -857,9 +859,9 @@ mod tests {
                 matches!(reason, "failed" | "timeout"),
                 "{reason}"
             );
-            assert!(!logs.text().contains("CANARY-9"));
+            assert!(!logs.text().contains(CANARY));
         }
-        assert!(!crate::telemetry::test_support::exported_text().contains("CANARY-9"));
+        assert!(!crate::telemetry::test_support::exported_text().contains(CANARY));
     }
 
     #[tokio::test]
