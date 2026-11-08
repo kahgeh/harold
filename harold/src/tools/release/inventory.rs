@@ -4,7 +4,9 @@
 //! It only reads: it runs `ReleaseToolService::products`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -14,10 +16,13 @@ use opentelemetry::metrics::ObservableGauge;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 use tokio::time::{MissedTickBehavior, interval};
+use tracing::{info, warn};
 
+use super::gather::{Reach, ReachError, reach_for};
 use super::service::ReleaseToolService;
 use crate::pod_stats::{
     Git, INVENTORY_ITEM_DAYS, INVENTORY_ITEMS, INVENTORY_OLDEST_HOURS, ListStats, list_stats,
+    read_registry,
 };
 
 #[cfg(test)]
@@ -143,9 +148,165 @@ pub(super) async fn publish<G: Git>(
     }
 }
 
+/// The file of counted tags beside the pod stats tips file. A tool's data folder is
+/// `<store folder>/tools/release`, so the file is `<store folder>/pod/release-tips`.
+pub(super) fn tips_file(data_folder: &Path) -> PathBuf {
+    data_folder
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("."))
+        .join("pod")
+        .join("release-tips")
+}
+
+/// What `release-tips` holds for one product.
+enum Counted {
+    /// No line for the product.
+    Nothing,
+    /// A line that does not read as `<product> <tag>`, or a file that cannot be read.
+    Unreadable,
+    Tag(String),
+}
+
+/// The counted tags in `file`. A missing file holds none.
+fn read_tips(file: &Path, product: &str) -> Counted {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Counted::Nothing,
+        Err(_) => return Counted::Unreadable,
+    };
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some(product) {
+            continue;
+        }
+        return match (words.next(), words.next()) {
+            (Some(tag), None) => Counted::Tag(tag.to_owned()),
+            _ => Counted::Unreadable,
+        };
+    }
+    Counted::Nothing
+}
+
+/// Saves `tag` as the counted tag of `product`, keeping the lines of the other products.
+/// The file is written to a temporary file beside it and renamed, for the user only. The
+/// line of a product that cannot be read is dropped.
+fn save_tip(file: &Path, product: &str, tag: &str) -> std::io::Result<()> {
+    let old = std::fs::read_to_string(file).unwrap_or_default();
+    let mut counted: BTreeMap<String, String> = old
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            Some((words.next()?.to_owned(), words.next()?.to_owned()))
+        })
+        .collect();
+    counted.insert(product.to_owned(), tag.to_owned());
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let text: String = counted
+        .iter()
+        .map(|(product, tag)| format!("{product} {tag}\n"))
+        .collect();
+    let temp = file.with_extension("tmp");
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)?;
+    out.write_all(text.as_bytes())?;
+    out.sync_all()?;
+    std::fs::rename(&temp, file)
+}
+
+/// Records `merged_to_released` for the specs that the newest tag of each product reaches
+/// for the first time. The new tag is saved to `tips` first (ADR 0003), and the values are
+/// recorded after: a failed write records nothing, and a later read tries the same tag.
+pub(super) async fn record_releases<G: Git>(
+    service: &ReleaseToolService<G>,
+    tips: &Path,
+    now: OffsetDateTime,
+    offset: UtcOffset,
+) {
+    let Some(registry) = service.registry() else {
+        return;
+    };
+    let Ok(products) = read_registry(registry) else {
+        return;
+    };
+    for product in products.iter().filter(|product| !product.paused) {
+        let counted = read_tips(tips, &product.name);
+        let tag = match &counted {
+            Counted::Tag(tag) => Some(tag.as_str()),
+            Counted::Nothing | Counted::Unreadable => None,
+        };
+        let reach = match reach_for(service.git(), product, tag, offset, now).await {
+            Ok(Some(reach)) => reach,
+            Ok(None) | Err(ReachError::Unavailable(_)) => continue,
+            Err(ReachError::MissingTag) => {
+                // The counted tag is gone: start again from the newest tag.
+                let Ok(Some(reach)) = reach_for(service.git(), product, None, offset, now).await
+                else {
+                    continue;
+                };
+                if save_tip(tips, &product.name, &reach.tag).is_ok() {
+                    warn!(pod.product = %product.name, reason = "missing_tag", "release tips reset");
+                }
+                continue;
+            }
+        };
+        match counted {
+            Counted::Nothing => {
+                let _ = save_tip(tips, &product.name, &reach.tag);
+            }
+            Counted::Unreadable => {
+                if save_tip(tips, &product.name, &reach.tag).is_ok() {
+                    warn!(pod.product = %product.name, reason = "unreadable", "release tips reset");
+                }
+            }
+            Counted::Tag(counted) if counted == reach.tag => {}
+            Counted::Tag(_) => {
+                if save_tip(tips, &product.name, &reach.tag).is_err() {
+                    continue;
+                }
+                let specs = record_merges(&product.name, &reach);
+                info!(pod.product = %product.name, tag = %reach.tag, specs, "release phase recorded");
+            }
+        }
+    }
+}
+
+/// Records one value for each reached spec and returns how many it recorded. A spec whose
+/// wait is negative, and every spec of a tag with no readable time, is skipped.
+fn record_merges(product: &str, reach: &Reach) -> usize {
+    let Some(tag_time) = reach.tag_time else {
+        return 0;
+    };
+    let mut recorded = 0;
+    for spec in &reach.merges {
+        let seconds = (tag_time - spec.merged_at).as_seconds_f64();
+        if seconds < 0.0 {
+            continue;
+        }
+        crate::telemetry::instruments().pod_spec_lead_time.record(
+            seconds,
+            &[
+                KeyValue::new("pod.product", product.to_owned()),
+                KeyValue::new("phase", "merged_to_released"),
+                KeyValue::new("spec.revisions", i64::from(spec.revisions)),
+                KeyValue::new("spec.id", spec.id.clone()),
+            ],
+        );
+        recorded += 1;
+    }
+    recorded
+}
+
 /// Publishes now and then every `period`, until shutdown or until the sender is dropped.
 pub(super) async fn run<G: Git>(
     service: ReleaseToolService<G>,
+    tips: PathBuf,
     period: Duration,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -161,7 +322,11 @@ pub(super) async fn run<G: Git>(
         tokio::select! {
             biased;
             _ = shutdown.changed() => return,
-            () = publish(&service, OffsetDateTime::now_utc(), crate::telemetry::local_offset()) => {}
+            () = async {
+                let offset = crate::telemetry::local_offset();
+                publish(&service, OffsetDateTime::now_utc(), offset).await;
+                record_releases(&service, &tips, OffsetDateTime::now_utc(), offset).await;
+            } => {}
         }
     }
 }

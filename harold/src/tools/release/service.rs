@@ -35,6 +35,11 @@ impl<G: Git> ReleaseToolService<G> {
         self.registry.as_deref()
     }
 
+    /// The git runner, so the inventory reads the release tags with it.
+    pub(super) fn git(&self) -> &G {
+        &self.git
+    }
+
     /// The lists of the named product, or of every product when `name` is empty.
     pub(super) async fn products(
         &self,

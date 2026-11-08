@@ -23,8 +23,15 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let publisher = service::ReleaseToolService::new(ctx.pod_registry.clone());
     let service = service::ReleaseToolService::new(ctx.pod_registry);
     inventory::register();
+    // `release-tips` sits beside the pod stats tips file: `<store folder>/pod/release-tips`.
+    let tips = inventory::tips_file(&ctx.data_folder);
     // Ends on a shutdown signal and when the sender is dropped.
-    let task = tokio::spawn(inventory::run(publisher, inventory::PERIOD, ctx.shutdown));
+    let task = tokio::spawn(inventory::run(
+        publisher,
+        tips,
+        inventory::PERIOD,
+        ctx.shutdown,
+    ));
     Ok(ToolHandle {
         routes: Routes::new(ReleaseServiceServer::new(service)),
         task,

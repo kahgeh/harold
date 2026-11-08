@@ -5,7 +5,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
-use super::{PERIOD, publish, register, run};
+use super::{PERIOD, publish, record_releases, register, run};
+use crate::outbound::fake::CapturedLogs;
 use crate::pod_stats::{
     Git, GitOutput, INVENTORY_ITEM_DAYS, INVENTORY_ITEMS, INVENTORY_OLDEST_HOURS, POD_FOLDER,
 };
@@ -234,7 +235,7 @@ async fn the_task_publishes_every_ten_minutes() {
     super::PUBLISHES.with(|count| count.set(0));
     super::PUBLISHES_DONE.with(|count| count.set(0));
 
-    let task = tokio::spawn(run(service, PERIOD, receiver));
+    let task = tokio::spawn(run(service, tips_in(&folder), PERIOD, receiver));
     wait_for_done(1).await;
     let_task_run().await;
     let at_start = super::PUBLISHES.with(|count| count.get());
@@ -258,7 +259,7 @@ async fn the_task_ends_at_shutdown() {
     let folder = TempFolder::new();
     let (service, _fixture) = two_merged(&folder, &unique_name());
     let (shutdown, receiver) = watch::channel(());
-    let task = tokio::spawn(run(service, PERIOD, receiver));
+    let task = tokio::spawn(run(service, tips_in(&folder), PERIOD, receiver));
     let_task_run().await;
 
     shutdown.send(()).expect("a receiver is listening");
@@ -331,7 +332,7 @@ async fn shutdown_drops_a_publish_in_flight() {
     let (shutdown, receiver) = watch::channel(());
     super::PUBLISHES.with(|count| count.set(0));
 
-    let task = tokio::spawn(run(service, PERIOD, receiver));
+    let task = tokio::spawn(run(service, tips_in(&folder), PERIOD, receiver));
     let_task_run().await;
     // The first publish has started and waits on the slow git.
     assert_eq!(super::PUBLISHES.with(|count| count.get()), 1);
@@ -444,4 +445,268 @@ async fn this_module_publishes_only_the_merged_not_released_list() {
         assert_eq!(test_support::gauge_value(INVENTORY_ITEMS.0, &attrs), None);
     }
     assert_eq!(items_of(&name), Some(2));
+}
+
+// Tests of `record_releases`: the phase `merged_to_released` and the file `release-tips`.
+
+const ALPHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const BETA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+const GAMMA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/// The time of the tag `v1.1.0`.
+const TAG_TIME: &str = "2026-11-02T00:00:00Z";
+const PHASE: &str = "merged_to_released";
+
+fn merge_commit(fixture: &Fixture, id: &str, merged: Option<&str>, commit: &str) {
+    fixture.spec(id, &format!("# {id}: Title\n"));
+    let merged = merged
+        .map(|time| format!("merged: {time}\n"))
+        .unwrap_or_default();
+    write(
+        fixture
+            .repo
+            .join(POD_FOLDER)
+            .join(format!("merged/{id}.md")),
+        &format!("# Merged: {id}\n\n{merged}commit: {commit}\n"),
+    );
+}
+
+/// A product `name` whose newest tag is `v1.1.0` and whose tag `v1.0.0` reaches every commit
+/// but `printed`. Three specs merged: alpha 1 day and beta 3 days before the tag, gamma
+/// before the tag too but already in `v1.0.0`.
+fn released(
+    folder: &TempFolder,
+    name: &str,
+    printed: &[&str],
+) -> (ReleaseToolService<FakeGit>, Fixture) {
+    let fixture = Fixture::new();
+    merge_commit(&fixture, "alpha", Some("2026-11-01T00:00:00Z"), ALPHA);
+    merge_commit(&fixture, "beta", Some("2026-10-30T00:00:00Z"), BETA);
+    merge_commit(&fixture, "gamma", Some("2026-10-20T00:00:00Z"), GAMMA);
+    let registry = registry(folder, &fixture, name, false);
+    let unix = OffsetDateTime::parse(TAG_TIME, &Rfc3339)
+        .expect("a valid time")
+        .unix_timestamp()
+        .to_string();
+    let listing: String = printed.iter().map(|hash| format!("{hash}\n")).collect();
+    let git = fixture
+        .git()
+        .answer(&DESCRIBE, true, "v1.1.0\n")
+        .answer(
+            &[
+                "for-each-ref",
+                "--format=%(creatordate:unix)",
+                "refs/tags/v1.1.0",
+            ],
+            true,
+            &unix,
+        )
+        .answer(&["rev-list", "v1.1.0", "^v1.0.0"], true, &listing)
+        .answer(&["rev-list", "v1.1.0", "^v0.9.0"], false, "");
+    (ReleaseToolService::with_git(Some(registry), git), fixture)
+}
+
+fn tips_in(folder: &TempFolder) -> PathBuf {
+    folder.0.join("pod/release-tips")
+}
+
+fn recorded(name: &str, id: &str) -> Option<f64> {
+    test_support::histogram_sum(
+        "pod.spec.lead_time",
+        &[("pod.product", name), ("phase", PHASE), ("spec.id", id)],
+    )
+}
+
+fn saved(folder: &TempFolder) -> String {
+    std::fs::read_to_string(tips_in(folder)).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_new_tag_records_the_wait_of_each_spec_it_newly_reaches() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    // The new tag reaches alpha and beta. Gamma is already in the counted tag.
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+    write(tips_in(&folder), &format!("{name} v1.0.0\n"));
+    let logs = CapturedLogs::start();
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), Some(86_400.0));
+    assert_eq!(recorded(&name, "beta"), Some(259_200.0));
+    assert_eq!(recorded(&name, "gamma"), None);
+    assert_eq!(saved(&folder), format!("{name} v1.1.0\n"));
+    let text = logs.text();
+    assert!(text.contains("release phase recorded"), "{text}");
+    assert!(text.contains("tag=v1.1.0"), "{text}");
+    assert!(text.contains("specs=2"), "{text}");
+}
+
+#[tokio::test]
+async fn a_product_with_no_counted_tag_records_nothing_and_saves_the_tag() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), None);
+    assert_eq!(saved(&folder), format!("{name} v1.1.0\n"));
+}
+
+#[tokio::test]
+async fn a_restart_with_the_file_in_place_records_nothing_again() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, fixture) = released(&folder, &name, &[ALPHA]);
+    write(tips_in(&folder), &format!("{name} v1.0.0\n"));
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+    assert_eq!(recorded(&name, "alpha"), Some(86_400.0));
+
+    // A new service value reads the same file, as after a restart.
+    let again = ReleaseToolService::with_git(
+        service.registry().map(PathBuf::from),
+        released_git(&fixture, &[ALPHA]),
+    );
+    record_releases(&again, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), Some(86_400.0));
+}
+
+/// The git answers of `released`, for a second service on the same fixture.
+fn released_git(fixture: &Fixture, printed: &[&str]) -> FakeGit {
+    let unix = OffsetDateTime::parse(TAG_TIME, &Rfc3339)
+        .expect("a valid time")
+        .unix_timestamp()
+        .to_string();
+    let listing: String = printed.iter().map(|hash| format!("{hash}\n")).collect();
+    fixture
+        .git()
+        .answer(&DESCRIBE, true, "v1.1.0\n")
+        .answer(
+            &[
+                "for-each-ref",
+                "--format=%(creatordate:unix)",
+                "refs/tags/v1.1.0",
+            ],
+            true,
+            &unix,
+        )
+        .answer(&["rev-list", "v1.1.0", "^v1.0.0"], true, &listing)
+}
+
+#[tokio::test]
+async fn a_failed_write_records_nothing_and_a_later_read_records_once() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA]);
+    write(tips_in(&folder), &format!("{name} v1.0.0\n"));
+    // A folder in the place of the temporary file makes the write fail.
+    let blocker = folder.0.join("pod/release-tips.tmp");
+    std::fs::create_dir_all(&blocker).expect("create the blocker");
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), None);
+    assert_eq!(saved(&folder), format!("{name} v1.0.0\n"));
+
+    std::fs::remove_dir(&blocker).expect("remove the blocker");
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), Some(86_400.0));
+    assert_eq!(saved(&folder), format!("{name} v1.1.0\n"));
+}
+
+#[tokio::test]
+async fn an_unreadable_line_resets_the_product_and_logs_the_reason() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA]);
+    // The line has a product and no tag.
+    write(tips_in(&folder), &format!("{name}\n"));
+    let logs = CapturedLogs::start();
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), None);
+    assert_eq!(saved(&folder), format!("{name} v1.1.0\n"));
+    let text = logs.text();
+    assert!(text.contains("release tips reset"), "{text}");
+    assert!(text.contains("reason=\"unreadable\""), "{text}");
+    assert!(text.contains(&name), "{text}");
+}
+
+#[tokio::test]
+async fn a_counted_tag_that_git_cannot_find_resets_the_product_and_logs_the_reason() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA]);
+    write(tips_in(&folder), &format!("{name} v0.9.0\n"));
+    let logs = CapturedLogs::start();
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), None);
+    assert_eq!(saved(&folder), format!("{name} v1.1.0\n"));
+    let text = logs.text();
+    assert!(text.contains("release tips reset"), "{text}");
+    assert!(text.contains("reason=\"missing_tag\""), "{text}");
+}
+
+#[tokio::test]
+async fn a_missing_or_later_merge_time_is_skipped() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, fixture) = released(&folder, &name, &[ALPHA, BETA, GAMMA]);
+    // Alpha merged after the tag time. Beta has no `merged:` line.
+    merge_commit(&fixture, "alpha", Some("2026-11-05T00:00:00Z"), ALPHA);
+    merge_commit(&fixture, "beta", None, BETA);
+    write(tips_in(&folder), &format!("{name} v1.0.0\n"));
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    assert_eq!(recorded(&name, "alpha"), None);
+    assert_eq!(recorded(&name, "beta"), None);
+    assert_eq!(recorded(&name, "gamma"), Some(13.0 * 86_400.0));
+}
+
+#[tokio::test]
+async fn the_file_has_mode_0600_and_leaves_no_temporary_file() {
+    use std::os::unix::fs::PermissionsExt;
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA]);
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    let mode = std::fs::metadata(tips_in(&folder))
+        .expect("the file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(!folder.0.join("pod/release-tips.tmp").exists());
+}
+
+#[tokio::test]
+async fn a_new_tag_with_no_new_spec_logs_zero_specs() {
+    test_support::install();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[]);
+    write(tips_in(&folder), &format!("{name} v1.0.0\n"));
+    let logs = CapturedLogs::start();
+
+    record_releases(&service, &tips_in(&folder), now(), UtcOffset::UTC).await;
+
+    let text = logs.text();
+    assert!(text.contains("release phase recorded"), "{text}");
+    assert!(text.contains("specs=0"), "{text}");
 }
