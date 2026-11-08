@@ -239,6 +239,27 @@ pub(crate) fn drop_unmatched_questions(
     (kept.join(" "), dropped)
 }
 
+/// Apply the question check to the model summary. Log each removed sentence.
+/// When nothing is left, use the whole reply with newlines turned to spaces.
+pub(crate) fn finish_summary(summary: &str, reply: &str) -> String {
+    let (text, dropped) = drop_unmatched_questions(summary, reply);
+    let fell_back = text.is_empty();
+    for question in &dropped {
+        info!(
+            reason = "question_not_in_reply",
+            chars = question.chars,
+            matched_share = question.matched_share,
+            fell_back,
+            "summary question dropped"
+        );
+    }
+    if fell_back {
+        reply.replace('\n', " ")
+    } else {
+        text
+    }
+}
+
 /// The prompt that asks the model for the phone summary.
 fn build_summary_prompt(safe_prompt: &str, safe_msg: &str) -> String {
     format!(
@@ -301,7 +322,7 @@ pub(crate) fn summarise_with(
                 return if summary.is_empty() {
                     whole_reply()
                 } else {
-                    summary.replace('\n', " ")
+                    finish_summary(&summary.replace('\n', " "), assistant_message)
                 };
             }
             let stderr = String::from_utf8_lossy(&o.stderr);
@@ -403,7 +424,7 @@ pub(crate) fn send_away_message(_message: &AwayMessageRequested) -> Result<(), S
 mod tests {
     use super::{
         AwayMessageRequested, TurnCompleted, build_summary_prompt, drop_unmatched_questions,
-        notify_away, send, send_away_message, send_unless_paused,
+        finish_summary, notify_away, send, send_away_message, send_unless_paused,
     };
     use crate::agent::domain::CompletionSummaryUpdate;
     use crate::settings::init_settings_for_test;
@@ -474,6 +495,75 @@ mod tests {
         let (text, dropped) = drop_unmatched_questions("It is done. Is it ok?", BUILD_REPLY);
         assert_eq!(text, "It is done.");
         assert_eq!(dropped[0].matched_share, 0);
+    }
+
+    /// Log text, kept by a subscriber for the test.
+    #[derive(Clone, Default)]
+    struct LogText(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogText {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogText {
+        type Writer = LogText;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_log<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let log = LogText::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        (result, text)
+    }
+
+    #[test]
+    fn finish_summary_falls_back_to_the_whole_reply() {
+        let (text, log) = capture_log(|| {
+            finish_summary("Do you approve the merge today?", "The spec\nis ready.")
+        });
+        assert_eq!(text, "The spec is ready.");
+        assert!(log.contains("fell_back=true"), "{log}");
+    }
+
+    #[test]
+    fn finish_summary_logs_once_per_removed_sentence_without_text() {
+        let (text, log) = capture_log(|| {
+            finish_summary(
+                "The spec is ready. Do you approve the merge today? Should anyone review secretword now?",
+                "The spec is ready.",
+            )
+        });
+        assert_eq!(text, "The spec is ready.");
+        assert_eq!(log.matches("summary question dropped").count(), 2, "{log}");
+        assert!(log.contains("reason=\"question_not_in_reply\""), "{log}");
+        assert!(log.contains("chars=31"), "{log}");
+        assert!(log.contains("matched_share=0"), "{log}");
+        assert!(log.contains("fell_back=false"), "{log}");
+        assert!(!log.contains("approve"), "{log}");
+        assert!(!log.contains("secretword"), "{log}");
+    }
+
+    #[test]
+    fn finish_summary_logs_nothing_when_no_question_is_removed() {
+        let (text, log) =
+            capture_log(|| finish_summary("The spec is ready.", "The spec is ready."));
+        assert_eq!(text, "The spec is ready.");
+        assert!(!log.contains("summary question dropped"), "{log}");
     }
 
     #[test]
