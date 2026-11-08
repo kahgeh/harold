@@ -64,6 +64,8 @@ pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 /// such as `text`, `msg`, `raw_output`, `tag` and `error`, is dropped before export.
 pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "notes",
+    "evidence.query",
+    "confirmed",
     "removed",
     "pending",
     "last_ok_age_s",
@@ -482,6 +484,8 @@ pub(crate) struct Instruments {
     pub web_app_collection_pages: Counter<u64>,
     /// One for each load of the factory flow page, by `outcome`.
     pub factory_flow_reads: Counter<u64>,
+    /// One for each read of the evidence check, by `outcome`.
+    pub evidence_reads: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -603,6 +607,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
         web_app_collection_pages: counter("harold.web_app.collection_pages", "{page}"),
         factory_flow_reads: counter("harold.factory_flow.reads", "{read}"),
+        evidence_reads: counter("harold.evidence.reads", "{read}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -1745,6 +1750,32 @@ pub(crate) fn register_factory_flow_counters() {
 pub(crate) fn count_factory_flow_read(outcome: &'static str) {
     instruments()
         .factory_flow_reads
+        .add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
+/// Every `outcome` of `harold.evidence.reads`.
+pub(crate) const EVIDENCE_OUTCOMES: [&str; 7] = [
+    "ok",
+    "unreachable",
+    "refused",
+    "timeout",
+    "not_set_up",
+    "bad_query",
+    "bad_row",
+];
+
+/// Records 0 for each `outcome` of `harold.evidence.reads`. Harold calls it at its start.
+pub(crate) fn register_evidence_counters() {
+    let reads = &instruments().evidence_reads;
+    for outcome in EVIDENCE_OUTCOMES {
+        reads.add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+}
+
+/// Counts one read of the evidence check with its `outcome`.
+pub(crate) fn count_evidence_read(outcome: &'static str) {
+    instruments()
+        .evidence_reads
         .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
@@ -4531,7 +4562,11 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 2] = ["factory-flow-page", "opencode-done-on-mac"];
+pub(crate) const HAROLD_FEATURES: [&str; 3] = [
+    "factory-flow-page",
+    "opencode-done-on-mac",
+    "evidence-check",
+];
 
 /// Counts one use of the product feature `spec_id`.
 pub(crate) fn feature_used(spec_id: &str) {

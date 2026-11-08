@@ -406,6 +406,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
 | `harold.web_app.collection_pages` | counter, `{page}` | `collection` (a name from `[[web_app.collections]]`, or `unknown`; never a path), `result` (`ok`, `not_found`, `refused`, `too_big`, `unreadable`) |
 | `harold.factory_flow.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`). One for each load of the page `/flow` |
+| `harold.evidence.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`). One for each read of one evidence query by the evidence check |
 | `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
 | `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
 | `harold.web_app.request.duration` | histogram, `s`, buckets 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | `route_class`, never `updates`. The time from the request's arrival to the first byte of the answer |
@@ -633,6 +634,17 @@ With export off (`export = false`, or no `otlp_endpoint`), the file holds every 
 **Observability.** *Does ClickHouse hold everything? When the collector was down, what did I lose? Did Harold crash or refuse to start?*
 - **Detection:** the card "Unsent log lines per day, by outcome" shows `harold.telemetry.log_records.unsent`. The card "Panics and refused starts per day" counts the rows `harold panicked`, `start after an unclean exit`, `startup refused` and `listener not started` by `reason`, with no 0 point. Any count above 0 in a day is worth a look. No alert pages the user: a collector that is down is the stack's own alert.
 - **Diagnosis:** a gap line in the parity check names its time and message. The `telemetry export failing` and `telemetry export recovered` lines in `harold.log` show when the export failed. A panic row carries `location` and `panic.message`, and a refused start carries `reason`, `errors` and `component`.
+
+## Evidence check
+
+The evidence tool reads the evidence queries of each merged spec once a day and writes `evidence/<id>.md` in the pod folder. Its log lines are `evidence query read` (`info` for `ok`, `warn` for the others) and `evidence file written` (`info`). No line holds SQL or message text.
+
+| Fields | Meaning |
+|---|---|
+| `evidence.query` | The name of an evidence query, such as `evidence-check-1`. A short name from a file name, never SQL |
+| `confirmed` | On `evidence file written`: `true` when the check also wrote `confirmed/<id>.md` |
+
+The lines also use `spec.id`, `outcome`, `elapsed_ms` and `state` (`waiting`, `present` or `missing`).
 
 ## Web app requests
 

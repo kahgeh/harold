@@ -5735,6 +5735,61 @@ fn the_factory_flow_reads_card_shows_the_outcomes_and_goes_red_after_three_failu
 }
 
 #[test]
+fn register_evidence_counters_seeds_each_outcome_at_zero() {
+    test_support::install();
+    register_evidence_counters();
+    assert_eq!(
+        EVIDENCE_OUTCOMES,
+        [
+            "ok",
+            "unreachable",
+            "refused",
+            "timeout",
+            "not_set_up",
+            "bad_query",
+            "bad_row"
+        ]
+    );
+    for outcome in EVIDENCE_OUTCOMES {
+        let point =
+            test_support::exact_counter_value("harold.evidence.reads", &[("outcome", outcome)]);
+        assert!(point.is_some(), "{outcome}");
+    }
+}
+
+#[test]
+fn count_evidence_read_adds_one_for_its_outcome() {
+    test_support::install();
+    let before =
+        test_support::exact_counter_value("harold.evidence.reads", &[("outcome", "bad_row")])
+            .unwrap_or(0);
+    count_evidence_read("bad_row");
+    let after =
+        test_support::exact_counter_value("harold.evidence.reads", &[("outcome", "bad_row")])
+            .unwrap();
+    assert!(after > before);
+}
+
+#[test]
+fn the_evidence_log_fields_are_allowed() {
+    for field in [
+        "spec.id",
+        "evidence.query",
+        "outcome",
+        "elapsed_ms",
+        "state",
+        "confirmed",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn evidence_check_is_a_listed_product_feature() {
+    assert!(HAROLD_FEATURES.contains(&"evidence-check"));
+}
+
+#[test]
 fn web_request_counters_are_seeded_at_zero() {
     test_support::install();
     register_web_request_counters();
