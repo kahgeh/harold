@@ -5,7 +5,7 @@ ClickHouse, no port and no server.
 
 - hyperdx/now.json holds the cards Agents working and Specs in progress.
 - queries/now.sql returns one row with the columns working, all and in_progress.
-- The sqlTemplate of a number tile is "SELECT <column> FROM (" + the text of the file + ")".
+- The sqlTemplate of a number tile is "SELECT `<column>` FROM (" + the text of the file + ") WHERE `<column>` IS NOT NULL".
 - There is no change tile: a reading of this moment has no week.
 """
 
@@ -32,7 +32,7 @@ def strip_comments(sql):
 
 
 def pick(column, sql):
-    return f"SELECT {column} FROM (\n{sql.rstrip()}\n)"
+    return f"SELECT `{column}` FROM (\n{sql.rstrip()}\n) WHERE `{column}` IS NOT NULL"
 
 
 class NowTest(unittest.TestCase):
@@ -51,13 +51,13 @@ class NowTest(unittest.TestCase):
 
     def test_the_cards_and_tiles(self):
         tiles = self.tiles()
-        expected = {"now-working-about", "now-in-progress-about"} | {tile[0] for tile in TILES}
+        expected = {"now-intro", "now-working-about", "now-in-progress-about"} | {tile[0] for tile in TILES}
         self.assertEqual(sorted(tiles), sorted(expected))
         for tile_id in ("now-working-about", "now-in-progress-about"):
             self.assertEqual(tiles[tile_id]["config"]["displayType"], "markdown")
         self.assertTrue(tiles["now-working-about"]["config"]["markdown"].startswith("**Agents working**"))
         self.assertTrue(tiles["now-in-progress-about"]["config"]["markdown"].startswith("**Specs in progress**"))
-        self.assertIn(DESCRIPTION, self.dashboard()["description"])
+        self.assertIn(DESCRIPTION, tiles["now-intro"]["config"]["markdown"].lower())
 
     def test_each_tile_picks_one_column_of_now_sql(self):
         sql = QUERY.read_text(encoding="utf-8")
@@ -90,7 +90,7 @@ class NowTest(unittest.TestCase):
         self.assertRegex(code, r"(?i)\b(HAVING|LIMIT\s+1)\b", "an empty source must give no row")
         for metric in ("harold.agents", "pod.inventory.items"):
             self.assertIn(f"'{metric}'", code)
-        self.assertRegex(code, r"(?i)list\s*=\s*'in_progress'")
+        self.assertRegex(code, r"(?i)list'\]\s*=\s*'in_progress'")
         for macro in set(re.findall(r"\$__\w+", sql)):
             self.assertEqual(macro, "$__filters")
 

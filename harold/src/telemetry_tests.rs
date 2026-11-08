@@ -2103,6 +2103,9 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
 
 /// The spec's Metrics table.
 const METRICS: &[&str] = &[
+    // The gauge of the user's hourly rate. The query inventory-cost.sql reads it through the
+    // ClickHouse dictionary otel.harold_settings. Harold sends it with user-attention-signals.
+    "harold.attention.hourly_rate",
     "system.filesystem.usage",
     "system.filesystem.utilization",
     "system.memory.usage",
@@ -2174,6 +2177,11 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    // The keys of the log line `agent event`, read by inventory-cost.sql (user-attention-signals).
+    "agent.name",
+    "agent.attr.seconds",
+    "agent.attr.words",
+    "otel.metric.overflow",
     "slave",
     "multiplexer",
     "host",
@@ -2403,6 +2411,18 @@ const HISTOGRAM_RULE: [&str; 4] = [
 ];
 
 /// The spec's trends table, in order.
+/// The tiles of "Harold trends" that read a named query file of `queries/`. The Python test
+/// `scripts/tests/test_big_picture.py` checks that each holds the text of its file and that
+/// every file follows the counter rule. The comments of those files say "rise", so the
+/// SQL check of this file skips them.
+const NAMED_QUERY_TILES: [&str; 5] = [
+    "delivery-lead-time",
+    "work-waiting",
+    "slicing-and-sizing",
+    "test-and-release-time",
+    "clarification-requests",
+];
+
 const TREND_PANELS: [&str; 12] = [
     "Slots",
     "Merges to main",
@@ -2525,6 +2545,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "big-picture.json",
             "dashboard.json",
             "machine.json",
+            "now.json",
             "trends.json",
             "webhook-agent-blocked-long.json",
             "webhook-agent-recaps-stopped.json",
@@ -3093,6 +3114,9 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
         let dashboard = definition(file);
         for tile in tiles(&dashboard) {
             let name = tile["name"].as_str().unwrap();
+            if NAMED_QUERY_TILES.contains(&tile["id"].as_str().unwrap_or_default()) {
+                continue;
+            }
             let Some(sql) = tile["config"]["sqlTemplate"].as_str() else {
                 continue;
             };
@@ -3129,7 +3153,19 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
 fn the_trends_dashboard_has_the_twelve_panels() {
     let trends = definition("trends.json");
     assert_eq!(trends["name"], "Harold trends");
-    assert_eq!(tile_names(&trends), TREND_PANELS);
+    let panels: Vec<&str> = tiles(&trends)
+        .iter()
+        .filter(|tile| !NAMED_QUERY_TILES.contains(&tile["id"].as_str().unwrap()))
+        .map(|tile| tile["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(panels, TREND_PANELS);
+    // The cards that left the big picture follow the twelve panels, one tile for each query file.
+    let cards: Vec<&str> = tiles(&trends)
+        .iter()
+        .filter_map(|tile| tile["id"].as_str())
+        .filter(|id| NAMED_QUERY_TILES.contains(id))
+        .collect();
+    assert_eq!(cards, NAMED_QUERY_TILES);
 }
 
 /// The SQL of the trends panel named `name`.

@@ -1,0 +1,107 @@
+{
+  "name": "Harold now",
+  "tags": [
+    "harold"
+  ],
+  "tiles": [
+    {
+      "id": "now-intro",
+      "name": "Harold now",
+      "x": 0,
+      "y": 0,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "The agents working and the specs in progress, at this moment. All products. A reading of this moment has no change figure."
+      }
+    },
+    {
+      "id": "now-working-about",
+      "name": "Agents working",
+      "x": 0,
+      "y": 2,
+      "w": 12,
+      "h": 3,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "**Agents working**\n\nThe agents working now, of all agents that Harold sees."
+      }
+    },
+    {
+      "id": "now-working",
+      "name": "Working",
+      "x": 0,
+      "y": 5,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT `working` FROM (\n-- Note: None. The row shows the agents that work now, of all agents, and the specs in progress now.\n-- Waits for: nothing\n-- Agents now: the newest export of the gauge harold.agents of the last 7 days, summed over the providers and the Rex hosts. \"all\" counts every state.\n-- A series that Harold stopped to export does not count. working is the sum of the state working.\n-- Specs in progress now: the newest export of the gauge pod.inventory.items of the last 7 days, the attribute list = in_progress, summed over the products.\n-- An in-progress spec has a branch and no parked handoff file. Parked and not clear specs are not counted.\n-- A source with no export in the last 7 days gives NULL, and its tile shows HyperDX's empty state. With no source at all there is no row.\n-- Columns: working, all, in_progress.\nSELECT\n    agents.working AS working,\n    agents.all_agents AS `all`,\n    items.in_progress AS in_progress\nFROM (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['state'] = 'working'))) AS working,\n        if(count() = 0, NULL, round(sum(Value))) AS all_agents\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'harold.agents'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'harold.agents' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS agents\nCROSS JOIN (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['list'] = 'in_progress'))) AS in_progress\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'pod.inventory.items'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS items\nWHERE working IS NOT NULL OR in_progress IS NOT NULL\nLIMIT 1\n) WHERE `working` IS NOT NULL",
+        "numberFormat": {
+          "output": "number",
+          "mantissa": 0,
+          "thousandSeparated": true,
+          "unit": "working"
+        }
+      }
+    },
+    {
+      "id": "now-all",
+      "name": "Of all",
+      "x": 6,
+      "y": 5,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT `all` FROM (\n-- Note: None. The row shows the agents that work now, of all agents, and the specs in progress now.\n-- Waits for: nothing\n-- Agents now: the newest export of the gauge harold.agents of the last 7 days, summed over the providers and the Rex hosts. \"all\" counts every state.\n-- A series that Harold stopped to export does not count. working is the sum of the state working.\n-- Specs in progress now: the newest export of the gauge pod.inventory.items of the last 7 days, the attribute list = in_progress, summed over the products.\n-- An in-progress spec has a branch and no parked handoff file. Parked and not clear specs are not counted.\n-- A source with no export in the last 7 days gives NULL, and its tile shows HyperDX's empty state. With no source at all there is no row.\n-- Columns: working, all, in_progress.\nSELECT\n    agents.working AS working,\n    agents.all_agents AS `all`,\n    items.in_progress AS in_progress\nFROM (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['state'] = 'working'))) AS working,\n        if(count() = 0, NULL, round(sum(Value))) AS all_agents\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'harold.agents'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'harold.agents' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS agents\nCROSS JOIN (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['list'] = 'in_progress'))) AS in_progress\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'pod.inventory.items'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS items\nWHERE working IS NOT NULL OR in_progress IS NOT NULL\nLIMIT 1\n) WHERE `all` IS NOT NULL",
+        "numberFormat": {
+          "output": "number",
+          "mantissa": 0,
+          "thousandSeparated": true,
+          "unit": "of all"
+        }
+      }
+    },
+    {
+      "id": "now-in-progress-about",
+      "name": "Specs in progress",
+      "x": 12,
+      "y": 2,
+      "w": 12,
+      "h": 3,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "**Specs in progress**\n\nThe specs in progress in every pod now: with a branch and no parked handoff file."
+      }
+    },
+    {
+      "id": "now-in-progress",
+      "name": "In progress",
+      "x": 12,
+      "y": 5,
+      "w": 12,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT `in_progress` FROM (\n-- Note: None. The row shows the agents that work now, of all agents, and the specs in progress now.\n-- Waits for: nothing\n-- Agents now: the newest export of the gauge harold.agents of the last 7 days, summed over the providers and the Rex hosts. \"all\" counts every state.\n-- A series that Harold stopped to export does not count. working is the sum of the state working.\n-- Specs in progress now: the newest export of the gauge pod.inventory.items of the last 7 days, the attribute list = in_progress, summed over the products.\n-- An in-progress spec has a branch and no parked handoff file. Parked and not clear specs are not counted.\n-- A source with no export in the last 7 days gives NULL, and its tile shows HyperDX's empty state. With no source at all there is no row.\n-- Columns: working, all, in_progress.\nSELECT\n    agents.working AS working,\n    agents.all_agents AS `all`,\n    items.in_progress AS in_progress\nFROM (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['state'] = 'working'))) AS working,\n        if(count() = 0, NULL, round(sum(Value))) AS all_agents\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'harold.agents'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'harold.agents' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS agents\nCROSS JOIN (\n    SELECT\n        if(count() = 0, NULL, round(sumIf(Value, Attributes['list'] = 'in_progress'))) AS in_progress\n    FROM otel.otel_metrics_gauge\n    WHERE MetricName = 'pod.inventory.items'\n      AND TimeUnix = (\n          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge\n          WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY\n      )\n) AS items\nWHERE working IS NOT NULL OR in_progress IS NOT NULL\nLIMIT 1\n) WHERE `in_progress` IS NOT NULL",
+        "numberFormat": {
+          "output": "number",
+          "mantissa": 0,
+          "thousandSeparated": true,
+          "unit": "specs"
+        }
+      }
+    }
+  ]
+}

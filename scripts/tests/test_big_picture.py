@@ -10,7 +10,8 @@ The files:
 - queries/<card>.sql holds the SQL of the card. It returns at most one row.
 
 The rule that links a tile to its file: the sqlTemplate of a number tile is
-"SELECT <column> FROM (" + the text of the file + ")" with an optional WHERE tail.
+"SELECT <column> FROM (" + the text of the file + ") WHERE <column> IS NOT NULL".
+The tile of the overflow column has the tail "WHERE overflow = 1" instead. A tile with no row shows HyperDX's empty state.
 A column of a change tile ends with _change_pct.
 
 The files agent-counter.sql, factory-flow.sql and README.md are not cards. The test ignores them.
@@ -58,7 +59,7 @@ CARDS = {
     "inventory-cost": ("Inventory cost", [
         ("inventory-cost-tokens-value", "tokens_m", None, "M tokens"),
         ("inventory-cost-tokens-change", "tokens_m_change_pct", None, "%"),
-        ("inventory-cost-attention-value", "attention_cost", "attention_cost IS NOT NULL", "@ATTENTION_CURRENCY@"),
+        ("inventory-cost-attention-value", "attention_cost", None, "@ATTENTION_CURRENCY@"),
         ("inventory-cost-attention-change", "attention_cost_change_pct", None, "%"),
         ("inventory-cost-attention-hours", "attention_hours", None, "hours"),
         ("inventory-cost-attention-requests", "attention_requests", None, "requests"),
@@ -87,8 +88,8 @@ MACRO = re.compile(r"\$__\w+")
 
 def pick(column, sql, where=None):
     """Return the sqlTemplate of a tile that picks one column of the query file."""
-    tail = f" WHERE {where}" if where else ""
-    return f"SELECT {column} FROM (\n{sql.rstrip()}\n){tail}"
+    tail = where or f"{column} IS NOT NULL"
+    return f"SELECT {column} FROM (\n{sql.rstrip()}\n) WHERE {tail}"
 
 
 def strip_comments(sql):
@@ -181,7 +182,7 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(dashboard.get("filters", []), [], "the big picture has no product filter")
         ids = [tile["id"] for tile in dashboard["tiles"]]
         self.assertEqual(len(ids), len(set(ids)), "tile ids repeat")
-        expected = []
+        expected = ["big-picture-intro"]
         for card, (_, tiles) in CARDS.items():
             expected += [f"{card}-about"] + [tile[0] for tile in tiles]
         self.assertEqual(sorted(ids), sorted(expected))
@@ -234,6 +235,11 @@ class BigPictureTest(unittest.TestCase):
                 self.assertTrue(tile.get("name", "").strip())
                 self.assertIsNone(CAVEAT.search(tile["name"]), tile["name"])
 
+    def test_the_intro_names_the_window_and_the_comparison(self):
+        text = self.by_id()["big-picture-intro"]["config"]["markdown"]
+        for phrase in ("last 7 days", "7 days before", "All products"):
+            self.assertIn(phrase, text)
+
     def test_each_card_has_its_title_and_what_an_empty_tile_means(self):
         tiles = self.by_id()
         for card, (title, _) in CARDS.items():
@@ -269,7 +275,7 @@ class BigPictureTest(unittest.TestCase):
             for tile_id, column, _, _ in specs:
                 if not column.endswith("_change_pct"):
                     continue
-                value_id = tile_id.replace("-change", "-value")
+                value_id = tile_id.removesuffix("-change") + "-value"
                 with self.subTest(tile=tile_id):
                     self.assertIn(value_id, ids)
                     self.assertEqual(tiles[tile_id]["y"], tiles[value_id]["y"])
