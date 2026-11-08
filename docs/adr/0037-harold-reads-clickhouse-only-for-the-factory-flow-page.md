@@ -19,5 +19,5 @@ Harold sends its logs, traces and metrics to the collector, which stores them in
 - The factory flow page is the only code in Harold that reads ClickHouse. A new reader needs a new ADR.
 - A read gives one of five outcomes: `ok`, `unreachable`, `refused`, `timeout` and `not_set_up`. The counter `harold.factory_flow.reads` counts them, and the card **Factory flow reads** shows them.
 - `docs/references/telemetry/queries/factory-flow.sql` is the one source of the numbers. A change to it changes the page and `bin/logq --named factory-flow` together.
-- A user with write rights, or a URL that is not on this machine, cannot be reached by this path.
+- The read cannot write. The user and the settings allow only a read, and the URL stays on this machine.
 - `reqwest`, which Harold already uses, sends the request. The change adds no dependency.
