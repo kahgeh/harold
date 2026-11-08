@@ -13,6 +13,8 @@ use crate::harold::{
 use crate::settings::Settings;
 use harold_api::tools::backlog::v1 as backlog_api;
 use harold_api::tools::backlog::v1::backlog_service_client::BacklogServiceClient;
+use harold_api::tools::evidence::v1 as evidence_api;
+use harold_api::tools::evidence::v1::evidence_service_client::EvidenceServiceClient;
 use harold_api::tools::knowledge::v1 as knowledge_api;
 use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
 use harold_api::tools::questions::v1 as questions;
@@ -282,6 +284,8 @@ const TOOL_USAGE_LINE: &str =
     "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
 const RELEASE_USAGE_LINE: &str =
     "invalid argument: usage is harold tool release next [product] [--json]";
+const EVIDENCE_USAGE_LINE: &str =
+    "invalid argument: usage is harold tool evidence check <product> [<id>]";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
 const SPOKEN_LOOKUP_UNAVAILABLE_LINE: &str = "the agent lookup is not available now; try again";
@@ -391,6 +395,7 @@ pub(crate) enum ToolCommand {
     Telemetry(TelemetryCommand),
     Watch(WatchCommand),
     Release(ReleaseCommand),
+    Evidence(EvidenceCommand),
     Knowledge(KnowledgeCommand),
     Tts(TtsCommand),
     Work(WorkCommand),
@@ -1148,6 +1153,28 @@ fn parse_release(args: &[&str]) -> Result<ReleaseCommand, String> {
     Ok(ReleaseCommand::Next { product, json })
 }
 
+/// A `harold tool evidence` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvidenceCommand {
+    Check { product: String, id: Option<String> },
+}
+
+fn parse_evidence(args: &[&str]) -> Result<EvidenceCommand, String> {
+    match args {
+        ["check", product, rest @ ..]
+            if !product.starts_with('-')
+                && rest.len() <= 1
+                && !rest.iter().any(|a| a.starts_with('-')) =>
+        {
+            Ok(EvidenceCommand::Check {
+                product: (*product).into(),
+                id: rest.first().map(|id| (*id).into()),
+            })
+        }
+        _ => Err(EVIDENCE_USAGE_LINE.into()),
+    }
+}
+
 fn parse_watch(args: &[&str]) -> Result<WatchCommand, String> {
     match args {
         ["list"] => Ok(WatchCommand::List),
@@ -1714,6 +1741,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["telemetry", rest @ ..] => parse_telemetry(rest).map(ToolCommand::Telemetry),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
+        ["evidence", rest @ ..] => parse_evidence(rest).map(ToolCommand::Evidence),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
         ["tts", rest @ ..] => parse_tts(rest).map(ToolCommand::Tts),
         ["work", rest @ ..] => parse_work(rest).map(ToolCommand::Work),
@@ -1816,6 +1844,8 @@ pub(crate) async fn check_ready(settings: &Settings) -> Result<(), Box<dyn std::
 pub(crate) const CALL_DEADLINE: Duration = Duration::from_secs(3);
 /// The deadline of a backlog import or export, which moves a whole file in one call.
 pub(crate) const BULK_DEADLINE: Duration = Duration::from_secs(30);
+/// The deadline of an evidence check, which runs each query with a limit of 5 seconds.
+const EVIDENCE_DEADLINE: Duration = Duration::from_secs(120);
 
 /// `deadline` is what the timeout line names, `wait` is how long it really waits; a command passes the same value for both.
 pub(crate) async fn call_within<T, E: From<String>>(
@@ -2415,6 +2445,9 @@ pub(crate) async fn tool(
     if let ToolCommand::Release(release) = command {
         return release_within(address, release, CALL_DEADLINE).await;
     }
+    if let ToolCommand::Evidence(evidence) = command {
+        return evidence_within(address, evidence, EVIDENCE_DEADLINE).await;
+    }
     if let ToolCommand::Knowledge(knowledge) = command {
         return knowledge_within(address, knowledge, KNOWLEDGE_DEADLINE).await;
     }
@@ -2690,6 +2723,71 @@ pub(crate) async fn release_within(
     .await
 }
 
+/// The line printed for a refusal from the evidence service.
+fn evidence_refusal_line(status: &tonic::Status, command: &EvidenceCommand) -> String {
+    let EvidenceCommand::Check { product, .. } = command;
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve evidence".into(),
+        (tonic::Code::NotFound, "unknown_product") => format!("unknown product {product}"),
+        (_, "registry_unreadable") => "the product registry cannot be read".into(),
+        _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
+        _ => status.message().to_string(),
+    }
+}
+
+/// The line for one spec: `<id> <state> <query> <present|absent> <reason>, ...`.
+fn evidence_line(spec: &evidence_api::SpecEvidence) -> String {
+    let mut line = format!("{} {}", spec.id, spec.state);
+    if !spec.failed.is_empty() {
+        line.push_str(&format!(" read failed: {}", spec.failed));
+        return line;
+    }
+    let results: Vec<String> = spec
+        .results
+        .iter()
+        .map(|result| {
+            let word = if result.present { "present" } else { "absent" };
+            format!("{} {word} {}", result.name, result.reason)
+        })
+        .collect();
+    if !results.is_empty() {
+        line.push(' ');
+        line.push_str(&results.join(", "));
+    }
+    line
+}
+
+/// Runs a `harold tool evidence` command. `Ok` is the text to print; `Err` the one line.
+pub(crate) async fn evidence_within(
+    address: &str,
+    command: &EvidenceCommand,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(EVIDENCE_DEADLINE, wait, async {
+        let mut client = EvidenceServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let EvidenceCommand::Check { product, id } = command;
+        let response = client
+            .check(evidence_api::CheckRequest {
+                product: product.clone(),
+                id: id.clone().unwrap_or_default(),
+            })
+            .await
+            .map_err(|status| evidence_refusal_line(&status, command))?
+            .into_inner();
+        if response.specs.is_empty() {
+            return Ok(match id {
+                Some(id) => format!("{id} has no evidence query in {product}"),
+                None => format!("no spec of {product} has an evidence query"),
+            });
+        }
+        let lines: Vec<String> = response.specs.iter().map(evidence_line).collect();
+        Ok(lines.join("\n"))
+    })
+    .await
+}
+
 /// Runs a `harold tool watch` command from `folder`, the caller's working directory.
 /// `Ok` is the text to print; `Err` the one line.
 pub(crate) async fn watch_within(
@@ -2934,6 +3032,7 @@ pub(crate) async fn tool_within(
             | ToolCommand::Telemetry(_)
             | ToolCommand::Watch(_)
             | ToolCommand::Release(_)
+            | ToolCommand::Evidence(_)
             | ToolCommand::Knowledge(_)
             | ToolCommand::Tts(_)
             | ToolCommand::Work(_) => Err(TOOL_USAGE_LINE.into()),
@@ -8691,6 +8790,130 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    // -- harold tool evidence -----------------------------------------------------
+
+    fn evidence_args(args: &[&str]) -> Result<Mode, String> {
+        let mut all = vec!["tool", "evidence"];
+        all.extend_from_slice(args);
+        parse(&all)
+    }
+
+    #[test]
+    fn tool_evidence_check_parses_its_arguments() {
+        assert_eq!(
+            evidence_args(&["check", "harold"]),
+            Ok(Mode::Tool(ToolCommand::Evidence(EvidenceCommand::Check {
+                product: "harold".into(),
+                id: None,
+            })))
+        );
+        assert_eq!(
+            evidence_args(&["check", "harold", "evidence-check"]),
+            Ok(Mode::Tool(ToolCommand::Evidence(EvidenceCommand::Check {
+                product: "harold".into(),
+                id: Some("evidence-check".into()),
+            })))
+        );
+    }
+
+    #[test]
+    fn tool_evidence_check_refuses_a_malformed_command() {
+        for args in [
+            &["check"][..],
+            &["check", "a", "b", "c"],
+            &["check", "--json", "a"],
+            &["later", "a"],
+            &[],
+        ] {
+            assert_eq!(
+                evidence_args(args),
+                Err(EVIDENCE_USAGE_LINE.into()),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_evidence_line_has_the_id_the_state_and_each_query_with_its_result() {
+        let spec = evidence_api::SpecEvidence {
+            id: "s".into(),
+            state: "waiting".into(),
+            results: vec![
+                evidence_api::QueryResult {
+                    name: "s-1".into(),
+                    present: true,
+                    reason: "gauge_seen".into(),
+                },
+                evidence_api::QueryResult {
+                    name: "s-2".into(),
+                    present: false,
+                    reason: "no_ok_read".into(),
+                },
+            ],
+            failed: String::new(),
+        };
+        assert_eq!(
+            evidence_line(&spec),
+            "s waiting s-1 present gauge_seen, s-2 absent no_ok_read"
+        );
+        let failed = evidence_api::SpecEvidence {
+            failed: "timeout".into(),
+            results: Vec::new(),
+            ..spec
+        };
+        assert_eq!(evidence_line(&failed), "s waiting read failed: timeout");
+    }
+
+    async fn evidence_server(folder: &TempFolder) -> (Serving, tokio::sync::watch::Sender<()>) {
+        let repo = folder.0.join("alpha");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        git(
+            &repo,
+            &["commit", "--quiet", "--allow-empty", "-m", "first"],
+        );
+        let registry = folder.0.join("products.toml");
+        std::fs::write(
+            &registry,
+            format!(
+                "[products.alpha]\nrepo = \"{}\"\nbase = \"main\"\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::evidence::start(crate::tools::evidence::Launch {
+            registry: Some(registry),
+            settings: Default::default(),
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        (serve(handle.routes).await, stop)
+    }
+
+    #[tokio::test]
+    async fn tool_evidence_check_runs_against_the_daemon() {
+        let folder = TempFolder::new();
+        let (serving, _stop) = evidence_server(&folder).await;
+        let run = |product: &str, id: Option<&str>| {
+            let address = serving.address.clone();
+            let command = EvidenceCommand::Check {
+                product: product.into(),
+                id: id.map(Into::into),
+            };
+            async move { evidence_within(&address, &command, TEST_WAIT).await }
+        };
+        assert_eq!(
+            run("alpha", None).await,
+            Ok("no spec of alpha has an evidence query".to_string())
+        );
+        assert_eq!(
+            run("nope", None).await,
+            Err("unknown product nope".to_string())
+        );
     }
 
     /// Runs a git command in `repo`, with no network and a fixed identity.

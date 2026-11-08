@@ -23,7 +23,7 @@ use crate::agent::domain::EffectiveAgentState;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::pod_stats::{self, PodSnapshot};
-use crate::settings::{AgentProviderSettings, Settings, WatchSettings};
+use crate::settings::{AgentProviderSettings, FactoryFlowSettings, Settings, WatchSettings};
 use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod backlog;
@@ -184,6 +184,8 @@ pub(crate) struct Extras {
     pub(crate) grpc_addr: Option<std::net::SocketAddr>,
     /// For `ToolContext::watch_counts`.
     pub(crate) watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
+    /// The `[factory_flow]` settings, which the evidence tool reads ClickHouse with.
+    pub(crate) factory_flow: FactoryFlowSettings,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -269,6 +271,7 @@ pub(crate) async fn start(
         }),
         grpc_addr: cfg.grpc.addr().ok(),
         watch_counts,
+        factory_flow: cfg.factory_flow.clone(),
     };
     let pane_folder = SnapshotPaneFolder { ports };
     start_with(
@@ -296,6 +299,11 @@ async fn start_with(
     let mut tools = Tools {
         routes: Routes::default(),
         tasks: Vec::new(),
+    };
+    let evidence_launch = evidence::Launch {
+        registry: extras.pod_registry.clone(),
+        settings: extras.factory_flow.clone(),
+        shutdown: shutdown.clone(),
     };
     let knowledge_launch = extras.knowledge.clone();
     let knowledge_shutdown = shutdown.clone();
@@ -327,6 +335,11 @@ async fn start_with(
     start_tool(
         telemetry_name,
         telemetry::start(telemetry_ctx).await,
+        &mut tools,
+    );
+    start_tool(
+        evidence::NAME,
+        evidence::start(evidence_launch).await,
         &mut tools,
     );
     if let Some(launch) = knowledge_launch {

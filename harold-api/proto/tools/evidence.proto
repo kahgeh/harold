@@ -1,0 +1,37 @@
+// The evidence tool: the check that the evidence queries of a merged spec find their signal.
+//
+//   Check  for a product, checks one spec (or every open spec when the id is empty) at
+//          once, and gives the state of each spec with the result of each evidence query.
+syntax = "proto3";
+
+package harold.tools.evidence.v1;
+
+service EvidenceService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {
+  // A product name from the registry.
+  string product = 1;
+  // A spec id; empty means every open spec of the product.
+  string id = 2;
+}
+
+message CheckResponse {
+  repeated SpecEvidence specs = 1;
+}
+
+message SpecEvidence {
+  string id = 1;
+  // waiting, present or missing.
+  string state = 2;
+  repeated QueryResult results = 3;
+  // The outcome of a read that failed; empty when the check wrote the file.
+  string failed = 4;
+}
+
+message QueryResult {
+  string name = 1;
+  bool present = 2;
+  string reason = 3;
+}

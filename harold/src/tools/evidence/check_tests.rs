@@ -25,26 +25,29 @@ fn t(text: &str) -> OffsetDateTime {
 }
 
 /// Every pass counts the one feature `evidence-check`, so the tests run one at a time.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const QUERY_DIR: &str = "docs/references/telemetry/queries/evidence";
 
+/// The `(sql, params)` of one request.
+pub(super) type Seen = (String, Vec<(String, String)>);
+
 /// One answer of the fake source for each call, in order. The last answer repeats.
-struct FakeSource {
-    answers: Mutex<Vec<Result<String, SourceFailure>>>,
+pub(super) struct FakeSource {
+    pub(super) answers: Mutex<Vec<Result<String, SourceFailure>>>,
     /// The `(sql, params)` of each request.
-    seen: Mutex<Vec<(String, Vec<(String, String)>)>>,
+    pub(super) seen: Mutex<Vec<Seen>>,
 }
 
 impl FakeSource {
-    fn new(answers: Vec<Result<String, SourceFailure>>) -> Self {
+    pub(super) fn new(answers: Vec<Result<String, SourceFailure>>) -> Self {
         Self {
             answers: Mutex::new(answers),
             seen: Mutex::new(Vec::new()),
         }
     }
 
-    fn row(present: &str, reason: &str) -> Result<String, SourceFailure> {
+    pub(super) fn row(present: &str, reason: &str) -> Result<String, SourceFailure> {
         Ok(format!(
             "{{\"present\":{present},\"reason\":\"{reason}\"}}\n"
         ))
@@ -70,10 +73,10 @@ impl ClickhouseSource for FakeSource {
     }
 }
 
-struct Fixture {
-    root: PathBuf,
-    repo: PathBuf,
-    users: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
+    pub(super) repo: PathBuf,
+    pub(super) users: PathBuf,
     next_id: u32,
 }
 
@@ -95,11 +98,11 @@ impl Fixture {
         }
     }
 
-    fn pod(&self) -> PathBuf {
+    pub(super) fn pod(&self) -> PathBuf {
         self.repo.join(".superpowers/pod")
     }
 
-    fn product(&self) -> Product {
+    pub(super) fn product(&self) -> Product {
         Product {
             name: "evidence-fixture".to_string(),
             repo: self.repo.clone(),
@@ -109,7 +112,7 @@ impl Fixture {
         }
     }
 
-    fn settings(&self) -> FactoryFlowSettings {
+    pub(super) fn settings(&self) -> FactoryFlowSettings {
         FactoryFlowSettings {
             users_file: Some(self.users.to_string_lossy().into_owned()),
             ..Default::default()
@@ -136,7 +139,7 @@ impl Fixture {
         git(&self.repo, &[], &["rev-parse", "HEAD"])
     }
 
-    fn tag(&self, name: &str) {
+    pub(super) fn tag(&self, name: &str) {
         git(&self.repo, &[], &["tag", name]);
     }
 
@@ -182,9 +185,9 @@ fn git(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-const MERGE_TIME: &str = "2026-11-12T03:05:00Z";
+pub(super) const MERGE_TIME: &str = "2026-11-12T03:05:00Z";
 const TAG_TIME: &str = "2026-11-13T10:00:00Z";
-const SQL: &str = "SELECT 1 AS present, 'x' AS reason WHERE now() > {since:DateTime}";
+pub(super) const SQL: &str = "SELECT 1 AS present, 'x' AS reason WHERE now() > {since:DateTime}";
 
 async fn run(
     fixture: &Fixture,
@@ -203,7 +206,7 @@ async fn run(
 }
 
 /// A fixture with one spec `s` merged at MERGE_TIME and a tag at TAG_TIME that holds it.
-fn tagged(queries: &[(&str, &str)]) -> Fixture {
+pub(super) fn tagged(queries: &[(&str, &str)]) -> Fixture {
     let mut fixture = Fixture::new();
     let commit = fixture.commit(queries, TAG_TIME);
     fixture.tag("v1.0.0");

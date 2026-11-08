@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/tools/knowledge.proto");
     println!("cargo:rerun-if-changed=proto/tools/work.proto");
     println!("cargo:rerun-if-changed=proto/tools/release.proto");
+    println!("cargo:rerun-if-changed=proto/tools/evidence.proto");
     println!("cargo:rerun-if-changed=proto/tools/telemetry.proto");
 
     let descriptor_path =
@@ -25,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/tools/knowledge.proto",
                 "proto/tools/work.proto",
                 "proto/tools/release.proto",
+                "proto/tools/evidence.proto",
                 "proto/tools/telemetry.proto",
             ],
             &["proto"],
