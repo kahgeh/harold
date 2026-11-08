@@ -56,7 +56,7 @@ CARDS = {
                            change="tokens_m_change_pct", extra="attention", better="lower"),
 }
 # The stubs return no row until the spec that fills them is built.
-STUBS = {"value-created": "value-created-signals", "delivery-lead-time-tile": "delivery-lead-time-tile"}
+STUBS = {"value-created": "value-created-signals"}
 INTRO = (
     "The last 7 days, against the 7 days before. All products. Each card is one line: the value, "
     "then its change on last week. \u25b2 is up and \u25bc is down. "
@@ -64,8 +64,8 @@ INTRO = (
     "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
     "Higher is better: Value created, Products changed. "
     "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost. "
-    "Value created and Delivery lead time show no data yet until value-created-signals and "
-    "delivery-lead-time-tile fill their queries. "
+    "Value created shows no data yet until value-created-signals fills its query. "
+    "Delivery lead time has data after the first release that follows spec-release-phase. "
     "In Inventory cost, \"attention: no data yet\" means no answer in the last 7 days, "
     "and \"attention: no rate set\" means answers but no hourly rate."
 )

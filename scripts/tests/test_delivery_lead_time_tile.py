@@ -68,7 +68,7 @@ class DeliveryLeadTimeTileTest(unittest.TestCase):
     def run_on(self, *points):
         """Run the query on the fake points. Return the lines of the answer, in TSV."""
         source = " UNION ALL ".join(points) if points else \
-            "SELECT '' AS MetricName, map() AS Attributes, now() AS TimeUnix, toFloat64(0) AS Sum WHERE 0"
+            "SELECT '' AS MetricName, CAST(map(), 'Map(String, String)') AS Attributes, now() AS TimeUnix, toFloat64(0) AS Sum WHERE 0"
         self.assertIn(TABLE, self.text)
         sql = self.text.replace(TABLE, f"({source})").rstrip() + "\nFORMAT TSV"
         done = subprocess.run([self.logq], input=sql, capture_output=True, text=True, timeout=60)
