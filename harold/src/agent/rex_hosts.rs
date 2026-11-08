@@ -541,7 +541,6 @@ impl RexHostInventory {
     }
 }
 
-/// Whether the output of `rex hosts list --json` has a host with the label `label`.
 /// The name of a Rex call that can fail a scan, for the `operation` field of the log line.
 fn failed_operation_name(operation: MultiplexerOperation) -> Option<&'static str> {
     match operation {
@@ -553,6 +552,7 @@ fn failed_operation_name(operation: MultiplexerOperation) -> Option<&'static str
     }
 }
 
+/// Whether the output of `rex hosts list --json` has a host with the label `label`.
 fn parse_listed(text: &str, label: &str) -> Result<bool, RexError> {
     let value = parse_json(text)?;
     let hosts = value
