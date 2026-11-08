@@ -258,6 +258,20 @@ The done items are dated at local midnight of the first `YYYY-MM-DD` in the queu
 
 The export writes `# Queue`, the queue note, `## Now` (`- <text>`), `## Parked` (`<n>. <text>`, numbered 1 to n), and `## Done` with every done item (`- <text>`). An empty section holds `Nothing.`.
 
+## Idea times and the idea check
+
+Each item keeps two times, apart from `updated_at_ms`:
+
+- `first_put_at_ms`: the time of the first `put` of the id. A `put` of an id that exists keeps it. Migration `002` added the column. A row that existed at the migration took its `updated_at_ms`, because the store has no older time.
+- `opened_at_ms`: the time the check first saw a spec file with the id of the item. A `put` keeps it. It is empty until then.
+
+Every 10 minutes the tool checks each product of the pod registry (`ToolContext::pod_registry`). It asks `read_specs` in `pod_stats.rs` for the specs of the product. It does not open the pod folder itself and writes nothing there.
+
+- The items with no spec file are the ideas. The tool gives their count to pod stats, which exports it as `pod.inventory.items` with `list = idea`.
+- For an item whose spec the tool sees for the first time, it stores `opened_at_ms` and gives the wait to pod stats: from `first_put_at_ms` to the draft time of the spec. Pod stats records it as the phase `idea_to_open` of `pod.spec.lead_time`. An item put after its spec was drafted records nothing.
+- A removed item is not in the store, so it leaves the count. A phase that was recorded stays.
+- A pod folder that cannot be read logs `backlog idea check failed` with `reason`, once for each product until it can be read. The tool then keeps the last count.
+
 ## Log lines
 
 Seven fixed lines, with only the fields `tool`, `product`, `item_id` or `note_id`, `count` and `reason`. No item, backlog note or queue text is ever logged.
@@ -272,11 +286,13 @@ Seven fixed lines, with only the fields `tool`, `product`, `item_id` or `note_id
 | `backlog imported` | `tool`, `product`, `count` | After an applied import; `count` is the number of items and backlog notes stored. A queue import has no `product`, and its `count` is the number of queue items. |
 | `backlog write refused` | `tool`, `product`, `reason` | `reason` is `no_pane`, `unknown_product`, `wrong_product`, `not_chief` or `registry_unreadable`. `product` is there only when it is in the registry, since the request's own string may be anything. |
 
+The idea check adds two lines of its own, with `pod.product` and no item text: `backlog idea opened` (info, with `spec.id` and `wait_s`) and `backlog idea check failed` (warning, with `reason`).
+
 A backlog note update or removal logs nothing. A tool that can't start logs `tool failed to start` with `tool=backlog reason=store_open_failed`.
 
 ## Data folder and rollback
 
-The data folder is `<parent of the store path>/tools/backlog/`. It holds `backlog.db`, a Turso database with four tables: `items`, `notes`, `queue_items` and `queue_note`.
+The data folder is `<parent of the store path>/tools/backlog/`. It holds `backlog.db`, a Turso database with four tables: `items`, `notes`, `queue_items` and `queue_note`. Migration `002_idea_times` adds the columns `first_put_at_ms` and `opened_at_ms` to `items`. It runs when Harold starts, once.
 
 The core store is untouched. To roll back:
 
