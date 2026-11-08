@@ -195,6 +195,9 @@ struct Stream {
     stalled: bool,
     /// How many `POST /page/hidden` reports reached Harold while the stream was open.
     hidden: Arc<AtomicU32>,
+    /// The `page_id` the page sent with the stream: a random id for one open page. It is not
+    /// a secret or a credential. `None` for a page that sent none.
+    page_id: Option<String>,
 }
 
 /// How often an open stream sends the page a beat.
@@ -238,16 +241,26 @@ impl OpenPages {
     /// Gives a stream the next number; it leaves the open set when the guard drops, for any
     /// reason. Opening a stream does not count as hearing from the page.
     pub(crate) fn open(self: &Arc<Self>) -> OpenPage {
+        self.open_page(None)
+    }
+
+    /// Like `open`, for a stream of the page `page_id`. Streams with one id are one page.
+    pub(crate) fn open_page(self: &Arc<Self>, page_id: Option<String>) -> OpenPage {
         let mut state = self.state();
         state.next += 1;
         let number = state.next;
-        let stream = Stream::default();
+        let stream = Stream {
+            page_id: page_id.clone().filter(|id| !id.is_empty()),
+            ..Stream::default()
+        };
+        let page_id = stream.page_id.clone();
         let hidden = HiddenReports(Arc::clone(&stream.hidden));
         state.open.insert(number, stream);
         OpenPage {
             pages: Arc::clone(self),
             number,
             hidden,
+            page_id,
         }
     }
 
@@ -287,8 +300,22 @@ impl OpenPages {
         })
     }
 
-    /// The open streams of pages that are on screen: those opened since the last hidden
-    /// report, and none unless the page was heard from within `PAGE_SEEN_LIMIT`.
+    /// How many streams of the page `page_id` are open.
+    fn streams_of(&self, page_id: Option<&str>) -> usize {
+        let state = self.state();
+        match page_id {
+            Some(id) => state
+                .open
+                .values()
+                .filter(|stream| stream.page_id.as_deref() == Some(id))
+                .count(),
+            None => 1,
+        }
+    }
+
+    /// The open pages that are on screen: those with a stream opened since the last hidden
+    /// report (streams with one `page_id` are one page, a stream with none is a page of its
+    /// own), and none unless the page was heard from within `PAGE_SEEN_LIMIT`.
     pub(crate) fn visible(&self) -> usize {
         let now = (self.clock)();
         let state = self.state();
@@ -302,7 +329,12 @@ impl OpenPages {
             .open
             .range(state.hidden_through + 1..)
             .filter(|(_, stream)| !stream.stalled)
-            .count()
+            .map(|(number, stream)| match stream.page_id.as_deref() {
+                Some(id) => (Some(id), 0),
+                None => (None, *number),
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     }
 }
 
@@ -311,6 +343,20 @@ pub(crate) struct OpenPage {
     pages: Arc<OpenPages>,
     number: u64,
     hidden: HiddenReports,
+    page_id: Option<String>,
+}
+
+/// The streams of one page, counted after any of them closed.
+pub(crate) struct PageStreams {
+    pages: Arc<OpenPages>,
+    page_id: Option<String>,
+}
+
+impl PageStreams {
+    /// How many streams of the page are open now.
+    pub(crate) fn open(&self) -> usize {
+        self.pages.streams_of(self.page_id.as_deref())
+    }
 }
 
 /// The hidden reports one stream saw, readable after the stream leaves the open set.
@@ -336,6 +382,24 @@ impl Drop for OpenPage {
 }
 
 impl OpenPage {
+    /// The `page_id` the page sent, or an empty text for a page that sent none.
+    pub(crate) fn page_id(&self) -> &str {
+        self.page_id.as_deref().unwrap_or_default()
+    }
+
+    /// The open streams of this page, this one included.
+    pub(crate) fn streams_for_page(&self) -> usize {
+        self.pages.streams_of(self.page_id.as_deref())
+    }
+
+    /// A handle that counts the page's streams after this one closed.
+    pub(crate) fn page_streams(&self) -> PageStreams {
+        PageStreams {
+            pages: Arc::clone(&self.pages),
+            page_id: self.page_id.clone(),
+        }
+    }
+
     /// The count of hidden reports this stream sees, which outlives the stream.
     pub(crate) fn hidden_reports(&self) -> HiddenReports {
         self.hidden.clone()

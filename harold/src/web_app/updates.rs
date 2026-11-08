@@ -66,6 +66,15 @@ pub(super) fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
 }
 
 /// Whether the page's signals say it opened this stream because the last one stalled.
+/// The `page_id` the page's signals hold, if it sent one.
+fn page_id_signal(query: &UpdatesQuery) -> Option<String> {
+    let signals = serde_json::from_str::<serde_json::Value>(query.datastar.as_deref()?).ok()?;
+    let id = signals.get("page_id")?.as_str()?;
+    // A random id is short; a long or odd text is not one.
+    (id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| id.to_owned())
+}
+
 fn stalled_signal(query: &UpdatesQuery) -> bool {
     let signals = query
         .datastar
@@ -161,6 +170,7 @@ pub(crate) async fn get_updates(
     let query = query.ok().map(|Query(query)| query);
     let said = query.as_ref().and_then(oldest_signal);
     let reopened = query.as_ref().is_some_and(stalled_signal);
+    let page_id = query.as_ref().and_then(page_id_signal);
     let from = said.as_ref().and_then(Option::as_deref);
     // Watch before the first read, so a change made during it is not missed.
     let changes = state.store.watch_app_thread();
@@ -204,21 +214,31 @@ pub(crate) async fn get_updates(
     if let Some(patch) = oldest_patch {
         let _ = patches.try_send(Ok(patch));
     }
+    // Counted before the log, so the line holds this stream too.
+    let open = state.pages.open_page(page_id);
+    let (page_id, streams_for_page) = (open.page_id(), open.streams_for_page());
     if reopened {
         info!(
             rows = window.rows.len(),
             bytes,
+            page_id,
+            streams_for_page,
             reopened_after_stall = true,
             "app page connected"
         );
     } else {
-        info!(rows = window.rows.len(), bytes, "app page connected");
+        info!(
+            rows = window.rows.len(),
+            bytes,
+            page_id,
+            streams_for_page,
+            "app page connected"
+        );
     }
     let seen = Seen {
         from: window.oldest().map(str::to_owned),
         known: shown(window.rows),
     };
-    let open = state.pages.open();
     tokio::spawn(async move {
         // Counted until the stream ends, however it ends.
         let link = Link { patches, open };
@@ -243,12 +263,18 @@ async fn follow_thread(
     let mut signals = StreamSignals::new();
     let connected = std::time::Instant::now();
     let hidden = link.open.hidden_reports();
+    let page_id = link.open.page_id().to_owned();
+    let page_streams = link.open.page_streams();
     let reason = send_patches(state, changes, call, seen, dots, todos_shown, link).await;
     signals.ended(reason);
+    // The stream has left the open set: the others of its page, and this one.
+    let streams_for_page = page_streams.open() + 1;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
         hidden_reported = hidden.word(),
+        page_id,
+        streams_for_page,
         "app page disconnected"
     );
 }

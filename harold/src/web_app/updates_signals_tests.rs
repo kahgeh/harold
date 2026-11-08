@@ -38,6 +38,8 @@ impl axum::serve::Listener for OneConnection {
 
 /// An open updates stream: the client end of the pipe, and the sender of the shutdown signal.
 struct Stream {
+    /// A stream of the same page that was open before this one, held until the test ends.
+    _held: Option<crate::web_app::OpenPage>,
     client: DuplexStream,
     shutdown: watch::Sender<()>,
     directory: std::path::PathBuf,
@@ -45,6 +47,12 @@ struct Stream {
 
 /// Opens `GET /updates` as the page does and reads the head of the response.
 async fn open_stream() -> Stream {
+    open_stream_with("", None).await
+}
+
+/// Opens `GET /updates` with `query` after the address (for example the page's signals), with
+/// one stream of the page `held_page_id` already open.
+async fn open_stream_with(query: &str, held_page_id: Option<&str>) -> Stream {
     let directory =
         std::env::temp_dir().join(format!("harold-updates-signals-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
@@ -59,13 +67,14 @@ async fn open_stream() -> Stream {
         None,
         Default::default(),
     );
+    let held = held_page_id.map(|id| state.pages.open_page(Some(id.to_owned())));
     let app = router(state);
     let (mut client, server) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         let _ = axum::serve(OneConnection(Some(server)), app).await;
     });
     let request = format!(
-        "GET /updates HTTP/1.1\r\nhost: localhost\r\ntailscale-user-login: {LOGIN}\r\n\
+        "GET /updates{query} HTTP/1.1\r\nhost: localhost\r\ntailscale-user-login: {LOGIN}\r\n\
          sec-fetch-site: same-origin\r\ndatastar-request: true\r\n\r\n"
     );
     client.write_all(request.as_bytes()).await.unwrap();
@@ -82,6 +91,7 @@ async fn open_stream() -> Stream {
         String::from_utf8_lossy(&head)
     );
     Stream {
+        _held: held,
         client,
         shutdown,
         directory,
@@ -209,4 +219,50 @@ async fn open_gauge_rises_and_falls() {
     // A guard that drops with no reason, as a cancelled task does, still lowers the count.
     drop(first);
     assert_eq!(OPEN.with(Cell::get), 0);
+}
+
+/// The query Datastar adds for the signals `{"page_id":"<id>"}`.
+const PAGE_QUERY: &str = "?datastar=%7B%22page_id%22%3A%22p-one%22%7D";
+
+#[tokio::test(start_paused = true)]
+async fn the_connect_and_close_lines_hold_the_page_id_and_the_streams_of_that_page() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let first = open_stream_with(PAGE_QUERY, None).await;
+    let connected = line_with_text(&logs, "app page connected").await;
+    assert!(connected.contains(r#"page_id="p-one""#), "{connected}");
+    assert!(connected.contains("streams_for_page=1"), "{connected}");
+    drop(first.client);
+    let closed = line_with_text(&logs, "app page disconnected").await;
+    assert!(closed.contains(r#"page_id="p-one""#), "{closed}");
+    assert!(closed.contains("streams_for_page=1"), "{closed}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_stream_of_one_page_id_logs_two_streams_for_that_page() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let _second = open_stream_with(PAGE_QUERY, Some("p-one")).await;
+    let connected = line_with_text(&logs, "app page connected").await;
+    assert!(connected.contains("streams_for_page=2"), "{connected}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_without_a_page_id_logs_an_empty_page_id_and_one_stream() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let _stream = open_stream().await;
+    let connected = line_with_text(&logs, "app page connected").await;
+    assert!(connected.contains(r#"page_id="""#), "{connected}");
+    assert!(connected.contains("streams_for_page=1"), "{connected}");
+}
+
+async fn line_with_text(logs: &CapturedLogs, wanted: &str) -> String {
+    for _ in 0..500 {
+        if let Some(line) = logs.text().lines().find(|line| line.contains(wanted)) {
+            return line.to_owned();
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("no line with {wanted} in:\n{}", logs.text());
 }

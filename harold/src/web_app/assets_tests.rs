@@ -553,7 +553,7 @@ fn the_thread_binds_the_beat_and_the_reopen_sends_the_stalled_signal() {
     assert!(thread.contains(r#"<input type="hidden" id="stalled" data-bind:stalled>"#));
     let messages = include_str!("../../templates/web_app/messages.html");
     assert!(messages.contains(
-        "data-on:harold-reopen=\"@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled)$/}})\""
+        "data-on:harold-reopen=\"@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled|page_id)$/}})\""
     ));
 }
 
@@ -1384,4 +1384,13 @@ fn pages_js_watches_messages_and_announces_each_removed_copy() {
     ] {
         assert!(script.contains(wanted), "pages.js lacks {wanted}");
     }
+}
+
+#[test]
+fn the_thread_page_holds_a_page_id_and_both_update_calls_send_it() {
+    let thread = include_str!("../../templates/web_app/thread.html");
+    assert!(thread.contains(r#"data-signals:page_id="{{ page_id }}""#));
+    let messages = include_str!("../../templates/web_app/messages.html");
+    assert!(messages.contains("filterSignals: {include: /^(oldest|page_id)$/}"));
+    assert!(messages.contains("filterSignals: {include: /^(oldest|stalled|page_id)$/}"));
 }

@@ -1129,7 +1129,7 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert!(first.contains(r#"id="m-r120""#));
     assert!(first.contains(OLDER_ATTRIBUTE), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|page_id)$/}})""#),
         "{first}"
     );
 
@@ -1138,12 +1138,12 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert_eq!(row_count(&first), 120, "every row");
     assert!(!first.contains(r#"id="older""#), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|page_id)$/}})""#),
         "{first}"
     );
 }
 
-const REOPEN_ATTRIBUTE: &str = r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled)$/}})""#;
+const REOPEN_ATTRIBUTE: &str = r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled|page_id)$/}})""#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
@@ -1184,7 +1184,7 @@ async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_s
         assert!(first.contains(OLDER_ATTRIBUTE), "{signals:?}");
         assert!(
             first
-                .contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#)
+                .contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|page_id)$/}})""#)
         );
     }
 }

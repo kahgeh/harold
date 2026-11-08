@@ -83,6 +83,9 @@ pub(crate) struct ThreadPage {
     pub older: bool,
     /// The oldest row shown, as the page's `oldest` signal holds it; empty without rows.
     pub oldest: String,
+    /// A random id for this open page, sent as the signal `page_id` with each update stream.
+    /// It is not a secret or a credential.
+    pub page_id: String,
     /// Harold's VAPID public key, base64url: the page's `applicationServerKey`.
     pub public_key: String,
     /// Whether a call can start: the header offers one, or says voice is not set up.
@@ -99,6 +102,11 @@ pub(crate) struct ThreadPage {
     pub browser_traces: bool,
     /// Harold's version: the `service.version` of the page's spans.
     pub version: &'static str,
+}
+
+/// A new random id for one open thread page.
+pub(crate) fn new_page_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// How many rows the thread page opens with, and each older load adds.
@@ -550,6 +558,7 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         has_icon: state.identity.icon.is_some(),
         older: older_line(&window),
         oldest: js_string(window.oldest().unwrap_or_default()),
+        page_id: js_string(&new_page_id()),
         messages: window.rows.iter().cloned().map(MessageView::from).collect(),
         public_key: state.public_key.to_string(),
         call_set_up: calls.is_some_and(|calls| calls.set_up()),

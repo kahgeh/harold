@@ -389,7 +389,7 @@ async fn a_new_stream_starts_with_the_whole_thread() {
     );
     assert!(first.contains(r#"id="messages""#), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|page_id)$/}})""#),
         "{first}"
     );
     assert!(
@@ -484,7 +484,7 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})" "#),
+        page.contains(r#"<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|page_id)$/}})" "#),
         "{page}"
     );
 
@@ -1586,4 +1586,34 @@ fn a_stream_knows_how_many_hidden_reports_came_while_it_was_open() {
     pages.report_hidden();
     assert_eq!((first.word(), second.word()), ("repeated", "repeated"));
     assert_eq!(later.word(), "true");
+}
+
+#[test]
+fn open_pages_counts_distinct_page_ids_and_not_streams() {
+    let pages = std::sync::Arc::new(super::OpenPages::default());
+    let (a1, a2) = (
+        pages.open_page(Some("a".to_owned())),
+        pages.open_page(Some("a".to_owned())),
+    );
+    assert_eq!(a1.streams_for_page(), 2);
+    pages.report_seen(None);
+    assert_eq!(pages.visible(), 1);
+    let b = pages.open_page(Some("b".to_owned()));
+    // A stream with no id is a page of its own.
+    let none = pages.open();
+    assert_eq!(b.streams_for_page(), 1);
+    assert_eq!(none.streams_for_page(), 1);
+    assert_eq!(pages.visible(), 3);
+    drop(a1);
+    assert_eq!(a2.streams_for_page(), 1);
+    assert_eq!(pages.visible(), 3);
+    drop(a2);
+    assert_eq!(pages.visible(), 2);
+}
+
+#[test]
+fn a_new_page_id_is_random_and_not_empty() {
+    let (one, two) = (super::pages::new_page_id(), super::pages::new_page_id());
+    assert!(!one.is_empty() && one != two, "{one} {two}");
+    assert!(one.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{one}");
 }
