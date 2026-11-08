@@ -985,7 +985,7 @@ Special cases:
 
 The SQL panels read the time range's points and, for the counter rule, the day before it.
 
-Five more tiles follow the twelve panels: Delivery lead time, Work waiting, Slicing and sizing, Test and release time and Clarification requests per day, by cause. They left the big picture. Each is a table that holds the text of its named query in `queries/`, with the columns `series`, `this_week` and `last_week`, and its numbers cover the last 7 days and the 7 days before them, whatever the time range is. They are described in [Harold: the big picture](#harold-the-big-picture) (the cards that left) and in the pod signals table above.
+Five more tiles follow the twelve panels: Lead time by phase, Work waiting, Slicing and sizing, Test and release time and Clarification requests per day, by cause. They left the big picture. Each is a table that holds the text of its named query in `queries/`, with the columns `series`, `this_week` and `last_week`, and its numbers cover the last 7 days and the 7 days before them, whatever the time range is. They are described in [Harold: the big picture](#harold-the-big-picture) (the cards that left) and in the pod signals table above.
 
 The "Spec size" panel cannot show lines merged per spec: `pod.merged_lines` carries `pod.product` and `change` but no `spec.id`, so the two cannot be joined. Read a merged spec's lines from "Merges to main" at the time of its merge.
 
@@ -1086,12 +1086,12 @@ Two limits remain:
 
 The last 7 days are the 7 days before now, and the 7 days before are the 7 days before those. The window is in each query, not in the time range. Open the dashboard with a time range of at least the last 14 days.
 
-**The empty state.** A card whose query returns no row shows HyperDX's own text, "No data found within time range.". The text over the cards says that this means "no data yet". A tile never shows 0, `null` or `N/A` for no data. The `concat` of the line gives `NULL` when its value is `NULL`, and an aggregate query always returns one row, so the tile ends in `WHERE <value> IS NOT NULL`: with no value it returns no row. Value created and Delivery lead time are stubs: `value-created.sql` and `delivery-lead-time-tile.sql` return no row until the specs value-created-signals and delivery-lead-time-tile fill them.
+**The empty state.** A card whose query returns no row shows HyperDX's own text, "No data found within time range.". The text over the cards says that this means "no data yet". A tile never shows 0, `null` or `N/A` for no data. The `concat` of the line gives `NULL` when its value is `NULL`, and an aggregate query always returns one row, so the tile ends in `WHERE <value> IS NOT NULL`: with no value it returns no row. Value created is a stub: `value-created.sql` returns no row until the spec value-created-signals fills it. Delivery lead time returns no row until a release follows spec-release-phase.
 
 | Card | The line shows | Source metrics | Note |
 |---|---|---|---|
 | Value created | The work records that the user checked, in work records | `harold.work.checked` | A stub: empty until value-created-signals fills it. Work at `released` that the user did not use is not counted. |
-| Delivery lead time | The days from the idea to the user's check | None yet | A stub: empty until delivery-lead-time-tile fills it. The table on "Harold trends" shows the p50 by phase. |
+| Delivery lead time | The median days from the first draft of a spec to the release that holds it, for the specs released in the 7 days | `pod.spec.lead_time` | The sum of the four phases of each spec, joined by `spec.id`. A spec counts only with all four phases. A drop is better. The card has data after the first release that follows spec-release-phase. The table "Lead time by phase" on "Harold trends" shows the p50 by phase. |
 | Waste | Hours of free slots while work waited, plus redo hours, in whole hours | `pod.slots.idle_with_work`, `pod.spec.effort` | A day above 2 slot hours of free slots with work waiting needs a look. So does a spec above 2 redo hours. |
 | Tokens and turns | Tokens in M with one decimal, with their change, then the turns | `harold.turn.tokens`, `harold.turns`, `harold.turn.tokens.by_spec` | The flow: all tokens spent in the 7 days, on all work. A build worker on Opus is the first thing to check. |
 | Products changed | The products with at least one merge | `pod.merges` | None. |
@@ -1105,11 +1105,11 @@ The last 7 days are the 7 days before now, and the 7 days before are the 7 days 
 
 **How a card counts.** A counter of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. A week with no point gives no number, never a 0.
 
-**The cards that left.** Delivery lead time, Slicing and sizing, Test and release time, Clarification requests per day, by cause, and Work waiting are now tables on "Harold trends". They keep their named queries, their columns `series`, `this_week` and `last_week`, and the product filter of their old dashboard is gone: the queries that carry `$__filters` read all products. The cards that wait for a spec keep their note and their `-- Empty:` line in the query file, and the name of the tile shows what waits:
+**The cards that left.** Lead time by phase (the old Delivery lead time), Slicing and sizing, Test and release time, Clarification requests per day, by cause, and Work waiting are now tables on "Harold trends". They keep their named queries, their columns `series`, `this_week` and `last_week`, and the product filter of their old dashboard is gone: the queries that carry `$__filters` read all products. The cards that wait for a spec keep their note and their `-- Empty:` line in the query file, and the name of the tile shows what waits:
 
 | Card | Waits for |
 |---|---|
-| Delivery lead time (the "work: ..." rows) | work-status-history |
+| Lead time by phase (the "work: ..." rows) | work-status-history |
 | Slicing and sizing (the row "slices per work record") | work-status-history |
 | Test and release time | release-attempts |
 | Clarification requests per day, by cause | telemetry-record-tool |

@@ -277,7 +277,7 @@
     },
     {
       "id": "delivery-lead-time",
-      "name": "Delivery lead time (work rows: no data yet, waits for work-status-history)",
+      "name": "Lead time by phase (work rows: no data yet, waits for work-status-history)",
       "x": 0,
       "y": 36,
       "w": 12,
