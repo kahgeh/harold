@@ -81,6 +81,22 @@ The `git` commands are read-only: they run with `GIT_OPTIONAL_LOCKS=0`, at most 
 - A missing file, a line that does not parse, or a saved tip that the reflog does not hold before the current tip counts nothing. Harold starts from the current tip.
 - After a rollback to a Harold built before 36a7c94, delete the file; see [Rollback](../operation/README.md#rollback).
 
+### The release-tips file
+
+The release tool records `merged_to_released` on `pod.spec.lead_time`. The release tool's inventory reads the newest release tag of each product every 10 minutes. The file `<store path>/../pod/release-tips` holds the tag that it counted last. It has one `<product> <tag>` line per product and mode 0600. The tool writes it to `release-tips.tmp` and renames it.
+
+- When the newest tag differs from the counted tag, the tool saves the new tag first (ADR 0003). Then it records one value for each spec whose `merged/<id>.md` has a `commit:` that the new tag reaches and the counted tag does not (one `git rev-list` call). A crash between the two steps loses the values of that tag but never records them twice.
+- The value is the tag's own time (`git for-each-ref`, `creatordate`) minus the `merged:` time. The tag time is the time of the cut and publish of the release, not of the install. A missing or negative time is skipped.
+- A product with no counted tag records nothing at its first read and saves its newest tag. A failed write records nothing, and the next read tries the same tag again.
+- A line that cannot be read, or a counted tag that git cannot find, counts as no counted tag. The tool records nothing, saves the newest tag and logs `release tips reset`.
+
+| Line | Fields |
+|---|---|
+| `release phase recorded` | `pod.product`, `tag`, `specs` (the number of values recorded). Level info. Logged at each new tag |
+| `release tips reset` | `pod.product`, `reason` (`unreadable` or `missing_tag`). Level warn |
+
+A `release phase recorded` line with `specs` = 0, at a read where the `merged_not_released` count of `pod.inventory.items` for that product fell, is a check for the weekly digest. It is not an alert. To find the cause, read the line's `tag` and `pod.product`, then `merged/<id>.md` of the spec, then `git rev-list` between the two tags.
+
 ### Spec states
 
 Each pod keeps its specs in `<base checkout>/.superpowers/pod/`. That folder is not in git, so git holds no dates for specs or approvals. Harold reads each state's time from the pod's files and, for the older sources, from file creation times and the base branch.
@@ -205,7 +221,8 @@ The release tool is the only reader of the release tag. It publishes its own ser
 
 - `open_to_approved`: from the creation of `specs/<id>.md` to the creation of `approvals/<id>.md`;
 - `approved_to_started`: from the approval to `started:`;
-- `started_to_completed`: from `started:` to `merged:`.
+- `started_to_completed`: from `started:` to `merged:`;
+- `merged_to_released`: from `merged:` to the time of the first release tag that holds the spec's merge commit. The release tool records it, not pod stats. See [The release-tips file](#the-release-tips-file).
 
 A step with a missing or negative time is skipped. Harold records a spec's steps in one of two cases:
 
@@ -403,7 +420,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`) |
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |
 | `pod.inventory.item_days` | gauge, `d` | `pod.product`, `list` |
-| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`). `missed` is a cron match that did not run because it was older than 120 minutes |

@@ -327,9 +327,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | link (of a work record) | A pointer from a work record to a spec, a question or a note. A todo's `link` is a web address | — |
 | work file | One Turso file of work records. The newest is the current one | "shard" |
 | status move (of a work record) | One change of the status of a work record, with its time | "transition", "event" (an event is in Harold's event store) |
-| lead time (of a work record) | The time from the creation of the work record to `checked by the user`. It is not `pod.spec.lead_time`, which measures a spec from open to merged | "cycle time" |
+| lead time (of a work record) | The time from the creation of the work record to `checked by the user`. It is not `pod.spec.lead_time`, which measures a spec from open to its release | "cycle time" |
 | slice | One spec that a work record links to. A work record split into three specs has three slices | "stage" (a stage is a part of a spec, as in linux-satellite stage 2b) |
-| phase (of a lead time) | A named part of a lead time. For a spec (`pod.spec.lead_time`): `open_to_approved`, `approved_to_started`, `started_to_completed`. For a work record (`harold.work.lead_time`): `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check` and `whole` | "stage" |
+| phase (of a lead time) | A named part of a lead time. For a spec (`pod.spec.lead_time`): `open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`. For a work record (`harold.work.lead_time`): `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check` and `whole` | "stage" |
 | factory flow page | The web app page `/flow` that shows the eight flow stages, each with its items waiting, its median wait and its levers. | "pipeline page", "dashboard" (the dashboard is HyperDX's) |
 | flow stage | One of the eight steps of the factory flow: idea, spec, architect review, approval, build, merge, release, installed. | "stage" alone (a stage is a part of a spec), "phase" (a phase is a part of a lead time) |
 | median wait | The median time that items spent in a flow stage, from the rows of the query `factory-flow`. | "average", "lead time" (a lead time spans several flow stages) |
