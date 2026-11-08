@@ -296,6 +296,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "thread",
     "location",
     "errors",
+    "matched_share",
+    "fell_back",
 ];
 
 /// How long shutting the exporters down may take in all.

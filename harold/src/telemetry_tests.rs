@@ -8439,3 +8439,10 @@ fn the_page_id_and_streams_for_page_are_allowed_fields() {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
 }
+
+#[test]
+fn the_summary_question_fields_are_allowed() {
+    for field in ["reason", "chars", "matched_share", "fell_back"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}

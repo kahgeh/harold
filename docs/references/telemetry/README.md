@@ -505,7 +505,9 @@ These fields were added so that the log lines of the collector work show their i
 | `note_id` | The number of a backlog note. On `backlog note added` |
 | `question_id` | The id of a question. On the questions tool lines |
 | `rows` | A count of rows. On `app page served` |
-| `chars` | A count of characters, never the text. On `sending iMessage` |
+| `chars` | A count of characters, never the text. On `sending iMessage` and `summary question dropped` |
+| `matched_share` | A share from 0 to 100, never text. On `summary question dropped` |
+| `fell_back` | True when the check left no sentence and Harold used the whole reply. On `summary question dropped` |
 | `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
 | `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |
 | `add_dirs` | A count of the folders that a watch skill names, never the paths. On `watch run finished` and `watch run failed` |
