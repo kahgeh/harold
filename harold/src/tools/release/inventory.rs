@@ -1,7 +1,8 @@
 //! Publishes the `merged_not_released` list of work waiting every 10 minutes. The pod
 //! stats module publishes the other three lists on gauges of the same names. This module
 //! adds its own series, with `list = merged_not_released`, on instruments of those names.
-//! It only reads: it runs `ReleaseToolService::products`.
+//! It also publishes `released_not_installed` for the product `harold`: the specs of the
+//! releases newer than the running version. It only reads: it runs `ReleaseToolService::products`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -60,6 +61,22 @@ struct Entry {
     stats: ListStats,
 }
 
+/// The value of the `list` attribute of the series of the specs that a release holds and
+/// the running version does not.
+const NOT_INSTALLED_LIST: &str = "released_not_installed";
+
+/// The product whose releases Harold installs on this machine.
+const INSTALLED_PRODUCT: &str = "harold";
+
+/// The count of `released_not_installed` of each product that has one.
+static NOT_INSTALLED: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+fn not_installed() -> MutexGuard<'static, BTreeMap<String, u64>> {
+    NOT_INSTALLED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 static REGISTERED: OnceLock<(ObservableGauge<u64>, [ObservableGauge<f64>; 2])> = OnceLock::new();
 
 fn store() -> MutexGuard<'static, BTreeMap<String, Entry>> {
@@ -85,6 +102,15 @@ pub(super) fn register() {
             .with_callback(|observer| {
                 for (product, Entry { stats, .. }) in store().iter() {
                     observer.observe(stats.items, &attributes(product));
+                }
+                for (product, items) in not_installed().iter() {
+                    observer.observe(
+                        *items,
+                        &[
+                            KeyValue::new("pod.product", product.clone()),
+                            KeyValue::new("list", NOT_INSTALLED_LIST),
+                        ],
+                    );
                 }
             })
             .build();
@@ -145,6 +171,45 @@ pub(super) async fn publish<G: Git>(
                 stats,
             },
         );
+    }
+}
+
+/// Records the `released_not_installed` count of `product`: the specs that the newest tag
+/// reaches and the tag of `running` does not. `running` is `None` for a build from source,
+/// and then the product has no point. A product with no release tag, or a running version
+/// with no tag in the repository, has none too. A failed git read keeps the last count.
+pub(super) async fn publish_installed<G: Git>(
+    service: &ReleaseToolService<G>,
+    product: &str,
+    running: Option<&str>,
+    now: OffsetDateTime,
+    offset: UtcOffset,
+) {
+    let Some(running) = running else {
+        not_installed().remove(product);
+        return;
+    };
+    let Some(registry) = service.registry() else {
+        return;
+    };
+    let Ok(products) = read_registry(registry) else {
+        return;
+    };
+    let Some(product_entry) = products
+        .iter()
+        .find(|entry| entry.name == product && !entry.paused)
+    else {
+        not_installed().remove(product);
+        return;
+    };
+    match reach_for(service.git(), product_entry, Some(running), offset, now).await {
+        Ok(Some(reach)) => {
+            not_installed().insert(product.to_owned(), reach.merges.len() as u64);
+        }
+        Ok(None) | Err(ReachError::MissingTag) => {
+            not_installed().remove(product);
+        }
+        Err(ReachError::Unavailable(_)) => {}
     }
 }
 
@@ -325,6 +390,14 @@ pub(super) async fn run<G: Git>(
             () = async {
                 let offset = crate::telemetry::local_offset();
                 publish(&service, OffsetDateTime::now_utc(), offset).await;
+                publish_installed(
+                    &service,
+                    INSTALLED_PRODUCT,
+                    crate::telemetry::running_release(),
+                    OffsetDateTime::now_utc(),
+                    offset,
+                )
+                .await;
                 record_releases(&service, &tips, OffsetDateTime::now_utc(), offset).await;
             } => {}
         }

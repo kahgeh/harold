@@ -5,7 +5,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
-use super::{PERIOD, publish, record_releases, register, run};
+use super::{PERIOD, publish, publish_installed, record_releases, register, run};
 use crate::outbound::fake::CapturedLogs;
 use crate::pod_stats::{
     Git, GitOutput, INVENTORY_ITEM_DAYS, INVENTORY_ITEMS, INVENTORY_OLDEST_HOURS, POD_FOLDER,
@@ -709,4 +709,85 @@ async fn a_new_tag_with_no_new_spec_logs_zero_specs() {
     let text = logs.text();
     assert!(text.contains("release phase recorded"), "{text}");
     assert!(text.contains("specs=0"), "{text}");
+}
+
+// Tests of `released_not_installed`: the specs of the tags newer than the running version.
+
+fn not_installed_of(name: &str) -> Option<u64> {
+    test_support::gauge_value(
+        INVENTORY_ITEMS.0,
+        &[("pod.product", name), ("list", "released_not_installed")],
+    )
+}
+
+#[tokio::test]
+async fn a_tag_newer_than_the_running_version_lists_its_specs() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    // The newest tag reaches alpha and beta. Gamma is already in the running version.
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+
+    publish_installed(&service, &name, Some("v1.0.0"), now(), UtcOffset::UTC).await;
+
+    assert_eq!(not_installed_of(&name), Some(2));
+    // The list of the release stage keeps its own series.
+    assert_eq!(items_of(&name), None);
+}
+
+#[tokio::test]
+async fn the_running_version_at_the_newest_tag_lists_none() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+    publish_installed(&service, &name, Some("v1.0.0"), now(), UtcOffset::UTC).await;
+    assert_eq!(not_installed_of(&name), Some(2));
+
+    publish_installed(&service, &name, Some("v1.1.0"), now(), UtcOffset::UTC).await;
+
+    assert_eq!(not_installed_of(&name), Some(0));
+}
+
+#[tokio::test]
+async fn a_build_from_source_gives_no_point() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+    publish_installed(&service, &name, Some("v1.0.0"), now(), UtcOffset::UTC).await;
+
+    publish_installed(&service, &name, None, now(), UtcOffset::UTC).await;
+
+    assert_eq!(not_installed_of(&name), None);
+}
+
+#[tokio::test]
+async fn a_running_version_with_no_tag_in_the_repository_gives_no_point() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = released(&folder, &name, &[ALPHA, BETA]);
+
+    // The fake git answers no for `^v0.9.0`: the tag is not in the repository.
+    publish_installed(&service, &name, Some("v0.9.0"), now(), UtcOffset::UTC).await;
+
+    assert_eq!(not_installed_of(&name), None);
+}
+
+#[tokio::test]
+async fn a_product_with_no_release_tag_gives_no_point_for_released_not_installed() {
+    test_support::install();
+    register();
+    let folder = TempFolder::new();
+    let name = unique_name();
+    let (service, _fixture) = two_merged_no_tag(&folder, &name);
+
+    publish_installed(&service, &name, Some("v1.0.0"), now(), UtcOffset::UTC).await;
+
+    assert_eq!(not_installed_of(&name), None);
 }

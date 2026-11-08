@@ -60,6 +60,15 @@ pub(crate) const TRACE_TARGET: &str = "harold::trace";
 /// The file in Harold's data folder that holds the version that started last.
 pub(crate) const INSTALLED_VERSION_FILE: &str = "installed-version";
 
+/// The release version that runs, set once at start. Empty for a build from source.
+static RUNNING_RELEASE: OnceLock<String> = OnceLock::new();
+
+/// The release version that runs, or `None` for a build from source or before the start
+/// has recorded it.
+pub(crate) fn running_release() -> Option<&'static str> {
+    RUNNING_RELEASE.get().map(String::as_str)
+}
+
 /// What `record_install` did.
 #[derive(Debug, PartialEq)]
 pub(crate) enum InstallOutcome {
@@ -88,6 +97,7 @@ pub(crate) fn record_install(
     if version == "source" {
         return InstallOutcome::NotRelease;
     }
+    let _ = RUNNING_RELEASE.set(version.to_owned());
     let file = data_folder.join(INSTALLED_VERSION_FILE);
     if std::fs::read_to_string(&file).is_ok_and(|saved| saved.trim() == version) {
         return InstallOutcome::Unchanged;
