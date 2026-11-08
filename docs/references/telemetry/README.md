@@ -1592,6 +1592,14 @@ scripts/check_hyperdx_alerts.sh
 
 The check prints `check_hyperdx_alerts: ok, <n> alerts` and exits 0 when HyperDX holds every alert in `hyperdx/` with its file's `threshold`, `thresholdType`, `interval` and `numConsecutiveWindows`. A file with no `numConsecutiveWindows` must match `null`, which is what HyperDX returns for it. The check also expects each alert to point at its own webhook, and no alert tagged `harold` to be without a file. Otherwise it prints one line per problem and exits 1. The check exits 2, with one line that starts `check_hyperdx_alerts: cannot check`, when `HYPERDX_URL` is not set, when the key file is missing, empty or not a regular file, when group or others can read it, when it lies inside a git checkout, when HyperDX cannot be reached, or when it does not answer with a list.
 
+## The summary question check
+
+Harold writes the text of a turn-end update as a short summary of the agent's reply. After the model answers, `summarise_with` in `harold/src/channels/mod.rs` removes each question sentence of the summary that matches no question of the reply. A summary question matches when at least 60 percent of its content words (4 or more letters) are in one question of the reply. When nothing is left, Harold uses the whole reply with newlines turned to spaces.
+
+The log line `summary question dropped` (`info`) comes once for each removed sentence. Its fields are `reason` (`question_not_in_reply`), `chars` (the length of the removed sentence), `matched_share` (0 to 100) and `fell_back` (true when nothing was left). The line holds no text of the message.
+
+Evidence: `evidence/chief-line-own-words-1.sql`. Read it with `bin/logq --named evidence/chief-line-own-words-1 since=<time>`. The column `reason` is `checked_no_drop`, `dropped_question` or `no_turns`. Expected rate: under 1 removal a week. Above 5 a week, choose the reply itself for turn-end updates.
+
 ## Not tested until real use
 
 The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked by tests that read the files. The alerts and their webhooks were applied to the local stack on 2026-10-24, and `scripts/check_hyperdx_alerts.sh` checks that the stack holds them. Untested until real use:
