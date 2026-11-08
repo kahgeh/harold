@@ -298,3 +298,100 @@ async fn attempt(
         },
     }
 }
+
+/// One lever of a flow stage, as `levers.md` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Lever {
+    pub name: String,
+    pub owner: String,
+}
+
+/// What the levers file gave.
+#[derive(Debug)]
+pub(crate) enum LeversRead {
+    /// No setting, or the file cannot be read.
+    NoFile,
+    /// `per_stage` has one list for each flow stage, in the order of `STAGES`. `unread` names
+    /// each row that no stage owns, as `<flow stage>: <lever>`.
+    Read {
+        per_stage: Vec<Vec<Lever>>,
+        unread: Vec<String>,
+    },
+}
+
+/// Reads `levers_file` (read only) at each call.
+pub(crate) async fn read_levers(path: Option<&str>) -> LeversRead {
+    let Some(path) = path else {
+        return LeversRead::NoFile;
+    };
+    match tokio::fs::read_to_string(expand_tilde(path)).await {
+        Ok(text) => parse_levers(&text),
+        Err(_) => LeversRead::NoFile,
+    }
+}
+
+/// The cells of one table line, trimmed, without the outer bars.
+fn cells(line: &str) -> Vec<&str> {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect()
+}
+
+/// Reads the first table whose columns include `Flow stage`, `Lever`, `What it changes` and
+/// `Owner`, in any order and any case.
+fn parse_levers(text: &str) -> LeversRead {
+    let mut per_stage: Vec<Vec<Lever>> = vec![Vec::new(); STAGES.len()];
+    let mut unread = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let column = |header: &[&str], name: &str| {
+        header
+            .iter()
+            .position(|cell| cell.eq_ignore_ascii_case(name))
+    };
+    for (at, line) in lines.iter().enumerate() {
+        if !line.trim_start().starts_with('|') {
+            continue;
+        }
+        let header = cells(line);
+        let (Some(stage), Some(lever), Some(_), Some(owner)) = (
+            column(&header, "Flow stage"),
+            column(&header, "Lever"),
+            column(&header, "What it changes"),
+            column(&header, "Owner"),
+        ) else {
+            continue;
+        };
+        let rows = lines[at + 1..]
+            .iter()
+            .skip(1)
+            .take_while(|row| row.trim_start().starts_with('|'));
+        for row in rows {
+            let row = cells(row);
+            let (Some(stage_cell), Some(lever_cell), Some(owner_cell)) =
+                (row.get(stage), row.get(lever), row.get(owner))
+            else {
+                let name = row.first().copied().unwrap_or_default();
+                unread.push(format!(
+                    "{name}: {}",
+                    row.get(1).copied().unwrap_or_default()
+                ));
+                continue;
+            };
+            match STAGES
+                .iter()
+                .position(|known| known.eq_ignore_ascii_case(stage_cell))
+            {
+                Some(place) => per_stage[place].push(Lever {
+                    name: (*lever_cell).to_string(),
+                    owner: (*owner_cell).to_string(),
+                }),
+                None => unread.push(format!("{stage_cell}: {lever_cell}")),
+            }
+        }
+        break;
+    }
+    LeversRead::Read { per_stage, unread }
+}

@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::flow::{
-    FACTORY_FLOW_SQL, FlowOutcome, FlowRequest, FlowSource, ReqwestSource, SourceFailure,
-    read_factory_flow,
+    FACTORY_FLOW_SQL, FlowOutcome, FlowRequest, FlowSource, Lever, LeversRead, ReqwestSource,
+    SourceFailure, read_factory_flow, read_levers,
 };
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::FactoryFlowSettings;
@@ -462,4 +462,106 @@ fn the_real_request_holds_the_user_the_limits_the_query_and_only_the_configured_
 fn a_request_does_not_show_its_password_in_debug_output() {
     let request = FlowRequest::new("http://localhost:8123/".into(), CANARY.into(), "SELECT 1");
     assert!(!format!("{request:?}").contains(CANARY));
+}
+
+const LEVERS: &str = "---\nname: levers\n---\n\nText before.\n\n| Flow stage | Lever | What it changes | Owner |\n|---|---|---|---|\n| idea | Backlog of five | A free slot always has ranked work | PnEM |\n| spec | Spec quality | Fewer rounds | PnEM |\n| spec | Slicing and sizing | Smaller pieces | PnEM |\n| approval | Standing waiver | Time to start | chief |\n| release | Release speed and tooling | Time to release | chief |\n| installed | Release watch | Faults after install | chief |\n\nText after.\n";
+
+fn lever(name: &str, owner: &str) -> Lever {
+    Lever {
+        name: name.to_string(),
+        owner: owner.to_string(),
+    }
+}
+
+async fn levers_from(text: &str) -> LeversRead {
+    let dir = TestDirectory::new();
+    let path = dir.file("levers.md", text);
+    read_levers(Some(&path)).await
+}
+
+#[tokio::test]
+async fn the_levers_table_gives_each_stage_its_levers_in_the_order_of_the_file() {
+    let LeversRead::Read { per_stage, unread } = levers_from(LEVERS).await else {
+        panic!("the file is read");
+    };
+    assert_eq!(per_stage.len(), 8);
+    assert_eq!(per_stage[0], vec![lever("Backlog of five", "PnEM")]);
+    assert_eq!(
+        per_stage[1],
+        vec![
+            lever("Spec quality", "PnEM"),
+            lever("Slicing and sizing", "PnEM")
+        ]
+    );
+    assert!(per_stage[2].is_empty());
+    assert_eq!(per_stage[3], vec![lever("Standing waiver", "chief")]);
+    assert_eq!(
+        per_stage[6],
+        vec![lever("Release speed and tooling", "chief")]
+    );
+    assert_eq!(per_stage[7], vec![lever("Release watch", "chief")]);
+    assert!(unread.is_empty());
+}
+
+#[tokio::test]
+async fn a_row_with_an_unknown_flow_stage_goes_in_rows_not_read() {
+    let text = LEVERS.replace("| installed | Release watch", "| deploy | Release watch");
+    let LeversRead::Read { per_stage, unread } = levers_from(&text).await else {
+        panic!("the file is read");
+    };
+    assert!(per_stage[7].is_empty());
+    assert_eq!(unread, vec!["deploy: Release watch".to_string()]);
+}
+
+#[tokio::test]
+async fn a_short_row_goes_in_rows_not_read() {
+    let text = LEVERS.replace(
+        "| spec | Slicing and sizing | Smaller pieces | PnEM |",
+        "| spec | Slicing and sizing |",
+    );
+    let LeversRead::Read { per_stage, unread } = levers_from(&text).await else {
+        panic!("the file is read");
+    };
+    assert_eq!(per_stage[1], vec![lever("Spec quality", "PnEM")]);
+    assert_eq!(unread, vec!["spec: Slicing and sizing".to_string()]);
+}
+
+#[tokio::test]
+async fn only_the_first_table_with_the_four_columns_is_read() {
+    let other = "| Name | Value |\n|---|---|\n| a | b |\n\n";
+    let second = "\n| Flow stage | Lever | What it changes | Owner |\n|---|---|---|---|\n| idea | Second table | x | chief |\n";
+    let text = format!("{other}{LEVERS}{second}");
+    let LeversRead::Read { per_stage, .. } = levers_from(&text).await else {
+        panic!("the file is read");
+    };
+    assert_eq!(per_stage[0], vec![lever("Backlog of five", "PnEM")]);
+}
+
+#[tokio::test]
+async fn the_columns_may_come_in_another_order_and_the_stage_in_any_case() {
+    let text = "| Owner | Lever | Flow Stage | What it changes |\r\n|---|---|---|---|\r\n| chief | Release watch | Installed | x |\r\n";
+    let LeversRead::Read { per_stage, .. } = levers_from(text).await else {
+        panic!("the file is read");
+    };
+    assert_eq!(per_stage[7], vec![lever("Release watch", "chief")]);
+}
+
+#[tokio::test]
+async fn no_setting_or_no_file_is_no_levers_file() {
+    assert!(matches!(read_levers(None).await, LeversRead::NoFile));
+    let dir = TestDirectory::new();
+    let missing = dir.0.join("none.md").to_string_lossy().into_owned();
+    assert!(matches!(
+        read_levers(Some(&missing)).await,
+        LeversRead::NoFile
+    ));
+}
+
+#[tokio::test]
+async fn a_file_with_no_levers_table_gives_empty_stages() {
+    let LeversRead::Read { per_stage, unread } = levers_from("Only text.\n").await else {
+        panic!("the file is read");
+    };
+    assert!(per_stage.iter().all(Vec::is_empty));
+    assert!(unread.is_empty());
 }
