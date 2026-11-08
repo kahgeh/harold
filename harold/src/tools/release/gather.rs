@@ -170,6 +170,132 @@ async fn gather(
     Ok(next)
 }
 
+/// The newest release tag and the specs that it reaches for the first time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Reach {
+    pub tag: String,
+    /// The tag's own time (`creatordate`). `None` when git gives no readable time.
+    pub tag_time: Option<OffsetDateTime>,
+    /// The specs whose merge commit the tag reaches and the counted tag does not. Empty
+    /// when there is no counted tag, or when it is the newest tag.
+    pub merges: Vec<ReachedSpec>,
+}
+
+/// One spec that a release tag reaches for the first time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ReachedSpec {
+    pub id: String,
+    pub merged_at: OffsetDateTime,
+    pub revisions: u32,
+}
+
+/// Why `reach_for` has no answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReachError {
+    /// Git gave no answer, or the pod folder could not be read.
+    Unavailable(&'static str),
+    /// `git rev-list` cannot find the counted tag.
+    MissingTag,
+}
+
+/// The newest release tag of `product` and, when `counted` names an older tag, the specs
+/// whose merge commit the newest tag reaches and `counted` does not (one `rev-list` call).
+/// `Ok(None)` means the product has no release tag. This function only reads.
+pub(super) async fn reach_for(
+    git: &impl Git,
+    product: &Product,
+    counted: Option<&str>,
+    offset: UtcOffset,
+    now: OffsetDateTime,
+) -> Result<Option<Reach>, ReachError> {
+    let origin = format!("origin/{}", product.base);
+    let describe = [
+        "describe",
+        "--tags",
+        "--abbrev=0",
+        "--match",
+        "v[0-9]*",
+        origin.as_str(),
+    ];
+    let Some(text) = ask(git, &product.repo, &describe)
+        .await
+        .map_err(ReachError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    let tag = text.trim().to_string();
+    if tag.is_empty() {
+        return Ok(None);
+    }
+    let reference = format!("refs/tags/{tag}");
+    let tag_time = ask(
+        git,
+        &product.repo,
+        &["for-each-ref", "--format=%(creatordate:unix)", &reference],
+    )
+    .await
+    .map_err(ReachError::Unavailable)?
+    .and_then(|text| text.trim().parse::<i64>().ok())
+    .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok());
+    let mut reach = Reach {
+        tag,
+        tag_time,
+        merges: Vec::new(),
+    };
+    let Some(counted) = counted.filter(|counted| *counted != reach.tag) else {
+        return Ok(Some(reach));
+    };
+
+    let exclusion = format!("^{counted}");
+    let Some(text) = ask(
+        git,
+        &product.repo,
+        &["rev-list", reach.tag.as_str(), exclusion.as_str()],
+    )
+    .await
+    .map_err(ReachError::Unavailable)?
+    else {
+        return Err(ReachError::MissingTag);
+    };
+    let reached: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .collect();
+
+    let history = read_history(git, product)
+        .await
+        .map_err(ReachError::Unavailable)?;
+    let pod = product.repo.join(POD_FOLDER);
+    let SpecRead { specs, .. } = read_specs(
+        &pod,
+        &Sources {
+            busy: &HashMap::new(),
+            reflog: &history.reflog,
+            gone: &HashMap::new(),
+            now,
+            offset,
+        },
+    )
+    .map_err(ReachError::Unavailable)?;
+    reach.merges = specs
+        .iter()
+        .filter_map(|spec| {
+            let commit = spec.merged_commit.as_deref()?;
+            let merged_at = spec.merged_at?;
+            reached
+                .iter()
+                .any(|hash| hash.starts_with(commit) || commit.starts_with(hash))
+                .then(|| ReachedSpec {
+                    id: spec.id.clone(),
+                    merged_at,
+                    revisions: spec.revisions,
+                })
+        })
+        .collect();
+    Ok(Some(reach))
+}
+
 /// Runs a git command. `Err` means git gave no answer. `Ok(None)` means the command
 /// failed.
 async fn ask(git: &impl Git, repo: &Path, args: &[&str]) -> Result<Option<String>, &'static str> {

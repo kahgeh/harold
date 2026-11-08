@@ -176,6 +176,14 @@ impl Fixture {
         )
     }
 
+    async fn reach(
+        &self,
+        git: &FakeGit,
+        counted: Option<&str>,
+    ) -> Result<Option<Reach>, ReachError> {
+        reach_for(git, &self.product(), counted, UtcOffset::UTC, time(NOW)).await
+    }
+
     async fn next(&self, git: &FakeGit) -> ProductNext {
         next_for(git, &self.product(), time(NOW), UtcOffset::UTC).await
     }
@@ -558,4 +566,107 @@ fn the_release_tool_has_no_copy_of_the_waiting_line() {
     let source = include_str!("gather.rs");
     assert!(!source.contains("WAITING_LINE"));
     assert!(!source.contains("Waiting for your approval."));
+}
+
+// Tests of `reach_for`: the tag time and the specs a new tag first reaches.
+
+const NEW_TAG_TIME: &str = "2026-11-02T00:00:00Z";
+const BETA_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+/// The answers for a newest tag `v1.1.0` with its own time, on top of `git()`.
+fn git_new_tag(fixture: &Fixture) -> FakeGit {
+    fixture.git().answer(&DESCRIBE, true, "v1.1.0\n").answer(
+        &[
+            "for-each-ref",
+            "--format=%(creatordate:unix)",
+            "refs/tags/v1.1.0",
+        ],
+        true,
+        &format!("{}\n", time(NEW_TAG_TIME).unix_timestamp()),
+    )
+}
+
+fn two_specs(fixture: &Fixture) {
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    fixture.spec("beta", "# beta: Second\n");
+    fixture.merge("beta", BETA_COMMIT);
+}
+
+#[tokio::test]
+async fn reach_lists_the_specs_the_new_tag_newly_reaches() {
+    let fixture = Fixture::new();
+    two_specs(&fixture);
+    // The new tag holds the commit of alpha and not that of beta, which is not printed.
+    let git = git_new_tag(&fixture).answer(
+        &["rev-list", "v1.1.0", "^v1.0.0"],
+        true,
+        &format!("{COMMIT}\n"),
+    );
+
+    let reach = fixture
+        .reach(&git, Some("v1.0.0"))
+        .await
+        .expect("an answer")
+        .expect("a release");
+
+    assert_eq!(reach.tag, "v1.1.0");
+    assert_eq!(reach.tag_time, Some(time(NEW_TAG_TIME)));
+    let ids: Vec<&str> = reach.merges.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["alpha"]);
+    assert_eq!(reach.merges[0].merged_at, time(MERGE_TIME));
+}
+
+#[tokio::test]
+async fn reach_with_no_counted_tag_lists_no_spec() {
+    let fixture = Fixture::new();
+    two_specs(&fixture);
+    let git = git_new_tag(&fixture);
+
+    let reach = fixture.reach(&git, None).await.unwrap().unwrap();
+
+    assert_eq!(reach.tag, "v1.1.0");
+    assert!(reach.merges.is_empty());
+}
+
+#[tokio::test]
+async fn reach_of_the_counted_tag_itself_lists_no_spec() {
+    let fixture = Fixture::new();
+    two_specs(&fixture);
+    let git = git_new_tag(&fixture);
+
+    let reach = fixture.reach(&git, Some("v1.1.0")).await.unwrap().unwrap();
+
+    assert!(reach.merges.is_empty());
+}
+
+#[tokio::test]
+async fn reach_names_a_counted_tag_that_git_cannot_find() {
+    let fixture = Fixture::new();
+    two_specs(&fixture);
+    // `rev-list` fails because `^v0.9.0` is unknown.
+    let git = git_new_tag(&fixture).answer(&["rev-list", "v1.1.0", "^v0.9.0"], false, "");
+
+    let error = fixture.reach(&git, Some("v0.9.0")).await.unwrap_err();
+
+    assert_eq!(error, ReachError::MissingTag);
+}
+
+#[tokio::test]
+async fn reach_without_a_release_tag_is_none() {
+    let fixture = Fixture::new();
+    let git = fixture.git().answer(&DESCRIBE, false, "");
+
+    assert_eq!(fixture.reach(&git, Some("v1.0.0")).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn reach_when_git_gives_no_answer_is_unavailable() {
+    let fixture = Fixture::new();
+    let git = fixture.git().no_answer(&DESCRIBE);
+
+    assert_eq!(
+        fixture.reach(&git, None).await.unwrap_err(),
+        ReachError::Unavailable(NO_ANSWER)
+    );
 }
