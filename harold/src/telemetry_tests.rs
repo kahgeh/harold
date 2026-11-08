@@ -2139,6 +2139,7 @@ const METRICS: &[&str] = &[
     "pod.specs",
     "pod.spec.words",
     "pod.spec.effort",
+    "pod.fix.confirmed_at",
     "pod.pods",
     "pod.agents",
     "pod.spec.lead_time",

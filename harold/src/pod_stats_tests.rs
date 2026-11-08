@@ -3810,6 +3810,115 @@ fn defaults_for_size_and_awaiting() {
     assert!(!facts.awaiting);
 }
 
+// --- confirmed files and pod.fix.confirmed_at ---
+
+fn put_confirmed(dir: &Path, id: &str, text: &str) {
+    write(&dir.join(format!("confirmed/{id}.md")), text);
+}
+
+const CONFIRMED_AT: &str = "2026-11-05T09:30:00Z";
+
+#[tokio::test]
+async fn a_confirmed_file_gives_the_spec_its_confirmed_time() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/fixed.md"), "# Fixed\n\n**Kind.** fix\n");
+    put_confirmed(
+        &files,
+        "fixed",
+        &format!(
+            "# Confirmed: fixed\n\nconfirmed: {CONFIRMED_AT}\nevidence: queries/example.sql\n"
+        ),
+    );
+    write(&files.join("specs/plain.md"), "# Plain\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let specs = snapshot.lock().unwrap().specs[&pod.name].clone();
+    let at = |id: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.id == id)
+            .unwrap()
+            .confirmed_at
+    };
+    assert_eq!(
+        at("fixed").map(|time| time.unix_timestamp()),
+        Some(parse_time(CONFIRMED_AT).unwrap().unix_timestamp())
+    );
+    assert_eq!(at("plain"), None);
+}
+
+#[tokio::test]
+async fn a_restart_reads_the_same_confirmed_time_again() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/fixed.md"), "# Fixed\n");
+    put_confirmed(
+        &files,
+        "fixed",
+        &format!("confirmed: {CONFIRMED_AT}\nevidence: q\n"),
+    );
+    let read = || async {
+        let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+        stats.poll().await;
+        let specs = snapshot.lock().unwrap().specs[&pod.name].clone();
+        specs[0].confirmed_at
+    };
+    let first = read().await;
+    let second = read().await;
+    assert!(first.is_some());
+    assert_eq!(first, second);
+}
+
+#[tokio::test]
+async fn a_confirmed_file_with_no_time_is_ignored() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/a.md"), "# A\n");
+    write(&files.join("specs/b.md"), "# B\n");
+    put_confirmed(&files, "a", "evidence: queries/example.sql\n");
+    put_confirmed(&files, "b", "confirmed: yesterday\nevidence: q\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let specs = snapshot.lock().unwrap().specs[&pod.name].clone();
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().all(|spec| spec.confirmed_at.is_none()));
+}
+
+#[tokio::test]
+async fn the_confirmed_gauge_carries_unix_seconds_with_the_spec_and_product() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let at = parse_time(CONFIRMED_AT).unwrap();
+    let confirmed = SpecFacts {
+        id: "fixed".into(),
+        confirmed_at: Some(at),
+        ..SpecFacts::default()
+    };
+    let not_confirmed = SpecFacts {
+        id: "open".into(),
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![confirmed, not_confirmed])]),
+        ..PodSnapshot::default()
+    };
+    let read = |id: &str| {
+        test_support::gauge_f64_value(
+            "pod.fix.confirmed_at",
+            &[("pod.product", product.as_str()), ("spec.id", id)],
+        )
+    };
+    assert_eq!(read("fixed"), Some(at.unix_timestamp() as f64));
+    assert_eq!(read("open"), None);
+
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
 // --- free slots with work waiting, and work waiting ---
 
 /// Writes a spec with an approval, and no other file, in the pod folder of `repo`.

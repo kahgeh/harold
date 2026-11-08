@@ -859,6 +859,9 @@ pub(crate) struct SpecFacts {
     pub size: SpecSize,
     /// The kind from the `**Kind.**` line of the spec.
     pub kind: SpecKind,
+    /// The `confirmed:` time of `confirmed/<id>.md`, which the evidence check writes when
+    /// the evidence of a fix is present.
+    pub confirmed_at: Option<OffsetDateTime>,
     /// True when the first line of the spec is `Waiting for your approval.`.
     pub awaiting: bool,
     /// False when `approvals/<id>.md` names (`spec-sha256:`) another text than the spec
@@ -889,6 +892,7 @@ impl Default for SpecFacts {
             revised_after_approval: 0,
             size: SpecSize::Unsized,
             kind: SpecKind::Unkinded,
+            confirmed_at: None,
             awaiting: false,
             approval_current: true,
         }
@@ -1137,6 +1141,10 @@ fn parse_withdrawn(pairs: &HashMap<&str, &str>) -> Option<WithdrawnFile> {
     Some(WithdrawnFile { at, reason })
 }
 
+fn parse_confirmed(pairs: &HashMap<&str, &str>) -> Option<OffsetDateTime> {
+    parse_time(pairs.get("confirmed")?)
+}
+
 fn parse_started(pairs: &HashMap<&str, &str>) -> Option<OffsetDateTime> {
     parse_time(pairs.get("started")?)
 }
@@ -1305,10 +1313,17 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         read_pod_file(pod, "withdrawn", id, parse_withdrawn).split();
     let (started_file, started_notice) = read_pod_file(pod, "started", id, parse_started).split();
     let (merged_file, merged_notice) = read_pod_file(pod, "merged", id, parse_merged).split();
-    let mut notices: Vec<Notice> = [withdrawn_notice, started_notice, merged_notice]
-        .into_iter()
-        .flatten()
-        .collect();
+    let (confirmed_file, confirmed_notice) =
+        read_pod_file(pod, "confirmed", id, parse_confirmed).split();
+    let mut notices: Vec<Notice> = [
+        withdrawn_notice,
+        started_notice,
+        merged_notice,
+        confirmed_notice,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let withdrawn = withdrawn_file.map(|file| (file.at, file.reason));
     let started = started_file.map(|at| at.to_offset(offset));
     let merged = merged_file.map(|file| (file.at.to_offset(offset), file.commit));
@@ -1405,6 +1420,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         revised_after_approval: revised_after_approval(&entries, approved_at),
         size,
         kind,
+        confirmed_at: confirmed_file,
         awaiting,
         approval_current,
     };
@@ -2575,6 +2591,7 @@ struct Gauges {
     _specs: ObservableGauge<u64>,
     _words: ObservableGauge<u64>,
     _effort: ObservableGauge<f64>,
+    _confirmed: ObservableGauge<f64>,
     _pods: ObservableGauge<u64>,
     _agents: ObservableGauge<u64>,
     _idle_with_work: ObservableGauge<u64>,
@@ -2612,6 +2629,7 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
         let specs = Arc::clone(&snapshot);
         let words = Arc::clone(&snapshot);
         let effort = Arc::clone(&snapshot);
+        let confirmed = Arc::clone(&snapshot);
         let pods = Arc::clone(&snapshot);
         let agents = Arc::clone(&snapshot);
         let idle = Arc::clone(&snapshot);
@@ -2704,6 +2722,28 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                                 with_measure.push(KeyValue::new("measure", measure));
                                 observer.observe(value, &with_measure);
                             }
+                        }
+                    }
+                })
+                .build(),
+            // One point for each confirmed file, with its time in Unix seconds. A restart
+            // exports the same times again.
+            _confirmed: meter
+                .f64_observable_gauge("pod.fix.confirmed_at")
+                .with_unit("s")
+                .with_callback(move |observer| {
+                    for (product, specs) in &lock(&confirmed).specs {
+                        for spec in specs {
+                            let Some(at) = spec.confirmed_at else {
+                                continue;
+                            };
+                            observer.observe(
+                                at.unix_timestamp() as f64,
+                                &[
+                                    KeyValue::new("pod.product", product.clone()),
+                                    KeyValue::new("spec.id", spec.id.clone()),
+                                ],
+                            );
                         }
                     }
                 })

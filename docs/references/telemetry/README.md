@@ -423,6 +423,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |
 | `pod.inventory.item_days` | gauge, `d` | `pod.product`, `list` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `pod.fix.confirmed_at` | gauge, `s` (Unix seconds) | `pod.product`, `spec.id` |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`). `missed` is a cron match that did not run because it was older than 120 minutes |
