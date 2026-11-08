@@ -74,6 +74,15 @@ class FlowMergeSqlTextTest(unittest.TestCase):
         for word in ("ready_not_merged", "started_to_ready", "ready_to_completed"):
             self.assertIn(f"'{word}'", text)
 
+    def test_the_two_evidence_queries_name_their_phase_list_and_reasons(self):
+        evidence = QUERIES / "evidence"
+        one = (evidence / "flow-merge-1.sql").read_text(encoding="utf-8")
+        two = (evidence / "flow-merge-2.sql").read_text(encoding="utf-8")
+        for word in ("'ready_to_completed'", "phase_seen", "no_phase_yet"):
+            self.assertIn(word, one)
+        for word in ("'ready_not_merged'", "list_seen", "no_list"):
+            self.assertIn(word, two)
+
 
 if __name__ == "__main__":
     unittest.main()

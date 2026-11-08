@@ -20,6 +20,8 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `evidence-check-2.sql` | `harold.evidence.reads` with `outcome = ok` rose after `since`. Reasons `read_ok` and `no_ok_read` |
 | `flow-spec-review-1.sql` | `pod.spec.lead_time` with `phase = architect_review` rose after `since`. Reasons `phase_seen` and `no_phase_yet` |
 | `flow-spec-review-2.sql` | The median of `open_to_approved` for the specs recorded after `since` is above 60 seconds. Reasons `approval_wait_true` and `approval_wait_zero` |
+| `flow-merge-1.sql` | `pod.spec.lead_time` with `phase = ready_to_completed` rose after `since`. Reasons `phase_seen` and `no_phase_yet` |
+| `flow-merge-2.sql` | `pod.inventory.items` with `list = ready_not_merged` has points after `since`. Reasons `list_seen` and `no_list` |
 
 ## Run one
 
