@@ -712,3 +712,137 @@ fn an_agent_that_leaves_the_block_forgets_its_working() {
     fake.agent_process(200);
     assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
 }
+
+const GAP_LIMIT_MS: u64 = 180_000;
+
+/// Makes the `process` call of the block `b1` fail.
+fn break_b1(fake: &Fake) {
+    fake.put("process-b1.json", "not json");
+}
+
+#[test]
+fn a_block_whose_process_call_fails_keeps_its_row_and_state_within_the_limit() {
+    let fake = Fake::new("gap-keeps-row");
+    let now = clock(1_000);
+    let inventory = fake
+        .inventory("omarchy", None, Arc::clone(&now))
+        .keeping(GAP_LIMIT_MS);
+    let first = inventory.scan().agents;
+    assert_eq!(first.len(), 1);
+    break_b1(&fake);
+    now.store(61_000, Ordering::SeqCst);
+    let scan = inventory.scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents, first);
+    assert_eq!(scan.agents[0].state, WORKING);
+    assert_eq!(scan.agents[0].current_step.as_deref(), Some("Edit files"));
+}
+
+#[test]
+fn a_turn_that_ends_during_the_block_gap_gives_done() {
+    let fake = Fake::new("gap-done");
+    let now = clock(1_000);
+    let inventory = fake.done_inventory(Arc::clone(&now)).keeping(GAP_LIMIT_MS);
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    break_b1(&fake);
+    now.store(61_000, Ordering::SeqCst);
+    assert_eq!(inventory.scan().agents[0].state, WORKING);
+    fake.agent_process(200);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), DONE);
+}
+
+#[test]
+fn a_block_gap_past_the_limit_drops_the_row_and_its_memory() {
+    let fake = Fake::new("gap-expires");
+    let now = clock(1_000);
+    let inventory = fake.done_inventory(Arc::clone(&now)).keeping(GAP_LIMIT_MS);
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    break_b1(&fake);
+    now.store(1_000 + GAP_LIMIT_MS as i64 + 1, Ordering::SeqCst);
+    let scan = inventory.scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert!(scan.agents.is_empty());
+    fake.agent_process(200);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
+}
+
+#[test]
+fn the_block_gap_counts_from_the_last_good_read_of_the_block() {
+    let fake = Fake::new("gap-from-good");
+    let now = clock(0);
+    let inventory = fake
+        .inventory("omarchy", None, Arc::clone(&now))
+        .keeping(GAP_LIMIT_MS);
+    assert_eq!(inventory.scan().agents.len(), 1);
+    break_b1(&fake);
+    now.store(170_000, Ordering::SeqCst);
+    assert_eq!(inventory.scan().agents.len(), 1);
+    now.store(181_000, Ordering::SeqCst);
+    assert!(inventory.scan().agents.is_empty());
+}
+
+#[test]
+fn a_block_that_leaves_the_slot_list_goes_at_once() {
+    let fake = Fake::new("gap-leaves");
+    let now = clock(1_000);
+    let inventory = fake
+        .inventory("omarchy", None, Arc::clone(&now))
+        .keeping(GAP_LIMIT_MS);
+    assert_eq!(inventory.scan().agents.len(), 1);
+    break_b1(&fake);
+    fake.put(
+        "view.json",
+        r#"{"windows":[{"layers":[{"blocks":[
+        {"block_id":"block:b2","creator_name":"com.superlogical.terminal"}]}]}]}"#,
+    );
+    now.store(2_000, Ordering::SeqCst);
+    assert!(inventory.scan().agents.is_empty());
+}
+
+#[test]
+fn a_new_pid_after_a_block_gap_is_a_new_incarnation() {
+    let fake = Fake::new("gap-new-pid");
+    let now = clock(1_000);
+    let inventory = fake.done_inventory(Arc::clone(&now)).keeping(GAP_LIMIT_MS);
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    break_b1(&fake);
+    now.store(31_000, Ordering::SeqCst);
+    assert_eq!(inventory.scan().agents.len(), 1);
+    fake.agent_process(201);
+    fake.status(201, "idle", "");
+    let agent = inventory.scan().agents.remove(0);
+    assert_eq!(agent.state, IDLE);
+    assert_eq!(agent.first_seen_ms, 31_000);
+}
+
+#[test]
+fn a_limit_of_zero_leaves_out_a_block_whose_process_call_fails() {
+    let fake = Fake::new("gap-zero");
+    let now = clock(1_000);
+    let inventory = fake.done_inventory(Arc::clone(&now)).keeping(0);
+    assert_eq!(scan_with(&fake, &inventory, "working"), WORKING);
+    break_b1(&fake);
+    assert!(inventory.scan().agents.is_empty());
+    fake.agent_process(200);
+    assert_eq!(scan_with(&fake, &inventory, "idle"), IDLE);
+}
+
+#[test]
+fn the_failed_operation_names_the_first_failing_call() {
+    let fake = Fake::new("gap-operation");
+    let inventory = fake.inventory("omarchy", None, clock(1));
+    assert_eq!(inventory.scan().outcome, Ok(()));
+    assert_eq!(inventory.failed_operation(), None);
+    break_b1(&fake);
+    fake.put("process-b2.json", "not json");
+    assert!(inventory.scan().outcome.is_err());
+    assert_eq!(inventory.failed_operation(), Some("process"));
+    let listing = std::fs::read_to_string(fake.dir.join("view.json")).unwrap();
+    std::fs::remove_file(fake.dir.join("view.json")).unwrap();
+    assert!(inventory.scan().outcome.is_err());
+    assert_eq!(inventory.failed_operation(), Some("layout"));
+    fake.put("view.json", &listing);
+    std::fs::remove_file(fake.dir.join("ls.json")).unwrap();
+    assert!(inventory.scan().outcome.is_err());
+    assert_eq!(inventory.failed_operation(), Some("list"));
+}

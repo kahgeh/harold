@@ -512,12 +512,15 @@ pub(crate) fn start(settings: &Settings, shutdown: watch::Receiver<()>) -> HostA
         .rex_hosts
         .iter()
         .map(|label| {
-            Arc::new(RexHostInventory::new(
-                label.clone(),
-                settings.agents.clone(),
-                monitor.rex_host_marks.get(label).cloned(),
-                Arc::clone(&clock),
-            )) as Arc<dyn HostSource>
+            Arc::new(
+                RexHostInventory::new(
+                    label.clone(),
+                    settings.agents.clone(),
+                    monitor.rex_host_marks.get(label).cloned(),
+                    Arc::clone(&clock),
+                )
+                .keeping(monitor.host_unknown_after_ms),
+            ) as Arc<dyn HostSource>
         })
         .collect();
     let interval = Duration::from_millis(monitor.inventory_interval_ms);

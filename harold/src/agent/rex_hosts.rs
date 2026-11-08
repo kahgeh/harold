@@ -90,6 +90,10 @@ struct Seen {
     first_seen_ms: i64,
     /// The last state that a record gave for this pid. `None` before a record.
     state: Option<ObservedAgentState>,
+    /// The row that the last good read of the block gave, as Harold showed it.
+    last_row: RexHostAgent,
+    /// When the last good read of the block came.
+    last_good_ms: i64,
 }
 
 #[derive(Default)]
@@ -114,6 +118,8 @@ pub(crate) struct RexHostInventory {
     icon: Mutex<IconState>,
     /// The first Rex call that failed in the scan that is running or ran last.
     failed_operation: Mutex<Option<&'static str>>,
+    /// How long a block whose `process` call fails keeps its row. Zero keeps nothing.
+    keep_ms: i64,
 }
 
 impl RexHostInventory {
@@ -152,7 +158,15 @@ impl RexHostInventory {
             whoami_retry_at_ms: Mutex::new(None),
             icon: Mutex::new(IconState::default()),
             failed_operation: Mutex::new(None),
+            keep_ms: 0,
         }
+    }
+
+    /// Lets a block whose `process` call fails keep its row and its memory for up to
+    /// `keep_ms` from its last good read.
+    pub(crate) fn keeping(mut self, keep_ms: u64) -> Self {
+        self.keep_ms = i64::try_from(keep_ms).unwrap_or(i64::MAX);
+        self
     }
 
     pub(crate) fn label(&self) -> &str {
@@ -339,6 +353,13 @@ impl RexHostInventory {
         let first_error = results
             .iter()
             .find_map(|result| result.as_ref().err().copied());
+        // The blocks whose `process` call failed. Their rows may stay for a short time.
+        let failed_blocks: Vec<&str> = slots
+            .iter()
+            .zip(&results)
+            .filter(|(_, result)| result.is_err())
+            .map(|(slot, _)| slot.block_id.as_str())
+            .collect();
         let answered: Vec<_> = slots
             .iter()
             .zip(results)
@@ -347,6 +368,11 @@ impl RexHostInventory {
         if let Some(error) = first_error
             && (answered.is_empty() || stop_requested())
         {
+            // A reply that does not parse is a failed `process` call too.
+            self.failed_operation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert(MultiplexerOperation::Process.as_str());
             return Err(error);
         }
         let mut hits = Vec::new();
@@ -439,9 +465,22 @@ impl RexHostInventory {
                     pid: agent.pid,
                     first_seen_ms,
                     state,
+                    last_row: agent.clone(),
+                    last_good_ms: now,
                 },
             );
             agents.push(agent);
+        }
+        // A block that is still in the slot list but did not answer keeps its row and its
+        // memory, until the limit passes. A block that left the slot list goes at once.
+        for block_id in failed_blocks {
+            if let Some(old) = seen.remove(block_id)
+                && self.keep_ms > 0
+                && now.saturating_sub(old.last_good_ms) <= self.keep_ms
+            {
+                agents.push(old.last_row.clone());
+                next.insert(block_id.to_string(), old);
+            }
         }
         *seen = next;
         Ok(agents)
