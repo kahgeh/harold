@@ -1082,7 +1082,7 @@ impl<T> PodFile<T> {
 
 /// The `key: value` lines of a pod file. The first line of a key wins and a line without a
 /// colon, such as the title, is skipped.
-fn key_values(text: &str) -> HashMap<&str, &str> {
+pub(crate) fn key_values(text: &str) -> HashMap<&str, &str> {
     let mut pairs = HashMap::new();
     for line in text.lines() {
         if let Some((key, value)) = line.split_once(':') {
@@ -1092,7 +1092,7 @@ fn key_values(text: &str) -> HashMap<&str, &str> {
     pairs
 }
 
-fn parse_time(text: &str) -> Option<OffsetDateTime> {
+pub(crate) fn parse_time(text: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
 }
 
