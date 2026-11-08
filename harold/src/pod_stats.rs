@@ -1921,7 +1921,13 @@ pub(crate) const INVENTORY_OLDEST_HOURS: (&str, &str) = ("pod.inventory.oldest_h
 pub(crate) const INVENTORY_ITEM_DAYS: (&str, &str) = ("pod.inventory.item_days", "d");
 
 /// The lists of work waiting, in the order the gauges report them.
-const WORK_LISTS: [&str; 3] = ["awaiting_approval", "approved_not_started", "in_progress"];
+const WORK_LISTS: [&str; 5] = [
+    "awaiting_approval",
+    "approved_not_started",
+    "in_progress",
+    "in_spec_writing",
+    "in_architect_review",
+];
 
 /// What one list of work waiting holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1962,11 +1968,6 @@ pub(crate) fn work_waiting(
             .map(|since| now - since)
             .collect()
     };
-    let mut awaiting = ages(&|spec| {
-        (spec.state == SpecState::Open && spec.awaiting)
-            .then_some(spec.open_at)
-            .flatten()
-    });
     // A stale approval (one that names an older text) awaits approval again.
     let approved_since = |spec: &SpecFacts, current: bool| {
         let approved_at = spec.approved_at?;
@@ -1975,15 +1976,31 @@ pub(crate) fn work_waiting(
             && cutoff.is_none_or(|cutoff| approved_at >= cutoff))
         .then_some(approved_at)
     };
-    let stale = ages(&|spec| approved_since(spec, false));
+    let awaiting_since = |spec: &SpecFacts| {
+        if spec.state == SpecState::Open && spec.awaiting {
+            return spec.open_at;
+        }
+        approved_since(spec, false)
+    };
+    // Each spec that awaits approval is in one stage, by the last line of its reviews file.
+    let awaiting = ages(&awaiting_since);
+    let in_stage = |wanted: fn(&ReviewLine) -> bool| {
+        ages(&|spec| {
+            let last = spec.reviews.as_ref()?.last()?;
+            wanted(last).then(|| awaiting_since(spec)).flatten()
+        })
+    };
+    let writing = in_stage(|line| matches!(line, ReviewLine::Verdict(_, false)));
+    let review = in_stage(|line| matches!(line, ReviewLine::Sent(_)));
     let approved = ages(&|spec| approved_since(spec, true));
     let in_progress = ages(&|spec| (spec.state == SpecState::InProgress).then_some(spec.state_at));
-    awaiting.extend(stale);
     let idle = if approved.is_empty() { 0 } else { free_slots };
     let lists = BTreeMap::from([
         (WORK_LISTS[0], list_stats(&awaiting)),
         (WORK_LISTS[1], list_stats(&approved)),
         (WORK_LISTS[2], list_stats(&in_progress)),
+        (WORK_LISTS[3], list_stats(&writing)),
+        (WORK_LISTS[4], list_stats(&review)),
     ]);
     (idle, lists)
 }

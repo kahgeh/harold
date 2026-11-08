@@ -4160,8 +4160,8 @@ fn an_empty_list_reports_0() {
     let now = at("2026-11-03T00:00:00Z");
     let (idle, lists) = work_waiting(&[], 3, None, now);
     assert_eq!(idle, 0);
-    assert_eq!(lists.len(), 3);
-    for name in ["awaiting_approval", "approved_not_started", "in_progress"] {
+    assert_eq!(lists.len(), 5);
+    for name in WORK_LISTS {
         assert_eq!(lists[name], ListStats::default(), "{name}");
     }
 }
@@ -5043,4 +5043,87 @@ fn read_specs_reads_the_reviews_file_and_logs_a_bad_one_once() {
         &read.notices[0],
         Notice::Unreadable { id, file, .. } if id == "bad" && file == "reviews/bad.md"
     ));
+}
+
+// --- the two review lists ---
+
+fn awaiting_with(id: &str, reviews: Option<&str>, stale: bool, now: OffsetDateTime) -> SpecFacts {
+    let base = if stale {
+        SpecFacts {
+            approved_at: Some(now - time::Duration::days(2)),
+            approval_current: false,
+            ..spec_in(id, SpecState::Approved, now)
+        }
+    } else {
+        SpecFacts {
+            awaiting: true,
+            open_at: Some(now - time::Duration::days(1)),
+            ..spec_in(id, SpecState::Open, now)
+        }
+    };
+    SpecFacts {
+        reviews: reviews.and_then(parse_reviews),
+        ..base
+    }
+}
+
+const SENT: &str = "sent: 2026-11-08T10:10:00Z sha256:aa\n";
+const REVISE: &str = "verdict: 2026-11-08T10:30:00Z revise\n";
+const OK: &str = "verdict: 2026-11-08T10:30:00Z ok\n";
+const SKIPPED: &str = "skipped: 2026-11-08T10:30:00Z\n";
+
+#[test]
+fn the_last_review_line_puts_a_waiting_spec_in_a_stage() {
+    let now = at("2026-11-09T00:00:00Z");
+    for stale in [false, true] {
+        let cases: [(&str, Option<String>, [u64; 3]); 5] = [
+            ("none", None, [1, 0, 0]),
+            ("ok", Some(format!("{SENT}{OK}")), [1, 0, 0]),
+            ("skipped", Some(SKIPPED.to_owned()), [1, 0, 0]),
+            ("revise", Some(format!("{SENT}{REVISE}")), [1, 1, 0]),
+            ("sent", Some(SENT.to_owned()), [1, 0, 1]),
+        ];
+        for (name, reviews, [awaiting, writing, review]) in cases {
+            let spec = awaiting_with(name, reviews.as_deref(), stale, now);
+            let (_, lists) = work_waiting(&[spec], 2, None, now);
+            assert_eq!(lists["awaiting_approval"].items, awaiting, "{name} {stale}");
+            assert_eq!(lists["in_spec_writing"].items, writing, "{name} {stale}");
+            assert_eq!(lists["in_architect_review"].items, review, "{name} {stale}");
+        }
+    }
+}
+
+#[test]
+fn a_spec_that_does_not_wait_for_approval_is_in_no_review_list() {
+    let now = at("2026-11-09T00:00:00Z");
+    let reviews = parse_reviews(&format!("{SENT}{REVISE}"));
+    let approved = SpecFacts {
+        approved_at: Some(now),
+        reviews: reviews.clone(),
+        ..spec_in("approved", SpecState::Approved, now)
+    };
+    let not_waiting = SpecFacts {
+        reviews,
+        ..spec_in("quiet", SpecState::Open, now)
+    };
+    let (_, lists) = work_waiting(&[approved, not_waiting], 2, None, now);
+    assert_eq!(lists["in_spec_writing"].items, 0);
+    assert_eq!(lists["in_architect_review"].items, 0);
+}
+
+#[test]
+fn the_review_lists_never_count_a_spec_twice() {
+    let now = at("2026-11-09T00:00:00Z");
+    let specs = [
+        awaiting_with("a", Some(&format!("{SENT}{REVISE}")), false, now),
+        awaiting_with("b", Some(SENT), true, now),
+        awaiting_with("c", None, false, now),
+    ];
+    let (_, lists) = work_waiting(&specs, 2, None, now);
+    let (awaiting, writing, review) = (
+        lists["awaiting_approval"].items,
+        lists["in_spec_writing"].items,
+        lists["in_architect_review"].items,
+    );
+    assert_eq!((awaiting, writing, review), (3, 1, 1));
 }
