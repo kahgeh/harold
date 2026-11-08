@@ -357,7 +357,7 @@ screen_history_lines = 2000
 | `agents[].idle_all` | Optional conjunctive, case-sensitive visible-grid fragments and idle-placeholder rejection clauses |
 | `agents[].summary_line_prefixes` | Optional exact, case-sensitive safe submitted-input prefixes for `generic-v1`; `codex-v1` recognizes its own styled `>` and `›` blocks |
 | `agents[].screen_adapter` | `generic-v1` when omitted; accepts `generic-v1`, `codex-v1`, or `claude-v1`; unknown names fail startup |
-| `agents[].idle_after_working` | `idle` when omitted; accepts `idle` or `done`; unknown values fail startup. With `done`, an agent on a Rex host whose record goes from working or blocked to idle with the same pid shows done. The shipped OpenCode entry sets `done`, because OpenCode reports idle at the end of a turn |
+| `agents[].idle_after_working` | `idle` when omitted; accepts `idle` or `done`; unknown values fail startup. With `done`, an agent on this Mac or on a Rex host whose record goes from working or blocked to idle with the same pid shows done. The shipped OpenCode entry sets `done`, because OpenCode reports idle at the end of a turn |
 | `agents[].screen_history_lines` | Integer from 1 through 10,000; defaults to 2,000 history rows before the visible grid |
 
 The defaults above are the ones in `harold/config/default.toml`, and that file decides them. Harold will not start without it, and it sets every `[agent_monitor]` key, so the fallback values built into `AgentMonitorSettings` in `harold/src/settings.rs` (1,000 ms inventory and 500 ms screen intervals) apply only to a key the file leaves out.

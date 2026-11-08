@@ -975,7 +975,7 @@ mod rex_observer {
     }
 
     fn api_with(block: &str, status: Option<Value>) -> Arc<CountingRex> {
-        let mut api = CountingRex {
+        let api = CountingRex {
             blocks: vec![block.to_string()],
             ..CountingRex::default()
         };
@@ -1565,7 +1565,7 @@ mod rex_observer {
         #[test]
         fn a_turn_shorter_than_one_scan_gives_done_when_the_stream_read_it() {
             let block = "block:short-turn";
-            let mut api = CountingRex {
+            let api = CountingRex {
                 blocks: vec![block.to_string()],
                 ..CountingRex::default()
             };

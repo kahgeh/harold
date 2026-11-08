@@ -17,7 +17,7 @@ The returned snapshot can contain the configured history depth plus the pane's v
 | --- | --- | --- |
 | Codex | Explicit `codex-v1` | Styled submitted `>` or `›` prompt blocks, including wrapped continuation rows. |
 | Claude | Explicit `claude-v1` | Configured safe line prefixes, as in `generic-v1`; no Claude-specific styled parser or composer guarantee. |
-| OpenCode | `generic-v1` | State only: no work summary prefix is configured. The explicit plugin supplies submitted instructions. On a Rex host, OpenCode 2.2.6 writes its own program status record (`working`, then `idle` at the end of a turn), and `idle_after_working = "done"` turns that idle into done. The screen clauses are used on this Mac only. |
+| OpenCode | `generic-v1` | State only: no work summary prefix is configured. The explicit plugin supplies submitted instructions. OpenCode 2.2.6 writes its own program status record (`working`, then `idle` at the end of a turn), and `idle_after_working = "done"` turns that idle into done, on this Mac and on a Rex host. The screen clauses are used on this Mac only. |
 | Custom named provider | `generic-v1` unless overridden | Configured safe line prefixes. Omit prefixes if they cannot distinguish submitted input safely. |
 
 `screen_adapter` defaults to `generic-v1` when omitted. A provider named `codex` or `claude` does not select `codex-v1` or `claude-v1` implicitly. If a local overlay replaces the complete `[[agents]]` list, add the adapter selection to its Codex and Claude entries as well.
