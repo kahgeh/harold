@@ -348,7 +348,6 @@ async fn no_answer_in_five_seconds_is_a_timeout() {
     let read = read_factory_flow(&settings(Some(users)), &Silent).await;
     assert_eq!(read.outcome, FlowOutcome::Timeout);
     assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert_eq!(read.elapsed_ms, 5000);
 }
 
 #[tokio::test]
@@ -867,4 +866,129 @@ async fn the_pages_index_has_the_row_factory_flow_after_specs() {
     let flow = page.find("href=\"/flow\"").expect("the Factory flow row");
     assert!(flow > specs);
     assert!(page[flow..].contains("Factory flow"));
+}
+
+// ---------------------------------------------------------------------------
+// Port tests: a fake ClickHouse on a loopback port. They run only in the container test
+// set and in CI, through `scripts/test-run factory-flow-page <name> --container port-tests`.
+// ---------------------------------------------------------------------------
+
+/// What the fake ClickHouse saw: the whole request, as text.
+type Seen = Arc<Mutex<Vec<String>>>;
+
+/// A fake ClickHouse that answers each request with `status` and `body`, or never answers
+/// when `body` is none. It returns the base URL and what it saw.
+async fn fake_clickhouse(status: &'static str, body: Option<String>) -> (String, Seen) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let seen: Seen = Arc::default();
+    let record = Arc::clone(&seen);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let record = Arc::clone(&record);
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request).into_owned();
+                    let Some((head, rest)) = text.split_once("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if rest.len() >= length {
+                        record.lock().unwrap().push(text);
+                        break;
+                    }
+                }
+                let Some(body) = body else {
+                    std::future::pending::<()>().await;
+                    return;
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (url, seen)
+}
+
+async fn read_from(url: String) -> super::flow::FlowRead {
+    let dir = TestDirectory::new();
+    let mut flow_settings = settings(Some(dir.file("users.sql", &users_file_text(CANARY))));
+    flow_settings.clickhouse_url = url;
+    read_factory_flow(&flow_settings, &ReqwestSource::new()).await
+}
+
+#[tokio::test]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn the_real_source_sends_the_user_the_key_the_limits_and_the_query() {
+    let (url, seen) = fake_clickhouse("200 OK", Some(body())).await;
+    let read = read_from(url).await;
+    assert_eq!(read.outcome, FlowOutcome::Ok);
+    assert_eq!(read.rows.len(), 8);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let request = seen[0].to_ascii_lowercase();
+    assert!(request.starts_with("post /?"), "{request}");
+    for piece in [
+        "default_format=jsoneachrow",
+        "readonly=1",
+        "max_execution_time=5",
+        "x-clickhouse-user: hyperdx_ro",
+    ] {
+        assert!(request.contains(piece), "{piece}");
+    }
+    assert!(request.contains(&format!(
+        "x-clickhouse-key: {}",
+        CANARY.to_ascii_lowercase()
+    )));
+    assert!(seen[0].ends_with(FACTORY_FLOW_SQL));
+    assert!(
+        !seen[0].lines().next().unwrap().contains(CANARY),
+        "the password is not in the URL"
+    );
+}
+
+#[tokio::test]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn a_refusal_from_clickhouse_is_refused() {
+    let (url, _) = fake_clickhouse("403 Forbidden", Some("Code: 497".to_string())).await;
+    assert_eq!(read_from(url).await.outcome, FlowOutcome::Refused);
+}
+
+#[tokio::test]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn a_port_with_no_listener_is_unreachable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    drop(listener);
+    assert_eq!(read_from(url).await.outcome, FlowOutcome::Unreachable);
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn a_server_that_never_answers_is_a_timeout() {
+    let (url, _) = fake_clickhouse("200 OK", None).await;
+    assert_eq!(read_from(url).await.outcome, FlowOutcome::Timeout);
 }

@@ -81,7 +81,6 @@ pub(crate) struct StageRow {
 pub(crate) struct FlowRead {
     pub outcome: FlowOutcome,
     pub rows: Vec<StageRow>,
-    pub elapsed_ms: u64,
 }
 
 /// One query to send. It holds the password until it drops, and `Debug` never shows it.
@@ -260,11 +259,7 @@ pub(crate) async fn read_factory_flow(
     } else {
         warn!(outcome = word, elapsed_ms, "factory flow read");
     }
-    FlowRead {
-        outcome,
-        rows,
-        elapsed_ms,
-    }
+    FlowRead { outcome, rows }
 }
 
 async fn attempt(
