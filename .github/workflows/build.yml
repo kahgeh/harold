@@ -40,7 +40,7 @@ jobs:
         timeout-minutes: 20
         env:
           HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}
-run: |
+        run: |
           export HAROLD_RELEASE_TIME="$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/$HAROLD_RELEASE_VERSION")"
           cargo build --locked --release --target aarch64-apple-darwin -p harold -p control-tower
 
@@ -140,7 +140,7 @@ run: |
         if: github.event_name == 'release'
         env:
           HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}
-run: |
+        run: |
           export HAROLD_RELEASE_TIME="$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/$HAROLD_RELEASE_VERSION")"
           cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-features --features harold/linux-defaults -p harold -p control-tower
 

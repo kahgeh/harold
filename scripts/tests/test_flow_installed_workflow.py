@@ -14,7 +14,7 @@ TIME_LINE = (
 )
 
 
-def step_lines(text, job, step):
+def raw_step_lines(text, job, step):
     lines = text.splitlines()
     start = lines.index(f"  {job}:") + 1
     end = len(lines)
@@ -28,8 +28,12 @@ def step_lines(text, job, step):
     for line in job_lines[begin:]:
         if line.startswith("      - "):
             break
-        out.append(line.strip())
+        out.append(line)
     return out
+
+
+def step_lines(text, job, step):
+    return [line.strip() for line in raw_step_lines(text, job, step)]
 
 
 class ReleaseTimeTest(unittest.TestCase):
@@ -37,6 +41,11 @@ class ReleaseTimeTest(unittest.TestCase):
         text = BUILD.read_text(encoding="utf-8")
         step = step_lines(text, job, "Build release binaries")
         self.assertIn("HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}", step)
+        raw = raw_step_lines(text, job, "Build release binaries")
+        # The step keys sit at 8 spaces and the command lines at 10, so the file keeps its shape.
+        self.assertIn("        run: |", raw)
+        self.assertIn(f"          {TIME_LINE}", raw)
+        self.assertTrue(all(line.startswith("        ") for line in raw if line.strip()), raw)
         joined = "\n".join(step)
         self.assertIn(TIME_LINE, joined)
         # The time is read from the tag's own time, before the build starts.

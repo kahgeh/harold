@@ -60,7 +60,7 @@ pub(crate) const TRACE_TARGET: &str = "harold::trace";
 /// The file in Harold's data folder that holds the version that started last.
 pub(crate) const INSTALLED_VERSION_FILE: &str = "installed-version";
 
-/// The release version that runs, set once at start. Empty for a build from source.
+/// The release version that runs, set once at start. Unset for a build from source.
 static RUNNING_RELEASE: OnceLock<String> = OnceLock::new();
 
 /// The release version that runs, or `None` for a build from source or before the start
