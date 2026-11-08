@@ -120,6 +120,15 @@ The installed service controls its own config directory, `local` overlay, PATH, 
 
 `service.json` records the service identity, its environment, and the signing identity the installer used. Channel credentials belong in `config/local.toml`, which the installer writes with owner-only permissions. Edit that file and run `haroldctl restart` to apply changes.
 
+### The attention settings
+
+The section `[attention]` holds what the time of the user is worth. The HyperDX attention cost uses it.
+
+- `hourly_rate`: a whole number above 0, in the currency below. The default is `100`.
+- `currency`: three capital letters (ISO 4217). The default is `"AUD"`.
+
+Override both in `config/local.toml`, then run `haroldctl restart`. A rate of 0 or below, or a currency that is not three capital letters, stops the start. Harold sends the rate as the gauge `harold.attention.hourly_rate` at each export. The cost on the card changes after the next export and the next reload of the ClickHouse dictionary `otel.harold_settings`. The recorded answer seconds do not change.
+
 ## The store
 
 Harold keeps everything it records in one folder: `<prefix>/harold/data/store/` for the installed service, and `[store] path` for a directly run binary. The folder holds four entries:

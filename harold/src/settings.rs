@@ -556,6 +556,41 @@ impl CallAnswererSettings {
     }
 }
 
+/// The `[attention]` table: what the user's time is worth. Harold sends the rate as the
+/// gauge `harold.attention.hourly_rate`, so the HyperDX attention cost can read it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct AttentionSettings {
+    /// A whole number above 0, in `currency`.
+    pub hourly_rate: u32,
+    /// Three capital letters (ISO 4217).
+    pub currency: String,
+}
+
+impl Default for AttentionSettings {
+    fn default() -> Self {
+        Self {
+            hourly_rate: 100,
+            currency: "AUD".into(),
+        }
+    }
+}
+
+impl AttentionSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.hourly_rate == 0 {
+            errors.push("attention.hourly_rate must be a whole number above 0".into());
+        }
+        let capitals =
+            self.currency.len() == 3 && self.currency.bytes().all(|b| b.is_ascii_uppercase());
+        if !capitals {
+            errors.push("attention.currency must be three capital letters, such as AUD".into());
+        }
+        errors
+    }
+}
+
 /// Whether `model` is a model name: at most 128 ASCII token characters.
 fn valid_model_name(model: &str) -> bool {
     !model.is_empty()
@@ -1828,6 +1863,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) call_answerer: CallAnswererSettings,
     #[serde(default)]
+    pub(crate) attention: AttentionSettings,
+    #[serde(default)]
     pub(crate) restart_reminder: RestartReminderSettings,
     #[serde(default)]
     pub(crate) agents: AgentSettings,
@@ -1938,6 +1975,7 @@ impl Settings {
         errors.extend(self.knowledge.validate());
         errors.extend(tts_errors(&self.tts));
         errors.extend(self.call_answerer.validate());
+        errors.extend(self.attention.validate());
         errors.extend(self.restart_reminder.validate());
         errors.extend(away_messages_only_from_error(
             self.notify.away_messages_only_from.as_deref(),
@@ -2819,6 +2857,67 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         let off = parse_call_answerer("[call_answerer]\nenabled = false\n");
         assert!(!off.enabled);
         assert!(off.validate().is_empty());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct AttentionFixture {
+        #[serde(default)]
+        attention: super::AttentionSettings,
+    }
+
+    fn parse_attention(sources: &[&str]) -> super::AttentionSettings {
+        let mut builder = Config::builder();
+        for source in sources {
+            builder = builder.add_source(File::from_str(source, FileFormat::Toml));
+        }
+        builder
+            .build()
+            .and_then(Config::try_deserialize::<AttentionFixture>)
+            .expect("attention fixture should deserialize")
+            .attention
+    }
+
+    #[test]
+    fn attention_settings_ship_100_and_aud() {
+        let shipped = parse_attention(&[include_str!("../config/default.toml")]);
+        assert_eq!(shipped.hourly_rate, 100);
+        assert_eq!(shipped.currency, "AUD");
+        assert!(shipped.validate().is_empty());
+        assert_eq!(parse_attention(&[""]), shipped);
+    }
+
+    #[test]
+    fn attention_settings_local_toml_overrides_both() {
+        let settings = parse_attention(&[
+            include_str!("../config/default.toml"),
+            "[attention]\nhourly_rate = 150\ncurrency = \"EUR\"\n",
+        ]);
+        assert_eq!(settings.hourly_rate, 150);
+        assert_eq!(settings.currency, "EUR");
+        assert!(settings.validate().is_empty());
+    }
+
+    #[test]
+    fn attention_settings_reject_a_bad_rate_or_currency() {
+        for source in [
+            "[attention]\nhourly_rate = 0\n",
+            "[attention]\ncurrency = \"aud\"\n",
+            "[attention]\ncurrency = \"AUDX\"\n",
+            "[attention]\ncurrency = \"\"\n",
+        ] {
+            let errors = parse_attention(&[source]).validate();
+            assert_eq!(errors.len(), 1, "{source}");
+            assert!(errors[0].contains("attention."), "{source}");
+        }
+        // A negative rate does not fit the whole number, so loading fails.
+        let negative = Config::builder()
+            .add_source(File::from_str(
+                "[attention]\nhourly_rate = -5\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .and_then(Config::try_deserialize::<AttentionFixture>);
+        assert!(negative.is_err());
     }
 
     #[derive(Debug, Deserialize)]

@@ -191,6 +191,11 @@ imessage = ["chief-of-pods"]
 web_app = ["chief-of-pods"]
 machine_audio_output = ["chief-of-pods"]
 
+[attention]
+# What the user's time is worth. The HyperDX attention cost uses it. Change it in local.toml.
+hourly_rate = 100   # a whole number above 0, in the currency below
+currency = "AUD"    # three capital letters (ISO 4217)
+
 # Timed prompts: none by default. Add [[timed_prompts]] entries in local.toml.
 # See docs/references/timed-prompts/README.md.
 
