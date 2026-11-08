@@ -1059,6 +1059,29 @@ pub(crate) fn file_time(path: &Path, offset: UtcOffset) -> Option<OffsetDateTime
 }
 
 /// The text of the file at `path`, or None when it cannot be read.
+/// The draft time of a spec: the open time. It is the time of the first `## ` heading of
+/// the revisions file, in `offset`, when that heading has a clock time. Else it is the
+/// birth time of the spec file. It never takes a later heading. An earlier birth time wins.
+pub(crate) fn draft_time(
+    revisions: Option<&str>,
+    birth: Option<OffsetDateTime>,
+    offset: UtcOffset,
+) -> Option<OffsetDateTime> {
+    let first = revisions
+        .and_then(|text| text.lines().find_map(|line| line.strip_prefix("## ")))
+        .filter(|heading| {
+            heading
+                .split(',')
+                .next()
+                .is_some_and(|stamp| stamp.split_whitespace().count() == 2)
+        })
+        .and_then(|heading| heading_time(heading, offset));
+    match (first, birth) {
+        (Some(first), Some(birth)) => Some(first.min(birth)),
+        (first, birth) => first.or(birth),
+    }
+}
+
 fn read_text(path: &Path) -> Option<String> {
     std::fs::read(path)
         .ok()
@@ -1321,7 +1344,9 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     } = context;
     let (now, offset) = (sources.now, sources.offset);
     let spec = pod.join("specs").join(format!("{id}.md"));
-    let open_at = file_time(&spec, offset)?;
+    let birth = file_time(&spec, offset)?;
+    let revisions_text = read_text(&pod.join("specs").join(format!("{id}.revisions.md")));
+    let open_at = draft_time(revisions_text.as_deref(), Some(birth), offset)?;
     let approved_at = file_time(&pod.join("approvals").join(format!("{id}.md")), offset);
     let (withdrawn_file, withdrawn_notice) =
         read_pod_file(pod, "withdrawn", id, parse_withdrawn).split();
@@ -1402,7 +1427,6 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let worked_to = withdrawn.map(|(at, _)| at).or(completed).unwrap_or(now);
     let build_worker_seconds =
         in_progress_at.map_or(0, |from| (worked_to - from).whole_seconds().max(0));
-    let revisions_text = read_text(&pod.join("specs").join(format!("{id}.revisions.md")));
     let marks = revisions_text
         .as_deref()
         .map(revision_marks)

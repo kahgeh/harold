@@ -4856,3 +4856,36 @@ fn work_waiting_still_counts_a_current_approval_as_approved() {
     assert_eq!(lists["awaiting_approval"].items, 0);
     assert_eq!(lists["approved_not_started"].items, 1);
 }
+
+// --- draft_time ---
+
+#[test]
+fn draft_time_takes_the_time_of_a_first_heading_that_has_one() {
+    let text = "# Revisions\n\n## 2026-11-02 09:30, rev 1 (first)\n\n## 2026-11-03 10:00, rev 2\n";
+    let birth = at("2026-11-05T12:00:00Z");
+    assert_eq!(
+        draft_time(Some(text), Some(birth), UtcOffset::UTC),
+        Some(at("2026-11-02T09:30:00Z"))
+    );
+}
+
+#[test]
+fn draft_time_takes_the_birth_time_when_the_first_heading_has_only_a_date() {
+    let text = "## 2026-11-02, rev 1 (first)\n\n## 2026-11-03 10:00, rev 2\n";
+    let birth = at("2026-11-05T12:00:00Z");
+    assert_eq!(draft_time(Some(text), Some(birth), UtcOffset::UTC), Some(birth));
+}
+
+#[test]
+fn draft_time_takes_the_birth_time_when_there_is_no_revisions_file() {
+    let birth = at("2026-11-05T12:00:00Z");
+    assert_eq!(draft_time(None, Some(birth), UtcOffset::UTC), Some(birth));
+    assert_eq!(draft_time(None, None, UtcOffset::UTC), None);
+}
+
+#[test]
+fn draft_time_takes_an_earlier_birth_time() {
+    let text = "## 2026-11-02 09:30, rev 1 (first)\n";
+    let birth = at("2026-11-01T08:00:00Z");
+    assert_eq!(draft_time(Some(text), Some(birth), UtcOffset::UTC), Some(birth));
+}
