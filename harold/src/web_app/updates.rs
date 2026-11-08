@@ -65,7 +65,6 @@ pub(super) fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
     )
 }
 
-/// Whether the page's signals say it opened this stream because the last one stalled.
 /// The `page_id` the page's signals hold, if it sent one.
 fn page_id_signal(query: &UpdatesQuery) -> Option<String> {
     let signals = serde_json::from_str::<serde_json::Value>(query.datastar.as_deref()?).ok()?;
@@ -75,6 +74,7 @@ fn page_id_signal(query: &UpdatesQuery) -> Option<String> {
         .then(|| id.to_owned())
 }
 
+/// Whether the page's signals say it opened this stream because the last one stalled.
 fn stalled_signal(query: &UpdatesQuery) -> bool {
     let signals = query
         .datastar

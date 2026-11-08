@@ -1620,3 +1620,16 @@ fn a_new_page_id_is_random_and_not_empty() {
         "{one}"
     );
 }
+
+#[test]
+fn the_streams_left_for_a_page_without_an_id_are_none_after_it_closes() {
+    let pages = std::sync::Arc::new(super::OpenPages::default());
+    let none = pages.open();
+    let left = none.page_streams();
+    drop(none);
+    assert_eq!(left.open(), 0);
+    let with_id = pages.open_page(Some("a".to_owned()));
+    let left = with_id.page_streams();
+    drop(with_id);
+    assert_eq!(left.open(), 0);
+}

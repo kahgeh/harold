@@ -356,7 +356,10 @@ pub(crate) struct PageStreams {
 impl PageStreams {
     /// How many streams of the page are open now.
     pub(crate) fn open(&self) -> usize {
-        self.pages.streams_of(self.page_id.as_deref())
+        // A stream without an id is a page of its own: none is left once it closed.
+        self.page_id
+            .as_deref()
+            .map_or(0, |id| self.pages.streams_of(Some(id)))
     }
 }
 
