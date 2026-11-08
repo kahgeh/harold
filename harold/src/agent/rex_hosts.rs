@@ -83,6 +83,26 @@ pub(crate) struct HostScan {
 pub(crate) type HostClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub(crate) type HostProgram = Arc<dyn Fn() -> Result<PathBuf, RexError> + Send + Sync>;
 
+/// The state that a record shows, after the done rule. A provider that reports idle at the
+/// end of a turn asks for done: a record that goes from working or blocked to idle with the
+/// same pid gives done, and done stays while the record stays idle. `before` is the last
+/// state for the same pid. Every other record keeps its own state.
+pub(crate) fn state_after(
+    asks_done: bool,
+    before: Option<ObservedAgentState>,
+    record: ObservedAgentState,
+) -> ObservedAgentState {
+    let after_work = matches!(
+        before,
+        Some(ObservedAgentState::Working | ObservedAgentState::Blocked | ObservedAgentState::Done)
+    );
+    if asks_done && record == ObservedAgentState::Idle && after_work {
+        ObservedAgentState::Done
+    } else {
+        record
+    }
+}
+
 /// What Harold last saw in one block: the agent pid, when Harold first saw it and the last
 /// state that it showed.
 struct Seen {
@@ -443,21 +463,11 @@ impl RexHostInventory {
             // goes from working or blocked to idle with the same pid shows done. A record
             // that gave no state (a failed call) keeps what Harold showed before.
             let state = match agent.state {
-                HostAgentState::Observed(ObservedAgentState::Idle)
-                    if asks_done
-                        && matches!(
-                            before,
-                            Some(
-                                ObservedAgentState::Working
-                                    | ObservedAgentState::Blocked
-                                    | ObservedAgentState::Done
-                            )
-                        ) =>
-                {
-                    agent.state = HostAgentState::Observed(ObservedAgentState::Done);
-                    Some(ObservedAgentState::Done)
+                HostAgentState::Observed(observed) => {
+                    let shown = state_after(asks_done, before, observed);
+                    agent.state = HostAgentState::Observed(shown);
+                    Some(shown)
                 }
-                HostAgentState::Observed(state) => Some(state),
                 HostAgentState::Unknown => before,
             };
             next.insert(

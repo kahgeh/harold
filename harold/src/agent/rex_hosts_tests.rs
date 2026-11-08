@@ -872,3 +872,40 @@ fn a_failed_status_call_in_an_earlier_scan_does_not_hide_a_failed_process_call()
     assert!(inventory.scan().outcome.is_err());
     assert_eq!(inventory.failed_operation(), Some("process"));
 }
+
+mod done_rule {
+    use super::*;
+    use ObservedAgentState::{Blocked, Done, Idle, Working};
+
+    #[test]
+    fn working_then_idle_gives_done_when_the_provider_asks() {
+        assert_eq!(state_after(true, Some(Working), Idle), Done);
+    }
+
+    #[test]
+    fn blocked_then_idle_gives_done_when_the_provider_asks() {
+        assert_eq!(state_after(true, Some(Blocked), Idle), Done);
+    }
+
+    #[test]
+    fn done_then_idle_stays_done() {
+        assert_eq!(state_after(true, Some(Done), Idle), Done);
+    }
+
+    #[test]
+    fn idle_with_no_earlier_state_stays_idle() {
+        assert_eq!(state_after(true, None, Idle), Idle);
+        assert_eq!(state_after(true, Some(Idle), Idle), Idle);
+    }
+
+    #[test]
+    fn a_provider_that_does_not_ask_keeps_idle() {
+        assert_eq!(state_after(false, Some(Working), Idle), Idle);
+    }
+
+    #[test]
+    fn a_state_that_is_not_idle_is_kept() {
+        assert_eq!(state_after(true, Some(Idle), Working), Working);
+        assert_eq!(state_after(true, Some(Working), Blocked), Blocked);
+    }
+}
