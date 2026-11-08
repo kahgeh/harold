@@ -710,6 +710,63 @@ pub(crate) fn register_attention_rate(rate: u32, currency: &str) {
         .unwrap_or_else(PoisonError::into_inner) = Some((u64::from(rate), currency.to_owned()));
 }
 
+/// What the price gauges read: the `[prices]` settings, or `None` before `register_prices`.
+fn prices_state() -> &'static Arc<Mutex<Option<crate::settings::PricesSettings>>> {
+    static STATE: OnceLock<Arc<Mutex<Option<crate::settings::PricesSettings>>>> = OnceLock::new();
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<f64>; 2]> = OnceLock::new();
+    let state = STATE.get_or_init(|| Arc::new(Mutex::new(None)));
+    GAUGES.get_or_init(|| {
+        let list_reader = Arc::clone(state);
+        let rate_reader = Arc::clone(state);
+        [
+            meter()
+                .f64_observable_gauge("harold.list_price.per_mtok")
+                .with_unit("USD/{Mtoken}")
+                .with_callback(move |observer| {
+                    let prices = list_reader.lock().unwrap_or_else(PoisonError::into_inner);
+                    let Some(prices) = prices.as_ref() else {
+                        return;
+                    };
+                    for (model, model_prices) in &prices.list {
+                        for (kind, price) in model_prices.by_kind() {
+                            observer.observe(
+                                price,
+                                &[
+                                    KeyValue::new("model", model.clone()),
+                                    KeyValue::new("kind", kind),
+                                    KeyValue::new("currency", "USD"),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
+            meter()
+                .f64_observable_gauge("harold.exchange_rate.usd_to_aud")
+                .with_unit("1")
+                .with_callback(move |observer| {
+                    let prices = rate_reader.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(prices) = prices.as_ref() {
+                        observer.observe(
+                            prices.exchange_rate_usd_to_aud,
+                            &[KeyValue::new("currency", "AUD")],
+                        );
+                    }
+                })
+                .build(),
+        ]
+    });
+    state
+}
+
+/// Sets the gauges `harold.list_price.per_mtok` and `harold.exchange_rate.usd_to_aud` from
+/// the `[prices]` settings. `main` calls it once, after `init_telemetry`, when export is on.
+pub(crate) fn register_prices(prices: &crate::settings::PricesSettings) {
+    *prices_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(prices.clone());
+}
+
 /// What the two slave-link gauges read, by slave name.
 #[derive(Default)]
 struct SlaveLinkGaugeState {

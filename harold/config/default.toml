@@ -201,8 +201,10 @@ currency = "AUD"    # three capital letters (ISO 4217)
 # Change them in local.toml. A price change here prices the whole stock again.
 # List prices: USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
 # on 2026-11-08. cache_write is the 5-minute cache write price.
-# Exchange rate: AUD for 1 USD on 2026-11-06 (1.6250 AUD per EUR divided by 1.1165 USD per EUR),
-# from the ECB euro reference rates, https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/
+# Exchange rate: AUD for 1 USD on 2026-11-06. It is a cross rate: the ECB euro reference rate for AUD
+# (1.6250) divided by the one for USD (1.1165), from
+# https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/
+# To use another rate, set exchange_rate_usd_to_aud in local.toml.
 exchange_rate_usd_to_aud = 1.4554
 
 [prices.list.claude-opus-5-5]

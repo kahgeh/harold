@@ -2100,6 +2100,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             settings.attention.hourly_rate,
             &settings.attention.currency,
         );
+        crate::telemetry::register_prices(&settings.prices);
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,
         ));

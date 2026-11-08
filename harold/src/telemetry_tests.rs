@@ -2106,6 +2106,10 @@ const METRICS: &[&str] = &[
     // The gauge of the user's hourly rate. The query inventory-cost.sql reads it through the
     // ClickHouse dictionary otel.harold_settings. Harold sends it with user-attention-signals.
     "harold.attention.hourly_rate",
+    // The gauges of the list prices and the exchange rate. The query inventory-cost.sql reads
+    // them through the same dictionary.
+    "harold.list_price.per_mtok",
+    "harold.exchange_rate.usd_to_aud",
     "system.filesystem.usage",
     "system.filesystem.utilization",
     "system.memory.usage",
@@ -2207,6 +2211,7 @@ const ATTRIBUTES: &[&str] = &[
     "load_waited_ms",
     "pod.product",
     "spec.id",
+    "currency",
     "change",
     "channel",
     "outcome",
@@ -6760,6 +6765,52 @@ fn the_attention_rate_gauge_carries_the_rate_and_the_currency() {
     assert_eq!(
         test_support::gauge_value("harold.attention.hourly_rate", &[("currency", "EUR")]),
         Some(120)
+    );
+}
+
+#[test]
+fn the_price_gauges_carry_each_list_price_and_the_exchange_rate() {
+    test_support::install();
+    let mut prices = crate::settings::PricesSettings::default();
+    prices.exchange_rate_usd_to_aud = 1.5;
+    prices.list.insert(
+        "claude-test-price".into(),
+        crate::settings::ModelPrices {
+            input: 4.0,
+            output: 20.0,
+            cache_write: 5.0,
+            cache_read: 0.2,
+        },
+    );
+    register_prices(&prices);
+    for (kind, price) in [
+        ("input", 4.0),
+        ("output", 20.0),
+        ("cache_write", 5.0),
+        ("cache_read", 0.2),
+    ] {
+        assert_eq!(
+            test_support::gauge_f64_value(
+                "harold.list_price.per_mtok",
+                &[
+                    ("model", "claude-test-price"),
+                    ("kind", kind),
+                    ("currency", "USD")
+                ]
+            ),
+            Some(price),
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        test_support::gauge_f64_value("harold.exchange_rate.usd_to_aud", &[("currency", "AUD")]),
+        Some(1.5)
+    );
+    prices.exchange_rate_usd_to_aud = 1.6;
+    register_prices(&prices);
+    assert_eq!(
+        test_support::gauge_f64_value("harold.exchange_rate.usd_to_aud", &[("currency", "AUD")]),
+        Some(1.6)
     );
 }
 
