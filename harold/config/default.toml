@@ -95,6 +95,9 @@ inventory_timeout_ms = 3000
 screen_interval_ms = 2000
 hook_grace_ms = 2000
 report_grace_ms = 30000
+# How long a Rex host that Harold cannot read keeps the last states of its agents, counted
+# from the last good read. Then they show unknown. 0 shows unknown at the first failed read.
+host_unknown_after_ms = 180000
 # The one multiplexer Harold works with, read at start: "tmux" (the default) or "rex".
 # multiplexer = "tmux"
 # The path to the `rex` program, when Harold does not find it by itself.

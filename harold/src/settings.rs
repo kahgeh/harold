@@ -791,6 +791,9 @@ pub(crate) struct AgentMonitorSettings {
     pub hook_grace_ms: u64,
     /// How long an adapter's report stands against the screen reading.
     pub report_grace_ms: u64,
+    /// How long a Rex host that Harold cannot read keeps the last states of its agents,
+    /// counted from the last good read. Then they show unknown. Zero keeps nothing.
+    pub host_unknown_after_ms: u64,
     /// The one multiplexer Harold works with: `"tmux"` (the default) or `"rex"`. Read at start.
     pub multiplexer: String,
     /// The path to the `rex` program, when it is not found by the usual search.
@@ -859,6 +862,7 @@ impl Default for AgentMonitorSettings {
             screen_interval_ms: 500,
             hook_grace_ms: 2_000,
             report_grace_ms: 30_000,
+            host_unknown_after_ms: 180_000,
             multiplexer: "tmux".to_string(),
             rex: None,
             rex_hosts: Vec::new(),
@@ -3388,6 +3392,26 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
 
         let configured = parse_agent_config(&["agents = []\n[agent_monitor]\nreport_grace_ms = 0"]);
         assert_eq!(configured.agent_monitor.report_grace_ms, 0);
+        assert!(
+            AgentSettings::default()
+                .validate(&configured.agent_monitor)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn host_unknown_after_defaults_to_3_minutes_and_accepts_zero() {
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        assert_eq!(shipped.agent_monitor.host_unknown_after_ms, 180_000);
+        assert_eq!(
+            AgentMonitorSettings::default().host_unknown_after_ms,
+            180_000
+        );
+        assert!(include_str!("../config/default.toml").contains("host_unknown_after_ms = 180000"));
+
+        let configured =
+            parse_agent_config(&["agents = []\n[agent_monitor]\nhost_unknown_after_ms = 0"]);
+        assert_eq!(configured.agent_monitor.host_unknown_after_ms, 0);
         assert!(
             AgentSettings::default()
                 .validate(&configured.agent_monitor)

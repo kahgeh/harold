@@ -112,6 +112,8 @@ pub(crate) struct RexHostInventory {
     /// The time before which a failed `whoami` is not tried again.
     whoami_retry_at_ms: Mutex<Option<i64>>,
     icon: Mutex<IconState>,
+    /// The first Rex call that failed in the scan that is running or ran last.
+    failed_operation: Mutex<Option<&'static str>>,
 }
 
 impl RexHostInventory {
@@ -149,6 +151,7 @@ impl RexHostInventory {
             host_id: Mutex::new(None),
             whoami_retry_at_ms: Mutex::new(None),
             icon: Mutex::new(IconState::default()),
+            failed_operation: Mutex::new(None),
         }
     }
 
@@ -182,6 +185,15 @@ impl RexHostInventory {
             Err(RexError::Failed) => MultiplexerOutcome::Failed,
             Err(RexError::Malformed) => MultiplexerOutcome::Malformed,
         };
+        if result.is_err()
+            && !stop_requested()
+            && let Some(name) = failed_operation_name(operation)
+        {
+            self.failed_operation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert(name);
+        }
         record_call(
             "rex",
             recorded_host(with_server, &self.label),
@@ -288,7 +300,19 @@ impl RexHostInventory {
         })
     }
 
+    /// The Rex call that failed in the last scan. `None` when no call failed.
+    pub(crate) fn failed_operation(&self) -> Option<&'static str> {
+        *self
+            .failed_operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn scan_agents(&self) -> Result<Vec<RexHostAgent>, RexError> {
+        *self
+            .failed_operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         let slots = self.slots()?;
         let now = (self.clock)();
         let texts = parallel_map(&slots, PROCESS_WIDTH, current_stop(), |slot| {
@@ -479,6 +503,17 @@ impl RexHostInventory {
 }
 
 /// Whether the output of `rex hosts list --json` has a host with the label `label`.
+/// The name of a Rex call that can fail a scan, for the `operation` field of the log line.
+fn failed_operation_name(operation: MultiplexerOperation) -> Option<&'static str> {
+    match operation {
+        MultiplexerOperation::List
+        | MultiplexerOperation::Layout
+        | MultiplexerOperation::Process
+        | MultiplexerOperation::Status => Some(operation.as_str()),
+        _ => None,
+    }
+}
+
 fn parse_listed(text: &str, label: &str) -> Result<bool, RexError> {
     let value = parse_json(text)?;
     let hosts = value

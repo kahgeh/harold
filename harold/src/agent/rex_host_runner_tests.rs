@@ -57,6 +57,8 @@ struct FakeHost {
     /// The `host_id` of the Rex server on this Mac. `None` makes that read fail.
     local_id: Option<String>,
     local_calls: AtomicUsize,
+    /// The Rex call that the host reports as the failed one.
+    operation: Option<&'static str>,
     script: Mutex<VecDeque<Step>>,
     last: Mutex<Option<Step>>,
     calls: AtomicUsize,
@@ -73,6 +75,7 @@ impl FakeHost {
             listed: Some(true),
             local_id: None,
             local_calls: AtomicUsize::new(0),
+            operation: None,
             script: Mutex::new(steps.into()),
             last: Mutex::new(None),
             calls: AtomicUsize::new(0),
@@ -154,6 +157,10 @@ impl HostSource for FakeHost {
 
     fn icon(&self) -> String {
         "server.rack".into()
+    }
+
+    fn failed_operation(&self) -> Option<&'static str> {
+        self.operation
     }
 
     fn listed(&self) -> Option<bool> {
@@ -725,4 +732,132 @@ async fn omarchy_agent_is_one_row_through_link_up_and_down() {
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert!(host.calls() > reads);
     one_row(WORKING);
+}
+
+fn reached_with(state: HostAgentState) -> HostReport {
+    HostReport::Reached {
+        agents: vec![agent("omarchy", "b1", 200, 100, state)],
+        host_id: Some("id-o".into()),
+        icon: "server.rack".into(),
+    }
+}
+
+fn unreached() -> HostReport {
+    HostReport::Unreached {
+        reason: Unreached::Timeout,
+        host_id: None,
+    }
+}
+
+#[test]
+fn a_failed_read_within_the_limit_keeps_the_state_and_the_step() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+    agents.record("omarchy", reached_with(WORKING), 1_000);
+    agents.record("omarchy", unreached(), 61_000);
+    let rows = agents.snapshot();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].agent.state, WORKING);
+    assert_eq!(rows[0].agent.current_step.as_deref(), Some("Edit files"));
+    assert_eq!(rows[0].last_transition_at_ms, 100);
+}
+
+#[test]
+fn a_failed_read_after_the_limit_shows_unknown_with_no_step() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+    agents.record("omarchy", reached_with(WORKING), 1_000);
+    agents.record("omarchy", unreached(), 181_001);
+    let rows = agents.snapshot();
+    assert_eq!(rows[0].agent.state, HostAgentState::Unknown);
+    assert_eq!(rows[0].agent.current_step, None);
+    assert_eq!(rows[0].last_transition_at_ms, 181_001);
+}
+
+#[test]
+fn the_limit_counts_from_the_last_good_read_not_from_a_failed_read() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+    agents.record("omarchy", reached_with(WORKING), 0);
+    // The first failed read comes 170 s after the last good read.
+    agents.record("omarchy", unreached(), 170_000);
+    assert_eq!(agents.snapshot()[0].agent.state, WORKING);
+    // This read is 11 s after the failed read before it, and 181 s after the good read.
+    agents.record("omarchy", unreached(), 181_000);
+    assert_eq!(agents.snapshot()[0].agent.state, HostAgentState::Unknown);
+}
+
+#[test]
+fn a_limit_of_zero_shows_unknown_at_the_first_failed_read() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 0);
+    agents.record("omarchy", reached_with(WORKING), 1_000);
+    agents.record("omarchy", unreached(), 1_001);
+    assert_eq!(agents.snapshot()[0].agent.state, HostAgentState::Unknown);
+}
+
+#[test]
+fn a_host_that_never_answered_has_no_kept_rows() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+    agents.record("omarchy", unreached(), 1_000);
+    assert!(agents.snapshot().is_empty());
+}
+
+#[test]
+fn a_good_read_after_a_gap_starts_the_limit_again() {
+    let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+    agents.record("omarchy", reached_with(WORKING), 0);
+    agents.record("omarchy", unreached(), 200_000);
+    assert_eq!(agents.snapshot()[0].agent.state, HostAgentState::Unknown);
+    agents.record("omarchy", reached_with(IDLE), 210_000);
+    agents.record("omarchy", unreached(), 300_000);
+    assert_eq!(agents.snapshot()[0].agent.state, IDLE);
+}
+
+#[test]
+fn kept_states_stay_in_the_gauge_within_the_limit() {
+    crate::telemetry::test_support::install();
+    let agents = HostAgents::with_unknown_after_ms(vec!["keep_host".into()], 180_000);
+    let mut kept = agent("keep_host", "b1", 200, 1, WORKING);
+    kept.provider_id = "keep_provider".into();
+    agents.record(
+        "keep_host",
+        HostReport::Reached {
+            agents: vec![kept],
+            host_id: Some("id".into()),
+            icon: String::new(),
+        },
+        10,
+    );
+    agents.record("keep_host", unreached(), 60_000);
+    assert_eq!(gauge("keep_host", "keep_provider", "working"), Some(1));
+    assert_eq!(gauge("keep_host", "keep_provider", "unknown"), Some(0));
+}
+
+#[test]
+fn the_unreachable_line_carries_the_operation_that_failed() {
+    for operation in ["list", "layout", "process", "status"] {
+        let logs = CapturedLogs::start();
+        let agents = HostAgents::with_unknown_after_ms(vec!["omarchy".into()], 180_000);
+        agents.record_with_operation("omarchy", unreached(), 1_000, Some(operation));
+        let lines = host_lines(&logs);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!(r#"operation="{operation}""#)),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains(r#"state="unreachable""#), "{lines:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_runner_gives_the_failed_operation_of_the_source_to_the_line() {
+    let logs = CapturedLogs::start();
+    let mut host = Arc::into_inner(FakeHost::new(
+        "omarchy",
+        vec![Step::Fail(RexError::Timeout)],
+    ))
+    .unwrap();
+    host.operation = Some("layout");
+    let (_agents, _shutdown) = spawn(&[Arc::new(host)]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lines = host_lines(&logs);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains(r#"operation="layout""#), "{lines:?}");
 }

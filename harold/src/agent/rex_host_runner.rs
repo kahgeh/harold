@@ -38,6 +38,11 @@ pub(crate) trait HostSource: Send + Sync {
     fn listed(&self) -> Option<bool>;
     /// The `host_id` of the Rex server on this Mac. `None` when the read fails. It blocks.
     fn local_host_id(&self) -> Option<String>;
+    /// The Rex call that failed in the last scan: `list`, `layout`, `process` or `status`.
+    /// `None` when Harold cannot tell.
+    fn failed_operation(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 impl HostSource for RexHostInventory {
@@ -59,6 +64,10 @@ impl HostSource for RexHostInventory {
 
     fn local_host_id(&self) -> Option<String> {
         self.local_host_id()
+    }
+
+    fn failed_operation(&self) -> Option<&'static str> {
+        self.failed_operation()
     }
 }
 
@@ -134,6 +143,10 @@ struct Host {
     /// The agents of the last good read.
     agents: Vec<RexHostAgent>,
     reachable: bool,
+    /// When the last good read came, on the host clock.
+    last_good_ms: Option<i64>,
+    /// True when the failed reads went past `host_unknown_after_ms`: the rows show unknown.
+    expired: bool,
     host_id: Option<String>,
     icon: String,
     left_out: bool,
@@ -148,6 +161,8 @@ struct Inner {
     local: Mutex<LocalId>,
     /// The labels whose slave link is up. Their agents come from the slave, not from Rex.
     linked: Mutex<HashSet<String>>,
+    /// How long a failed read keeps the last states. Zero keeps nothing.
+    unknown_after_ms: i64,
     version: watch::Sender<u64>,
 }
 
@@ -158,6 +173,7 @@ impl Default for Inner {
             hosts: Mutex::new(HashMap::new()),
             local: Mutex::new(LocalId::default()),
             linked: Mutex::new(HashSet::new()),
+            unknown_after_ms: 0,
             version: watch::channel(0).0,
         }
     }
@@ -170,11 +186,21 @@ pub(crate) struct HostAgents {
 }
 
 impl HostAgents {
-    /// The store for the hosts `labels`, in `rex_hosts` order.
+    /// The store for the hosts `labels`, in `rex_hosts` order. It keeps no state after a
+    /// failed read.
+    #[cfg(test)]
     pub(crate) fn new(labels: Vec<String>) -> Self {
+        Self::with_unknown_after_ms(labels, 0)
+    }
+
+    /// The store for the hosts `labels`. After a failed read, an agent keeps its last state
+    /// for up to `unknown_after_ms` from the last good read, then shows unknown. Zero shows
+    /// unknown at the first failed read.
+    pub(crate) fn with_unknown_after_ms(labels: Vec<String>, unknown_after_ms: u64) -> Self {
         Self {
             inner: Arc::new(Inner {
                 labels,
+                unknown_after_ms: i64::try_from(unknown_after_ms).unwrap_or(i64::MAX),
                 ..Inner::default()
             }),
         }
@@ -275,6 +301,17 @@ impl HostAgents {
 
     /// Keeps the result of one read of the host `label` at the time `now_ms`.
     pub(crate) fn record(&self, label: &str, report: HostReport, now_ms: i64) {
+        self.record_with_operation(label, report, now_ms, None);
+    }
+
+    /// Like `record`. `operation` names the Rex call that failed, for the log line.
+    pub(crate) fn record_with_operation(
+        &self,
+        label: &str,
+        report: HostReport,
+        now_ms: i64,
+        operation: Option<&'static str>,
+    ) {
         let changed = {
             let mut hosts = self.lock();
             let before = rows(&self.inner.labels, &hosts);
@@ -289,6 +326,8 @@ impl HostAgents {
                     icon,
                 } => {
                     host.reachable = true;
+                    host.last_good_ms = Some(now_ms);
+                    host.expired = false;
                     host.host_id = host_id.or(host.host_id.take());
                     host.icon = icon;
                     host.transitions = agents
@@ -308,18 +347,26 @@ impl HostAgents {
                         })
                         .collect();
                     host.agents = agents;
-                    log_change(label, host, Logged::Reachable);
+                    log_change(label, host, Logged::Reachable, None);
                 }
                 HostReport::Unreached { reason, host_id } => {
                     host.reachable = false;
                     host.host_id = host_id.or(host.host_id.take());
-                    for (_, state, since) in host.transitions.values_mut() {
-                        if *state != HostAgentState::Unknown {
-                            *state = HostAgentState::Unknown;
-                            *since = now_ms;
+                    // The limit counts from the last good read, not from a failed read.
+                    let limit = self.inner.unknown_after_ms;
+                    host.expired = limit == 0
+                        || host
+                            .last_good_ms
+                            .is_none_or(|good| now_ms.saturating_sub(good) > limit);
+                    if host.expired {
+                        for (_, state, since) in host.transitions.values_mut() {
+                            if *state != HostAgentState::Unknown {
+                                *state = HostAgentState::Unknown;
+                                *since = now_ms;
+                            }
                         }
                     }
-                    log_change(label, host, Logged::Unreachable(reason));
+                    log_change(label, host, Logged::Unreachable(reason), operation);
                 }
             }
             leave_out_duplicates(&self.inner.labels, &mut hosts, self.local_id().as_deref());
@@ -380,8 +427,9 @@ fn rows(labels: &[String], hosts: &HashMap<String, Host>) -> Vec<HostAgentRow> {
                     .transitions
                     .get(&agent.host_pane_id)
                     .map_or(agent.first_seen_ms, |(_, _, since)| *since);
-                if !host.reachable {
-                    // The last good read is old: its state and step may no longer hold.
+                if !host.reachable && host.expired {
+                    // The last good read is older than the limit: its state and step may no
+                    // longer hold.
                     agent.state = HostAgentState::Unknown;
                     agent.current_step = None;
                 }
@@ -415,13 +463,14 @@ fn leave_out_duplicates(labels: &[String], hosts: &mut HashMap<String, Host>, lo
         };
         if !host.left_out {
             host.left_out = true;
-            log_change(label, host, Logged::LeftOut(reason));
+            log_change(label, host, Logged::LeftOut(reason), None);
         }
     }
 }
 
 /// Logs `agent monitor host` when the host's state differs from the last line.
-fn log_change(label: &str, host: &mut Host, next: Logged) {
+/// The line of an unreachable host names the Rex call that failed in `operation`.
+fn log_change(label: &str, host: &mut Host, next: Logged, operation: Option<&'static str>) {
     if host.logged == Some(next) {
         return;
     }
@@ -432,6 +481,7 @@ fn log_change(label: &str, host: &mut Host, next: Logged) {
             host = %label,
             state = "unreachable",
             reason = reason.reason(),
+            operation = operation.unwrap_or("none"),
             "agent monitor host"
         ),
         // A label that leads to this Mac is a mistake in the settings: it is a warning.
@@ -471,21 +521,41 @@ pub(crate) fn start(settings: &Settings, shutdown: watch::Receiver<()>) -> HostA
         })
         .collect();
     let interval = Duration::from_millis(monitor.inventory_interval_ms);
-    spawn_hosts(sources, interval, clock, shutdown).0
+    spawn_hosts_keeping(
+        sources,
+        interval,
+        clock,
+        shutdown,
+        monitor.host_unknown_after_ms,
+    )
+    .0
 }
 
 /// Starts one task for each source, in the order of `sources`. Each task stops at shutdown.
+#[cfg(test)]
 pub(crate) fn spawn_hosts(
     sources: Vec<Arc<dyn HostSource>>,
     interval: Duration,
     clock: HostClock,
     shutdown: watch::Receiver<()>,
 ) -> (HostAgents, Vec<JoinHandle<()>>) {
-    let agents = HostAgents::new(
+    spawn_hosts_keeping(sources, interval, clock, shutdown, 0)
+}
+
+/// Like `spawn_hosts`. A failed read keeps the last states for up to `unknown_after_ms`.
+pub(crate) fn spawn_hosts_keeping(
+    sources: Vec<Arc<dyn HostSource>>,
+    interval: Duration,
+    clock: HostClock,
+    shutdown: watch::Receiver<()>,
+    unknown_after_ms: u64,
+) -> (HostAgents, Vec<JoinHandle<()>>) {
+    let agents = HostAgents::with_unknown_after_ms(
         sources
             .iter()
             .map(|source| source.label().to_string())
             .collect(),
+        unknown_after_ms,
     );
     let tasks = sources
         .into_iter()
@@ -576,11 +646,15 @@ async fn run_host(
             };
             agents.finish_local_read(id);
         }
+        let operation = match report {
+            HostReport::Reached { .. } => None,
+            HostReport::Unreached { .. } => source.failed_operation(),
+        };
         failures = match report {
             HostReport::Reached { .. } => 0,
             HostReport::Unreached { .. } => failures.saturating_add(1),
         };
-        agents.record(&label, report, clock());
+        agents.record_with_operation(&label, report, clock(), operation);
         let wait = if failures >= FAILURES_BEFORE_BACKOFF {
             BACKOFF_INTERVAL
         } else {
