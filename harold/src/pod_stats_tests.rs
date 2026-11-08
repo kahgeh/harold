@@ -4999,9 +4999,69 @@ fn a_reviews_file_with_a_line_out_of_order_does_not_parse() {
         "verdict: 2026-11-08T10:30:00Z maybe\n",
         "# Reviews: g\n",
         "other: 2026-11-08T10:30:00Z\n",
+        // The file of propose-hints: a verdict after a closed review.
+        "sent: 2026-11-08T10:10:00Z sha256:aa\nverdict: 2026-11-08T10:20:00Z revise\nverdict: 2026-11-08T10:30:00Z ok\n",
     ] {
         assert_eq!(parse_reviews(text), None, "{text}");
     }
+}
+
+#[test]
+fn a_skipped_line_after_a_sent_line_closes_the_review() {
+    assert_eq!(
+        parse_reviews("sent: 2026-11-08T10:00:00Z sha256:aa\nskipped: 2026-11-08T10:20:00Z\n"),
+        Some(vec![
+            ReviewLine::Sent(at("2026-11-08T10:00:00Z")),
+            ReviewLine::Skipped(at("2026-11-08T10:20:00Z")),
+        ])
+    );
+}
+
+#[test]
+fn the_agent_jobs_file_with_two_rounds_then_sent_and_skipped_parses() {
+    let text = format!(
+        "{TWO_ROUNDS}sent: 2026-11-08T11:30:00Z sha256:2fcaa698327b\nskipped: 2026-11-08T11:30:00Z\n"
+    );
+    assert_eq!(parse_reviews(&text).map(|lines| lines.len()), Some(6));
+}
+
+#[test]
+fn a_skipped_line_with_no_open_review_still_parses() {
+    assert_eq!(
+        parse_reviews("skipped: 2026-11-08T10:30:00Z\n"),
+        Some(vec![ReviewLine::Skipped(at("2026-11-08T10:30:00Z"))])
+    );
+}
+
+#[test]
+fn the_time_from_sent_to_skipped_is_architect_review() {
+    let product =
+        record_reviewed("sent: 2026-11-08T10:00:00Z sha256:aa\nskipped: 2026-11-08T10:20:00Z\n");
+    // Open 10:00, approved 12:00: 0 s writing, 20 min review, 100 min approval.
+    assert_eq!(phase_sum(&product, "spec_writing"), Some(0.0));
+    assert_eq!(phase_sum(&product, "architect_review"), Some(1200.0));
+    assert_eq!(phase_sum(&product, "approval_wait"), Some(6000.0));
+    assert_eq!(phase_sum(&product, "open_to_approved"), Some(7200.0));
+}
+
+#[test]
+fn sent_then_skipped_gives_architect_review_and_approval_wait_of_the_spec() {
+    let lines =
+        parse_reviews("sent: 2026-11-08T10:00:00Z sha256:aa\nskipped: 2026-11-08T10:20:00Z\n")
+            .unwrap();
+    let phases = review_phases(
+        at("2026-11-08T09:00:00Z"),
+        at("2026-11-08T10:30:00Z"),
+        &lines,
+    );
+    assert_eq!(
+        phases,
+        Some([
+            ("spec_writing", 3600.0),
+            ("architect_review", 1200.0),
+            ("approval_wait", 600.0),
+        ])
+    );
 }
 
 #[test]
@@ -5076,12 +5136,13 @@ const SKIPPED: &str = "skipped: 2026-11-08T10:30:00Z\n";
 fn the_last_review_line_puts_a_waiting_spec_in_a_stage() {
     let now = at("2026-11-09T00:00:00Z");
     for stale in [false, true] {
-        let cases: [(&str, Option<String>, [u64; 3]); 5] = [
+        let cases: [(&str, Option<String>, [u64; 3]); 6] = [
             ("none", None, [1, 0, 0]),
             ("ok", Some(format!("{SENT}{OK}")), [1, 0, 0]),
             ("skipped", Some(SKIPPED.to_owned()), [1, 0, 0]),
             ("revise", Some(format!("{SENT}{REVISE}")), [1, 1, 0]),
             ("sent", Some(SENT.to_owned()), [1, 0, 1]),
+            ("sent_skipped", Some(format!("{SENT}{SKIPPED}")), [1, 0, 0]),
         ];
         for (name, reviews, [awaiting, writing, review]) in cases {
             let spec = awaiting_with(name, reviews.as_deref(), stale, now);

@@ -1190,8 +1190,8 @@ impl ReviewLine {
 /// Reads `reviews/<id>.md`: an optional `# ` title, then one line each of
 /// `sent: <time> sha256:<hex>`, `verdict: <time> ok|revise` and `skipped: <time>`. A blank
 /// line is skipped. None when a line does not parse, when a `verdict:` does not follow a
-/// `sent:`, when a `sent:` or `skipped:` follows a `sent:` with no verdict, or when the file
-/// has no line.
+/// `sent:`, when a `sent:` follows a `sent:` with no verdict, or when the file has no line.
+/// A `skipped:` after an open `sent:` closes that review, as a `verdict:` does.
 pub(crate) fn parse_reviews(text: &str) -> Option<Vec<ReviewLine>> {
     let mut lines = Vec::new();
     let mut in_review = false;
@@ -1217,7 +1217,10 @@ pub(crate) fn parse_reviews(text: &str) -> Option<Vec<ReviewLine>> {
                 in_review = false;
                 ReviewLine::Verdict(at, ok)
             }
-            ("skipped", false) => ReviewLine::Skipped(at),
+            ("skipped", _) => {
+                in_review = false;
+                ReviewLine::Skipped(at)
+            }
             _ => return None,
         };
         lines.push(parsed);
@@ -1238,10 +1241,14 @@ pub(crate) fn review_phases(
     for line in lines {
         let at = line.at();
         match line {
-            ReviewLine::Sent(_) | ReviewLine::Skipped(_) => {
+            ReviewLine::Sent(_) => {
                 writing += (at - cursor).as_seconds_f64();
-                sent_at = matches!(line, ReviewLine::Sent(_)).then_some(at);
+                sent_at = Some(at);
             }
+            ReviewLine::Skipped(_) => match sent_at.take() {
+                Some(sent) => review += (at - sent).as_seconds_f64(),
+                None => writing += (at - cursor).as_seconds_f64(),
+            },
             ReviewLine::Verdict(..) => review += (at - sent_at.take()?).as_seconds_f64(),
         }
         cursor = at;
