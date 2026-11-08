@@ -45,6 +45,20 @@ Every install, by these commands or by `./scripts/install.sh`, moves the previou
 
 A rollback to an install from before that move returns the old program. The backup holds `tmx-agent-dash` when the install replaced a layout from before that move. `ROLLBACK.md` names it. Its commands put it back in `~/bin`.
 
+### After the install, on each machine that has its own ClickHouse and HyperDX
+
+A merge to `main` changes none of this. Only a release install does. After `make release` or `make install-release`, finish each machine that has its own ClickHouse and HyperDX with this list. Do the steps in order.
+
+1. Run `bin/setup` in the chief-of-pods checkout. It creates the ClickHouse dictionary `otel.harold_settings` on the running ClickHouse. `bin/setup --check` reports whether it exists. (user-attention-signals)
+2. Apply the dashboards to that machine's HyperDX with the commands in [The dashboards](../references/telemetry/README.md#the-dashboards): "Harold: the big picture", "Harold trends", "Harold now", and every other dashboard the release changed. (big-picture-tiles, harold-now-dashboard)
+3. Declare the telemetry events that the release added: run the `harold tool telemetry declare` lines of each spec in the release. Declaring again is safe: the same declaration is accepted with no change. (user-attention-signals)
+4. Check `[attention]` `hourly_rate` and `currency` in that machine's `local.toml`. Without them, the defaults of `default.toml` apply: 100 AUD an hour. (user-attention-signals)
+5. Check each new tile against `bin/logq --named <card>`, and open `/flow` in the web app. (big-picture-tiles, factory-flow-page)
+
+A line whose spec is not in the release yet stays in the list. The step says which spec brings it, so a machine without that spec skips it.
+
+To add a line for a release: a spec that needs a manual step after the install names its line. The merge of that spec adds the line to this list, with the spec id in brackets.
+
 ### Roll back across the agent state rename
 
 The agent state rename changes the events Harold writes. An older Harold cannot read the events that this Harold writes.
