@@ -1967,7 +1967,8 @@ impl PodSignals {
         Self { live: true }
     }
 
-    /// A handle that drops every call, for a tool that runs without pod stats.
+    /// A handle that drops every call, for a tool test that runs without pod stats.
+    #[cfg(test)]
     pub(crate) fn none() -> Self {
         Self { live: false }
     }
