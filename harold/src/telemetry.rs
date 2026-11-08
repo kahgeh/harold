@@ -673,10 +673,13 @@ pub(crate) const SLAVE_REPORT_KINDS: [&str; 3] = ["snapshot", "turn", "lock"];
 /// Every `outcome` of a report on the master.
 pub(crate) const SLAVE_REPORT_OUTCOMES: [&str; 2] = ["applied", "duplicate"];
 
+/// The rate and the currency of the `[attention]` settings.
+type AttentionRate = Option<(u64, String)>;
+
 /// What the gauge `harold.attention.hourly_rate` reads: the rate and the currency of the
 /// `[attention]` settings, or `None` before `register_attention_rate` sets them.
-fn attention_rate_state() -> &'static Arc<Mutex<Option<(u64, String)>>> {
-    static STATE: OnceLock<Arc<Mutex<Option<(u64, String)>>>> = OnceLock::new();
+fn attention_rate_state() -> &'static Arc<Mutex<AttentionRate>> {
+    static STATE: OnceLock<Arc<Mutex<AttentionRate>>> = OnceLock::new();
     static GAUGE: OnceLock<opentelemetry::metrics::ObservableGauge<u64>> = OnceLock::new();
     let state = STATE.get_or_init(|| Arc::new(Mutex::new(None)));
     GAUGE.get_or_init(|| {

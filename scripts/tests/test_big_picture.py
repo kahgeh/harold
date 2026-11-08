@@ -524,7 +524,7 @@ class AttentionRecordingCard(unittest.TestCase):
         self.assertIn("range(14)", code)
         for name in ("chief.attention_request", "chief.attention_answered", "harold.notifications"):
             self.assertIn(name, code)
-        self.assertIn("Dev/p/chief-of-pods", code)
+        self.assertIn("endsWith(Attributes['agent'], '/chief-of-pods')", code)
         self.assertIn("'sent'", code)
 
 

@@ -1130,6 +1130,35 @@ harold tool telemetry count chief.clarification_requests --attr cause=<cause>
 
 The name is `chief.clarification_requests` everywhere. HyperDX reads it as `agent.chief.clarification_requests`. Until the declaration, the card shows `no data yet`.
 
+**The attention part's producer.** The attention part of the card "Inventory cost" shows what the attention of the user cost in the last 7 days. An **attention request** is a message from the chief to the user that needs a decision or an answer. One message with three choices is one attention request. A status line, a report or a reply with no decision is not one. A question (a todo with an id such as `Q1`) that the chief sends is also an attention request. The two words name different things: a question is a todo, and an attention request is one message.
+
+The chief runs these two declarations once, after the telemetry tool is installed:
+
+```sh
+harold tool telemetry declare chief.attention_request event "A message from the chief that needs the user's decision or answer" --attr words=1-500 --attr channel=imessage,web_app,machine_audio_output,chief_pane
+harold tool telemetry declare chief.attention_answered event "The user answered an attention request" --attr seconds=1-604800 --attr channel=imessage,web_app,machine_audio_output,chief_pane
+```
+
+The chief records each attention request with its word count. A longer message is recorded as 500:
+
+```sh
+harold tool telemetry event chief.attention_request --attr words=<count> --attr channel=<imessage|web_app|machine_audio_output|chief_pane>
+```
+
+When the answer arrives, the chief records the seconds from the attention request to the answer. An answer after more than 7 days is recorded as 604800. An attention request with no answer has no answered event:
+
+```sh
+harold tool telemetry event chief.attention_answered --attr seconds=<seconds> --attr channel=<channel>
+```
+
+HyperDX reads each event as the log line `agent event` with `agent.name`, `agent.attr.words`, `agent.attr.seconds` and `agent.attr.channel`. An event carries no text, so the message is never recorded.
+
+The cost is the answer hours of the 7 days times the hourly rate. The rate is the `[attention]` setting `hourly_rate`, in `currency`. See [The attention settings](../operation/README.md#the-attention-settings). Harold sends the rate as the gauge `harold.attention.hourly_rate` with the attribute `currency`. The ClickHouse dictionary `otel.harold_settings` holds the newest value of the gauge, and `inventory-cost.sql` reads it with `dictGetOrNull`. The chief creates the dictionary with `bin/setup`. ClickHouse reloads the dictionary every 1 to 5 minutes. After a change in `local.toml`, the new rate reaches the card after the restart of Harold, its next export (30 seconds) and the next reload. The recorded seconds do not change.
+
+The line of the card shows `attention: no data yet` when the 7 days have no answer. It shows `attention: no rate set` when there are answers but the dictionary has no rate.
+
+The card "Attention requests against chief messages" on "Harold trends" shows by day the attention requests, the answers and the chief's messages sent. A day with 0 attention requests and more than 0 chief messages means the chief stopped recording. A run of 3 days with attention requests and 0 answers means the answer records stopped. The card is for reading. It is not an alert. `bin/logq --named attention-recording` returns the same rows.
+
 ## Harold now
 
 `now.json` is the dashboard "Harold now", apart from "Harold: the big picture". It shows what runs at this moment, with the line "the agents working and the specs in progress, at this moment". It has two cards, each ONE table tile with ONE line, in the form of the big picture. It has no change, because a reading of this moment has no week.

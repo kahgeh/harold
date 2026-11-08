@@ -27,6 +27,7 @@ harold tool telemetry count harold.release.attempts 3 --attr result=ok
 harold tool telemetry gauge harold.queue.depth 7
 harold tool telemetry declare chief.digest event "A digest was sent" --attr items=0-50
 harold tool telemetry event chief.digest --attr items=4
+harold tool telemetry event chief.attention_request --attr words=120 --attr channel=imessage
 harold tool telemetry list harold
 harold tool telemetry remove harold.queue.depth
 ```

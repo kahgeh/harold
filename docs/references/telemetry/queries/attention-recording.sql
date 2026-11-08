@@ -2,7 +2,7 @@
 -- Waits for: nothing
 -- Attention requests against chief messages: one row for each of the last 14 days, the newest day first.
 -- attention_requests and answers are the counts of the lines "agent event" with agent.name chief.attention_request and chief.attention_answered.
--- chief_messages is the rise of harold.notifications with agent Dev/p/chief-of-pods and outcome sent, by the counter rule in docs/references/telemetry/README.md.
+-- chief_messages is the rise of harold.notifications with an agent that ends in chief-of-pods (the chief's folder) and outcome sent, by the counter rule in docs/references/telemetry/README.md.
 -- Each point rises by its value minus the previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
 -- The query reads the points of 60 days of the counter. A day is a calendar day of the ClickHouse server. A day with no line or no point gives 0.
 -- Columns: day, attention_requests, answers, chief_messages.
@@ -24,7 +24,7 @@ WITH
                         ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
                 FROM otel.otel_metrics_sum
                 WHERE MetricName = 'harold.notifications'
-                  AND Attributes['agent'] = 'Dev/p/chief-of-pods'
+                  AND endsWith(Attributes['agent'], '/chief-of-pods')
                   AND Attributes['outcome'] = 'sent'
                   AND TimeUnix > now() - INTERVAL 60 DAY
             )
