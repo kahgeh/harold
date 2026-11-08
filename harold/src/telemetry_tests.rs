@@ -8446,3 +8446,144 @@ fn the_summary_question_fields_are_allowed() {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The install lag: one point for each new version on this machine
+// ---------------------------------------------------------------------------
+
+fn install_folder() -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("harold-install-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+fn install_time(text: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(text, &Rfc3339).unwrap()
+}
+
+#[test]
+fn a_new_version_records_one_lag_and_writes_the_file() {
+    test_support::install();
+    let folder = install_folder();
+    let version = format!("v0.test-{}", uuid::Uuid::new_v4());
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    let outcome = record_install(
+        &version,
+        Some("2026-11-09T10:00:00+11:00"),
+        install_time("2026-11-09T12:00:00+11:00"),
+        &folder,
+    );
+
+    assert_eq!(outcome, InstallOutcome::Recorded(7200.0));
+    assert_eq!(
+        test_support::histogram_sum("harold.release.install_lag", &[("version", &version)]),
+        Some(7200.0)
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join(INSTALLED_VERSION_FILE)).unwrap(),
+        version
+    );
+    let text = logs.text();
+    assert!(text.contains("release installed"), "{text}");
+    assert!(text.contains("lag_s=7200"), "{text}");
+}
+
+#[test]
+fn the_same_version_records_nothing() {
+    test_support::install();
+    let folder = install_folder();
+    let version = format!("v0.test-{}", uuid::Uuid::new_v4());
+    let time = Some("2026-11-09T10:00:00+11:00");
+    let now = install_time("2026-11-09T12:00:00+11:00");
+    record_install(&version, time, now, &folder);
+
+    let again = record_install(&version, time, now, &folder);
+
+    assert_eq!(again, InstallOutcome::Unchanged);
+    assert_eq!(
+        test_support::histogram_sum("harold.release.install_lag", &[("version", &version)]),
+        Some(7200.0)
+    );
+}
+
+#[test]
+fn a_build_from_source_records_nothing_and_writes_no_file() {
+    let folder = install_folder();
+    let now = install_time("2026-11-09T12:00:00+11:00");
+
+    let outcome = record_install("source", Some("2026-11-09T10:00:00+11:00"), now, &folder);
+
+    assert_eq!(outcome, InstallOutcome::NotRelease);
+    assert!(!folder.join(INSTALLED_VERSION_FILE).exists());
+}
+
+#[test]
+fn a_bad_release_time_logs_once_and_records_nothing() {
+    test_support::install();
+    let now = install_time("2026-11-09T12:00:00+11:00");
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    for time in [
+        None,
+        Some(""),
+        Some("yesterday"),
+        Some("2026-11-09T13:00:00+11:00"),
+    ] {
+        let folder = install_folder();
+        let version = format!("v0.test-{}", uuid::Uuid::new_v4());
+
+        let outcome = record_install(&version, time, now, &folder);
+
+        assert_eq!(outcome, InstallOutcome::TimeUnknown, "{time:?}");
+        assert_eq!(
+            test_support::histogram_sum("harold.release.install_lag", &[("version", &version)]),
+            None,
+            "{time:?}"
+        );
+    }
+    let text = logs.text();
+    assert_eq!(text.matches("release time unknown").count(), 4, "{text}");
+}
+
+#[test]
+fn an_unreadable_installed_version_file_counts_as_no_version() {
+    test_support::install();
+    let folder = install_folder();
+    // A folder where the file belongs cannot be read as text.
+    std::fs::create_dir(folder.join(INSTALLED_VERSION_FILE)).unwrap();
+    let version = format!("v0.test-{}", uuid::Uuid::new_v4());
+
+    let outcome = record_install(
+        &version,
+        Some("2026-11-09T10:00:00+11:00"),
+        install_time("2026-11-09T12:00:00+11:00"),
+        &folder,
+    );
+
+    // The point is recorded once; the failed write is logged and does not fail the start.
+    assert_eq!(outcome, InstallOutcome::Recorded(7200.0));
+}
+
+#[test]
+fn the_lag_histogram_has_its_name_unit_and_buckets_and_its_fields_may_leave() {
+    test_support::install();
+    let folder = install_folder();
+    let version = format!("v0.test-{}", uuid::Uuid::new_v4());
+    record_install(
+        &version,
+        Some("2026-11-09T10:00:00+11:00"),
+        install_time("2026-11-09T12:00:00+11:00"),
+        &folder,
+    );
+    for field in ["version", "lag_s"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    let found = test_support::metrics().iter().any(|resource| {
+        resource.scope_metrics().any(|scope| {
+            scope
+                .metrics()
+                .any(|metric| metric.name() == "harold.release.install_lag" && metric.unit() == "s")
+        })
+    });
+    assert!(found);
+}

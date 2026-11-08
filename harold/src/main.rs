@@ -60,6 +60,9 @@ use harold::{
 /// Release tag compiled in by the release workflow; "source" for any other build.
 const HAROLD_VERSION: &str = version_or_source(option_env!("HAROLD_RELEASE_VERSION"));
 
+/// The tag's own time, compiled in by the release workflow. `None` for a build from source.
+const HAROLD_RELEASE_TIME: Option<&str> = option_env!("HAROLD_RELEASE_TIME");
+
 const fn version_or_source(value: Option<&'static str>) -> &'static str {
     match value {
         Some(version) if !version.is_empty() => version,
@@ -2218,6 +2221,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         rex: cfg.agent_monitor.multiplexer() == settings::Multiplexer::Rex,
     };
 
+    telemetry::record_install(
+        HAROLD_VERSION,
+        HAROLD_RELEASE_TIME,
+        time::OffsetDateTime::now_utc(),
+        std::path::Path::new(&cfg.store.resolved_path()),
+    );
     let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());

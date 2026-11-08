@@ -57,6 +57,59 @@ use crate::settings::TelemetrySettings;
 /// level is `info`.
 pub(crate) const TRACE_TARGET: &str = "harold::trace";
 
+/// The file in Harold's data folder that holds the version that started last.
+pub(crate) const INSTALLED_VERSION_FILE: &str = "installed-version";
+
+/// What `record_install` did.
+#[derive(Debug, PartialEq)]
+pub(crate) enum InstallOutcome {
+    /// A new version: one point, with the lag in seconds.
+    Recorded(f64),
+    /// The version is the one that started last.
+    Unchanged,
+    /// A build from source has no release.
+    NotRelease,
+    /// A release build with no usable `HAROLD_RELEASE_TIME`.
+    TimeUnknown,
+}
+
+/// Records `harold.release.install_lag` when `version` is not the version in
+/// `installed-version` in `data_folder`, then writes the version to the file. A build from
+/// source (`version` is `source`) records nothing. A missing, empty, unreadable or future
+/// `release_time` logs `release time unknown` and records nothing. A file that cannot be
+/// read counts as no version. A file that cannot be written is logged and does not stop
+/// the start.
+pub(crate) fn record_install(
+    version: &str,
+    release_time: Option<&str>,
+    now: OffsetDateTime,
+    data_folder: &std::path::Path,
+) -> InstallOutcome {
+    if version == "source" {
+        return InstallOutcome::NotRelease;
+    }
+    let file = data_folder.join(INSTALLED_VERSION_FILE);
+    if std::fs::read_to_string(&file).is_ok_and(|saved| saved.trim() == version) {
+        return InstallOutcome::Unchanged;
+    }
+    let lag = release_time
+        .and_then(|text| OffsetDateTime::parse(text.trim(), &Rfc3339).ok())
+        .map(|released| (now - released).as_seconds_f64())
+        .filter(|lag| *lag >= 0.0);
+    let Some(lag) = lag else {
+        warn!(version = %version, "release time unknown");
+        return InstallOutcome::TimeUnknown;
+    };
+    instruments()
+        .release_install_lag
+        .record(lag, &[KeyValue::new("version", version.to_owned())]);
+    info!(version = %version, lag_s = lag as u64, "release installed");
+    if let Err(error) = std::fs::write(&file, version) {
+        warn!(reason = %error.kind(), "installed version not saved");
+    }
+    InstallOutcome::Recorded(lag)
+}
+
 /// The target of the two collector-health lines. They go to `harold.log` only.
 pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 
@@ -278,6 +331,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "welcome",
     "own",
     "version",
+    "lag_s",
     "report_no",
     "duration_ms",
     "tool",
@@ -474,6 +528,9 @@ pub(crate) struct Instruments {
     pub pod_merged_lines: Counter<u64>,
     /// `pod.spec.lead_time`, seconds.
     pub pod_spec_lead_time: Histogram<f64>,
+    /// `harold.release.install_lag`, seconds, by `version`: one point for each new version
+    /// that starts on this machine.
+    pub release_install_lag: Histogram<f64>,
     /// `watch.runs`, `{run}`, by `folder` and `outcome`.
     pub watch_runs: Counter<u64>,
     /// `watch.cost_usd`, `USD`, by `folder`.
@@ -604,6 +661,12 @@ fn build_instruments(meter: &Meter) -> Instruments {
             "pod.spec.lead_time",
             &[
                 600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
+            ],
+        ),
+        release_install_lag: seconds(
+            "harold.release.install_lag",
+            &[
+                900.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0, 604800.0,
             ],
         ),
         watch_runs: counter("watch.runs", "{run}"),
