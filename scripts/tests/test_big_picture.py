@@ -1,26 +1,31 @@
 """Check that the big picture dashboard, the trends dashboard and their named queries do not drift.
 
-The test reads files as text, with the standard library only. It needs no
+The structure tests read files as text, with the standard library only. They need no
 ClickHouse, no port and no server.
 
 The files:
-- hyperdx/big-picture.json holds five cards. A card is a markdown tile (its name and its
-  description), a value tile and a change tile, and the detail tiles that the card needs.
+- hyperdx/big-picture.json holds an intro text and six cards. A card is ONE table tile with ONE
+  text line: the value with its unit, then its change against the 7 days before.
 - hyperdx/trends.json holds the cards that left the big picture, as tables.
-- queries/<card>.sql holds the SQL of the card. It returns at most one row.
+- queries/<card>.sql holds the SQL of the card. It returns at most one row of numbers.
 
-The rule that links a tile to its file: the sqlTemplate of a number tile is
-"SELECT <column> FROM (" + the text of the file + ") WHERE <column> IS NOT NULL".
-The tile of the overflow column has the tail "WHERE overflow = 1" instead. A tile with no row shows HyperDX's empty state.
-A column of a change tile ends with _change_pct.
+The rule that links a tile to its file: the sqlTemplate of a card tile is
+"SELECT concat(...) AS "<card title>" FROM (" + the text of the file + ") WHERE <value> IS NOT NULL".
+The wrap() function below builds it. A column of a change ends with _change_pct. It is already a percent.
 
-The files agent-counter.sql, factory-flow.sql and README.md are not cards. The test ignores them.
+The line tests send the wrap with fake rows (constants only, SELECT only) to the read-only
+ClickHouse through bin/logq. They skip when bin/logq or ClickHouse is not there, as in CI.
+
+The files agent-counter.sql and factory-flow.sql are not cards. The test ignores them.
 The web app page /flow reads factory-flow.sql.
 """
 
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,38 +39,36 @@ NOT_CARDS = {"agent-counter.sql", "factory-flow.sql"}
 # These dashboards may hold a tile that reads a query file.
 DASHBOARD_FILES = ["big-picture.json", "trends.json", "dashboard.json", "now.json"]
 
-# card -> (title, the tiles). A tile is (id, column, where tail, unit).
-# The unit is the numberFormat unit of the tile. "%" marks a change tile.
+# card file -> the card. "fmt" is count (whole number with thousands separators) or d1 (one decimal).
+# "extra" names the part after the change. "better" is the direction that is better.
 CARDS = {
-    "value-created": ("Value created", [
-        ("value-created-value", "value", None, "work records"),
-        ("value-created-change", "value_change_pct", None, "%"),
-    ]),
-    "waste": ("Waste", [
-        ("waste-value", "hours", None, "hours"),
-        ("waste-change", "hours_change_pct", None, "%"),
-    ]),
-    "tokens-and-turns": ("Tokens and turns", [
-        ("tokens-and-turns-tokens-value", "tokens_m", None, "M tokens"),
-        ("tokens-and-turns-tokens-change", "tokens_m_change_pct", None, "%"),
-        ("tokens-and-turns-turns-value", "turns", None, "turns"),
-        ("tokens-and-turns-turns-change", "turns_change_pct", None, "%"),
-        ("tokens-and-turns-overflow", "overflow", "overflow = 1", "specs past the limit"),
-    ]),
-    "products-changed": ("Products changed", [
-        ("products-changed-value", "products", None, "products"),
-        ("products-changed-change", "products_change_pct", None, "%"),
-    ]),
-    "inventory-cost": ("Inventory cost", [
-        ("inventory-cost-tokens-value", "tokens_m", None, "M tokens"),
-        ("inventory-cost-tokens-change", "tokens_m_change_pct", None, "%"),
-        ("inventory-cost-attention-value", "attention_cost", None, "@ATTENTION_CURRENCY@"),
-        ("inventory-cost-attention-change", "attention_cost_change_pct", None, "%"),
-        ("inventory-cost-attention-hours", "attention_hours", None, "hours"),
-        ("inventory-cost-attention-requests", "attention_requests", None, "requests"),
-        ("inventory-cost-words-per-request", "words_per_request", None, "words"),
-    ]),
+    "value-created": dict(title="Value created", value="value", unit="work records", fmt="count",
+                          change="value_change_pct", extra=None, better="higher"),
+    "delivery-lead-time-tile": dict(title="Delivery lead time", value="days", unit="days", fmt="d1",
+                                    change="days_change_pct", extra=None, better="lower"),
+    "waste": dict(title="Waste", value="hours", unit="hours", fmt="count",
+                  change="hours_change_pct", extra=None, better="lower"),
+    "tokens-and-turns": dict(title="Tokens and turns", value="tokens_m", unit="M tokens", fmt="d1",
+                             change="tokens_m_change_pct", extra="turns", better="lower"),
+    "products-changed": dict(title="Products changed", value="products", unit="products", fmt="count",
+                             change="products_change_pct", extra=None, better="higher"),
+    "inventory-cost": dict(title="Inventory cost", value="tokens_m", unit="M tokens", fmt="d1",
+                           change="tokens_m_change_pct", extra="attention", better="lower"),
 }
+# The stubs return no row until the spec that fills them is built.
+STUBS = {"value-created": "value-created-signals", "delivery-lead-time-tile": "delivery-lead-time-tile"}
+INTRO = (
+    "The last 7 days, against the 7 days before. All products. Each card is one line: the value, "
+    "then its change on last week. \u25b2 is up and \u25bc is down. "
+    "\"No data found within time range.\" means \"no data yet\". "
+    "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
+    "Higher is better: Value created, Products changed. "
+    "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost. "
+    "Value created and Delivery lead time show no data yet until value-created-signals and "
+    "delivery-lead-time-tile fill their queries. "
+    "In Inventory cost, \"attention: no data yet\" means no answer in the last 7 days, "
+    "and \"attention: no rate set\" means answers but no hourly rate."
+)
 # The queries that the cards of Harold trends read, as they are now.
 TRENDS_CARDS = [
     "delivery-lead-time",
@@ -74,22 +77,53 @@ TRENDS_CARDS = [
     "clarification-requests",
     "work-waiting",
 ]
-# What an empty tile of a card means. The markdown tile of the card says it.
-EMPTY_MEANING = {
-    "value-created": ["no data yet", "no change figure"],
-    "waste": ["no data yet", "no change figure"],
-    "tokens-and-turns": ["no data yet", "no change figure", "flow", "harold.turn.tokens.by_spec", "otel.metric.overflow"],
-    "products-changed": ["no data yet", "no change figure"],
-    "inventory-cost": ["no data yet", "no change figure", "no rate set", "stock", "harold.turn.tokens.by_spec", "otel.metric.overflow"],
-}
 CAVEAT = re.compile(r"(?i)\b(empty|no data yet|waits? for)\b")
 MACRO = re.compile(r"\$__\w+")
 
 
-def pick(column, sql, where=None):
-    """Return the sqlTemplate of a tile that picks one column of the query file."""
-    tail = where or f"{column} IS NOT NULL"
-    return f"SELECT {column} FROM (\n{sql.rstrip()}\n) WHERE {tail}"
+def grp(x):
+    """ClickHouse text of the whole number x with thousands separators (up to 999,999,999)."""
+    n = f"toUInt64(round({x}))"
+    three = lambda e: f"leftPad(toString({e}), 3, '0')"
+    return (f"multiIf({n} >= 1000000, concat(toString(intDiv({n}, 1000000)), ',', {three(f'intDiv({n}, 1000) % 1000')}, ',', {three(f'{n} % 1000')}), "
+            f"{n} >= 1000, concat(toString(intDiv({n}, 1000)), ',', {three(f'{n} % 1000')}), toString({n}))")
+
+
+def d1(x):
+    """ClickHouse text of x with one decimal."""
+    r = f"toInt64(round({x} * 10))"
+    return f"concat(toString(intDiv({r}, 10)), '.', toString({r} % 10))"
+
+
+def change_text(column):
+    r = f"round({column})"
+    return (f"multiIf({column} IS NULL, 'no change figure', "
+            f"{r} > 0, concat('\u25b2 ', toString(toInt64({r})), '% on last week'), "
+            f"{r} < 0, concat('\u25bc ', toString(abs(toInt64({r}))), '% on last week'), "
+            f"'0% on last week')")
+
+
+def extra_text(kind):
+    if kind is None:
+        return None
+    if kind == "turns":
+        return f"if(turns IS NULL, '', concat(' \u00b7 ', {grp('turns')}, ' turns'))"
+    return ("concat(' \u00b7 ', multiIf(attention_hours IS NULL, 'attention: no data yet', "
+            "attention_cost IS NULL, 'attention: no rate set', "
+            f"concat('attention ', {grp('attention_cost')}, ' ', ifNull(currency, ''), ' (', {d1('attention_hours')}, ' h, ', "
+            f"toString(toUInt64(ifNull(attention_requests, 0))), ' requests)')))")
+
+
+def wrap(card, source):
+    """Return the sqlTemplate of the tile of the card. The source is the text of the file or a fake SELECT."""
+    spec = CARDS[card]
+    number = (grp if spec["fmt"] == "count" else d1)(spec["value"])
+    parts = [number, f"' {spec['unit']}  '", change_text(spec["change"])]
+    extra = extra_text(spec["extra"])
+    if extra:
+        parts.append(extra)
+    return (f"SELECT concat({', '.join(parts)}) AS \"{spec['title']}\"\n"
+            f"FROM (\n{source.rstrip()}\n)\nWHERE {spec['value']} IS NOT NULL")
 
 
 def strip_comments(sql):
@@ -176,58 +210,67 @@ class BigPictureTest(unittest.TestCase):
             self.fail(f"card {card} has no query file: {path.relative_to(ROOT)}")
         return path.read_text(encoding="utf-8")
 
-    def test_five_cards_and_no_product_filter(self):
+    def test_six_cards_in_order_and_no_product_filter(self):
         dashboard = self.dashboard()
         self.assertEqual(dashboard["name"], "Harold: the big picture")
         self.assertEqual(dashboard.get("filters", []), [], "the big picture has no product filter")
         ids = [tile["id"] for tile in dashboard["tiles"]]
-        self.assertEqual(len(ids), len(set(ids)), "tile ids repeat")
-        expected = ["big-picture-intro"]
-        for card, (_, tiles) in CARDS.items():
-            expected += [f"{card}-about"] + [tile[0] for tile in tiles]
-        self.assertEqual(sorted(ids), sorted(expected))
+        self.assertEqual(ids, ["big-picture-intro"] + list(CARDS))
+        titles = [tile["name"] for tile in dashboard["tiles"][1:]]
+        self.assertEqual(titles, ["Value created", "Delivery lead time", "Waste", "Tokens and turns",
+                                  "Products changed", "Inventory cost"])
 
-    def test_each_tile_picks_one_column_of_its_file(self):
+    def test_each_card_is_one_table_tile_that_wraps_its_file(self):
         tiles = self.by_id()
-        for card, (_, specs) in CARDS.items():
-            for tile_id, column, where, _ in specs:
-                with self.subTest(tile=tile_id):
-                    config = tiles[tile_id]["config"]
-                    self.assertEqual(config["sqlTemplate"], pick(column, self.query_text(card), where))
-                    self.assertEqual(config["displayType"], "number")
-                    self.assertEqual(config["configType"], "sql")
-                    self.assertEqual(config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@")
-                    self.assertRegex(config["sourceId"], r"^@[A-Z_]+_SOURCE_ID@$")
+        for card, spec in CARDS.items():
+            with self.subTest(card=card):
+                config = tiles[card]["config"]
+                self.assertEqual(config["displayType"], "table")
+                self.assertEqual(config["configType"], "sql")
+                self.assertEqual(config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@")
+                self.assertRegex(config["sourceId"], r"^@[A-Z_]+_SOURCE_ID@$")
+                self.assertEqual(config["sqlTemplate"], wrap(card, self.query_text(card)))
+                self.assertTrue(config["sqlTemplate"].startswith("SELECT concat("))
+                self.assertIn(f'AS "{spec["title"]}"', config["sqlTemplate"])
+                self.assertTrue(config["sqlTemplate"].endswith(f"WHERE {spec['value']} IS NOT NULL"))
+
+    def test_the_change_is_rounded_and_not_multiplied(self):
+        for card, spec in CARDS.items():
+            sql = self.by_id()[card]["config"]["sqlTemplate"]
+            with self.subTest(card=card):
+                self.assertIn(f"round({spec['change']})", sql)
+                self.assertNotIn("* 100", sql.split("FROM (", 1)[0], "the wrap must not multiply the percent")
+                self.assertNotIn("factor", json.dumps(self.by_id()[card]))
 
     def test_each_column_is_in_its_file(self):
-        for card, (_, specs) in CARDS.items():
+        for card, spec in CARDS.items():
             sql = strip_comments(self.query_text(card))
-            for tile_id, column, _, _ in specs:
-                with self.subTest(tile=tile_id):
+            columns = [spec["value"], spec["change"]]
+            if spec["extra"] == "turns":
+                columns += ["turns"]
+            if spec["extra"] == "attention":
+                columns += ["attention_hours", "attention_cost", "currency", "attention_requests"]
+            for column in columns:
+                with self.subTest(card=card, column=column):
                     self.assertRegex(sql, rf"(?i)\bAS\s+{column}\b")
 
-    def test_number_format_has_the_unit(self):
-        tiles = self.by_id()
-        for _, (_, specs) in CARDS.items():
-            for tile_id, column, _, unit in specs:
-                with self.subTest(tile=tile_id):
-                    number = tiles[tile_id]["config"]["numberFormat"]
-                    if column.endswith("_change_pct"):
-                        # The query returns the percent as a whole number: 100 for +100%.
-                        self.assertEqual(number["output"], "percent")
-                        self.assertEqual(number["factor"], 0.01)
-                        self.assertEqual(number["mantissa"], 0)
-                        self.assertNotIn("unit", number)
-                    else:
-                        self.assertEqual(number["output"], "number")
-                        self.assertEqual(number["unit"], unit)
-                        self.assertIsInstance(number["mantissa"], int)
+    def test_no_card_tile_has_a_number_format_or_a_markdown_tile(self):
+        for tile in self.tiles():
+            with self.subTest(tile=tile["id"]):
+                self.assertNotIn("numberFormat", tile["config"])
+                self.assertNotEqual(tile["config"]["displayType"], "number")
+        self.assertEqual([t["id"] for t in self.tiles() if t["config"]["displayType"] == "markdown"],
+                         ["big-picture-intro"])
 
-    def test_tokens_in_m_have_one_decimal(self):
-        tiles = self.by_id()
-        for tile_id in ("tokens-and-turns-tokens-value", "inventory-cost-tokens-value"):
-            with self.subTest(tile=tile_id):
-                self.assertEqual(tiles[tile_id]["config"]["numberFormat"]["mantissa"], 1)
+    def test_no_attention_currency_fill(self):
+        self.assertNotIn("@ATTENTION_CURRENCY@", DASHBOARD.read_text(encoding="utf-8"))
+
+    def test_the_stubs_return_no_row_and_name_their_spec(self):
+        for card, spec_name in STUBS.items():
+            with self.subTest(card=card):
+                text = self.query_text(card)
+                self.assertIn(spec_name, text.split("SELECT", 1)[0])
+                self.assertRegex(strip_comments(text), r"(?i)\bWHERE\s+0\b")
 
     def test_no_title_carries_a_caveat(self):
         for tile in self.tiles():
@@ -235,21 +278,20 @@ class BigPictureTest(unittest.TestCase):
                 self.assertTrue(tile.get("name", "").strip())
                 self.assertIsNone(CAVEAT.search(tile["name"]), tile["name"])
 
-    def test_the_intro_names_the_window_and_the_comparison(self):
-        text = self.by_id()["big-picture-intro"]["config"]["markdown"]
-        for phrase in ("last 7 days", "7 days before", "All products"):
-            self.assertIn(phrase, text)
+    def test_the_intro_text(self):
+        config = self.by_id()["big-picture-intro"]["config"]
+        self.assertEqual(config["displayType"], "markdown")
+        self.assertEqual(config["markdown"], INTRO)
+        for phrase in ("last 7 days", "7 days before", "All products", "No data found within time range.",
+                       "no data yet", "no change figure", "no rate set"):
+            self.assertIn(phrase, INTRO)
 
-    def test_each_card_has_its_title_and_what_an_empty_tile_means(self):
-        tiles = self.by_id()
-        for card, (title, _) in CARDS.items():
+    def test_the_intro_says_which_way_is_better(self):
+        higher, lower = INTRO.split("Higher is better: ")[1].split(" Lower is better: ")
+        for card, spec in CARDS.items():
+            side = higher if spec["better"] == "higher" else lower
             with self.subTest(card=card):
-                about = tiles[f"{card}-about"]
-                self.assertEqual(about["config"]["displayType"], "markdown")
-                text = about["config"]["markdown"]
-                self.assertTrue(text.startswith(f"**{title}**"), text[:40])
-                for phrase in EMPTY_MEANING[card]:
-                    self.assertIn(phrase, text)
+                self.assertIn(spec["title"], side)
 
     def test_the_now_card_left(self):
         self.assertNotIn("now", self.by_id())
@@ -267,19 +309,6 @@ class BigPictureTest(unittest.TestCase):
                              or tile["y"] >= other["y"] + other["h"] or other["y"] >= tile["y"] + tile["h"])
                     self.assertTrue(apart, f"{tile['id']} overlaps {other['id']}")
             placed.append(tile)
-
-    def test_change_tile_is_beside_its_value_tile(self):
-        tiles = self.by_id()
-        for _, (_, specs) in CARDS.items():
-            ids = [spec[0] for spec in specs]
-            for tile_id, column, _, _ in specs:
-                if not column.endswith("_change_pct"):
-                    continue
-                value_id = tile_id.removesuffix("-change") + "-value"
-                with self.subTest(tile=tile_id):
-                    self.assertIn(value_id, ids)
-                    self.assertEqual(tiles[tile_id]["y"], tiles[value_id]["y"])
-                    self.assertEqual(tiles[tile_id]["x"], tiles[value_id]["x"] + tiles[value_id]["w"])
 
     def test_trends_tiles_read_their_files_as_tables(self):
         tiles = self.by_id(TRENDS)
@@ -339,6 +368,8 @@ class BigPictureTest(unittest.TestCase):
 
     def test_change_percent_is_whole_and_safe_for_zero(self):
         for card in CARDS:
+            if card in STUBS:
+                continue
             code = strip_comments(self.query_text(card))
             with self.subTest(card=card):
                 self.assertRegex(code, r"(?i)round\(")
@@ -389,6 +420,89 @@ class BigPictureTest(unittest.TestCase):
             with self.subTest(file=path.name):
                 self.assertRegex(text, r"(?m)^-- Note: \S", "no '-- Note:' line")
                 self.assertRegex(text, r"(?m)^-- Waits for: \S", "no '-- Waits for:' line")
+
+
+def find_logq():
+    """Return the path of bin/logq, or None. LOGQ names it. The default is the chief's tool."""
+    named = os.environ.get("LOGQ")
+    if named:
+        return named if Path(named).is_file() else None
+    found = shutil.which("logq")
+    if found:
+        return found
+    default = Path.home() / "Dev" / "p" / "chief-of-pods" / "bin" / "logq"
+    return str(default) if default.is_file() else None
+
+
+def fake_source(**columns):
+    """Return a SELECT of constants: one fake row. None is NULL. The SQL reads no table."""
+    parts = []
+    for name, value in columns.items():
+        if isinstance(value, str):
+            parts.append(f"CAST('{value}' AS Nullable(String)) AS {name}")
+        elif value is None:
+            parts.append(f"CAST(NULL AS Nullable(Float64)) AS {name}")
+        else:
+            parts.append(f"CAST({value} AS Nullable(Float64)) AS {name}")
+    return "SELECT " + ", ".join(parts)
+
+
+class LineWrapTest(unittest.TestCase):
+    """The wrap on fake rows. It runs the SQL (SELECT of constants only) through bin/logq."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.logq = find_logq()
+        if cls.logq is None:
+            raise unittest.SkipTest("bin/logq is not here (set LOGQ): the line tests need the read-only ClickHouse")
+        probe = subprocess.run([cls.logq], input="SELECT 1", capture_output=True, text=True, timeout=30)
+        if probe.returncode != 0 or probe.stdout.strip() != "1":
+            raise unittest.SkipTest("ClickHouse cannot be reached through bin/logq: the line tests are skipped")
+
+    def line(self, card, **columns):
+        sql = wrap(card, fake_source(**columns))
+        self.assertRegex(sql, r"(?i)^SELECT\b")
+        done = subprocess.run([self.logq], input=sql, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return done.stdout.rstrip("\n")
+
+    def test_a_rise_a_fall_and_no_change(self):
+        self.assertEqual(self.line("value-created", value=4717, value_change_pct=57),
+                         "4,717 work records  \u25b2 57% on last week")
+        self.assertEqual(self.line("waste", hours=9, hours_change_pct=-12),
+                         "9 hours  \u25bc 12% on last week")
+        self.assertEqual(self.line("waste", hours=9, hours_change_pct=0), "9 hours  0% on last week")
+
+    def test_a_null_change_gives_no_change_figure(self):
+        self.assertEqual(self.line("waste", hours=9, hours_change_pct=None), "9 hours  no change figure")
+
+    def test_a_null_value_gives_no_row(self):
+        self.assertEqual(self.line("waste", hours=None, hours_change_pct=5), "")
+        self.assertEqual(self.line("value-created", value=None, value_change_pct=None), "")
+
+    def test_numbers_have_thousands_separators_and_one_decimal(self):
+        self.assertEqual(self.line("products-changed", products=999, products_change_pct=1), "999 products  \u25b2 1% on last week")
+        self.assertEqual(self.line("products-changed", products=1000, products_change_pct=1), "1,000 products  \u25b2 1% on last week")
+        self.assertEqual(self.line("products-changed", products=1234567, products_change_pct=1), "1,234,567 products  \u25b2 1% on last week")
+        self.assertEqual(self.line("delivery-lead-time-tile", days=5, days_change_pct=None), "5.0 days  no change figure")
+        self.assertEqual(self.line("delivery-lead-time-tile", days=12.34, days_change_pct=2), "12.3 days  \u25b2 2% on last week")
+
+    def test_tokens_and_turns(self):
+        self.assertEqual(
+            self.line("tokens-and-turns", tokens_m=4.7, tokens_m_change_pct=-12, turns=4717, turns_change_pct=56),
+            "4.7 M tokens  \u25bc 12% on last week \u00b7 4,717 turns")
+
+    def test_inventory_cost_attention_part(self):
+        base = dict(tokens_m=1.2, tokens_m_change_pct=8, currency="AUD", attention_requests=12)
+        self.assertEqual(
+            self.line("inventory-cost", attention_hours=3.5, attention_cost=350, **base),
+            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention 350 AUD (3.5 h, 12 requests)")
+        self.assertEqual(
+            self.line("inventory-cost", attention_hours=None, attention_cost=None, **base),
+            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention: no data yet")
+        self.assertEqual(
+            self.line("inventory-cost", attention_hours=3.5, attention_cost=None, **base),
+            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention: no rate set")
 
 
 if __name__ == "__main__":
