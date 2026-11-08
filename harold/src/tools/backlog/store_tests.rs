@@ -883,3 +883,112 @@ async fn updating_a_queue_item_restarts_its_age() {
         .unwrap();
     assert_eq!(queue_times(&store).await, [("N1".to_string(), 5)]);
 }
+
+async fn times(store: &TursoBacklogStore, id: &str) -> IdeaTimes {
+    store
+        .idea_times(P)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|times| times.id == id)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn migration_002_sets_first_put_from_updated_at() {
+    let folder = TempFolder::new();
+    // A store at migration 001, as the real store is before the release, with rows.
+    let old = TursoBacklogStore::open_at(&folder.0, &MIGRATIONS[..1])
+        .await
+        .unwrap();
+    {
+        let conn = old.conn.lock().await;
+        for (id, rank, updated) in [("a", 1, 1_000), ("b", 2, 2_000)] {
+            conn.execute(
+                "INSERT INTO items (product, id, rank, title, evidence_json, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, 'T', '[]', ?4)",
+                (P, id, rank, updated),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    drop(old);
+    let store = open_store(&folder).await;
+    let a = times(&store, "a").await;
+    assert_eq!((a.first_put_at_ms, a.opened_at_ms), (1_000, None));
+    assert_eq!(times(&store, "b").await.first_put_at_ms, 2_000);
+    assert_eq!(listed_ids(&store, P).await, ids(&["a", "b"]));
+}
+
+#[tokio::test]
+async fn opening_a_migrated_store_again_changes_nothing() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store.put_item(P, item("a"), 5).await.unwrap().unwrap();
+    store.put_item(P, item("a"), 9).await.unwrap().unwrap();
+    drop(store);
+    let store = open_store(&folder).await;
+    let a = times(&store, "a").await;
+    assert_eq!(a.first_put_at_ms, 5);
+    let conn = store.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM _migrations", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(integer(&row, 0).unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_changed_002_checksum_is_refused() {
+    let folder = TempFolder::new();
+    drop(open_store(&folder).await);
+    let changed = [MIGRATIONS[0], (MIGRATIONS[1].0, "SELECT 1;")];
+    assert!(
+        TursoBacklogStore::open_at(&folder.0, &changed)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_new_put_sets_first_put_at() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store.put_item(P, item("a"), 5).await.unwrap().unwrap();
+    let a = times(&store, "a").await;
+    assert_eq!((a.first_put_at_ms, a.opened_at_ms), (5, None));
+}
+
+#[tokio::test]
+async fn a_replacing_put_keeps_first_put_at_and_opened_at() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store.put_item(P, item("a"), 5).await.unwrap().unwrap();
+    store.mark_opened(P, "a", 8).await.unwrap();
+    store.put_item(P, item("a"), 20).await.unwrap().unwrap();
+    let a = times(&store, "a").await;
+    assert_eq!((a.first_put_at_ms, a.opened_at_ms), (5, Some(8)));
+    assert_eq!(store.list_items(P).await.unwrap()[0].updated_at_ms, 20);
+}
+
+#[tokio::test]
+async fn mark_opened_stores_the_first_time_only() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store.put_item(P, item("a"), 5).await.unwrap().unwrap();
+    assert!(store.mark_opened(P, "a", 8).await.unwrap());
+    assert!(!store.mark_opened(P, "a", 99).await.unwrap());
+    assert_eq!(times(&store, "a").await.opened_at_ms, Some(8));
+    assert!(!store.mark_opened(P, "missing", 1).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_removed_item_has_no_idea_times() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store.put_item(P, item("a"), 5).await.unwrap().unwrap();
+    store.remove_item(P, "a", None, 6).await.unwrap().unwrap();
+    assert!(store.idea_times(P).await.unwrap().is_empty());
+}

@@ -14,7 +14,22 @@ use super::schema::{Item, MAX_ITEMS, Note, NoteKind, Place, QueueItem, QueueList
 
 const DATABASE: &str = "backlog.db";
 
-const MIGRATIONS: [(&str, &str); 1] = [("001_backlog", include_str!("migrations/001_backlog.sql"))];
+const MIGRATIONS: [(&str, &str); 2] = [
+    ("001_backlog", include_str!("migrations/001_backlog.sql")),
+    (
+        "002_idea_times",
+        include_str!("migrations/002_idea_times.sql"),
+    ),
+];
+
+/// When an item first entered the backlog and when its spec was first seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IdeaTimes {
+    pub id: String,
+    pub first_put_at_ms: i64,
+    /// Set once, when the check first finds a spec for the item.
+    pub opened_at_ms: Option<i64>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StoreError {
@@ -86,6 +101,16 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
     /// The product's items, by rank.
     fn list_items(&self, product: &str) -> impl Future<Output = Result<Vec<Item>>> + Send;
+    /// The idea times of the product's items, by rank.
+    fn idea_times(&self, product: &str) -> impl Future<Output = Result<Vec<IdeaTimes>>> + Send;
+    /// Stores the time the item's spec was first seen. Returns false when the item is
+    /// unknown or has the time already, so the phase is recorded once.
+    fn mark_opened(
+        &self,
+        product: &str,
+        id: &str,
+        at_ms: i64,
+    ) -> impl Future<Output = Result<bool>> + Send;
     /// The number of items of each product that has any.
     fn item_counts(&self) -> impl Future<Output = Result<BTreeMap<String, u32>>> + Send;
     /// Adds a note and returns its id.
@@ -192,6 +217,12 @@ pub(super) struct TursoBacklogStore {
 
 impl TursoBacklogStore {
     pub(super) async fn open(folder: &Path) -> Result<Self> {
+        Self::open_at(folder, &MIGRATIONS).await
+    }
+
+    /// Opens the store with the given migrations. The tests use it to build a store
+    /// at an older schema.
+    async fn open_at(folder: &Path, migrations: &[(&str, &str)]) -> Result<Self> {
         tokio::fs::create_dir_all(folder)
             .await
             .map_err(|e| StoreError::Data(format!("create {}: {e}", folder.display())))?;
@@ -202,7 +233,7 @@ impl TursoBacklogStore {
         let database = turso::Builder::new_local(path).build().await?;
         let conn = database.connect()?;
         configure(&conn).await?;
-        initialize_schema(&conn).await?;
+        initialize_schema(&conn, migrations).await?;
         Ok(Self {
             conn: Mutex::new(conn),
             _database: database,
@@ -218,9 +249,9 @@ async fn configure(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn initialize_schema(conn: &Connection) -> Result<()> {
+async fn initialize_schema(conn: &Connection, migrations: &[(&str, &str)]) -> Result<()> {
     begin(conn).await?;
-    finish(conn, apply_migrations(conn).await).await
+    finish(conn, apply_migrations(conn, migrations).await).await
 }
 
 /// Starts a write. A caller dropped between `begin` and `finish` leaves the
@@ -272,7 +303,7 @@ async fn finish_refusable<T, E>(
     }
 }
 
-async fn apply_migrations(conn: &Connection) -> Result<()> {
+async fn apply_migrations(conn: &Connection, migrations: &[(&str, &str)]) -> Result<()> {
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS _migrations (
@@ -297,14 +328,14 @@ async fn apply_migrations(conn: &Connection) -> Result<()> {
 
     if applied
         .keys()
-        .any(|name| !MIGRATIONS.iter().any(|(known, _)| known == name))
+        .any(|name| !migrations.iter().any(|(known, _)| known == name))
     {
         return Err(StoreError::Data("incompatible backlog schema".into()));
     }
 
-    for (name, sql) in MIGRATIONS {
+    for (name, sql) in migrations {
         let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
-        match applied.get(name) {
+        match applied.get(*name) {
             Some(existing) if *existing == checksum => {}
             Some(_) => {
                 return Err(StoreError::Data(format!(
@@ -315,7 +346,7 @@ async fn apply_migrations(conn: &Connection) -> Result<()> {
                 conn.execute_batch(sql).await?;
                 conn.execute(
                     "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
-                    (name, checksum, super::now_ms()),
+                    (*name, checksum, super::now_ms()),
                 )
                 .await?;
             }
@@ -421,11 +452,16 @@ async fn put_item_in(
             held as i64 + 1
         }
     };
+    // A replace deletes the old row first, so the two idea times are read before it.
+    let (first_put_at_ms, opened_at_ms) = match idea_times_of(conn, product, &item.id).await? {
+        Some(times) => (times.first_put_at_ms, times.opened_at_ms),
+        None => (now_ms, None),
+    };
     conn.execute(
         "INSERT OR REPLACE INTO items \
          (product, id, rank, title, value, size, risk, reason, paths, after, evidence_json, \
-          updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+          updated_at_ms, first_put_at_ms, opened_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         (
             product,
             item.id.as_str(),
@@ -439,10 +475,35 @@ async fn put_item_in(
             item.after.as_str(),
             evidence,
             now_ms,
+            first_put_at_ms,
+            opened_at_ms,
         ),
     )
     .await?;
     Ok(Ok(count_of(rank)?))
+}
+
+const IDEA_COLUMNS: &str = "id, COALESCE(first_put_at_ms, updated_at_ms), opened_at_ms";
+
+fn idea_times_row(row: &turso::Row) -> Result<IdeaTimes> {
+    Ok(IdeaTimes {
+        id: text(row, 0)?,
+        first_put_at_ms: integer(row, 1)?,
+        opened_at_ms: row.get_value(2)?.as_integer().copied(),
+    })
+}
+
+async fn idea_times_of(conn: &Connection, product: &str, id: &str) -> Result<Option<IdeaTimes>> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT {IDEA_COLUMNS} FROM items WHERE product = ?1 AND id = ?2"),
+            (product, id),
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(idea_times_row(&row)?)),
+        None => Ok(None),
+    }
 }
 
 async fn rank_items_in(
@@ -1003,6 +1064,37 @@ async fn import_queue_in(
 }
 
 impl BacklogStore for TursoBacklogStore {
+    async fn idea_times(&self, product: &str) -> Result<Vec<IdeaTimes>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                &format!("SELECT {IDEA_COLUMNS} FROM items WHERE product = ?1 ORDER BY rank, id"),
+                [product],
+            )
+            .await?;
+        let mut times = Vec::new();
+        while let Some(row) = rows.next().await? {
+            times.push(idea_times_row(&row)?);
+        }
+        Ok(times)
+    }
+
+    async fn mark_opened(&self, product: &str, id: &str, at_ms: i64) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = conn
+            .execute(
+                "UPDATE items SET opened_at_ms = ?3 \
+                 WHERE product = ?1 AND id = ?2 AND opened_at_ms IS NULL",
+                (product, id, at_ms),
+            )
+            .await
+            .map(|changed| changed > 0)
+            .map_err(StoreError::from);
+        finish(&conn, work).await
+    }
+
     async fn put_item(
         &self,
         product: &str,
