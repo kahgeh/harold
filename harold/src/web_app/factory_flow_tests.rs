@@ -169,7 +169,7 @@ fn body() -> String {
         ("architect review", "3", "10800", 1),
         ("approval", "7", "68400", 1),
         ("build", "4", "181440.5", 1),
-        ("merge", "null", "null", 0),
+        ("merge", "1", "3600", 1),
         ("release", "17", "null", 1),
         ("installed", "null", "null", 0),
     ];
@@ -700,7 +700,10 @@ async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query(
     assert!(stage_block(&page, "build").contains("median 2.1 d"));
     assert!(stage_block(&page, "release").contains("17 waiting"));
     assert!(stage_block(&page, "release").contains("wait not recorded yet"));
-    for stage in ["idea", "merge", "installed"] {
+    assert!(stage_block(&page, "merge").contains("1 waiting"));
+    assert!(stage_block(&page, "merge").contains("median 1 h"));
+    assert!(!stage_block(&page, "merge").contains("no data yet"));
+    for stage in ["idea", "installed"] {
         assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
         assert!(stage_block(&page, stage).contains("flow-grey"), "{stage}");
     }

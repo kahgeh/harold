@@ -1,6 +1,6 @@
 -- Note: The flow stage with the highest median wait is the first one to ask about.
 -- Waits for: nothing
--- Empty: idea, merge and installed: no data yet (has_data is 0 and the numbers are empty)
+-- Empty: idea and installed: no data yet (has_data is 0 and the numbers are empty)
 -- The factory flow, one row for each flow stage, in order: idea, spec, architect review, approval, build, merge, release, installed. All products together.
 -- Items: the newest export of pod.inventory.items for the list of the stage, summed over the products. It is the rule of work-waiting.sql
 -- (rows "specs: <list>", the first SELECT of "this" week), with one change: it takes the newest export of each list,
@@ -13,7 +13,10 @@
 -- architect review: items = in_architect_review. The wait is the phase architect_review of each spec that has it.
 -- approval: items = awaiting_approval minus in_spec_writing and in_architect_review (never below 0). The wait is the phase approval_wait of
 -- each spec, or the phase open_to_approved when the spec has no approval_wait.
--- build: the phase approved_to_started plus the phase started_to_completed of the same spec, joined by spec.id. A spec with only one of the two phases gives no wait.
+-- build: items = approved_not_started plus in_progress minus ready_not_merged (never below 0). The wait is the phase approved_to_started plus the phase
+-- started_to_ready of the same spec, joined by spec.id, when the spec has a ready file; else approved_to_started plus started_to_completed, as before.
+-- A spec with no approved_to_started, or with neither started_to_ready nor started_to_completed, gives no wait.
+-- merge: items = ready_not_merged. The wait is the phase ready_to_completed of each spec that has it (empty when none has it).
 -- release: items = merged_not_released. The wait is not recorded yet: median_wait_s is empty and has_data is 1.
 -- This query reads no product filter. It stands alone, so bin/logq --named factory-flow and Harold print the same rows.
 -- Columns: stage, items, median_wait_s, has_data.
@@ -25,7 +28,7 @@ latest AS (
     FROM otel.otel_metrics_gauge
     WHERE MetricName = 'pod.inventory.items'
       AND Attributes['list'] IN ('awaiting_approval', 'approved_not_started', 'in_progress', 'merged_not_released',
-                                   'in_spec_writing', 'in_architect_review')
+                                   'in_spec_writing', 'in_architect_review', 'ready_not_merged')
       AND (Attributes['list'], TimeUnix) IN (
           SELECT Attributes['list'], max(TimeUnix) FROM otel.otel_metrics_gauge
           WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY
@@ -76,8 +79,14 @@ per_spec AS (
         countIf(phase = 'architect_review') AS has_review,
         sumIf(wait_s, phase = 'approval_wait') AS waiting_s,
         countIf(phase = 'approval_wait') AS has_waiting,
-        sumIf(wait_s, phase IN ('approved_to_started', 'started_to_completed')) AS build_s,
-        uniqExactIf(phase, phase IN ('approved_to_started', 'started_to_completed')) AS build_phases
+        sumIf(wait_s, phase = 'approved_to_started') AS started_s,
+        countIf(phase = 'approved_to_started') AS has_started,
+        sumIf(wait_s, phase = 'started_to_ready') AS ready_s,
+        countIf(phase = 'started_to_ready') AS has_ready,
+        sumIf(wait_s, phase = 'started_to_completed') AS completed_s,
+        countIf(phase = 'started_to_completed') AS has_completed,
+        sumIf(wait_s, phase = 'ready_to_completed') AS merge_s,
+        countIf(phase = 'ready_to_completed') AS has_merge
     FROM rises
     GROUP BY spec_id
 )
@@ -112,11 +121,20 @@ FROM (
     SELECT
         5,
         'build',
-        toNullable(coalesce((SELECT n FROM latest WHERE list = 'approved_not_started'), 0) + coalesce((SELECT n FROM latest WHERE list = 'in_progress'), 0)),
-        (SELECT if(countIf(build_phases = 2) = 0, NULL, quantileExactIf(0.5)(build_s, build_phases = 2)) FROM per_spec),
+        toNullable(greatest(
+            coalesce((SELECT n FROM latest WHERE list = 'approved_not_started'), 0)
+            + coalesce((SELECT n FROM latest WHERE list = 'in_progress'), 0)
+            - coalesce((SELECT n FROM latest WHERE list = 'ready_not_merged'), 0), 0)),
+        (SELECT if(countIf(has_started > 0 AND (has_ready > 0 OR has_completed > 0)) = 0, NULL,
+                   quantileExactIf(0.5)(started_s + if(has_ready > 0, ready_s, completed_s), has_started > 0 AND (has_ready > 0 OR has_completed > 0))) FROM per_spec),
         1
     UNION ALL
-    SELECT 6, 'merge', NULL, NULL, 0
+    SELECT
+        6,
+        'merge',
+        toNullable(coalesce((SELECT n FROM latest WHERE list = 'ready_not_merged'), 0)),
+        (SELECT if(countIf(has_merge > 0) = 0, NULL, quantileExactIf(0.5)(merge_s, has_merge > 0)) FROM per_spec),
+        1
     UNION ALL
     SELECT
         7,
