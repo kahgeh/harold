@@ -514,7 +514,7 @@ These agent monitor lines carry the fields below:
 | `agent monitor read retried` | `component`, `pane_id` (for a screen read), `elapsed_ms` (from the first try's start to the retry's success) |
 | `agent blocked long` | `pane_id`, `provider_id`. Logged at `warn` once for each blocked spell, 15 minutes after the first sample that showed `blocked` |
 | `agent monitor degraded`, `agent monitor recovered` | `component` (`inventory` or `screen`), `reason`. A screen `agent monitor degraded` line adds `pane_id` (the pane that tripped the rule) and `elapsed_ms` (the time since that pane's first failed read) |
-| `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`). `info`, once for each change |
+| `agent monitor host` | `host` (the label), `state` (`reachable`, `unreachable` or `left_out`), `reason` (on `unreachable` and `left_out`), `operation` (on `unreachable`: the Rex call that failed, `list`, `layout`, `process` or `status`, or `none` when no call is known). `info`, once for each change |
 | `pane write refused` | `pane_id`, `reason` (`on_rex_host` or `invalid_pane_id`), `writer` (the code path that tried to write, such as `rex_paste` or `turn_complete`). `warn`, once for each pane and writer |
 | `agent monitor multiplexer` | `multiplexer` (`tmux` or `rex`), and `rex_version` (the output of `rex version`; Rex only). `info`, once at start |
 | `agent waiting` | `pane_id`, `role` (`chief`, `coordinator`, `pnem`, or empty for an agent with no pod role and for an agent on a Rex host). `info`, once when an agent begins to wait |
