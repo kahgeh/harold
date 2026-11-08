@@ -8242,6 +8242,9 @@ mod value_created_fixture {
             effort("open-one", "unkinded", "open", 5 * DAY),
             effort("kinded", "fix", "approved", 5 * DAY),
             effort("old", "unkinded", "approved", 20 * DAY),
+            // The Kind line was added later: the newest points have a kind.
+            effort("added", "unkinded", "approved", 5 * DAY),
+            effort("added", "feature", "approved", DAY),
         ];
         assert_eq!(
             answer(&logq, "unkinded-specs.sql", &[], &gauge, &[]),
