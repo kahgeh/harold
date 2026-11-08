@@ -18,7 +18,8 @@ A file that waits for a spec has a "-- Empty: [<part>: ]no data yet (waits for <
 The name of its tile ends with "(empty: no data yet, waits for <spec>)", or with
 "(<part>: no data yet, waits for <spec>)" when only the part waits.
 
-The files agent-counter.sql and README.md are not cards. The test ignores them.
+The files agent-counter.sql, factory-flow.sql and README.md are not cards. The test ignores them.
+The web app page /flow reads factory-flow.sql.
 """
 
 import json
@@ -30,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TELEMETRY = ROOT / "docs" / "references" / "telemetry"
 DASHBOARD = TELEMETRY / "hyperdx" / "big-picture.json"
 QUERIES = TELEMETRY / "queries"
-NOT_CARDS = {"agent-counter.sql"}
+NOT_CARDS = {"agent-counter.sql", "factory-flow.sql"}
 CARDS = [
     "value-created",
     "delivery-lead-time",
