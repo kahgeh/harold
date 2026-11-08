@@ -6,11 +6,11 @@
 use std::cell::RefCell;
 use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::settings::{AgentProviderSettings, ScreenAdapter};
+use crate::settings::{AgentProviderSettings, IdleAfterWorking, ScreenAdapter};
 use sha2::{Digest, Sha256};
 
 #[path = "screen_capture.rs"]
@@ -271,6 +271,15 @@ pub(crate) const PROGRAM_STATUS_CLASSIFIER_ID: &str = "program_status";
 pub(crate) struct RexVisibleScreen {
     capture: RexPaneCapture,
     status: Arc<super::rex::RexStatus>,
+    /// The last state that a record gave for each block, for a provider that asks for done.
+    /// It lives in memory only.
+    marks: std::sync::Mutex<std::collections::HashMap<String, BlockMark>>,
+}
+
+/// What the observer last showed for the agent in one block.
+struct BlockMark {
+    pid: u32,
+    shown: ObservedAgentState,
 }
 
 impl RexVisibleScreen {
@@ -286,6 +295,7 @@ impl RexVisibleScreen {
         Self {
             capture: RexPaneCapture { api },
             status,
+            marks: std::sync::Mutex::default(),
         }
     }
 
@@ -293,6 +303,7 @@ impl RexVisibleScreen {
     fn record_observation(
         &self,
         pane: &AgentPaneObservation,
+        provider: &AgentProviderSettings,
     ) -> Option<(ScreenObservation, StateSource)> {
         use super::rex::Lookup;
         let block_id = &pane.incarnation.pane_id;
@@ -312,15 +323,41 @@ impl RexVisibleScreen {
         };
         // A record of another pid belongs to an agent that is gone.
         (record.pid == pane.incarnation.agent_pid).then(|| {
+            let state = self.shown_state(block_id, record.pid, record.state.observed(), provider);
             let observation = ScreenObservation {
                 incarnation: pane.incarnation.clone(),
-                state: Some(record.state.observed()),
+                state: Some(state),
                 fallback_summary: None,
                 classifier_id: PROGRAM_STATUS_CLASSIFIER_ID.to_string(),
                 observed_at_ms: system_now_ms(),
             };
             (observation, source)
         })
+    }
+
+    /// The state to show for a record. A provider with `idle_after_working = "done"` shows
+    /// done when the record goes from working or blocked to idle with the same pid. The
+    /// rule is the one that the host inventory uses.
+    fn shown_state(
+        &self,
+        block_id: &str,
+        pid: u32,
+        recorded: ObservedAgentState,
+        provider: &AgentProviderSettings,
+    ) -> ObservedAgentState {
+        let asks_done = provider.idle_after_working == IdleAfterWorking::Done;
+        if !asks_done {
+            return recorded;
+        }
+        let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
+        // A new pid is a new agent: the old mark does not count.
+        let before = marks
+            .get(block_id)
+            .filter(|mark| mark.pid == pid)
+            .map(|mark| mark.shown);
+        let shown = super::rex_hosts::state_after(asks_done, before, recorded);
+        marks.insert(block_id.to_string(), BlockMark { pid, shown });
+        shown
     }
 
     /// One `program_status` call. Any failure gives no record.
@@ -342,7 +379,7 @@ impl VisibleScreenPort for RexVisibleScreen {
         pane: &AgentPaneObservation,
         provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
-        if let Some((observation, source)) = self.record_observation(pane) {
+        if let Some((observation, source)) = self.record_observation(pane, provider) {
             count_observation(source, &observation);
             return Ok(observation);
         }

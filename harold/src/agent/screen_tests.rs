@@ -864,7 +864,7 @@ mod rex_observer {
     struct CountingRex {
         blocks: Vec<String>,
         /// The `program_status` reply for each block. A block with none fails.
-        statuses: HashMap<String, Value>,
+        statuses: Mutex<HashMap<String, Value>>,
         /// The first calls to `program_status` that fail, before the replies above apply.
         fail_first: std::sync::atomic::AtomicUsize,
         calls: Mutex<Vec<String>>,
@@ -924,7 +924,12 @@ mod rex_observer {
                     if failing.is_ok() {
                         return Err(RexError::Failed);
                     }
-                    self.statuses.get(block).cloned().ok_or(RexError::Failed)
+                    self.statuses
+                        .lock()
+                        .unwrap()
+                        .get(block)
+                        .cloned()
+                        .ok_or(RexError::Failed)
                 }
                 "size" => Ok(json!({"rows": 24, "columns": 80})),
                 "format" => Ok(json!({"id": 7, "total": 5})),
@@ -964,7 +969,10 @@ mod rex_observer {
             ..CountingRex::default()
         };
         if let Some(status) = status {
-            api.statuses.insert(block.to_string(), status);
+            api.statuses
+                .lock()
+                .unwrap()
+                .insert(block.to_string(), status);
         }
         Arc::new(api)
     }
@@ -1083,7 +1091,10 @@ mod rex_observer {
         };
         api.fail_first = std::sync::atomic::AtomicUsize::new(failing);
         if let Some(status) = status {
-            api.statuses.insert(block.to_string(), status);
+            api.statuses
+                .lock()
+                .unwrap()
+                .insert(block.to_string(), status);
         }
         Arc::new(api)
     }
@@ -1374,6 +1385,136 @@ mod rex_observer {
             observed("count-other-pid-provider", "program_status_call", "working"),
             0
         );
+    }
+
+    /// The done rule on this Mac: no stream, so each observation asks Rex once.
+    mod done_rule {
+        use super::*;
+        use ObservedAgentState::{Blocked, Done, Idle, Working};
+
+        const BLOCK: &str = "block:done-rule";
+
+        fn asking() -> AgentProviderSettings {
+            let mut provider = provider();
+            provider.idle_after_working = crate::settings::IdleAfterWorking::Done;
+            provider
+        }
+
+        fn say(api: &CountingRex, status: Option<Value>) {
+            let mut statuses = api.statuses.lock().unwrap();
+            match status {
+                Some(status) => statuses.insert(BLOCK.to_string(), status),
+                None => statuses.remove(BLOCK),
+            };
+        }
+
+        fn state_of(
+            screen: &RexVisibleScreen,
+            provider: &AgentProviderSettings,
+        ) -> Option<ObservedAgentState> {
+            let _one_at_a_time = crate::agent::rex::directory_test_lock();
+            screen.observe(&pane(BLOCK), provider).unwrap().state
+        }
+
+        /// Sends each record to a screen in turn and gives the states that it shows.
+        fn run(
+            provider: &AgentProviderSettings,
+            records: &[(&str, u32)],
+        ) -> Vec<Option<ObservedAgentState>> {
+            let api = api_with(BLOCK, None);
+            let screen = no_stream_screen(&api);
+            records
+                .iter()
+                .map(|(state, pid)| {
+                    say(&api, Some(reply(state, *pid)));
+                    state_of(&screen, provider)
+                })
+                .collect()
+        }
+
+        #[test]
+        fn working_then_idle_with_the_same_pid_gives_done() {
+            assert_eq!(
+                run(&asking(), &[("working", 20), ("idle", 20)]),
+                [Some(Working), Some(Done)]
+            );
+        }
+
+        #[test]
+        fn blocked_then_idle_gives_done() {
+            assert_eq!(
+                run(&asking(), &[("blocked", 20), ("idle", 20)]),
+                [Some(Blocked), Some(Done)]
+            );
+        }
+
+        #[test]
+        fn done_stays_while_the_record_stays_idle() {
+            assert_eq!(
+                run(
+                    &asking(),
+                    &[("working", 20), ("idle", 20), ("idle", 20), ("idle", 20)]
+                ),
+                [Some(Working), Some(Done), Some(Done), Some(Done)]
+            );
+        }
+
+        #[test]
+        fn working_again_after_done_gives_working() {
+            assert_eq!(
+                run(
+                    &asking(),
+                    &[("working", 20), ("idle", 20), ("working", 20), ("idle", 20)]
+                ),
+                [Some(Working), Some(Done), Some(Working), Some(Done)]
+            );
+        }
+
+        #[test]
+        fn idle_with_no_working_before_it_stays_idle() {
+            assert_eq!(
+                run(&asking(), &[("idle", 20), ("idle", 20)]),
+                [Some(Idle), Some(Idle)]
+            );
+        }
+
+        #[test]
+        fn a_new_pid_ends_done() {
+            let api = api_with(BLOCK, None);
+            let screen = no_stream_screen(&api);
+            say(&api, Some(reply("working", 20)));
+            assert_eq!(state_of(&screen, &asking()), Some(Working));
+            say(&api, Some(reply("idle", 20)));
+            assert_eq!(state_of(&screen, &asking()), Some(Done));
+            // The agent restarts as pid 21, and the pane now holds pid 21.
+            let mut restarted = pane(BLOCK);
+            restarted.incarnation.agent_pid = 21;
+            say(&api, Some(reply("idle", 21)));
+            let _one_at_a_time = crate::agent::rex::directory_test_lock();
+            let state = screen.observe(&restarted, &asking()).unwrap().state;
+            assert_eq!(state, Some(Idle));
+        }
+
+        #[test]
+        fn a_failed_call_between_two_records_keeps_the_working_mark() {
+            let api = api_with(BLOCK, None);
+            let screen = no_stream_screen(&api);
+            say(&api, Some(reply("working", 20)));
+            assert_eq!(state_of(&screen, &asking()), Some(Working));
+            say(&api, None);
+            state_of(&screen, &asking());
+            say(&api, Some(reply("idle", 20)));
+            assert_eq!(state_of(&screen, &asking()), Some(Done));
+        }
+
+        #[test]
+        fn a_provider_that_does_not_ask_keeps_idle_after_working() {
+            // Claude Code and Codex do not set `idle_after_working`.
+            assert_eq!(
+                run(&provider(), &[("working", 20), ("idle", 20)]),
+                [Some(Working), Some(Idle)]
+            );
+        }
     }
 }
 
