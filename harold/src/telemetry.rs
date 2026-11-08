@@ -520,6 +520,8 @@ pub(crate) struct Instruments {
     pub work_rotations: Counter<u64>,
     /// `harold.work.checked`, `{record}`, by `priority`.
     pub work_checked: Counter<u64>,
+    /// `harold.feature.used`, `{use}`, by `spec.id`.
+    pub feature_used: Counter<u64>,
     /// `harold.work.lead_time`, seconds, by `phase`.
     pub work_lead_time: Histogram<f64>,
     /// `harold.work.slices`, `{slice}`.
@@ -648,6 +650,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         work_check_mismatches: counter("harold.work.check.mismatches", "{mismatch}"),
         work_rotations: counter("harold.work.rotations", "{rotation}"),
         work_checked: counter("harold.work.checked", "{record}"),
+        feature_used: counter("harold.feature.used", "{use}"),
         work_lead_time: seconds(
             "harold.work.lead_time",
             &[
@@ -4471,6 +4474,27 @@ pub(crate) fn count_work_checked(priority: &'static str) {
         .add(1, &[KeyValue::new("priority", priority)]);
 }
 
+/// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
+/// here and calls `feature_used` at its one point of use.
+pub(crate) const HAROLD_FEATURES: [&str; 1] = ["factory-flow-page"];
+
+/// Counts one use of the product feature `spec_id`.
+pub(crate) fn feature_used(spec_id: &str) {
+    instruments()
+        .feature_used
+        .add(1, &[KeyValue::new("spec.id", spec_id.to_owned())]);
+}
+
+/// Records 0 once on `harold.feature.used` for each product feature in
+/// `HAROLD_FEATURES`, so a feature with no use shows 0 and not nothing.
+fn register_feature_counters() {
+    for id in HAROLD_FEATURES {
+        instruments()
+            .feature_used
+            .add(0, &[KeyValue::new("spec.id", id)]);
+    }
+}
+
 /// Records the seconds a work record took in `phase`.
 pub(crate) fn record_work_lead_time(phase: &'static str, seconds: f64) {
     #[cfg(test)]
@@ -4502,6 +4526,8 @@ pub(crate) fn register_work_counters() {
             .work_checked
             .add(0, &[KeyValue::new("priority", priority)]);
     }
+    // `main` calls this function once at start, so it seeds the feature counters too.
+    register_feature_counters();
     set_work_records(&[]);
     set_work_waiting_long(&[]);
 }

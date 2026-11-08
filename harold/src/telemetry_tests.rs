@@ -2167,6 +2167,7 @@ const METRICS: &[&str] = &[
     "harold.work.check.mismatches",
     "harold.work.rotations",
     "harold.work.checked",
+    "harold.feature.used",
     "harold.work.lead_time",
     "harold.work.slices",
     "harold.telemetry.calls",
@@ -6027,6 +6028,38 @@ fn a_work_mismatch_counts_by_record_and_kind() {
         ),
         Some(2)
     );
+}
+
+#[test]
+fn feature_used_rises_its_series_by_one() {
+    test_support::install();
+    let series = [("spec.id", "feature-used-test-only")];
+    assert_eq!(
+        test_support::exact_counter_value("harold.feature.used", &series),
+        None
+    );
+    feature_used("feature-used-test-only");
+    assert_eq!(
+        test_support::exact_counter_value("harold.feature.used", &series),
+        Some(1)
+    );
+    feature_used("feature-used-test-only");
+    assert_eq!(
+        test_support::exact_counter_value("harold.feature.used", &series),
+        Some(2)
+    );
+}
+
+#[test]
+fn each_listed_product_feature_starts_at_zero() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    assert!(HAROLD_FEATURES.contains(&"factory-flow-page"));
+    register_work_counters();
+    for id in HAROLD_FEATURES {
+        let counted = test_support::exact_counter_value("harold.feature.used", &[("spec.id", id)]);
+        assert!(counted.is_some(), "{id}");
+    }
 }
 
 #[test]

@@ -447,6 +447,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.work.status.duration` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `status` (the status the work record left), `priority` |
 | `harold.work.check.mismatches` | counter, `{mismatch}` | `record` (the work record's name), `kind` (the mismatch rule) |
 | `harold.work.rotations` | counter, `{rotation}` | `outcome` (`done`, `failed`) |
+| `harold.feature.used` | counter, `{use}` | `spec.id`. One count at each use of a product feature, as the spec of the feature defines it. Harold seeds each feature of its list at 0 at start. |
 | `harold.work.checked` | counter, `{record}` | `priority` (`focus`, `next`, `later`). One count when a work record reaches `checked by the user` |
 | `harold.work.lead_time` | histogram, `s`, buckets 3600, 14400, 43200, 86400, 172800, 345600, 604800, 1209600 | `phase` (`whole`, `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check`). Recorded at closing |
 | `harold.work.slices` | histogram, `{slice}`, buckets 1, 2, 3, 4, 6, 8, 12 | none. Recorded at closing: the number of `spec:` links of the work record |
