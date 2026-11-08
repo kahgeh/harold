@@ -2788,7 +2788,7 @@ const TTS_CARDS: [&str; 2] = [
     "TTS failures per day, by machine, caller and reason",
 ];
 /// The agents and multiplexer group's cards, in the order the dashboard lists them.
-const AGENT_CARDS: [&str; 13] = [
+const AGENT_CARDS: [&str; 14] = [
     "Agents by state",
     "Agents unknown",
     "Time in each state, p50 and p95, by day",
@@ -2802,6 +2802,7 @@ const AGENT_CARDS: [&str; 13] = [
     UNREADABLE_BLOCKS_CARD,
     "Now: agents waiting beside agents working",
     "Work waiting: p50 of the time before it was seen, by bucket",
+    HOST_LINK_DROPS_CARD,
 ];
 /// The cards of the logs group, in order.
 const LOG_CARDS: [&str; 2] = [
@@ -2815,6 +2816,7 @@ const WORK_CARDS: [&str; 3] = [
     "Time at each status, p50 and p95, by week",
     "Work check mismatches by day",
 ];
+const HOST_LINK_DROPS_CARD: &str = "Host link drops";
 const UNREADABLE_BLOCKS_CARD: &str = "Unreadable blocks, last 24 h, by pane";
 const INVENTORY_FULL_READS_CARD: &str = "Agent inventory full reads per day, by reason";
 const REX_READS_SLOW_CARD: &str = "Rex reads slow, by day";
@@ -2964,6 +2966,39 @@ fn the_unreadable_blocks_card_counts_the_unreadable_lines_by_pane_over_24_hours(
         assert!(sql.contains(piece), "{piece} in {sql}");
     }
     assert!(!sql.contains("agent pane readable again"), "{sql}");
+    // The product filter does not reach a log card.
+    assert!(!sql.contains("$__filters"), "{sql}");
+}
+
+#[test]
+fn the_host_link_drops_card_counts_unreachable_lines_and_the_longest_gap_for_each_host() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == HOST_LINK_DROPS_CARD)
+        .expect("the host link drops card");
+    assert_eq!(card["containerId"], "agents-multiplexer");
+    let config = &card["config"];
+    assert_eq!(config["configType"], "sql");
+    assert_eq!(config["displayType"], "table");
+    assert_eq!(config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@");
+    assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@");
+    let sql = config["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "FROM otel.otel_logs",
+        "ServiceName = 'harold'",
+        "Body = 'agent monitor host'",
+        "Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now()",
+        "LogAttributes['host']",
+        "LogAttributes['state']",
+        "countIf(state = 'unreachable') AS unreachable_lines",
+        "max(gap_s) AS longest_gap_s",
+        // Red: more than 40 lines a day, or a gap over 3 minutes (180 s).
+        "if(countIf(state = 'unreachable') > 40 OR max(gap_s) > 180, 'red', 'ok') AS link",
+        "GROUP BY host",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
     // The product filter does not reach a log card.
     assert!(!sql.contains("$__filters"), "{sql}");
 }

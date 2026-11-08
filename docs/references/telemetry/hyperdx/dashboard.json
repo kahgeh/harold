@@ -1337,6 +1337,22 @@
       }
     },
     {
+      "id": "host-link-drops",
+      "name": "Host link drops",
+      "x": 12,
+      "y": 80,
+      "w": 12,
+      "h": 4,
+      "containerId": "agents-multiplexer",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT host, countIf(state = 'unreachable') AS unreachable_lines, max(gap_s) AS longest_gap_s, if(countIf(state = 'unreachable') > 40 OR max(gap_s) > 180, 'red', 'ok') AS link FROM (SELECT host, state, if(state = 'reachable' AND prev_state = 'unreachable', dateDiff('second', run_start, ts), 0) AS gap_s FROM (SELECT LogAttributes['host'] AS host, LogAttributes['state'] AS state, Timestamp AS ts, lagInFrame(LogAttributes['state'], 1, '') OVER (PARTITION BY LogAttributes['host'] ORDER BY Timestamp) AS prev_state, minIf(Timestamp, LogAttributes['state'] = 'unreachable') OVER (PARTITION BY LogAttributes['host'], reachable_before ORDER BY Timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS run_start FROM (SELECT Timestamp, LogAttributes, sum(LogAttributes['state'] = 'reachable') OVER (PARTITION BY LogAttributes['host'] ORDER BY Timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS reachable_before FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'agent monitor host' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now()))) GROUP BY host ORDER BY host"
+      }
+    },
+    {
       "id": "work-by-priority-and-status",
       "name": "Work by priority and status, and long waits",
       "x": 0,
