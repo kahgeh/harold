@@ -1518,6 +1518,46 @@ mod rex_observer {
             assert_eq!(state_of(&screen, &asking()), Some(Done));
         }
 
+        fn uses_noted() -> usize {
+            crate::telemetry::take_noted_work()
+                .into_iter()
+                .filter(|noted| {
+                    *noted
+                        == crate::telemetry::WorkNoted::FeatureUsed("opencode-done-on-mac".into())
+                })
+                .count()
+        }
+
+        #[test]
+        fn one_turn_counts_one_use_however_many_scans_show_done() {
+            crate::telemetry::take_noted_work();
+            let api = api_with(BLOCK, None);
+            let screen = no_stream_screen(&api);
+            let scan = |state: &str| {
+                say(&api, Some(reply(state, 20)));
+                state_of(&screen, &asking())
+            };
+            assert_eq!(scan("working"), Some(Working));
+            assert_eq!(uses_noted(), 0);
+            for _ in 0..4 {
+                assert_eq!(scan("idle"), Some(Done));
+            }
+            assert_eq!(uses_noted(), 1);
+            // A second turn counts a second use.
+            scan("working");
+            scan("idle");
+            assert_eq!(uses_noted(), 1);
+        }
+
+        #[test]
+        fn idle_with_no_turn_and_a_done_record_count_no_use() {
+            crate::telemetry::take_noted_work();
+            run(&asking(), &[("idle", 20), ("idle", 20), ("done", 20)]);
+            assert_eq!(uses_noted(), 0);
+            run(&provider(), &[("working", 20), ("idle", 20)]);
+            assert_eq!(uses_noted(), 0);
+        }
+
         fn changed_event(block: &str) -> String {
             json!({"type": "program_status_changed", "payload": {"block_id": block}}).to_string()
         }

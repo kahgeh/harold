@@ -4531,7 +4531,7 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 1] = ["factory-flow-page"];
+pub(crate) const HAROLD_FEATURES: [&str; 2] = ["factory-flow-page", "opencode-done-on-mac"];
 
 /// Counts one use of the product feature `spec_id`.
 pub(crate) fn feature_used(spec_id: &str) {

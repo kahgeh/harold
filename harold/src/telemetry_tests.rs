@@ -6060,6 +6060,7 @@ fn each_listed_product_feature_starts_at_zero() {
     test_support::install();
     let _held = hold_work_gauges();
     assert!(HAROLD_FEATURES.contains(&"factory-flow-page"));
+    assert!(HAROLD_FEATURES.contains(&"opencode-done-on-mac"));
     register_work_counters();
     for id in HAROLD_FEATURES {
         let counted = test_support::exact_counter_value("harold.feature.used", &[("spec.id", id)]);

@@ -369,11 +369,20 @@ impl RexVisibleScreen {
             .get(block_id)
             .filter(|mark| mark.pid == pid)
             .map(|mark| mark.shown);
+        let was_done = before == Some(ObservedAgentState::Done);
         // The stream read a working or blocked record since the last scan, so a turn ran.
         if worked {
             before = Some(ObservedAgentState::Working);
         }
         let shown = super::rex_hosts::state_after(asks_done, before, recorded);
+        // The record gave idle and the rule gave done: a turn ended. A scan that finds the
+        // row already done counts again only after a new working record.
+        if shown == ObservedAgentState::Done
+            && recorded == ObservedAgentState::Idle
+            && (!was_done || worked)
+        {
+            crate::telemetry::feature_used("opencode-done-on-mac");
+        }
         marks.insert(block_id.to_string(), BlockMark { pid, shown });
         shown
     }
