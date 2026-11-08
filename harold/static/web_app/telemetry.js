@@ -94,6 +94,7 @@ function start() {
   recordErrors(tracer);
   recordRowsDrawn(tracer);
   recordThreadOpened(tracer);
+  recordDuplicateRows(tracer);
 }
 
 /** A script error or a promise nobody caught, as a `browser.error` span. */
@@ -159,6 +160,16 @@ function recordRowsDrawn(tracer) {
       }
     }
   }).observe(messages, { childList: true });
+}
+
+/**
+ * A row copy that pages.js removed, as a `thread.duplicate_row` span with no attributes:
+ * pages.js announces each one with a `harold:duplicate-row` event on the document.
+ */
+function recordDuplicateRows(tracer) {
+  document.addEventListener("harold:duplicate-row", () => {
+    tracer.startSpan("thread.duplicate_row").end();
+  });
 }
 
 /**

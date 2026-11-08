@@ -873,6 +873,8 @@ fn the_telemetry_script_imports_the_bundle_skips_five_paths_and_cuts_urls_to_pat
         r#""harold-version""#,
         r#""browser.error""#,
         r#""browser.message_shown""#,
+        r#""thread.duplicate_row""#,
+        r#"document.addEventListener("harold:duplicate-row""#,
         r#"getAttribute("data-trace")"#,
         "requestAnimationFrame",
         "new BatchSpanProcessor({",
@@ -1308,4 +1310,78 @@ fn the_collection_frame_follows_the_app_surface_and_colour_scheme() {
     assert!(rule.contains("background: var(--surface-1);"));
     assert!(rule.contains("color-scheme: light dark;"));
     assert!(!rule.contains("#fff"));
+}
+
+/// Runs `dropRepeatedRow` from `pages.js` in `node` on a small fake container and returns
+/// what it printed. The function sits at the top of the script, before its end marker.
+fn run_drop_repeated_row(body: &str) -> String {
+    let script = include_str!("../../static/web_app/pages.js");
+    let start = script
+        .find("function dropRepeatedRow(")
+        .expect("pages.js lacks dropRepeatedRow");
+    let end = script
+        .find("// end dropRepeatedRow")
+        .expect("pages.js lacks the end marker of dropRepeatedRow");
+    let program = format!(
+        r#"
+{function}
+const make = (ids) => {{
+  const rows = ids.map((id) => ({{ id, removed: false, remove() {{ this.removed = true; rows.splice(rows.indexOf(this), 1); }} }}));
+  return {{ rows, children: rows, querySelectorAll(selector) {{ return rows.filter((r) => r.id && selector === `[id="${{r.id}}"]`); }} }};
+}};
+{body}
+"#,
+        function = &script[start..end],
+    );
+    let output = std::process::Command::new("node")
+        .args(["-e", &program])
+        .output()
+        .expect("the test needs `node` on the PATH, and it is missing");
+    assert!(
+        output.status.success(),
+        "node failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn pages_js_drops_a_repeated_row_and_keeps_the_first() {
+    let out = run_drop_repeated_row(
+        r#"
+const container = make(["m-1"]);
+const first = container.rows[0];
+const copy = { id: "m-1", removed: false, remove() { this.removed = true; } };
+container.rows.push(copy);
+console.log(dropRepeatedRow(container, copy), copy.removed, first.removed);
+"#,
+    );
+    assert_eq!(out.trim(), "true true false");
+}
+
+#[test]
+fn pages_js_keeps_rows_with_other_ids_or_none() {
+    let out = run_drop_repeated_row(
+        r#"
+const container = make(["m-1"]);
+const other = { id: "m-2", removed: false, remove() { this.removed = true; } };
+const none = { id: "", removed: false, remove() { this.removed = true; } };
+container.rows.push(other, none);
+console.log(dropRepeatedRow(container, other), other.removed, dropRepeatedRow(container, none), none.removed);
+"#,
+    );
+    assert_eq!(out.trim(), "false false false false");
+}
+
+#[test]
+fn pages_js_watches_messages_and_announces_each_removed_copy() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        "new MutationObserver(",
+        "dropRepeatedRow(messages, node)",
+        r#"new CustomEvent("harold:duplicate-row")"#,
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
 }

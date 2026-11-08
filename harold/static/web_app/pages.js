@@ -4,6 +4,39 @@
 // when older messages load above what you are reading.
 "use strict";
 
+// A row that shows twice has one id. When two update streams are open, each appends the same
+// new row. This keeps the first copy, so the morph by id still reaches it, and removes the
+// new one. It returns true when it removed `row`.
+function dropRepeatedRow(container, row) {
+  if (!row.id) {
+    return false;
+  }
+  const same = container.querySelectorAll(`[id="${row.id}"]`);
+  if (same.length < 2 || same[0] === row) {
+    return false;
+  }
+  row.remove();
+  return true;
+}
+// end dropRepeatedRow
+
+(function () {
+  const messages = document.getElementById("messages");
+  if (!messages) {
+    return;
+  }
+  new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE && dropRepeatedRow(messages, node)) {
+          // telemetry.js records the span `thread.duplicate_row` for each removed copy.
+          document.dispatchEvent(new CustomEvent("harold:duplicate-row"));
+        }
+      }
+    }
+  }).observe(messages, { childList: true });
+})();
+
 // A link to the app's own address, in the thread or on a todo card, opens in the app instead
 // of Safari. One listener on the document covers the rows and cards the stream draws later.
 document.addEventListener("click", (event) => {

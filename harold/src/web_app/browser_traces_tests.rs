@@ -688,3 +688,25 @@ async fn thread_opened_keeps_its_two_attributes_and_nothing_else_does() {
     // The same keys on another span are dropped.
     assert!(spans[3].get("attributes").is_none(), "{:?}", spans[3]);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_duplicate_row_span_is_kept_without_attributes() {
+    let collector = Collector::start().await;
+    let app = App::start(Some(&collector.address())).await;
+    let sent = batch(
+        "harold-web-app",
+        vec![span(
+            "thread.duplicate_row",
+            "00f067aa0ba902c1",
+            "00f067aa0ba902b4",
+            vec![text("harold.row", "chief"), text("leak", CANARY)],
+        )],
+    );
+
+    app.post(sent.to_string()).await;
+
+    let spans = spans_of(&collector.wait_for_batches(1).await);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0]["name"], "thread.duplicate_row");
+    assert!(spans[0].get("attributes").is_none(), "{}", spans[0]);
+}
