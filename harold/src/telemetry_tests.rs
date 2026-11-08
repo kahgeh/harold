@@ -2145,6 +2145,7 @@ const METRICS: &[&str] = &[
     "watch.runs",
     "watch.cost_usd",
     "harold.notifications",
+    "harold.attention.hourly_rate",
     "harold.knowledge.graph_waiting",
     "harold.knowledge.typed_relations",
     "harold.multiplexer.calls",
@@ -6708,6 +6709,21 @@ fn the_slave_link_gauges_follow_the_notes() {
     assert_eq!(
         test_support::gauge_value("harold.slave_link.connected", &[("slave", "noted-slave")]),
         Some(0)
+    );
+}
+
+#[test]
+fn the_attention_rate_gauge_carries_the_rate_and_the_currency() {
+    test_support::install();
+    register_attention_rate(150, "EUR");
+    assert_eq!(
+        test_support::gauge_value("harold.attention.hourly_rate", &[("currency", "EUR")]),
+        Some(150)
+    );
+    register_attention_rate(120, "EUR");
+    assert_eq!(
+        test_support::gauge_value("harold.attention.hourly_rate", &[("currency", "EUR")]),
+        Some(120)
     );
 }
 

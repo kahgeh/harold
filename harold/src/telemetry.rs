@@ -673,6 +673,36 @@ pub(crate) const SLAVE_REPORT_KINDS: [&str; 3] = ["snapshot", "turn", "lock"];
 /// Every `outcome` of a report on the master.
 pub(crate) const SLAVE_REPORT_OUTCOMES: [&str; 2] = ["applied", "duplicate"];
 
+/// What the gauge `harold.attention.hourly_rate` reads: the rate and the currency of the
+/// `[attention]` settings, or `None` before `register_attention_rate` sets them.
+fn attention_rate_state() -> &'static Arc<Mutex<Option<(u64, String)>>> {
+    static STATE: OnceLock<Arc<Mutex<Option<(u64, String)>>>> = OnceLock::new();
+    static GAUGE: OnceLock<opentelemetry::metrics::ObservableGauge<u64>> = OnceLock::new();
+    let state = STATE.get_or_init(|| Arc::new(Mutex::new(None)));
+    GAUGE.get_or_init(|| {
+        let reader = Arc::clone(state);
+        meter()
+            .u64_observable_gauge("harold.attention.hourly_rate")
+            .with_unit("1")
+            .with_callback(move |observer| {
+                let rate = reader.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some((value, currency)) = rate.as_ref() {
+                    observer.observe(*value, &[KeyValue::new("currency", currency.clone())]);
+                }
+            })
+            .build()
+    });
+    state
+}
+
+/// Sets the gauge `harold.attention.hourly_rate` from the `[attention]` settings. `main`
+/// calls it once, after `init_telemetry`, when export is on.
+pub(crate) fn register_attention_rate(rate: u32, currency: &str) {
+    *attention_rate_state()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((u64::from(rate), currency.to_owned()));
+}
+
 /// What the two slave-link gauges read, by slave name.
 #[derive(Default)]
 struct SlaveLinkGaugeState {

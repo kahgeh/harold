@@ -2096,6 +2096,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         crate::telemetry::register_phone_counters();
         crate::telemetry::register_turn_token_counters();
         crate::telemetry::register_work_counters();
+        crate::telemetry::register_attention_rate(
+            settings.attention.hourly_rate,
+            &settings.attention.currency,
+        );
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,
         ));
