@@ -53,6 +53,31 @@ fn buckwal() -> ProductNext {
 }
 
 #[test]
+fn the_evidence_missing_list_follows_the_merged_list_and_an_empty_list_prints_nothing() {
+    let mut product = harold();
+    let plain = text(&NextResponse {
+        products: vec![product.clone()],
+    });
+    assert!(!plain.contains("evidence missing"), "{plain}");
+    product.evidence_missing = vec![line("alpha", "First"), line("beta", "")];
+    let shown = text(&NextResponse {
+        products: vec![product.clone()],
+    });
+    assert!(
+        shown.contains(
+            "    timing-tests-local  Run the tests locally\n  evidence missing\n    alpha  First\n    beta\n  in progress\n"
+        ),
+        "{shown}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&json(&NextResponse {
+        products: vec![product],
+    }))
+    .unwrap();
+    assert_eq!(value["products"][0]["evidence_missing"][0]["id"], "alpha");
+    assert_eq!(value["products"][0]["evidence_missing"][1]["id"], "beta");
+}
+
+#[test]
 fn text_matches_the_spec_example() {
     let response = NextResponse {
         products: vec![harold(), keymap(), buckwal()],

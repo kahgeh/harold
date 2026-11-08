@@ -1,7 +1,8 @@
 // The release tool: what each product's next release holds.
 //
 //   Next   for each product (or the one named), the work merged since the last release,
-//          in progress, approved, parked, awaiting approval and not clear.
+//          the specs with missing evidence, in progress, approved, parked, awaiting
+//          approval and not clear.
 syntax = "proto3";
 
 package harold.tools.release.v1;
@@ -33,6 +34,9 @@ message ProductNext {
   uint32 other_commits = 10;
   // A reason when git gave no answer.
   string unavailable = 11;
+  // The specs whose evidence file says `missing`. A client that does not know the
+  // field ignores it.
+  repeated Line evidence_missing = 12;
 }
 
 message Line {

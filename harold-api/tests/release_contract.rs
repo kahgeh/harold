@@ -139,6 +139,7 @@ fn messages_keep_their_field_numbers() {
             ("not_clear", 9),
             ("other_commits", 10),
             ("unavailable", 11),
+            ("evidence_missing", 12),
         ])
     );
     assert_eq!(
@@ -170,9 +171,10 @@ fn a_response_round_trips_every_field() {
             approved: vec![line.clone()],
             parked: vec![line.clone()],
             awaiting: vec![line.clone()],
-            not_clear: vec![line],
+            not_clear: vec![line.clone()],
             other_commits: 3,
             unavailable: "reason".to_string(),
+            evidence_missing: vec![line],
         }],
     };
     assert_eq!(round_trip(&response), response);

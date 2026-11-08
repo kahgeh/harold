@@ -136,6 +136,16 @@ impl Fixture {
         );
     }
 
+    /// `evidence/<id>.md` with the `state`.
+    fn evidence(&self, id: &str, state: &str) {
+        write(
+            &self.pod().join(format!("evidence/{id}.md")),
+            &format!(
+                "# Evidence: {id}\n\nchecked: {NOW}\nsince: {MERGE_TIME}\nreleased:\nstate: {state}\nquery: {id}-1 absent no_use_yet\n"
+            ),
+        );
+    }
+
     fn park(&self, id: &str) {
         write(&self.pod().join(format!("parked/{id}-handoff.md")), "x\n");
     }
@@ -215,6 +225,44 @@ fn others(commits: &[&str]) -> Vec<String> {
 
 fn strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
+}
+
+#[tokio::test]
+async fn a_spec_whose_evidence_says_missing_is_listed_with_its_title_and_the_others_are_not() {
+    let fixture = Fixture::new();
+    for (id, state) in [
+        ("alpha", "missing"),
+        ("beta", "waiting"),
+        ("gamma", "present"),
+        ("delta", "missing"),
+    ] {
+        fixture.spec(id, &format!("# {id}: Title of {id}\n"));
+        fixture.merge(id, COMMIT);
+        fixture.evidence(id, state);
+    }
+    fixture.spec("epsilon", "# epsilon: No evidence file\n");
+    fixture.merge("epsilon", COMMIT);
+    let git = fixture.git().answer(&DESCRIBE, false, "");
+
+    let next = fixture.next(&git).await;
+
+    assert_eq!(ids(&next.evidence_missing), ["alpha", "delta"]);
+    assert_eq!(next.evidence_missing[0].title, "Title of alpha");
+    assert_eq!(next.evidence_missing[0].commits, None);
+}
+
+#[tokio::test]
+async fn a_spec_whose_evidence_became_present_leaves_the_list() {
+    let fixture = Fixture::new();
+    fixture.spec("alpha", "# alpha: First\n");
+    fixture.merge("alpha", COMMIT);
+    fixture.evidence("alpha", "missing");
+    let git = fixture.git().answer(&DESCRIBE, false, "");
+    assert_eq!(ids(&fixture.next(&git).await.evidence_missing), ["alpha"]);
+
+    fixture.evidence("alpha", "present");
+
+    assert!(fixture.next(&git).await.evidence_missing.is_empty());
 }
 
 #[tokio::test]

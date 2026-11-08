@@ -7,7 +7,7 @@ use std::path::Path;
 use time::{OffsetDateTime, UtcOffset};
 
 use super::classify::{Branch, Facts, ReleaseTag, classify};
-use super::model::ProductNext;
+use super::model::{Line, ProductNext};
 use super::title::spec_title;
 use crate::pod_stats::{
     AGENT_PANE, Git, NO_ANSWER, POD_FOLDER, Product, Sources, SpecRead, SpecState, file_time,
@@ -143,6 +143,19 @@ async fn gather(
             other_commits: 0,
         },
     );
+
+    // Evidence: each spec whose evidence file says `missing`, as pod stats reads it.
+    let mut missing: Vec<Line> = specs
+        .iter()
+        .filter(|spec| spec.evidence_missing == Some(true))
+        .map(|spec| Line {
+            id: spec.id.clone(),
+            title: titles.get(&spec.id).cloned().unwrap_or_default(),
+            commits: None,
+        })
+        .collect();
+    missing.sort_by(|a, b| a.id.cmp(&b.id));
+    next.evidence_missing = missing;
 
     // Other commits: the commits on the base branch after the tag that no commit of a
     // listed merged spec reaches. A spec merges as several commits, so the count walks

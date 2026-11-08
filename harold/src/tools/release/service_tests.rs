@@ -203,3 +203,22 @@ async fn a_paused_product_has_its_release_and_a_git_failure_hides_no_other_produ
     assert_eq!(harold.awaiting[0].id, "alpha");
     assert_eq!(keymap.unavailable, Some("git gave no answer"));
 }
+
+#[test]
+fn the_reply_carries_the_evidence_missing_list() {
+    let next = super::ProductNext {
+        name: "harold".into(),
+        evidence_missing: vec![crate::tools::release::model::Line {
+            id: "alpha".into(),
+            title: "First".into(),
+            commits: None,
+        }],
+        ..Default::default()
+    };
+
+    let reply = super::to_proto(next);
+
+    assert_eq!(reply.evidence_missing.len(), 1);
+    assert_eq!(reply.evidence_missing[0].id, "alpha");
+    assert_eq!(reply.evidence_missing[0].title, "First");
+}

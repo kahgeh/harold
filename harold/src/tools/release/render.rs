@@ -33,6 +33,13 @@ fn product_text(product: &ProductNext) -> String {
         "no release yet: merged in the last 14 days".to_string()
     };
     section(&mut out, &merged_heading, &product.merged, true, false);
+    section(
+        &mut out,
+        "evidence missing",
+        &product.evidence_missing,
+        false,
+        false,
+    );
     section(&mut out, "in progress", &product.in_progress, true, true);
     section(
         &mut out,
@@ -108,6 +115,7 @@ fn product_json(product: &ProductNext) -> Value {
         "paused": product.paused,
         "release": product.release,
         "merged": lines_json(&product.merged, false),
+        "evidence_missing": lines_json(&product.evidence_missing, false),
         "in_progress": lines_json(&product.in_progress, true),
         "approved": lines_json(&product.approved, false),
         "parked": lines_json(&product.parked, false),

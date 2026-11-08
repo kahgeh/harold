@@ -92,6 +92,7 @@ fn to_proto(next: ProductNext) -> pb::ProductNext {
         paused: next.paused,
         release: next.release,
         merged: lines(next.merged),
+        evidence_missing: lines(next.evidence_missing),
         in_progress: lines(next.in_progress),
         approved: lines(next.approved),
         parked: lines(next.parked),

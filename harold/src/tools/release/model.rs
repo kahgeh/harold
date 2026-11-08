@@ -22,6 +22,8 @@ pub(super) struct ProductNext {
     /// The merge times of the specs in `merged`, in no set order. A spec with no merge time
     /// has no entry, so this list may be shorter than `merged`.
     pub merged_at: Vec<time::OffsetDateTime>,
+    /// The specs whose evidence file says `missing`, by id. They have no commit count.
+    pub evidence_missing: Vec<Line>,
     pub in_progress: Vec<Line>,
     pub approved: Vec<Line>,
     pub parked: Vec<Line>,

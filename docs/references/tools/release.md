@@ -28,6 +28,8 @@ Harold lists the products of the pod registry in alphabetical order. This is an 
 harold
   merged since the release (v0.73.0)
     timing-tests-local  Run the tests that depend on real time only on this Mac
+  evidence missing
+    evidence-check  Check that each released spec shows its evidence
   in progress
     row-names-plain  Name each control-tower row by its role or its window  (4 commits)
   approved, not started
@@ -51,7 +53,7 @@ buckwal
 ```
 
 - Each line is a spec id and its title. The title is the text after `<id>: ` in the first `# ` heading of `specs/<id>.md`.
-- The lists "merged since the release", "in progress" and "approved, not started" print `none` when they are empty. The other lists print nothing when they are empty.
+- The lists "merged since the release", "in progress" and "approved, not started" print `none` when they are empty. The other lists, "evidence missing" included, print nothing when they are empty.
 - The "in progress" lines also show the commits of the spec's branch over `origin/<base>`, for example `(4 commits)`, `(1 commit)` or `(0 commits)` for a spec just started. When git cannot count them (for example the product has no `origin/<base>`), the line shows no count.
 - A paused product prints one line: `paused: last release <tag>` or `paused: no release yet`.
 - A product whose git read fails prints `unavailable: <reason>` and no lists.
@@ -61,6 +63,7 @@ buckwal
 | List | A spec is in it when |
 | --- | --- |
 | merged since the release | Its state is `completed` and its merged commit is not in the release tag (one `git rev-list ^<tag> <commits>` call lists the commits in the history of the given commits that the tag does not reach; one `git merge-base --is-ancestor` call per commit answers if that call fails). A completed spec with no merged commit is in the list when its merge time is after the commit time of the tag. |
+| evidence missing | The `state:` line of `evidence/<id>.md` is `missing`. The tool reads the file with the rule of pod stats (`evidence_missing` of `read_specs`). A spec with a `waiting` or `present` file, or with no file, is not listed. A spec whose evidence becomes `present` leaves the list at the next check of the evidence tool. See [Evidence tool](evidence.md). |
 | in progress | Its state is `in_progress`, it has no parked handoff file and its worktree has a branch. |
 | approved, not started | Its state is `approved`, it has no parked handoff file and it was approved on or after the product's first merged file, and its approval names the current text of the spec. An older approval is history. An approval names the current text when `approvals/<id>.md` has no `spec-sha256:` line, or when that line equals the sha-256 of `specs/<id>.md`. |
 | parked | The file `parked/<id>-handoff.md` exists, whatever the state of the spec. A parked spec is in no other list. |
@@ -103,7 +106,7 @@ A product is paused when its entry in `products.toml` has `paused = true`. The t
 | `name` | The product name |
 | `paused` | `true` for a paused product |
 | `release` | The newest release tag; an empty string means no release |
-| `merged`, `in_progress`, `approved`, `parked`, `awaiting`, `not_clear` | The lists, each an array of `{ "id", "title" }`. The `in_progress` lines also hold `"commits"` when the count is known, and no `"commits"` key when it is unknown. A known count can be 0. In the gRPC `Line`, `commits_known` says if `commits` is a count. |
+| `merged`, `evidence_missing`, `in_progress`, `approved`, `parked`, `awaiting`, `not_clear` | The lists, each an array of `{ "id", "title" }`. The `in_progress` lines also hold `"commits"` when the count is known, and no `"commits"` key when it is unknown. A known count can be 0. In the gRPC `Line`, `commits_known` says if `commits` is a count. |
 | `other_commits` | The count of other commits since the release |
 | `unavailable` | A reason when git gave no answer; an empty string otherwise |
 
