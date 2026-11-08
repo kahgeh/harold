@@ -985,17 +985,19 @@ Special cases:
 
 The SQL panels read the time range's points and, for the counter rule, the day before it.
 
+Five more tiles follow the twelve panels: Delivery lead time, Work waiting, Slicing and sizing, Test and release time and Clarification requests per day, by cause. They left the big picture. Each is a table that holds the text of its named query in `queries/`, with the columns `series`, `this_week` and `last_week`, and its numbers cover the last 7 days and the 7 days before them, whatever the time range is. They are described in [Harold: the big picture](#harold-the-big-picture) (the cards that left) and in the pod signals table above.
+
 The "Spec size" panel cannot show lines merged per spec: `pod.merged_lines` carries `pod.product` and `change` but no `spec.id`, so the two cannot be joined. Read a merged spec's lines from "Merges to main" at the time of its merge.
 
 ### Pod signals cards
 
-Four cards read the pod signals: Waste, Slicing and sizing, Now and Work waiting. They are cards of the dashboard "Harold: the big picture", described in [Harold: the big picture](#harold-the-big-picture). The file [`hyperdx/big-picture.json`](hyperdx/big-picture.json) holds each card, and a file in [`queries/`](queries/) holds its SQL. The table below gives the reading for each card. Use the last value of each measure for each spec, as the "Withdrawn and wasted" panel does.
+Four cards read the pod signals: Waste, Slicing and sizing, Now and Work waiting. Waste is a card of the dashboard "Harold: the big picture", described in [Harold: the big picture](#harold-the-big-picture). Slicing and sizing and Work waiting are cards of "Harold trends". Now is the dashboard "Harold now", described in [Harold now](#harold-now). A file in [`queries/`](queries/) holds the SQL of each card. The table below gives the reading for each card. Use the last value of each measure for each spec, as the "Withdrawn and wasted" panel does.
 
 | Card | The question | Reads | Weekly comparison | Note (info only, no alert) | Diagnosis |
 |---|---|---|---|---|---|
 | Waste (`waste.sql`) | Where do slot hours and build hours go? | `pod.slots.idle_with_work` (free slots with work waiting) in slot hours (sum of points × 30 ÷ 3600); `pod.spec.effort` `redo_hours`; `pod.spec.effort` `revised_after_approval` beside them; the hours of failed release attempts (release-attempts) | The week's hours and counts against last week | More than 2 slot hours of free slots with work waiting in a day, counted with the same conversion. Any spec over 2 redo hours. A spec with 3 or more revisions after approval: the spec was not ready. The `slot-idle` alert stays | The approved, not started specs at that time, and `status.md`. For redo, the spec's revisions file: its tagged, timed headings give the reason |
 | Slicing and sizing (`slicing-and-sizing.sql`) | Do the specs match their size? | `pod.spec.effort` `build_worker_hours` by `spec.size`: for each size, the share of specs over its limit (4 hours for small, 8 hours for medium), beside `harold.work.slices` | The share this week against last week | Over a third of medium specs over 8 hours in a week | The other effort measures of those specs |
-| Now (`now.sql`) | Which agents work now? | `pod.agents` with `state` = `working`, over all pods and by pod | The share of working build workers while approved work waits | None needed: `pod.slots.idle_with_work` catches the waste | The control-tower |
+| Now (`now.sql`, the dashboard "Harold now") | Which agents work now, and how many specs are in progress? | `harold.agents` with `state` = `working`, over all agents, and `pod.inventory.items` with `list` = `in_progress`, over all products | None: a reading of this moment has no week | None needed: `pod.slots.idle_with_work` catches the waste | The control-tower |
 | Work waiting (`work-waiting.sql`) | How much work waits, and for how long? | `pod.inventory.items`, `pod.inventory.oldest_hours` and `pod.inventory.item_days`, by `pod.product` and `list` | The week's item-days against last week | The oldest `awaiting_approval` spec is over 72 hours old. This is the time the user takes to approve. The reading is `max(pod.inventory.oldest_hours) WHERE list = 'awaiting_approval'` over the last hour | `harold tool release next <product>` |
 
 ### Tokens and turns card
@@ -1078,51 +1080,40 @@ Two limits remain:
 
 ## Harold: the big picture
 
-`big-picture.json` is the dashboard "Harold: the big picture". It has ten cards, one for each lever: a way of working that moves quality, speed, waste or token cost. Each card is one table with two columns: `this_week` and `last_week`.
+`big-picture.json` is the dashboard "Harold: the big picture". It has five cards, each with one number and its change against the 7 days before: Value created, Waste, Tokens and turns, Products changed and Inventory cost. The dashboard has no product filter: it reads all products.
 
-**This week** means the last 7 days. **Last week** means the 7 days before them. Open the dashboard with a time range of at least the last 14 days. The window is in each query, not in the time range.
+**A card** is one block under one name. It is made of number tiles, because a HyperDX number tile shows one number and cannot show a second one. A **value tile** shows the number of the last 7 days with its unit. The **change tile** beside it shows the percent change against the 7 days before: `(this - before) / before * 100`, rounded to a whole percent. A markdown tile above the tiles gives the name of the card and what it shows. Tokens and turns has two value tiles with two change tiles, and a third tile, Specs past the limit. Inventory cost has detail tiles: the answer hours, the count of attention requests and the words per attention request.
 
-**How a card counts.** A counter or a histogram of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. The declared `agent.*` counters keep their totals, so their cards read the total at three times, by the method of `queries/agent-counter.sql`. The gauge cards Now and Work waiting read the newest export of the gauge in the week, never the last value of each series, so a series that Harold no longer exports does not count. Three groups of rows read otherwise. The rows from `pod.spec.effort` (redo hours, revised after approval, and the specs counted and over limit of Slicing and sizing) read the last value of each spec in the week, for the specs that changed or merged in it. The row "free slots, work waiting" of Waste sums all points of the week, times 30 seconds. The row "failed release attempts" reads a declared counter total. A week with no point gives no number (an empty cell), never a 0.
+The last 7 days are the 7 days before now, and the 7 days before are the 7 days before those. The window is in each query, not in the time range. Open the dashboard with a time range of at least the last 14 days.
 
-| Card | The number | Source metrics | Note (info only, no alert) |
+**The empty state.** A number tile whose query returns no row shows HyperDX's empty state. The tile never shows 0 or `null` for no data. Each tile selects one column and keeps only the rows where that column is not `NULL`. HyperDX 2.40 has no field for the empty text of a number tile, so the markdown tile of the card tells what an empty tile means: "no data yet" for a value tile, "no change figure" for a change tile (the 7 days before have no number, or the number is 0), and "no rate set" for the attention cost tile.
+
+| Card | The value tiles | Source metrics | Note |
 |---|---|---|---|
-| Value created | Work records that the user checked | `harold.work.checked` | The count at `released`, which the user did not use, is a note. |
-| Delivery lead time | The p50 days from idea to the user's check, and the four phases. The p50 is the median of the mean of each rise, weighted by the count, as for the panel "Waiting for you, p50" | `harold.work.lead_time`. Until it has data, `pod.spec.lead_time` gives "spec time, open to merged" | The slowest work record is the first to check. |
-| Work waiting | Item-days with a total, and the count and the oldest age in days of each list | `pod.inventory.items`, `.oldest_hours` and `.item_days`; `harold.work.records` at `released` | The oldest `awaiting_approval` spec is over 3 days (72 hours) old. |
-| Waste | Hours of free slots with work waiting, redo, and failed release attempts (result `failed` only); specs revised after approval, for the specs that changed or merged in the week | `pod.slots.idle_with_work`, `pod.spec.effort`, `agent.harold.release.seconds` | Each source has its own note. |
-| Tokens and turns | Tokens, the share of each model, turns, and tokens per merged spec | `harold.turn.tokens`, `harold.turn.tokens.by_spec`, `harold.turns`, `pod.merges` | A build worker on Opus. The `other` role over a fifth. Subagent tokens are not counted. |
-| Slicing and sizing | The share of specs over the limit of their size, for the specs that changed or merged in the week, and slices per work record | `pod.spec.effort` with `spec.size`, `harold.work.slices` | Medium specs over 8 hours. |
-| Test and release time | Minutes of an ok release attempt, by step, and failed release attempts | `agent.harold.release.*` | An ok attempt over 70 minutes. 2 failed attempts in a week. An attempt with the result `stopped` is not a failed attempt. |
-| Products changed | Merged specs of each product | `pod.merges` | None. |
-| Now | Agents that work, of all agents, by pod | `pod.agents` with `state`, `harold.agents` | None. |
-| Clarification requests per day, by cause | The times the user asked the chief what a word or a reply meant, by `cause` and for all causes together (`all`) | `agent.chief.clarification_requests` | Any day above 3: the chief's writing needs a look. |
+| Value created | The work records that the user checked | `harold.work.checked` | Empty until a work record is checked. Work at `released` that the user did not use is not counted. |
+| Waste | Hours of free slots while work waited, plus redo hours, in whole hours | `pod.slots.idle_with_work`, `pod.spec.effort` | A day above 2 slot hours of free slots with work waiting needs a look. So does a spec above 2 redo hours. |
+| Tokens and turns | Tokens in M with one decimal, and turns. Specs past the limit | `harold.turn.tokens`, `harold.turns`, `harold.turn.tokens.by_spec` | The flow: all tokens spent in the 7 days, on all work. A build worker on Opus is the first thing to check. |
+| Products changed | The products with at least one merge | `pod.merges` | None. |
+| Inventory cost | The tokens held in work not delivered, in M. The attention cost in the currency of the settings, the answer hours, the attention requests and the words per attention request | `harold.turn.tokens.by_spec` with `pod.spec.words`; `harold.attention.hourly_rate` through the dictionary `otel.harold_settings`; the events `chief.attention_request` and `chief.attention_answered` | The stock: the tokens already spent, at any time, on the specs that are approved or in progress now. |
 
-**The product filter** is named "Product (pod and spec cards only)". It reaches only the queries that read a `pod.product` attribute. These cards ignore it:
+**Tokens and turns against Inventory cost.** Tokens and turns is the flow: all tokens spent in the 7 days. Inventory cost is the stock: the tokens already spent on work that has not reached the user. The change of the stock compares the stock now with the stock 7 days ago.
 
-- Value created, Test and release time and Clarification requests per day, by cause: fully.
-- Delivery lead time: the rows "work: ..." ignore it. The rows "spec: ..." use it.
-- Work waiting: the row for `harold.work.records` at `released` ignores it. The `pod.inventory.*` rows use it.
-- Waste: the row "failed release attempts" ignores it. The pod rows use it.
-- Tokens and turns: the row "tokens per merged spec" ignores it.
-- Slicing and sizing: the row "slices per work record" ignores it.
-- Now: the rows "all Harold agents" ignore it. The `pod.agents` rows use it.
+**The overflow note.** The metric `harold.turn.tokens.by_spec` has 2 series for each spec. Past the series limit, new series fall into the overflow series, which has the attribute `otel.metric.overflow = true`. Then the tokens of each spec are a lower bound. `tokens-and-turns.sql` and `inventory-cost.sql` each return the column `overflow`: 1 when the overflow series has a point in the 7 days. The tile Specs past the limit shows it, and it is empty at 0. The markdown tiles of Tokens and turns and Inventory cost carry the note.
 
-Products changed uses the filter fully.
+**The attention cost.** The query reads the rate with `dictGetOrNull` from the ClickHouse dictionary `otel.harold_settings` (the gauge `harold.attention.hourly_rate`, from the `[attention]` setting of Harold). ClickHouse raises an error for a dictionary that does not exist, so the dictionary must exist before the query runs. With no rate in the dictionary the cost tile is empty. The unit of the cost tile is `@ATTENTION_CURRENCY@`: the apply step fills it with the currency of the dictionary. After a change of currency, apply the dashboard again. The events `chief.attention_request` and `chief.attention_answered` come from the spec user-attention-signals. Until it merges, the attention tiles are empty.
 
-**A card with no data yet** shows no row for the part that waits. The name of the tile names only that part. A card that is empty as a whole reads `<Card title> (empty: no data yet, waits for <spec>)`. A card with real rows and one part that waits reads `<Card title> (<part>: no data yet, waits for <spec>)`. So the empty part has a visible reason. The note stays in the query file as a comment. The name does not change by itself when the data arrives: remove the text in the parentheses, in the file and in the tile, when the spec lands. A card never shows a 0 that reads as a result. The cards wait for these specs:
+**How a card counts.** A counter of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. A week with no point gives no number, never a 0.
+
+**The cards that left.** Delivery lead time, Slicing and sizing, Test and release time, Clarification requests per day, by cause, and Work waiting are now tables on "Harold trends". They keep their named queries, their columns `series`, `this_week` and `last_week`, and the product filter of their old dashboard is gone: the queries that carry `$__filters` read all products. The cards that wait for a spec keep their note and their `-- Empty:` line in the query file, and the name of the tile shows what waits:
 
 | Card | Waits for |
 |---|---|
-| Value created | work-status-history |
 | Delivery lead time (the "work: ..." rows) | work-status-history |
 | Slicing and sizing (the row "slices per work record") | work-status-history |
-| Waste (the row "failed release attempts") | release-attempts |
 | Test and release time | release-attempts |
 | Clarification requests per day, by cause | telemetry-record-tool |
 
-The other cards wait for nothing. Their sources exist, and Tokens and turns shows real rows since `turn-tokens` merged.
-
-**The SQL of a card** is the file `queries/<card>.sql`. The card has one tile, with the id `<card>`, and the tile in `big-picture.json` holds the same text. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, or when a file has no card. After you edit a query file, make the same change in the tile. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
+**The SQL of a tile** is the file `queries/<card>.sql`. A number tile holds `SELECT <column> FROM (` the text of the file `) WHERE <column> IS NOT NULL`. The tile Specs past the limit has `WHERE overflow = 1`. A table tile of "Harold trends" holds the text of its file. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, when a file has no tile, when a title names a spec or a caveat, or when a card query can return more than one row. After you edit a query file, make the same change in its tiles. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
 
 **The clarification card's producer.** The chief records the counter with the telemetry tool. Run this once, after the telemetry tool is installed. It seeds the four series at 0:
 
@@ -1137,6 +1128,19 @@ harold tool telemetry count chief.clarification_requests --attr cause=<cause>
 ```
 
 The name is `chief.clarification_requests` everywhere. HyperDX reads it as `agent.chief.clarification_requests`. Until the declaration, the card shows `no data yet`.
+
+## Harold now
+
+`now.json` is the dashboard "Harold now", apart from "Harold: the big picture". It shows what runs at this moment, with the line "the agents working and the specs in progress, at this moment". It has two cards and no change tile, because a reading of this moment has no week.
+
+| Card | The tiles | Source metrics |
+|---|---|---|
+| Agents working | "working" and "of all": two number tiles side by side, for example 2 and 11 | `harold.agents` (all providers and Rex hosts): the newest export, the state `working`, and every state |
+| Specs in progress | One number tile: the in-progress specs of every pod | `pod.inventory.items` with `list = in_progress`, summed over the products: the newest export |
+
+An in-progress spec has a branch and no parked handoff file. Parked specs and specs that are not clear are not counted. The SQL is the file `queries/now.sql`, which returns one row with the columns `working`, `all` and `in_progress`. `bin/logq --named now` prints the row. Each tile selects one column. The test `scripts/tests/test_now.py` checks that each tile holds the text of the file.
+
+**Diagnosis.** Harold exports both gauges every 30 seconds. An empty working or of-all tile points at `harold.agents`: check that it has a point in the last minute, and its `state` attribute. An empty in-progress tile points at `pod.inventory.items`: check its `list` and `pod.product` attributes and the time of the newest export. A tile that is empty while `bin/logq --named now` returns a row is a defect.
 
 ## Machine stats
 
@@ -1390,12 +1394,16 @@ export CLICKHOUSE_CONNECTION_ID=$(hdx "$HYPERDX_URL/api/v2/connections" | jq -r 
 export METRICS_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Metrics") | .id')
 export TRACES_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Traces") | .id')
 export LOGS_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Logs") | .id')
+# The unit of the attention cost tile: the currency of the dictionary otel.harold_settings.
+# Read it with bin/logq of the chief-of-pods repository. It is AUD while the dictionary has no rate.
+export ATTENTION_CURRENCY=$(echo "SELECT ifNull(dictGetOrNull('otel.harold_settings', 'currency', tuple('harold.attention.hourly_rate')), 'AUD')" | logq | tr -d '\n')
 
 fill() {
   sed -e "s/@CLICKHOUSE_CONNECTION_ID@/$CLICKHOUSE_CONNECTION_ID/g" \
       -e "s/@METRICS_SOURCE_ID@/$METRICS_SOURCE_ID/g" \
       -e "s/@TRACES_SOURCE_ID@/$TRACES_SOURCE_ID/g" \
       -e "s/@LOGS_SOURCE_ID@/$LOGS_SOURCE_ID/g" \
+      -e "s/@ATTENTION_CURRENCY@/$ATTENTION_CURRENCY/g" \
       -e "s/@WEBHOOK_ID@/$WEBHOOK_ID/g" "docs/references/telemetry/hyperdx/$1"
 }
 
@@ -1417,7 +1425,7 @@ Run them from the repository root.
 **Create** the dashboards:
 
 ```sh
-for file in dashboard.json trends.json machine.json big-picture.json; do
+for file in dashboard.json trends.json machine.json big-picture.json now.json; do
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards/validate" --data-binary @-   # HyperDX's own check
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards" --data-binary @- | jq -r '.data.id // .id'
 done
@@ -1450,16 +1458,13 @@ fill dashboard.json \
   | jq --argjson old "$old" --argjson fresh "$fresh" '.filters |= [to_entries[] | .key as $i | .value | . as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | .id = ($id // $fresh[$i])]' \
   | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
 
-# "Harold trends" and "Machine resources" have no filters.
+# "Harold trends" and "Machine resources" have no filters. The PUT of "Harold: the big picture" below drops its old product filter.
 fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold trends" | jq -r .id)" --data-binary @-
 fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Machine resources" | jq -r .id)" --data-binary @-
 
-# "Harold: the big picture": an update keeps the live id of its one filter, found by name, as "Harold" does.
-old=$(dashboard "Harold: the big picture")
-fresh=$(for _ in $(seq "$(fill big-picture.json | jq '.filters | length')"); do openssl rand -hex 12; done | jq -R . | jq -sc .)
-fill big-picture.json \
-  | jq --argjson old "$old" --argjson fresh "$fresh" '.filters |= [to_entries[] | .key as $i | .value | . as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | .id = ($id // $fresh[$i])]' \
-  | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
+# "Harold: the big picture" and "Harold now" have no filters.
+fill big-picture.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold: the big picture" | jq -r .id)" --data-binary @-
+fill now.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold now" | jq -r .id)" --data-binary @-
 ```
 
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:

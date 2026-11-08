@@ -1,6 +1,6 @@
 # Named queries
 
-A **named query** is a SQL file in this folder. A dashboard card and `bin/logq --named <card>` both run it, so a card and its query come from one source. Each query returns this week against last week. A card has one tile with both columns.
+A **named query** is a SQL file in this folder. A dashboard card and `bin/logq --named <card>` both run it, so a card and its query come from one source. A card query returns one row, with a value column for each value tile and a `_change_pct` column for each change tile. A query of a table card in "Harold trends" returns this week against last week.
 
 `bin/logq` is the chief's read-only SQL tool. Its `--named` option lives in the chief's own repository. Harold holds no ClickHouse login.
 
@@ -9,34 +9,37 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | File | What it shows | Parameter |
 | --- | --- | --- |
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
-| `value-created.sql` | Work records that the user checked: the card "Value created" | none |
+| `value-created.sql` | Work records that the user checked, and the change: the card "Value created". Columns `value`, `value_change_pct` | none |
 | `delivery-lead-time.sql` | The p50 days of each phase, from idea to the user's check, and the spec time from open to merged: the card "Delivery lead time" | none |
 | `work-waiting.sql` | The items in each list, the oldest age in days and the item-days, with a total: the card "Work waiting" | none |
-| `waste.sql` | Hours of free slots with work waiting, redo and failed release attempts, and the specs revised after approval: the card "Waste" | none |
-| `tokens-and-turns.sql` | Tokens, the share of each model, turns, and tokens and turns per merged spec: the card "Tokens and turns" | none |
+| `waste.sql` | Hours of free slots with work waiting plus redo hours, in whole hours, and the change: the card "Waste". Columns `hours`, `hours_change_pct` | none |
+| `tokens-and-turns.sql` | Tokens in M, turns, their changes and the overflow flag: the card "Tokens and turns". Columns `tokens_m`, `tokens_m_change_pct`, `turns`, `turns_change_pct`, `overflow` | none |
+| `inventory-cost.sql` | The tokens held in work not delivered and your attention cost, with changes and the overflow flag: the card "Inventory cost". Columns `tokens_m`, `tokens_m_change_pct`, `attention_hours`, `attention_cost`, `attention_cost_change_pct`, `currency`, `attention_requests`, `words_per_request`, `overflow`. It reads the dictionary `otel.harold_settings`, which must exist | none |
 | `slicing-and-sizing.sql` | The share of specs over the limit of their size, and slices per work record: the card "Slicing and sizing" | none |
 | `test-and-release-time.sql` | Minutes of an ok release attempt, by step, and the failed attempts: the card "Test and release time" | none |
-| `products-changed.sql` | Merged specs of each product: the card "Products changed" | none |
-| `now.sql` | The agents that work, of all agents, by pod: the card "Now" | none |
+| `products-changed.sql` | The number of products with a merge, and the change: the card "Products changed". Columns `products`, `products_change_pct` | none |
+| `now.sql` | The agents working, all agents and the specs in progress, in one row: the dashboard "Harold now". Columns `working`, `all`, `in_progress` | none |
 | `clarification-requests.sql` | The times the user asked the chief what a word or reply meant, by cause: the card "Clarification requests per day, by cause" | none |
 
-The ten files after `agent-counter.sql` are the cards of the dashboard "Harold: the big picture". See [Harold: the big picture](../README.md#harold-the-big-picture). A test keeps each card and its file equal.
+Five files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql` and `clarification-requests.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
 
-`bin/logq --named <card> [k=v ...]` is available in the chief's repository. It reads `<card>.sql` from the folder in `$LOGQ_QUERIES_DIR`, turns `$__filters` into no filter and passes each `k=v` as `{k:String}`. The card names equal the file names. The card applies the product filter. The named query does not. So the two give the same numbers only when the filter is empty.
+`bin/logq --named <card> [k=v ...]` is available in the chief's repository. It reads `<card>.sql` from the folder in `$LOGQ_QUERIES_DIR`, turns `$__filters` into no filter and passes each `k=v` as `{k:String}`. The card names equal the file names. No dashboard that reads a named query has a product filter, so a tile and `bin/logq --named <card>` give the same numbers.
 
 ## The columns
 
-Every query returns one row for each series, with these columns:
+The files of the five cards of the big picture and `now.sql` return at most one row. Each column is the value of one value tile, or (a column that ends with `_change_pct`) the percent change of one change tile, against the 7 days before. A column with no number is `NULL`: its tile selects only the rows where the column is not `NULL`, so it shows HyperDX's empty state, never 0. A query returns no row when its source has no data.
+
+The other files return one row for each series, with these columns:
 
 | Column | Meaning |
 | --- | --- |
-| `series` | In the ten card files, a label for the row, such as `harold` or `tokens per merged spec`. In `agent-counter.sql`, the series' attributes as `key=value` pairs, sorted by key and joined by commas, empty for a counter with no attributes |
+| `series` | In the five files of "Harold trends", a label for the row, such as `harold` or `tokens per merged spec`. In `agent-counter.sql`, the series' attributes as `key=value` pairs, sorted by key and joined by commas, empty for a counter with no attributes |
 | `this_week` | The count in the last 7 days |
 | `last_week` | The count in the 7 days before |
 
-A new query keeps these three column names.
+A new table query keeps these three column names.
 
-The ten card files read the counters of Harold (`harold.*` and `pod.*`) with the counter rule of the telemetry README: the sum of the rise of each point, where a drop counts its whole value. They read a gauge at its newest export. Only `agent-counter.sql` and the cards of declared `agent.*` counters read totals, as the next section describes.
+The card files read the counters of Harold (`harold.*` and `pod.*`) with the counter rule of the telemetry README: the sum of the rise of each point, where a drop counts its whole value. They read a gauge at its newest export. Only `agent-counter.sql` and the cards of declared `agent.*` counters read totals, as the next section describes.
 
 ## How `agent-counter.sql` counts
 
