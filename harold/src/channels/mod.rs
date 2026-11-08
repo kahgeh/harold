@@ -153,6 +153,106 @@ fn clean_subtype(subtype: &str) -> &str {
     if fits { subtype } else { "other" }
 }
 
+/// A question sentence that the check removed from a summary.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DroppedQuestion {
+    /// Length of the removed sentence, in characters.
+    pub(crate) chars: usize,
+    /// Best share (0 to 100) of its content words found in one reply question.
+    pub(crate) matched_share: u32,
+}
+
+/// Split text into sentences. A sentence ends at `.`, `?` or `!` before a space or the end.
+fn split_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let ends = matches!(c, '.' | '?' | '!')
+            && chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if ends {
+            let end = i + c.len_utf8();
+            let sentence = text[start..end].trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence);
+            }
+            start = end;
+        }
+    }
+    let rest = text[start..].trim();
+    if !rest.is_empty() {
+        sentences.push(rest);
+    }
+    sentences
+}
+
+/// Content words: 4 or more letters, lower case, with punctuation removed.
+fn content_words(sentence: &str) -> std::collections::HashSet<String> {
+    sentence
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Remove each question sentence of the summary that matches no question of the reply.
+///
+/// A summary question matches when at least 60 percent of its content words are in
+/// one question of the reply. The text returned is empty when nothing is left.
+pub(crate) fn drop_unmatched_questions(
+    summary: &str,
+    reply: &str,
+) -> (String, Vec<DroppedQuestion>) {
+    let reply_questions: Vec<_> = split_sentences(reply)
+        .into_iter()
+        .filter(|s| s.ends_with('?'))
+        .map(content_words)
+        .collect();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for sentence in split_sentences(summary) {
+        if !sentence.ends_with('?') {
+            kept.push(sentence);
+            continue;
+        }
+        let words = content_words(sentence);
+        let share = reply_questions
+            .iter()
+            .map(|q| {
+                if words.is_empty() {
+                    0
+                } else {
+                    (words.iter().filter(|w| q.contains(*w)).count() * 100 / words.len()) as u32
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        if share >= 60 {
+            kept.push(sentence);
+        } else {
+            dropped.push(DroppedQuestion {
+                chars: sentence.chars().count(),
+                matched_share: share,
+            });
+        }
+    }
+    (kept.join(" "), dropped)
+}
+
+/// The prompt that asks the model for the phone summary.
+fn build_summary_prompt(safe_prompt: &str, safe_msg: &str) -> String {
+    format!(
+        "You are writing a phone notification summary.\n\n\
+         USER ASKED:\n<prompt>\n{safe_prompt}\n</prompt>\n\n\
+         ASSISTANT REPLIED:\n<message>\n{safe_msg}\n</message>\n\n\
+         Write 2-3 plain sentences summarising what was done and the outcome.\n\
+         Preserve any question the assistant asked.\n\
+         Add no question or request that the assistant's reply does not contain.\n\
+         Use the user's words only to understand the reply. Never answer them or ask them anything.\n\
+         No code, no markdown, no jargon. Keep it under 280 characters."
+    )
+}
+
 /// [`summarise_for_notification`] with the AI CLI path given.
 pub(crate) fn summarise_with(
     cli: Option<&str>,
@@ -170,14 +270,7 @@ pub(crate) fn summarise_with(
     let safe_prompt = last_user_prompt
         .replace("</prompt>", "")
         .replace("</message>", "");
-    let prompt = format!(
-        "You are writing a phone notification summary.\n\n\
-         USER ASKED:\n<prompt>\n{safe_prompt}\n</prompt>\n\n\
-         ASSISTANT REPLIED:\n<message>\n{safe_msg}\n</message>\n\n\
-         Write 2-3 plain sentences summarising what was done and the outcome.\n\
-         Preserve any question the assistant asked.\n\
-         No code, no markdown, no jargon. Keep it under 280 characters."
-    );
+    let prompt = build_summary_prompt(&safe_prompt, &safe_msg);
 
     let out = Command::new(cli)
         .args([
@@ -309,11 +402,92 @@ pub(crate) fn send_away_message(_message: &AwayMessageRequested) -> Result<(), S
 #[cfg(all(test, feature = "imessage"))]
 mod tests {
     use super::{
-        AwayMessageRequested, TurnCompleted, notify_away, send, send_away_message,
-        send_unless_paused,
+        AwayMessageRequested, TurnCompleted, build_summary_prompt, drop_unmatched_questions,
+        notify_away, send, send_away_message, send_unless_paused,
     };
     use crate::agent::domain::CompletionSummaryUpdate;
     use crate::settings::init_settings_for_test;
+
+    const PHOTO_SUMMARY: &str = "I made an explainer page for the rsi harness. It is private to you. I also found why your omarchy machine suspended: a 30-minute idle timer fired during my background job. I have set the stay-awake switch for now. Do you approve the Harold spec change?";
+    const PHOTO_REPLY: &str = "I made an explainer page for the rsi harness. It is private to you.\nI also found why your omarchy machine suspended: a 30-minute idle timer fired during my background job. I have set the stay-awake switch for now.";
+    const BUILD_REPLY: &str =
+        "The spec is ready. Do you want me to start the build now, or wait for the release?";
+
+    #[test]
+    fn keeps_question_the_reply_has() {
+        let summary =
+            "The spec is ready. Do you want me to start the build now, or wait for the release?";
+        let (text, dropped) = drop_unmatched_questions(summary, BUILD_REPLY);
+        assert_eq!(text, summary);
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn keeps_paraphrased_question() {
+        let summary = "The spec is ready. Should I start the build now?";
+        let (text, dropped) = drop_unmatched_questions(summary, BUILD_REPLY);
+        assert_eq!(text, summary);
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn removes_unmatched_question_keeps_rest() {
+        let (text, dropped) = drop_unmatched_questions(
+            "The spec is ready. Do you approve the merge today?",
+            "The spec is ready.",
+        );
+        assert_eq!(text, "The spec is ready.");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(
+            dropped[0].chars,
+            "Do you approve the merge today?".chars().count()
+        );
+    }
+
+    #[test]
+    fn only_unmatched_question_returns_empty() {
+        let (text, dropped) =
+            drop_unmatched_questions("Do you approve the merge today?", "The spec is ready.");
+        assert_eq!(text, "");
+        assert_eq!(dropped.len(), 1);
+    }
+
+    #[test]
+    fn no_question_unchanged() {
+        let (text, dropped) = drop_unmatched_questions("The spec is ready.", "The spec is ready.");
+        assert_eq!(text, "The spec is ready.");
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn photo_case_drops_approve_question() {
+        let (text, dropped) = drop_unmatched_questions(PHOTO_SUMMARY, PHOTO_REPLY);
+        assert_eq!(
+            text,
+            "I made an explainer page for the rsi harness. It is private to you. I also found why your omarchy machine suspended: a 30-minute idle timer fired during my background job. I have set the stay-awake switch for now."
+        );
+        assert_eq!(dropped.len(), 1);
+    }
+
+    #[test]
+    fn question_with_no_content_words_is_unmatched() {
+        let (text, dropped) = drop_unmatched_questions("It is done. Is it ok?", BUILD_REPLY);
+        assert_eq!(text, "It is done.");
+        assert_eq!(dropped[0].matched_share, 0);
+    }
+
+    #[test]
+    fn prompt_forbids_new_questions() {
+        let prompt = build_summary_prompt("p", "m");
+        assert!(
+            prompt.contains(
+                "Add no question or request that the assistant's reply does not contain."
+            )
+        );
+        assert!(prompt.contains(
+            "Use the user's words only to understand the reply. Never answer them or ask them anything."
+        ));
+    }
 
     #[test]
     fn paused_send_reports_success_without_delivering() {
