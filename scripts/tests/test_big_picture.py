@@ -52,8 +52,8 @@ CARDS = {
                              change="tokens_m_change_pct", extra="turns", better="lower"),
     "products-changed": dict(title="Products changed", value="products", unit="products", fmt="count",
                              change="products_change_pct", extra=None, better="higher"),
-    "inventory-cost": dict(title="Inventory cost", value="tokens_m", unit="M tokens", fmt="d1",
-                           change="tokens_m_change_pct", extra="attention", better="lower"),
+    "inventory-cost": dict(title="Inventory cost", value="total_cost", unit="", fmt="aud",
+                           change="total_cost_change_pct", extra="notes", better="lower"),
 }
 # The stubs return no row until the spec that fills them is built.
 STUBS = {}
@@ -66,8 +66,11 @@ INTRO = (
     "Higher is better: Value created, Products changed. "
     "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost. "
     "Delivery lead time has data after the first release that follows spec-release-phase. "
-    "In Inventory cost, \"attention: no data yet\" means no answer in the last 7 days, "
-    "and \"attention: no rate set\" means answers but no hourly rate."
+    "Inventory cost is in Australian dollars (A$): the tokens at the list prices, plus human attention. "
+    "\"human attention: no data yet\" means no answer in the last 7 days, "
+    "\"human attention: no rate set\" means answers but no hourly rate, "
+    "and \"tokens: no exchange rate set\" means no exchange rate. "
+    "A note after the change, \"not priced: <model>\", \"old stock not priced\" or \"past the series limit\", is a defect to fix."
 )
 # The queries that the cards of Harold trends read, as they are now.
 TRENDS_CARDS = [
@@ -114,17 +117,31 @@ def extra_text(kind):
         return None
     if kind == "turns":
         return f"if(turns IS NULL, '', concat(' \u00b7 ', {grp('turns')}, ' turns'))"
-    return ("concat(' \u00b7 ', multiIf(attention_hours IS NULL, 'attention: no data yet', "
-            "attention_cost IS NULL, 'attention: no rate set', "
-            f"concat('attention ', {grp('attention_cost')}, ' ', ifNull(currency, ''), ' (', {d1('attention_hours')}, ' h, ', "
-            f"toString(toUInt64(ifNull(attention_requests, 0))), ' requests)')))")
+    return ("concat("
+            "arrayStringConcat(arrayMap(m -> concat(' \u00b7 not priced: ', m), "
+            "arrayFilter(m -> m != '', splitByChar(',', ifNull(unpriced_models, '')))), ''), "
+            "if(ifNull(old_stock_unpriced, 0) = 1, ' \u00b7 old stock not priced', ''), "
+            "if(ifNull(overflow, 0) = 1, ' \u00b7 past the series limit', ''))")
+
+
+def cost_text():
+    """The Inventory cost line before the change: the total, then the two parts in parentheses."""
+    tokens = ("multiIf(token_cost IS NOT NULL, concat('tokens A$', " + grp("token_cost") + "), "
+              "tokens_m IS NOT NULL, 'tokens: no exchange rate set', 'tokens A$0')")
+    human = ("multiIf(attention_hours IS NULL, 'human attention: no data yet', "
+             "attention_cost IS NULL, 'human attention: no rate set', "
+             "concat('human attention A$', " + grp("attention_cost") + "))")
+    return f"concat('A$', {grp('total_cost')}, '  (', {tokens}, ' + ', {human}, ')  ')"
 
 
 def wrap(card, source):
     """Return the sqlTemplate of the tile of the card. The source is the text of the file or a fake SELECT."""
     spec = CARDS[card]
-    number = (grp if spec["fmt"] == "count" else d1)(spec["value"])
-    parts = [number, f"' {spec['unit']}  '", change_text(spec["change"], spec["better"])]
+    if spec["fmt"] == "aud":
+        parts = [cost_text(), change_text(spec["change"], spec["better"])]
+    else:
+        number = (grp if spec["fmt"] == "count" else d1)(spec["value"])
+        parts = [number, f"' {spec['unit']}  '", change_text(spec["change"], spec["better"])]
     extra = extra_text(spec["extra"])
     if extra:
         parts.append(extra)
@@ -255,8 +272,9 @@ class BigPictureTest(unittest.TestCase):
             columns = [spec["value"], spec["change"]]
             if spec["extra"] == "turns":
                 columns += ["turns"]
-            if spec["extra"] == "attention":
-                columns += ["attention_hours", "attention_cost", "currency", "attention_requests"]
+            if spec["extra"] == "notes":
+                columns += ["tokens_m", "token_cost", "attention_hours", "attention_cost", "unpriced_models",
+                            "old_stock_unpriced", "overflow"]
             for column in columns:
                 with self.subTest(card=card, column=column):
                     self.assertRegex(sql, rf"(?i)\bAS\s+{column}\b")
@@ -533,17 +551,44 @@ class LineWrapTest(unittest.TestCase):
             self.line("tokens-and-turns", tokens_m=4.7, tokens_m_change_pct=-12, turns=4717, turns_change_pct=56),
             "4.7 M tokens  \U0001f7e2 \u25bc 12% on last week \u00b7 4,717 turns")
 
-    def test_inventory_cost_attention_part(self):
-        base = dict(tokens_m=1.2, tokens_m_change_pct=8, currency="AUD", attention_requests=12)
-        self.assertEqual(
-            self.line("inventory-cost", attention_hours=3.5, attention_cost=350, **base),
-            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention 350 AUD (3.5 h, 12 requests)")
-        self.assertEqual(
-            self.line("inventory-cost", attention_hours=None, attention_cost=None, **base),
-            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention: no data yet")
-        self.assertEqual(
-            self.line("inventory-cost", attention_hours=3.5, attention_cost=None, **base),
-            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention: no rate set")
+    def cost(self, **columns):
+        row = dict(total_cost=1240, total_cost_change_pct=12, token_cost=940, tokens_m=11.7, attention_hours=3,
+                   attention_cost=300, unpriced_models="", old_stock_unpriced=0, overflow=0)
+        row.update(columns)
+        return self.line("inventory-cost", **row)
+
+    def test_inventory_cost_full_form(self):
+        self.assertEqual(self.cost(),
+                         "A$1,240  (tokens A$940 + human attention A$300)  \U0001f534 \u25b2 12% on last week")
+        self.assertEqual(self.cost(total_cost=1234567, token_cost=1234267, total_cost_change_pct=-3),
+                         "A$1,234,567  (tokens A$1,234,267 + human attention A$300)  \U0001f7e2 \u25bc 3% on last week")
+        self.assertEqual(self.cost(total_cost=940, total_cost_change_pct=0, attention_hours=None, attention_cost=None),
+                         "A$940  (tokens A$940 + human attention: no data yet)  \u26aa 0% on last week")
+
+    def test_inventory_cost_dot_for_a_rise_and_a_fall(self):
+        self.assertIn("\U0001f534 \u25b2 12%", self.cost(total_cost_change_pct=12))
+        self.assertIn("\U0001f7e2 \u25bc 12%", self.cost(total_cost_change_pct=-12))
+        self.assertTrue(self.cost(total_cost_change_pct=None).rstrip().endswith("no change figure"))
+
+    def test_inventory_cost_missing_parts(self):
+        self.assertEqual(self.cost(attention_cost=None, total_cost=940),
+                         "A$940  (tokens A$940 + human attention: no rate set)  \U0001f534 \u25b2 12% on last week")
+        self.assertEqual(self.cost(token_cost=None, total_cost=300),
+                         "A$300  (tokens: no exchange rate set + human attention A$300)  \U0001f534 \u25b2 12% on last week")
+
+    def test_inventory_cost_notes(self):
+        base = "A$1,240  (tokens A$940 + human attention A$300)  \U0001f534 \u25b2 12% on last week"
+        self.assertEqual(self.cost(unpriced_models="claude-a"), base + " \u00b7 not priced: claude-a")
+        self.assertEqual(self.cost(unpriced_models="claude-a,claude-b"),
+                         base + " \u00b7 not priced: claude-a \u00b7 not priced: claude-b")
+        self.assertEqual(self.cost(old_stock_unpriced=1), base + " \u00b7 old stock not priced")
+        self.assertEqual(self.cost(overflow=1), base + " \u00b7 past the series limit")
+        self.assertEqual(self.cost(unpriced_models="claude-a", old_stock_unpriced=1, overflow=1),
+                         base + " \u00b7 not priced: claude-a \u00b7 old stock not priced \u00b7 past the series limit")
+
+    def test_inventory_cost_words(self):
+        for text in (self.cost(attention_hours=None, attention_cost=None), self.cost(attention_cost=None)):
+            self.assertNotRegex(text, r"(?<!human )attention")
 
 
 class AttentionRecordingCard(unittest.TestCase):
