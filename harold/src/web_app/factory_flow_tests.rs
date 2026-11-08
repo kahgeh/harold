@@ -992,3 +992,14 @@ async fn a_server_that_never_answers_is_a_timeout() {
     let (url, _) = fake_clickhouse("200 OK", None).await;
     assert_eq!(read_from(url).await.outcome, FlowOutcome::Timeout);
 }
+
+#[test]
+fn the_real_client_follows_no_redirect() {
+    // A redirect could carry the password to another host. The client's Debug output does not
+    // list its proxies, so `no_proxy()` in `ReqwestSource::client` is checked by reading the code.
+    let shown = format!("{:?}", ReqwestSource::client());
+    assert!(
+        shown.contains(r#"redirect_policy: "Policy(None)""#),
+        "{shown}"
+    );
+}

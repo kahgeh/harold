@@ -139,8 +139,17 @@ pub(crate) struct ReqwestSource {
 impl ReqwestSource {
     pub(crate) fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: Self::client(),
         }
+    }
+
+    /// The client: no redirect and no proxy, so the password goes only to the configured URL.
+    pub(crate) fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .unwrap_or_default()
     }
 
     /// The HTTP request for `request`: the user and the password in headers, the limits and
