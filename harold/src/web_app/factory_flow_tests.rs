@@ -712,10 +712,8 @@ async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query(
     assert!(stage_block(&page, "idea").contains("4 waiting"));
     assert!(stage_block(&page, "idea").contains("median 6 h"));
     assert!(!stage_block(&page, "idea").contains("no data yet"));
-    for stage in ["installed"] {
-        assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
-        assert!(stage_block(&page, stage).contains("flow-grey"), "{stage}");
-    }
+    assert!(stage_block(&page, "installed").contains("no data yet"));
+    assert!(stage_block(&page, "installed").contains("flow-grey"));
     for stage in ["idea", "spec", "architect review", "approval"] {
         assert!(!stage_block(&page, stage).contains("flow-grey"), "{stage}");
     }
