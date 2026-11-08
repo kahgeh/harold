@@ -1,6 +1,6 @@
 # 38. Harold reads ClickHouse for the evidence check, and writes the evidence and confirmed files
 
-Date: <date of the merge>
+Date: 2026-11-09
 Status: Accepted. Extends 0037 and 0021.
 
 ## Context
