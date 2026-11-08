@@ -872,6 +872,9 @@ pub(crate) struct SpecFacts {
     pub approval_current: bool,
     /// The lines of `reviews/<id>.md`. None when the spec has no readable reviews file.
     pub reviews: Option<Vec<ReviewLine>>,
+    /// The `ready:` time of `ready/<id>.md`, written once when the build is done and waits
+    /// for its merge. None when the spec has no readable ready file.
+    pub ready_at: Option<OffsetDateTime>,
 }
 
 impl Default for SpecFacts {
@@ -902,6 +905,7 @@ impl Default for SpecFacts {
             awaiting: false,
             approval_current: true,
             reviews: None,
+            ready_at: None,
         }
     }
 }
@@ -1280,6 +1284,14 @@ struct MergedFile {
     commit: String,
 }
 
+/// The `ready:` time of `ready/<id>.md`. The file needs a `commit:` line with a full hash.
+fn parse_ready(pairs: &HashMap<&str, &str>) -> Option<OffsetDateTime> {
+    let at = parse_time(pairs.get("ready")?)?;
+    let commit = pairs.get("commit")?;
+    let is_sha = commit.len() >= 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    is_sha.then_some(at)
+}
+
 fn parse_merged(pairs: &HashMap<&str, &str>) -> Option<MergedFile> {
     let at = parse_time(pairs.get("merged")?)?;
     let commit = pairs.get("commit")?;
@@ -1456,8 +1468,10 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
     let (evidence_file, evidence_notice) =
         read_pod_file(pod, "evidence", id, parse_evidence_missing).split();
     let (reviews_file, reviews_notice) = read_pod_text(pod, "reviews", id, parse_reviews).split();
+    let (ready_file, ready_notice) = read_pod_file(pod, "ready", id, parse_ready).split();
     let mut notices: Vec<Notice> = [
         reviews_notice,
+        ready_notice,
         withdrawn_notice,
         started_notice,
         merged_notice,
@@ -1567,6 +1581,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         awaiting,
         approval_current,
         reviews: reviews_file,
+        ready_at: ready_file.map(|at| at.to_offset(offset)),
     };
     Some((facts, notices))
 }
@@ -1831,6 +1846,15 @@ fn record_lead_time(
             facts.started_at,
             Some(completed_at),
         ),
+        // The build splits at the ready time, at the first merge only: the ready file
+        // holds the first ready time, so a later merge has no split.
+        ("started_to_ready", first, facts.started_at, facts.ready_at),
+        (
+            "ready_to_completed",
+            first,
+            facts.ready_at,
+            Some(completed_at),
+        ),
     ];
     let mut waits: Vec<(&str, f64)> = phases
         .into_iter()
@@ -1921,12 +1945,13 @@ pub(crate) const INVENTORY_OLDEST_HOURS: (&str, &str) = ("pod.inventory.oldest_h
 pub(crate) const INVENTORY_ITEM_DAYS: (&str, &str) = ("pod.inventory.item_days", "d");
 
 /// The lists of work waiting, in the order the gauges report them.
-const WORK_LISTS: [&str; 5] = [
+const WORK_LISTS: [&str; 6] = [
     "awaiting_approval",
     "approved_not_started",
     "in_progress",
     "in_spec_writing",
     "in_architect_review",
+    "ready_not_merged",
 ];
 
 /// What one list of work waiting holds.
@@ -1994,6 +2019,11 @@ pub(crate) fn work_waiting(
     let review = in_stage(|line| matches!(line, ReviewLine::Sent(_)));
     let approved = ages(&|spec| approved_since(spec, true));
     let in_progress = ages(&|spec| (spec.state == SpecState::InProgress).then_some(spec.state_at));
+    let ready = ages(&|spec| {
+        (spec.state == SpecState::InProgress)
+            .then_some(spec.ready_at)
+            .flatten()
+    });
     let idle = if approved.is_empty() { 0 } else { free_slots };
     let lists = BTreeMap::from([
         (WORK_LISTS[0], list_stats(&awaiting)),
@@ -2001,6 +2031,7 @@ pub(crate) fn work_waiting(
         (WORK_LISTS[2], list_stats(&in_progress)),
         (WORK_LISTS[3], list_stats(&writing)),
         (WORK_LISTS[4], list_stats(&review)),
+        (WORK_LISTS[5], list_stats(&ready)),
     ]);
     (idle, lists)
 }

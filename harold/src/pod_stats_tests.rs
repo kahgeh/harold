@@ -4160,7 +4160,7 @@ fn an_empty_list_reports_0() {
     let now = at("2026-11-03T00:00:00Z");
     let (idle, lists) = work_waiting(&[], 3, None, now);
     assert_eq!(idle, 0);
-    assert_eq!(lists.len(), 5);
+    assert_eq!(lists.len(), 6);
     for name in WORK_LISTS {
         assert_eq!(lists[name], ListStats::default(), "{name}");
     }
@@ -5126,4 +5126,125 @@ fn the_review_lists_never_count_a_spec_twice() {
         lists["in_architect_review"].items,
     );
     assert_eq!((awaiting, writing, review), (3, 1, 1));
+}
+
+// --- the ready file ---
+
+const SHA: &str = "ba90fbf0b35bc839dcb2cf0a9947e6384f02b1c5";
+
+fn built(ready: Option<&str>) -> SpecFacts {
+    SpecFacts {
+        started_at: Some(at("2026-11-08T12:00:00Z")),
+        ready_at: ready.map(at),
+        ..reviewed(TWO_ROUNDS)
+    }
+}
+
+fn record_built(facts: &SpecFacts, first: bool) -> String {
+    test_support::install();
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let spec_ref = SpecRef {
+        id: "g".into(),
+        stage: None,
+    };
+    record_lead_time(
+        &product,
+        &spec_ref,
+        facts,
+        at("2026-11-08T13:00:00Z"),
+        first,
+    );
+    product
+}
+
+#[test]
+fn a_ready_file_splits_the_build_at_the_first_merge() {
+    let product = record_built(&built(Some("2026-11-08T12:40:00Z")), true);
+    assert_eq!(phase_sum(&product, "started_to_ready"), Some(2400.0));
+    assert_eq!(phase_sum(&product, "ready_to_completed"), Some(1200.0));
+    assert_eq!(phase_sum(&product, "started_to_completed"), Some(3600.0));
+}
+
+#[test]
+fn a_later_merge_records_started_to_completed_only() {
+    let product = record_built(&built(Some("2026-11-08T12:40:00Z")), false);
+    assert_eq!(phase_sum(&product, "started_to_ready"), None);
+    assert_eq!(phase_sum(&product, "ready_to_completed"), None);
+    assert_eq!(phase_sum(&product, "started_to_completed"), Some(3600.0));
+}
+
+#[test]
+fn no_ready_file_gives_neither_phase() {
+    let product = record_built(&built(None), true);
+    assert_eq!(phase_sum(&product, "started_to_ready"), None);
+    assert_eq!(phase_sum(&product, "ready_to_completed"), None);
+    assert_eq!(phase_sum(&product, "started_to_completed"), Some(3600.0));
+}
+
+#[test]
+fn a_ready_time_after_the_merge_gives_no_negative_phase() {
+    let product = record_built(&built(Some("2026-11-08T14:00:00Z")), true);
+    assert_eq!(phase_sum(&product, "ready_to_completed"), None);
+}
+
+#[test]
+fn a_ready_file_needs_a_time_and_a_commit() {
+    let ok = format!("# Ready: g\n\nready: 2026-11-08T22:10:00+11:00\ncommit: {SHA}\n");
+    let pairs = key_values(&ok);
+    assert_eq!(parse_ready(&pairs), Some(at("2026-11-08T11:10:00Z")));
+    for text in [
+        "# Ready: g\n\nready: 2026-11-08T22:10:00+11:00\n".to_owned(),
+        format!("ready: not-a-time\ncommit: {SHA}\n"),
+        "ready: 2026-11-08T22:10:00+11:00\ncommit: abc\n".to_owned(),
+    ] {
+        assert_eq!(parse_ready(&key_values(&text)), None, "{text}");
+    }
+}
+
+#[test]
+fn read_specs_reads_the_ready_file_and_logs_a_bad_one_once() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["ok", "bad", "none"] {
+        write(&dir.join(format!("specs/{id}.md")), "# Spec\n");
+    }
+    write(
+        &dir.join("ready/ok.md"),
+        &format!("# Ready: ok\n\nready: 2026-11-08T22:10:00+11:00\ncommit: {SHA}\n"),
+    );
+    write(&dir.join("ready/bad.md"), "ready: soon\n");
+
+    let read = read_files(&dir);
+    let specs = by_id(read.specs);
+
+    assert_eq!(specs["ok"].ready_at, Some(at("2026-11-08T11:10:00Z")));
+    assert_eq!(specs["bad"].ready_at, None);
+    assert_eq!(specs["none"].ready_at, None);
+    assert_eq!(read.notices.len(), 1, "{:?}", read.notices);
+    assert!(matches!(
+        &read.notices[0],
+        Notice::Unreadable { id, file, .. } if id == "bad" && file == "ready/bad.md"
+    ));
+}
+
+#[test]
+fn a_ready_spec_is_ready_not_merged_and_stays_in_progress() {
+    let now = at("2026-11-09T00:00:00Z");
+    let ready = SpecFacts {
+        ready_at: Some(now - time::Duration::hours(2)),
+        ..spec_in(
+            "ready",
+            SpecState::InProgress,
+            now - time::Duration::hours(5),
+        )
+    };
+    let building = spec_in("building", SpecState::InProgress, now);
+    let merged = SpecFacts {
+        ready_at: Some(now - time::Duration::hours(2)),
+        ..spec_in("merged", SpecState::Completed, now)
+    };
+    let (_, lists) = work_waiting(&[ready, building, merged], 2, None, now);
+    assert_eq!(lists["in_progress"].items, 2);
+    assert_eq!(lists["ready_not_merged"].items, 1);
+    assert!((lists["ready_not_merged"].oldest_hours - 2.0).abs() < 1e-9);
 }
