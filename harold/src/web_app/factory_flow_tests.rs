@@ -57,7 +57,10 @@ fn the_query_names_the_eight_stages_in_order() {
         at += found + literal.len();
     }
     assert!(FACTORY_FLOW_SQL.contains("ORDER BY ord"));
-    assert!(FACTORY_FLOW_SQL.contains("-- Columns: stage, items, median_wait_s, has_data."));
+    assert!(
+        FACTORY_FLOW_SQL
+            .contains("-- Columns: stage, items, median_wait_s, has_data, evidence_missing.")
+    );
 }
 
 #[test]
@@ -255,6 +258,8 @@ async fn a_good_answer_gives_eight_rows_and_sends_the_user_the_url_and_the_query
     );
     let installed = &read.rows[7];
     assert!(!installed.has_data && installed.items.is_none());
+    // A row with no column `evidence_missing` reads as 0.
+    assert!(read.rows.iter().all(|row| row.evidence_missing == 0.0));
     let seen = source.seen.lock().unwrap();
     assert_eq!(
         seen[0],
@@ -686,9 +691,10 @@ fn a_wait_shows_in_hours_below_two_days_and_in_days_from_two_days() {
     assert_eq!(format_wait(0.0), "0 h");
 }
 
-/// The eight rows with the count of the installed row.
+/// The eight rows with the column `evidence_missing` of the installed row: 3 specs released
+/// and not installed, and a median install lag of 90000 seconds (25 h).
 fn rows_with_installed(count: &str) -> String {
-    body_with(&[
+    let mut text = body_with(&[
         ("idea", "4", "21600", 1),
         ("spec", "2", "7200", 1),
         ("architect review", "3", "10800", 1),
@@ -696,8 +702,31 @@ fn rows_with_installed(count: &str) -> String {
         ("build", "4", "181440.5", 1),
         ("merge", "1", "3600", 1),
         ("release", "17", "7200", 1),
-        ("installed", count, "null", 0),
-    ])
+    ]);
+    text.push_str(&format!(
+        "{{\"stage\":\"installed\",\"items\":3,\"median_wait_s\":90000,\"has_data\":1,\"evidence_missing\":{count}}}\n"
+    ));
+    text
+}
+
+#[tokio::test]
+async fn the_installed_stage_shows_the_specs_not_installed_and_the_median_install_lag() {
+    let page = page_for(Ok(rows_with_installed("0")), None).await;
+    let block = stage_block(&page, "installed");
+    assert!(block.contains("3 waiting"), "{block}");
+    assert!(block.contains("median 25 h"), "{block}");
+    assert!(
+        !block.contains("no data yet") && !block.contains("flow-grey"),
+        "{block}"
+    );
+}
+
+#[tokio::test]
+async fn the_installed_stage_keeps_the_evidence_line_beside_the_install_numbers() {
+    let page = page_for(Ok(rows_with_installed("2")), None).await;
+    let block = stage_block(&page, "installed");
+    assert!(block.contains("3 waiting"), "{block}");
+    assert!(block.contains("2 installed without evidence"), "{block}");
 }
 
 #[tokio::test]

@@ -58,6 +58,9 @@ pub(crate) struct StageRow {
     pub items: Option<f64>,
     pub median_wait_s: Option<f64>,
     pub has_data: bool,
+    /// The specs installed without evidence. Only the installed row has it. A row with no
+    /// such column, or a null, reads as 0.
+    pub evidence_missing: f64,
 }
 
 /// What one read gives. `rows` is empty unless `outcome` is `Ok`.
@@ -79,6 +82,10 @@ fn rows_in(body: &str) -> Option<Vec<StageRow>> {
                 items: number(value.get("items")?),
                 median_wait_s: number(value.get("median_wait_s")?),
                 has_data: number(value.get("has_data")?)? > 0.0,
+                evidence_missing: value
+                    .get("evidence_missing")
+                    .and_then(number)
+                    .unwrap_or(0.0),
             })
         })
         .collect::<Option<_>>()?;
@@ -333,14 +340,16 @@ fn summary_of(row: &StageRow) -> String {
     }
 }
 
-/// The count of specs installed without evidence, as one line. Empty for 0, for no count
-/// and for any other stage.
+/// The count of specs installed without evidence, as one line. Empty for 0 and for any
+/// other stage.
 fn note_of(stage: &str, row: &StageRow) -> String {
-    match row.items {
-        Some(count) if stage == "installed" && count >= 0.5 => {
-            format!("{} installed without evidence", count.round() as i64)
-        }
-        _ => String::new(),
+    if stage == "installed" && row.evidence_missing >= 0.5 {
+        format!(
+            "{} installed without evidence",
+            row.evidence_missing.round() as i64
+        )
+    } else {
+        String::new()
     }
 }
 

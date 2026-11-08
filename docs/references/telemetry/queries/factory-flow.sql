@@ -1,6 +1,6 @@
 -- Note: The flow stage with the highest median wait is the first one to ask about.
 -- Waits for: nothing
--- Empty: installed: no data yet (has_data is 0 and the median is empty); its items is the count of specs installed without evidence
+-- Empty: installed: items is 0 and the median is empty when no list and no install is recorded (has_data stays 1); evidence_missing is the count of specs installed without evidence
 -- The factory flow, one row for each flow stage, in order: idea, spec, architect review, approval, build, merge, release, installed. All products together.
 -- Items: the newest export of pod.inventory.items for the list of the stage, summed over the products. It is the rule of work-waiting.sql
 -- (rows "specs: <list>", the first SELECT of "this" week), with one change: it takes the newest export of each list,
@@ -19,11 +19,14 @@
 -- A spec with no approved_to_started, or with neither started_to_ready nor started_to_completed, gives no wait.
 -- merge: items = ready_not_merged. The wait is the phase ready_to_completed of each spec that has it (empty when none has it).
 -- release: items = merged_not_released. The wait is the phase merged_to_released of each spec that has it (empty when none has it).
--- installed: items = the specs whose newest pod.evidence.missing point of the last 10 minutes is 1 (the evidence file says missing). It is a count of
--- specs, with no spec id. The median is empty and has_data stays 0: the stage has no wait. It adds no new reader of ClickHouse (ADR 0037).
+-- installed: items = released_not_installed (the specs in a release newer than the Harold that runs on this Mac). The wait is the install lag: one wait
+-- for each series of harold.release.install_lag (version and harold.machine), the mean of its rises, by the same rise rule. The median is over the waits
+-- of the last 30 days, on all machines. A restart that sends the same series again adds no wait. has_data is 1.
+-- evidence_missing = the specs whose newest pod.evidence.missing point of the last 10 minutes is 1 (the evidence file says missing). It is a count of
+-- specs, with no spec id, in its own column, and the other rows give 0. It adds no new reader of ClickHouse (ADR 0037).
 -- A spec that restarts its series gives more than one rise: its wait is the mean of them, so it counts once.
 -- This query reads no product filter. It stands alone, so bin/logq --named factory-flow and Harold print the same rows.
--- Columns: stage, items, median_wait_s, has_data.
+-- Columns: stage, items, median_wait_s, has_data, evidence_missing.
 WITH
 latest AS (
     SELECT
@@ -32,7 +35,8 @@ latest AS (
     FROM otel.otel_metrics_gauge
     WHERE MetricName = 'pod.inventory.items'
       AND Attributes['list'] IN ('awaiting_approval', 'approved_not_started', 'in_progress', 'merged_not_released',
-                                   'in_spec_writing', 'in_architect_review', 'ready_not_merged', 'idea')
+                                   'in_spec_writing', 'in_architect_review', 'ready_not_merged', 'idea',
+                                   'released_not_installed')
       AND (Attributes['list'], TimeUnix) IN (
           SELECT Attributes['list'], max(TimeUnix) FROM otel.otel_metrics_gauge
           WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY
@@ -72,6 +76,35 @@ rises AS (
     )
     WHERE rise_count > 0
 ),
+installs AS (
+    SELECT avg(rise_sum / rise_count) AS wait_s
+    FROM (
+        SELECT
+            series,
+            if(cnt >= before_cnt, toInt64(cnt) - toInt64(before_cnt), toInt64(cnt)) AS rise_count,
+            if(cnt >= before_cnt, total - before_total, total) AS rise_sum,
+            TimeUnix
+        FROM (
+            SELECT
+                cityHash64(MetricName, ResourceAttributes, Attributes) AS series,
+                TimeUnix,
+                Count AS cnt,
+                Sum AS total,
+                lagInFrame(Count, 1, toUInt64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_cnt,
+                lagInFrame(Sum, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before_total
+            FROM otel.otel_metrics_histogram
+            WHERE MetricName = 'harold.release.install_lag'
+              AND TimeUnix > now() - INTERVAL 30 DAY
+        )
+        WHERE TimeUnix > now() - INTERVAL 30 DAY
+    )
+    WHERE rise_count > 0
+    GROUP BY series
+),
 per_spec AS (
     SELECT
         spec_id,
@@ -98,28 +131,31 @@ per_spec AS (
     FROM rises
     GROUP BY spec_id
 )
-SELECT stage, items, median_wait_s, has_data
+SELECT stage, items, median_wait_s, has_data, evidence_missing
 FROM (
     SELECT
         1 AS ord,
         'idea' AS stage,
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'idea'), 0)) AS items,
         (SELECT if(countIf(has_idea > 0) = 0, NULL, quantileExactIf(0.5)(idea_s, has_idea > 0)) FROM per_spec) AS median_wait_s,
-        1 AS has_data
+        1 AS has_data,
+        toFloat64(0) AS evidence_missing
     UNION ALL
     SELECT
         2,
         'spec',
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'in_spec_writing'), 0)),
         (SELECT if(countIf(has_writing > 0) = 0, NULL, quantileExactIf(0.5)(writing_s, has_writing > 0)) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         3,
         'architect review',
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'in_architect_review'), 0)),
         (SELECT if(countIf(has_review > 0) = 0, NULL, quantileExactIf(0.5)(review_s, has_review > 0)) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         4,
@@ -129,7 +165,8 @@ FROM (
             - coalesce((SELECT n FROM latest WHERE list = 'in_spec_writing'), 0)
             - coalesce((SELECT n FROM latest WHERE list = 'in_architect_review'), 0), 0)),
         (SELECT if(countIf(has_waiting > 0 OR has_approval > 0) = 0, NULL, quantileExactIf(0.5)(if(has_waiting > 0, waiting_s, approval_s), has_waiting > 0 OR has_approval > 0)) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         5,
@@ -140,26 +177,32 @@ FROM (
             - coalesce((SELECT n FROM latest WHERE list = 'ready_not_merged'), 0), 0)),
         (SELECT if(countIf(has_started > 0 AND (has_ready > 0 OR has_completed > 0)) = 0, NULL,
                    quantileExactIf(0.5)(started_s + if(has_ready > 0, ready_s, completed_s), has_started > 0 AND (has_ready > 0 OR has_completed > 0))) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         6,
         'merge',
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'ready_not_merged'), 0)),
         (SELECT if(countIf(has_merge > 0) = 0, NULL, quantileExactIf(0.5)(merge_s, has_merge > 0)) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         7,
         'release',
         toNullable(coalesce((SELECT n FROM latest WHERE list = 'merged_not_released'), 0)),
         (SELECT if(countIf(has_release > 0) = 0, NULL, quantileExactIf(0.5)(release_s, has_release > 0)) FROM per_spec),
-        1
+        1,
+        toFloat64(0)
     UNION ALL
     SELECT
         8,
         'installed',
-        toNullable(toFloat64((
+        toNullable(coalesce((SELECT n FROM latest WHERE list = 'released_not_installed'), 0)),
+        (SELECT if(count() = 0, NULL, quantileExact(0.5)(wait_s)) FROM installs),
+        1,
+        toFloat64((
             SELECT countIf(newest = 1)
             FROM (
                 SELECT argMax(Value, TimeUnix) AS newest
@@ -167,8 +210,6 @@ FROM (
                 WHERE MetricName = 'pod.evidence.missing' AND TimeUnix > now() - INTERVAL 10 MINUTE
                 GROUP BY Attributes['pod.product'], Attributes['spec.id']
             )
-        ))),
-        NULL,
-        0
+        ))
 )
 ORDER BY ord

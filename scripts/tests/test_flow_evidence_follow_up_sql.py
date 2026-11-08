@@ -1,4 +1,4 @@
-"""Check the installed row of factory-flow.sql (the count of specs installed without evidence) on fake rows.
+"""Check the installed row of factory-flow.sql (the column evidence_missing: the count of specs installed without evidence) on fake rows.
 
 Each test replaces the two metric tables with a SELECT of constants (SELECT only, no write) and sends
 the text to the read-only ClickHouse through bin/logq. The tests skip when bin/logq or ClickHouse is
@@ -28,22 +28,22 @@ class FlowEvidenceFollowUpSqlTest(unittest.TestCase):
 
     def test_two_specs_at_1_and_one_at_0_give_2(self):
         row = self.installed_row([missing("a", 1, 1), missing("b", 2, 1), missing("c", 1, 0)])
-        self.assertEqual((row["items"], row["median_wait_s"], row["has_data"]), ("2", "\\N", "0"))
+        self.assertEqual((row["evidence_missing"], row["median_wait_s"], row["has_data"]), ("2", "\\N", "1"))
 
     def test_a_point_older_than_10_minutes_does_not_count(self):
         row = self.installed_row([missing("a", 1, 1), missing("b", 11, 1)])
-        self.assertEqual(row["items"], "1")
+        self.assertEqual(row["evidence_missing"], "1")
 
     def test_the_newest_point_of_a_spec_decides(self):
         row = self.installed_row([missing("a", 8, 1), missing("a", 2, 0), missing("b", 8, 0), missing("b", 2, 1)])
-        self.assertEqual(row["items"], "1")
+        self.assertEqual(row["evidence_missing"], "1")
 
     def test_the_same_spec_id_in_two_products_counts_twice(self):
         row = self.installed_row([missing("a", 1, 1, "p"), missing("a", 1, 1, "q")])
-        self.assertEqual(row["items"], "2")
+        self.assertEqual(row["evidence_missing"], "2")
 
     def test_with_no_point_the_count_is_0(self):
-        self.assertEqual(self.installed_row([])["items"], "0")
+        self.assertEqual(self.installed_row([])["evidence_missing"], "0")
 
 
 class FlowEvidenceFollowUpSqlTextTest(unittest.TestCase):
