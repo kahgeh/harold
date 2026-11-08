@@ -1061,7 +1061,6 @@ pub(crate) fn file_time(path: &Path, offset: UtcOffset) -> Option<OffsetDateTime
     Some(OffsetDateTime::from(time).to_offset(offset))
 }
 
-/// The text of the file at `path`, or None when it cannot be read.
 /// The draft time of a spec: the open time. It is the time of the first `## ` heading of
 /// the revisions file, in `offset`, when that heading has a clock time. Else it is the
 /// birth time of the spec file. It never takes a later heading. An earlier birth time wins.
@@ -1085,6 +1084,7 @@ pub(crate) fn draft_time(
     }
 }
 
+/// The text of the file at `path`, or None when it cannot be read.
 fn read_text(path: &Path) -> Option<String> {
     std::fs::read(path)
         .ok()
