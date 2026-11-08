@@ -1,6 +1,6 @@
 # 37. Harold reads ClickHouse only for the factory flow page
 
-Date: <date of the merge>
+Date: 2026-11-08
 Status: Accepted.
 
 ## Context
