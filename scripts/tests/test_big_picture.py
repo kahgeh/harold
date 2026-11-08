@@ -10,7 +10,7 @@ The files:
 - queries/<card>.sql holds the SQL of the card. It returns at most one row of numbers.
 
 The rule that links a tile to its file: the sqlTemplate of a card tile is
-"SELECT concat(...) AS "<card title>" FROM (" + the text of the file + ") WHERE <value> IS NOT NULL".
+"SELECT concat(...) AS ` ` FROM (" + the text of the file + ") WHERE <value> IS NOT NULL".
 The wrap() function below builds it. A column of a change ends with _change_pct. It is already a percent.
 
 The line tests send the wrap with fake rows (constants only, SELECT only) to the read-only
@@ -59,7 +59,8 @@ CARDS = {
 STUBS = {}
 INTRO = (
     "The last 7 days, against the 7 days before. All products. Each card is one line: the value, "
-    "then its change on last week. \u25b2 is up and \u25bc is down. "
+    "then its change on last week, with an arrow (\u25b2 up, \u25bc down) and a dot: "
+    "\U0001f7e2 better, \U0001f534 worse, \u26aa no change. "
     "\"No data found within time range.\" means \"no data yet\". "
     "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
     "Higher is better: Value created, Products changed. "
@@ -95,12 +96,17 @@ def d1(x):
     return f"concat(toString(intDiv({r}, 10)), '.', toString({r} % 10))"
 
 
-def change_text(column):
+GREEN, RED, WHITE = "\U0001f7e2", "\U0001f534", "\u26aa"
+
+
+def change_text(column, better):
+    """Text of the change. The dot is green when the change goes the better way (higher or lower)."""
+    rise, fall = (GREEN, RED) if better == "higher" else (RED, GREEN)
     r = f"round({column})"
     return (f"multiIf({column} IS NULL, 'no change figure', "
-            f"{r} > 0, concat('\u25b2 ', toString(toInt64({r})), '% on last week'), "
-            f"{r} < 0, concat('\u25bc ', toString(abs(toInt64({r}))), '% on last week'), "
-            f"'0% on last week')")
+            f"{r} > 0, concat('{rise} \u25b2 ', toString(toInt64({r})), '% on last week'), "
+            f"{r} < 0, concat('{fall} \u25bc ', toString(abs(toInt64({r}))), '% on last week'), "
+            f"'{WHITE} 0% on last week')")
 
 
 def extra_text(kind):
@@ -118,11 +124,11 @@ def wrap(card, source):
     """Return the sqlTemplate of the tile of the card. The source is the text of the file or a fake SELECT."""
     spec = CARDS[card]
     number = (grp if spec["fmt"] == "count" else d1)(spec["value"])
-    parts = [number, f"' {spec['unit']}  '", change_text(spec["change"])]
+    parts = [number, f"' {spec['unit']}  '", change_text(spec["change"], spec["better"])]
     extra = extra_text(spec["extra"])
     if extra:
         parts.append(extra)
-    return (f"SELECT concat({', '.join(parts)}) AS \"{spec['title']}\"\n"
+    return (f"SELECT concat({', '.join(parts)}) AS ` `\n"
             f"FROM (\n{source.rstrip()}\n)\nWHERE {spec['value']} IS NOT NULL")
 
 
@@ -231,7 +237,8 @@ class BigPictureTest(unittest.TestCase):
                 self.assertRegex(config["sourceId"], r"^@[A-Z_]+_SOURCE_ID@$")
                 self.assertEqual(config["sqlTemplate"], wrap(card, self.query_text(card)))
                 self.assertTrue(config["sqlTemplate"].startswith("SELECT concat("))
-                self.assertIn(f'AS "{spec["title"]}"', config["sqlTemplate"])
+                self.assertIn("AS ` `\nFROM (", config["sqlTemplate"], "the column name is one space")
+                self.assertNotIn(f'AS "{spec["title"]}"', config["sqlTemplate"])
                 self.assertTrue(config["sqlTemplate"].endswith(f"WHERE {spec['value']} IS NOT NULL"))
 
     def test_the_change_is_rounded_and_not_multiplied(self):
@@ -292,6 +299,27 @@ class BigPictureTest(unittest.TestCase):
             side = higher if spec["better"] == "higher" else lower
             with self.subTest(card=card):
                 self.assertIn(spec["title"], side)
+
+    def test_the_intro_explains_the_dots(self):
+        for phrase in ("\U0001f7e2 better", "\U0001f534 worse", "\u26aa no change"):
+            self.assertIn(phrase, INTRO)
+        self.assertNotIn("\u25b2 is up and \u25bc is down", INTRO)
+
+    def test_the_direction_of_each_card(self):
+        self.assertEqual({card: spec["better"] for card, spec in CARDS.items()},
+                         {"value-created": "higher", "delivery-lead-time-tile": "lower", "waste": "lower",
+                          "tokens-and-turns": "lower", "products-changed": "higher", "inventory-cost": "lower"})
+
+    def test_the_change_text_puts_the_dot_by_direction(self):
+        up = change_text("c", "higher")
+        down = change_text("c", "lower")
+        self.assertIn("'\U0001f7e2 \u25b2 '", up)
+        self.assertIn("'\U0001f534 \u25bc '", up)
+        self.assertIn("'\U0001f534 \u25b2 '", down)
+        self.assertIn("'\U0001f7e2 \u25bc '", down)
+        for text in (up, down):
+            self.assertIn("'\u26aa 0% on last week'", text)
+            self.assertIn("'no change figure'", text)
 
     def test_the_now_card_left(self):
         self.assertNotIn("now", self.by_id())
@@ -475,10 +503,16 @@ class LineWrapTest(unittest.TestCase):
 
     def test_a_rise_a_fall_and_no_change(self):
         self.assertEqual(self.line("value-created", value=4717, value_change_pct=57),
-                         "4,717 features and fixes  \u25b2 57% on last week")
+                         "4,717 features and fixes  \U0001f7e2 \u25b2 57% on last week")
+        self.assertEqual(self.line("value-created", value=4717, value_change_pct=-12),
+                         "4,717 features and fixes  \U0001f534 \u25bc 12% on last week")
+        self.assertEqual(self.line("waste", hours=9, hours_change_pct=9),
+                         "9 hours  \U0001f534 \u25b2 9% on last week")
         self.assertEqual(self.line("waste", hours=9, hours_change_pct=-12),
-                         "9 hours  \u25bc 12% on last week")
-        self.assertEqual(self.line("waste", hours=9, hours_change_pct=0), "9 hours  0% on last week")
+                         "9 hours  \U0001f7e2 \u25bc 12% on last week")
+        self.assertEqual(self.line("waste", hours=9, hours_change_pct=0), "9 hours  \u26aa 0% on last week")
+        self.assertEqual(self.line("value-created", value=4717, value_change_pct=0),
+                         "4,717 features and fixes  \u26aa 0% on last week")
 
     def test_a_null_change_gives_no_change_figure(self):
         self.assertEqual(self.line("waste", hours=9, hours_change_pct=None), "9 hours  no change figure")
@@ -488,28 +522,28 @@ class LineWrapTest(unittest.TestCase):
         self.assertEqual(self.line("value-created", value=None, value_change_pct=None), "")
 
     def test_numbers_have_thousands_separators_and_one_decimal(self):
-        self.assertEqual(self.line("products-changed", products=999, products_change_pct=1), "999 products  \u25b2 1% on last week")
-        self.assertEqual(self.line("products-changed", products=1000, products_change_pct=1), "1,000 products  \u25b2 1% on last week")
-        self.assertEqual(self.line("products-changed", products=1234567, products_change_pct=1), "1,234,567 products  \u25b2 1% on last week")
+        self.assertEqual(self.line("products-changed", products=999, products_change_pct=1), "999 products  \U0001f7e2 \u25b2 1% on last week")
+        self.assertEqual(self.line("products-changed", products=1000, products_change_pct=1), "1,000 products  \U0001f7e2 \u25b2 1% on last week")
+        self.assertEqual(self.line("products-changed", products=1234567, products_change_pct=1), "1,234,567 products  \U0001f7e2 \u25b2 1% on last week")
         self.assertEqual(self.line("delivery-lead-time-tile", days=5, days_change_pct=None), "5.0 days  no change figure")
-        self.assertEqual(self.line("delivery-lead-time-tile", days=12.34, days_change_pct=2), "12.3 days  \u25b2 2% on last week")
+        self.assertEqual(self.line("delivery-lead-time-tile", days=12.34, days_change_pct=2), "12.3 days  \U0001f534 \u25b2 2% on last week")
 
     def test_tokens_and_turns(self):
         self.assertEqual(
             self.line("tokens-and-turns", tokens_m=4.7, tokens_m_change_pct=-12, turns=4717, turns_change_pct=56),
-            "4.7 M tokens  \u25bc 12% on last week \u00b7 4,717 turns")
+            "4.7 M tokens  \U0001f7e2 \u25bc 12% on last week \u00b7 4,717 turns")
 
     def test_inventory_cost_attention_part(self):
         base = dict(tokens_m=1.2, tokens_m_change_pct=8, currency="AUD", attention_requests=12)
         self.assertEqual(
             self.line("inventory-cost", attention_hours=3.5, attention_cost=350, **base),
-            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention 350 AUD (3.5 h, 12 requests)")
+            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention 350 AUD (3.5 h, 12 requests)")
         self.assertEqual(
             self.line("inventory-cost", attention_hours=None, attention_cost=None, **base),
-            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention: no data yet")
+            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention: no data yet")
         self.assertEqual(
             self.line("inventory-cost", attention_hours=3.5, attention_cost=None, **base),
-            "1.2 M tokens  \u25b2 8% on last week \u00b7 attention: no rate set")
+            "1.2 M tokens  \U0001f534 \u25b2 8% on last week \u00b7 attention: no rate set")
 
 
 class AttentionRecordingCard(unittest.TestCase):
