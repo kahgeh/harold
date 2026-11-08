@@ -755,6 +755,7 @@ pub(crate) async fn start(
     prune(&store).await;
     let collections = Arc::new(collections::Collections::new(settings.collections.clone()));
     crate::telemetry::register_collection_counters(&collections.names());
+    crate::telemetry::register_factory_flow_counters();
     crate::telemetry::register_web_request_counters();
     let state = AppState {
         store: Arc::clone(&store),

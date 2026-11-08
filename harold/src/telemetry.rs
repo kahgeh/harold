@@ -478,6 +478,8 @@ pub(crate) struct Instruments {
     pub web_app_pushes: Counter<u64>,
     /// `harold.web_app.collection_pages`, `{page}`, by `collection` and `result`.
     pub web_app_collection_pages: Counter<u64>,
+    /// One for each load of the factory flow page, by `outcome`.
+    pub factory_flow_reads: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -596,6 +598,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         notifications: counter("harold.notifications", "{notification}"),
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
         web_app_collection_pages: counter("harold.web_app.collection_pages", "{page}"),
+        factory_flow_reads: counter("harold.factory_flow.reads", "{read}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -1629,6 +1632,25 @@ pub(crate) fn count_collection_page(collection: &str, result: &str) {
             KeyValue::new("result", result.to_string()),
         ],
     );
+}
+
+/// Every `outcome` of `harold.factory_flow.reads`.
+pub(crate) const FACTORY_FLOW_OUTCOMES: [&str; 5] =
+    ["ok", "unreachable", "refused", "timeout", "not_set_up"];
+
+/// Records 0 for each `outcome` of `harold.factory_flow.reads`. The web app calls it at its start.
+pub(crate) fn register_factory_flow_counters() {
+    let reads = &instruments().factory_flow_reads;
+    for outcome in FACTORY_FLOW_OUTCOMES {
+        reads.add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+}
+
+/// Counts one load of the factory flow page with its `outcome`.
+pub(crate) fn count_factory_flow_read(outcome: &'static str) {
+    instruments()
+        .factory_flow_reads
+        .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
 // ---------------------------------------------------------------------------

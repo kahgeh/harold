@@ -2614,6 +2614,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             CALL_ANSWERER_SPEND_CARD.to_string(),
         ])
         .chain(WEB_APP_CARDS.map(str::to_string))
+        .chain([FACTORY_FLOW_CARD.to_string()])
         .chain(KNOWLEDGE_CARDS.map(str::to_string))
         .chain(TTS_CARDS.map(str::to_string))
         .chain([
@@ -5622,6 +5623,69 @@ fn register_collection_counters_seeds_unknown_and_each_name() {
             assert!(point.is_some(), "{name} {result}");
         }
     }
+}
+
+/// The card for the page `/flow`, in the group "Web app (the phone's browser)".
+const FACTORY_FLOW_CARD: &str = "Factory flow reads";
+
+#[test]
+fn register_factory_flow_counters_seeds_each_outcome_at_zero() {
+    test_support::install();
+    register_factory_flow_counters();
+    assert_eq!(
+        FACTORY_FLOW_OUTCOMES,
+        ["ok", "unreachable", "refused", "timeout", "not_set_up"]
+    );
+    for outcome in FACTORY_FLOW_OUTCOMES {
+        let point =
+            test_support::exact_counter_value("harold.factory_flow.reads", &[("outcome", outcome)]);
+        assert!(point.is_some(), "{outcome}");
+    }
+}
+
+#[test]
+fn count_factory_flow_read_adds_one_for_its_outcome() {
+    test_support::install();
+    let before =
+        test_support::exact_counter_value("harold.factory_flow.reads", &[("outcome", "timeout")])
+            .unwrap_or(0);
+    count_factory_flow_read("timeout");
+    let after =
+        test_support::exact_counter_value("harold.factory_flow.reads", &[("outcome", "timeout")])
+            .unwrap();
+    assert!(after > before);
+}
+
+#[test]
+fn the_factory_flow_log_fields_are_allowed() {
+    for field in ["outcome", "elapsed_ms"] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
+fn the_factory_flow_reads_card_shows_the_outcomes_and_goes_red_after_three_failures() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == FACTORY_FLOW_CARD)
+        .expect("the factory flow card");
+    assert_eq!(card["config"]["displayType"], "table");
+    assert_eq!(card["containerId"], "web-app");
+    let sql = card["config"]["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "otel.otel_logs",
+        "Body = 'factory flow read'",
+        "LogAttributes['outcome'] AS outcome",
+        "GROUP BY day, outcome",
+        "ORDER BY Timestamp DESC LIMIT 3",
+        "'red'",
+        "!= 'ok'",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
+    // The card reads the outcome only, never a row value, a query or a password.
+    assert!(!sql.contains("password") && !sql.contains("SELECT *"));
 }
 
 #[test]

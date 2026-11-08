@@ -3255,7 +3255,10 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn factory_flow_defaults_to_the_local_clickhouse_and_no_files() {
         let shipped = crate::settings::settings_with("");
-        assert_eq!(shipped.factory_flow.clickhouse_url, "http://localhost:8123/");
+        assert_eq!(
+            shipped.factory_flow.clickhouse_url,
+            "http://localhost:8123/"
+        );
         assert!(shipped.factory_flow.users_file.is_none());
         assert!(shipped.factory_flow.levers_file.is_none());
         assert!(factory_flow_errors("").is_empty());
@@ -3267,7 +3270,10 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             "[factory_flow]\nusers_file = \"/x/users.sql\"\nlevers_file = \"/x/levers.md\"\n",
         );
         assert_eq!(set.factory_flow.users_file.as_deref(), Some("/x/users.sql"));
-        assert_eq!(set.factory_flow.levers_file.as_deref(), Some("/x/levers.md"));
+        assert_eq!(
+            set.factory_flow.levers_file.as_deref(),
+            Some("/x/levers.md")
+        );
     }
 
     #[test]
@@ -3278,7 +3284,8 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             "http://127.1.2.3:9000/",
             "http://[::1]:8123/",
         ] {
-            let errors = factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
+            let errors =
+                factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
             assert!(errors.is_empty(), "{url}: {errors:?}");
         }
     }
@@ -3294,10 +3301,14 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             "not a url",
             "",
         ] {
-            let errors = factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
+            let errors =
+                factory_flow_errors(&format!("[factory_flow]\nclickhouse_url = \"{url}\"\n"));
             assert_eq!(
                 errors,
-                vec!["factory_flow.clickhouse_url must be an http URL with a loopback host".to_string()],
+                vec![
+                    "factory_flow.clickhouse_url must be an http URL with a loopback host"
+                        .to_string()
+                ],
                 "{url}"
             );
         }
