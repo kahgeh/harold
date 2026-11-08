@@ -10,6 +10,7 @@ use tonic::service::Routes;
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
 pub(crate) mod guard;
+mod idea_check;
 mod markdown;
 mod schema;
 mod service;
@@ -36,9 +37,21 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let guard = guard::Guard::new(ctx.pane_folder, ctx.products, ctx.chief_pane);
     let service = service::BacklogToolService::new(Arc::clone(&store), guard);
     let mut shutdown = ctx.shutdown;
+    // Without a pod registry there are no products to check.
+    let check = ctx.pod_registry.map(|registry| {
+        tokio::spawn(idea_check::run(
+            Arc::clone(&store),
+            registry,
+            ctx.pod_signals,
+            shutdown.clone(),
+        ))
+    });
     let task = tokio::spawn(async move {
         // Returns on a shutdown signal and when the sender is dropped.
         let _ = shutdown.changed().await;
+        if let Some(check) = check {
+            let _ = check.await;
+        }
         drop(store);
     });
     Ok(ToolHandle {
