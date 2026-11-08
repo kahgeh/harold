@@ -7,6 +7,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | Harold | The daemon on each machine that watches agents, notifies the user, routes replies and hosts tools | "the server" |
+| page id | The random signal `page_id` that one open thread page sends with each update stream, so Harold counts pages and not streams. It is not a secret and not a credential. | "page token", "session id" (an agent's session), "client id" |
 | feature | A Cargo feature of Harold that builds one platform part in, such as `imessage`. It is chosen when Harold is built and is not a setting. For a part of a product that people use, see product feature. | "flag" alone, "toggle". "Feature flag" stays allowed: it is your own word |
 | feature set | A named group of features: `mac-defaults` (the default) or `linux-defaults` | "profile", "preset" |
 | timing test | A test that asserts a real time, and so can fail on a busy machine. It runs only with `--features timing-tests`, locally | "flaky test" |
