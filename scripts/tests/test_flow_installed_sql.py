@@ -86,6 +86,52 @@ class FlowInstalledSqlTextTest(unittest.TestCase):
         text = (QUERIES / "factory-flow.sql").read_text(encoding="utf-8")
         self.assertIn("-- Columns: stage, items, median_wait_s, has_data, evidence_missing.", text)
 
+    def test_the_evidence_queries_name_their_metrics_and_reasons(self):
+        one = (QUERIES / "evidence" / "flow-installed-1.sql").read_text(encoding="utf-8")
+        for word in ("'harold.release.install_lag'", "install_seen", "no_install_yet"):
+            self.assertIn(word, one)
+        two = (QUERIES / "evidence" / "flow-installed-2.sql").read_text(encoding="utf-8")
+        for word in ("'released_not_installed'", "list_seen", "no_list"):
+            self.assertIn(word, two)
+
+
+class FlowInstalledEvidenceSqlTest(unittest.TestCase):
+    """The evidence queries on fake rows. They skip when bin/logq or ClickHouse is not there."""
+
+    setUpClass = classmethod(base.FlowSqlTest.setUpClass.__func__)
+
+    def run_evidence(self, name, histogram=(), gauge=()):
+        sql = (QUERIES / "evidence" / name).read_text(encoding="utf-8").replace("{since:DateTime}", "now() - INTERVAL 2 HOUR")
+        for table, rows, empty in ((base.HISTOGRAM, histogram, base.EMPTY_HISTOGRAM), (base.GAUGE, gauge, base.EMPTY_GAUGE)):
+            sql = sql.replace(table, "(" + " UNION ALL ".join(rows or [empty]) + ")")
+        import subprocess
+        done = subprocess.run([self.logq], input=sql.rstrip() + "\nFORMAT TSVWithNames", capture_output=True,
+                              text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        header, row = done.stdout.splitlines()[:2]
+        return dict(zip(header.split("\t"), row.split("\t")))
+
+    def test_an_install_after_since_is_seen(self):
+        row = self.run_evidence("flow-installed-1.sql", histogram=[install("m1", "v1", 1, 1, 1000)])
+        self.assertEqual((row["present"], row["reason"]), ("1", "install_seen"))
+
+    def test_the_same_series_sent_again_after_since_is_not_a_new_install(self):
+        row = self.run_evidence("flow-installed-1.sql", histogram=[install("m1", "v1", 5, 1, 1000),
+                                                                   install("m1", "v1", 1, 1, 1000)])
+        self.assertEqual((row["present"], row["reason"]), ("0", "no_install_yet"))
+
+    def test_with_no_point_the_first_query_says_no_install_yet(self):
+        row = self.run_evidence("flow-installed-1.sql")
+        self.assertEqual((row["present"], row["reason"]), ("0", "no_install_yet"))
+
+    def test_a_list_point_after_since_is_seen(self):
+        row = self.run_evidence("flow-installed-2.sql", gauge=[inventory("released_not_installed", 0)])
+        self.assertEqual((row["present"], row["reason"]), ("1", "list_seen"))
+
+    def test_another_list_does_not_count(self):
+        row = self.run_evidence("flow-installed-2.sql", gauge=[inventory("merged_not_released", 3)])
+        self.assertEqual((row["present"], row["reason"]), ("0", "no_list"))
+
 
 if __name__ == "__main__":
     unittest.main()

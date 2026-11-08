@@ -349,6 +349,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | factory flow page | The web app page `/flow` that shows the eight flow stages, each with its items waiting, its median wait and its levers. | "pipeline page", "dashboard" (the dashboard is HyperDX's) |
 | flow stage | One of the eight steps of the factory flow: idea, spec, architect review, approval, build, merge, release, installed. | "stage" alone (a stage is a part of a spec), "phase" (a phase is a part of a lead time) |
 | median wait | The median time that items spent in a flow stage, from the rows of the query `factory-flow`. | "average", "lead time" (a lead time spans several flow stages) |
+| install lag | The time from a release's tag to its first start on a machine. | "deploy time", "rollout time" |
+| released not installed | The specs in a release newer than the Harold that runs on this Mac. | "pending install" |
 | has data | A flow stage whose numbers come from a signal that Harold records. A stage without it shows "no data yet". | "empty" (a stage with data can have 0 items) |
 | rotation | Harold's move of the open work records to a new work file every `rotation_days` days | "archive" for the move |
 | agent signal | A counter, gauge or event that a pane records with `harold tool telemetry`, exported as `agent.<name>`. It is not an agent's state | "custom metric" |

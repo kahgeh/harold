@@ -91,6 +91,7 @@ The release tool also publishes the work waiting in its "merged since the releas
 - The names and units are the constants that `harold/src/pod_stats.rs` exports. Pod stats records the other three lists (`awaiting_approval`, `approved_not_started` and `in_progress`) under the same names. See [Work waiting](../telemetry/README.md#spec-states).
 - A paused product, a product with no git answer and a product with no release tag have no series. The first release tag of a product brings its series back. The command still lists the last 14 days of merges for a product with no release. A product that leaves the registry ends its series. A failed read keeps the last numbers.
 - The tool also records `merged_to_released` on `pod.spec.lead_time` when the newest release tag of a product changes. It keeps the counted tag in the file `<store path>/../pod/release-tips`. See [The release-tips file](../telemetry/README.md#the-release-tips-file).
+- For the product `harold` it also records the list `released_not_installed` on `pod.inventory.items`: the specs that the newest release tag reaches and the running version does not. The running version comes from the start of Harold. A build from source, a product with no release tag and a running version with no tag in the repository have no point.
 - The tool still only reads git and the pod folder of each product. It writes nothing in a product's pod folder and keeps no database. Pod stats does not call the release tool (ADR 0004).
 
 ## The paused key

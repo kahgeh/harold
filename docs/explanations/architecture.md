@@ -165,6 +165,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-11-09: Flow merge. An eighth pod file, `ready/<id>.md`, is written by pod-coordination once, when it takes a finished build for the merge. Pod stats reads it, records the phases `started_to_ready` and `ready_to_completed` on `pod.spec.lead_time` at the first merge, and exports the list `ready_not_merged`. The factory flow page shows the merge stage. No ADR. [Telemetry reference](../references/telemetry/README.md)
 
 - 2026-11-09: Flow idea. The backlog tool checks every 10 minutes whether each backlog item has a spec. It asks `read_specs` in `pod_stats.rs`, and it opens no file of the pod folder itself. It tells pod stats through `PodSignals`, a small handle in `ToolContext` that pod stats makes at start. Pod stats exports the list `idea` on `pod.inventory.items` and records the phase `idea_to_open` on `pod.spec.lead_time`. The backlog tool keeps its own storage and makes no instrument. The factory flow page shows the idea stage. No ADR. [Telemetry reference](../references/telemetry/README.md)
+- 2026-11-09: Flow installed. The build workflow passes the tag time as `HAROLD_RELEASE_TIME`. At start, a release build records `harold.release.install_lag` once for each new version, using the file `installed-version` in its data folder. The release tool lists `released_not_installed` for the product `harold`. The flow page reads both on the installed row. No ADR changes.
 
 ## Departures from the standards
 

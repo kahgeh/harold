@@ -224,8 +224,11 @@ GROUP BY 1
 | `ready_not_merged` | It is in progress and has a readable `ready/<id>.md`. It stays in `in_progress` too | the `ready:` time | pod stats, each poll |
 | `idea` | It is a backlog item with no spec file. It is not a spec: the list counts items only, so it has no oldest hours and no item days | the first entry of the item in the backlog | pod stats, from the count of the backlog tool, every 10 minutes |
 | `merged_not_released` | It is merged and not in the newest release | the merge | the release tool, every 10 minutes |
+| `released_not_installed` | It is in a release newer than the Harold that runs on this Mac. Only the product `harold` has it, and a build from source has no point | the release tag | the release tool, every 10 minutes |
 
 The release tool is the only reader of the release tag. It publishes its own series on instruments with the same three names and units, which pod stats exports as constants. A paused product, or a product with no git answer, has no `merged_not_released` series. A product that leaves the registry ends its series. The list `idea` is the exception: pod stats keeps its last count until Harold restarts. A failed read keeps the last numbers. The pods port stays read-only, and pod stats never calls the release tool.
+
+**Install lag** (`harold.release.install_lag`) is recorded at the start of Harold. A release build has `HAROLD_RELEASE_VERSION` and `HAROLD_RELEASE_TIME`, the time of the tag (`creatordate`), from the build workflow. Harold compares its version with the file `installed-version` in its data folder. When the version is new, Harold records the seconds from the tag time to now, logs `release installed` (`version`, `lag_s`) and writes the version to the file. A restart of the same version records nothing. A build from source, or a release build with no usable `HAROLD_RELEASE_TIME`, records nothing, and the second case logs `release time unknown`. The flow page reads the waits by the counter rule: one wait for each series of `version` and `harold.machine`.
 
 **Steps** (`pod.spec.lead_time`) are recorded once per spec, when it first becomes `completed` from its `merged/<id>.md`. The `phase` attribute is:
 
@@ -428,11 +431,12 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.turn.tokens` | counter, `{token}` | `kind` (`input`, `output`, `cache_read`, `cache_write`), `model`, `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` when the pane is in a pod |
 | `harold.turn.tokens.by_spec` | counter, `{token}` | `spec.id`, `kind` (`input`, `output`, `cache_read`, `cache_write`) and `model`. Only for a `build_worker` turn that has a spec id. A series recorded before the merge of inventory-cost-dollars has no `model`, and its `input` holds all three input kinds |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
+| `harold.release.install_lag` | histogram, `s`, buckets 900, 3600, 7200, 14400, 43200, 86400, 172800, 604800 | `version`. The resource has `harold.machine`. One point for each new version that starts on a machine |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
 | `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), `spec.kind` (`feature`, `fix`, `other`, `unkinded`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
 | `pod.slots.idle_with_work` | gauge, `{slot}` | `pod.product` |
-| `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`, `in_spec_writing`, `in_architect_review`, `ready_not_merged`, `idea`) |
+| `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`, `in_spec_writing`, `in_architect_review`, `ready_not_merged`, `idea`, `released_not_installed`) |
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |
 | `pod.inventory.item_days` | gauge, `d` | `pod.product`, `list` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`, `spec_writing`, `architect_review`, `approval_wait`, `started_to_ready`, `ready_to_completed`, `idea_to_open`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |

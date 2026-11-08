@@ -28,6 +28,8 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `flow-idea-1.sql` | `pod.inventory.items` with `list = idea` has points after `since`. Reasons `list_seen` and `no_list` |
 | `flow-idea-2.sql` | `pod.spec.lead_time` with `phase = idea_to_open` rose after `since`. Reasons `phase_seen` and `no_phase_yet` |
 | `flow-release-1.sql` | `pod.spec.lead_time` with `phase = merged_to_released` rose after `since`. Reasons `phase_seen` and `no_release_yet` |
+| `flow-installed-1.sql` | `harold.release.install_lag` rose after `since`. Reasons `install_seen` and `no_install_yet` |
+| `flow-installed-2.sql` | `pod.inventory.items` with `list = released_not_installed` has points after `since`. Reasons `list_seen` and `no_list` |
 
 ## Run one
 
