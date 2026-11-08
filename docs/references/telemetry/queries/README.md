@@ -1,6 +1,6 @@
 # Named queries
 
-A **named query** is a SQL file in this folder. A dashboard card and `bin/logq --named <card>` both run it, so a card and its query come from one source. A card query returns one row, with a value column for each value tile and a `_change_pct` column for each change tile. A query of a table card in "Harold trends" returns this week against last week.
+A **named query** is a SQL file in this folder. A dashboard card and `bin/logq --named <card>` both run it, so a card and its query come from one source. A card query returns at most one row of numbers: the value columns and a `_change_pct` column for each change. The tile of the card wraps the file in a `SELECT concat(...)` that makes the line of the card. A query of a table card in "Harold trends" returns this week against last week.
 
 `bin/logq` is the chief's read-only SQL tool. Its `--named` option lives in the chief's own repository. Harold holds no ClickHouse login.
 
@@ -9,7 +9,8 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | File | What it shows | Parameter |
 | --- | --- | --- |
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
-| `value-created.sql` | Work records that the user checked, and the change: the card "Value created". Columns `value`, `value_change_pct` | none |
+| `value-created.sql` | A stub that returns no row until the spec value-created-signals fills it: the card "Value created". Columns `value`, `value_change_pct` | none |
+| `delivery-lead-time-tile.sql` | A stub that returns no row until the spec delivery-lead-time-tile fills it: the card "Delivery lead time" of the big picture. Columns `days`, `days_change_pct` | none |
 | `delivery-lead-time.sql` | The p50 days of each phase, from idea to the user's check, and the spec time from open to merged: the card "Delivery lead time" | none |
 | `work-waiting.sql` | The items in each list, the oldest age in days and the item-days, with a total: the card "Work waiting" | none |
 | `waste.sql` | Hours of free slots with work waiting plus redo hours, in whole hours, and the change: the card "Waste". Columns `hours`, `hours_change_pct` | none |
@@ -18,16 +19,16 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | `slicing-and-sizing.sql` | The share of specs over the limit of their size, and slices per work record: the card "Slicing and sizing" | none |
 | `test-and-release-time.sql` | Minutes of an ok release attempt, by step, and the failed attempts: the card "Test and release time" | none |
 | `products-changed.sql` | The number of products with a merge, and the change: the card "Products changed". Columns `products`, `products_change_pct` | none |
-| `now.sql` | The agents working, all agents and the specs in progress, in one row: the dashboard "Harold now". Columns `working`, `all`, `in_progress` | none |
+| `now.sql` | The agents working, all agents and the specs in progress, in one row, from the last 2 minutes: the dashboard "Harold now". Columns `working`, `all`, `in_progress`, `read_at` | none |
 | `clarification-requests.sql` | The times the user asked the chief what a word or reply meant, by cause: the card "Clarification requests per day, by cause" | none |
 
-Five files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql` and `clarification-requests.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
+Six files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `delivery-lead-time-tile.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql` and `clarification-requests.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
 
 `bin/logq --named <card> [k=v ...]` is available in the chief's repository. It reads `<card>.sql` from the folder in `$LOGQ_QUERIES_DIR`, turns `$__filters` into no filter and passes each `k=v` as `{k:String}`. The card names equal the file names. No dashboard that reads a named query has a product filter, so a tile and `bin/logq --named <card>` give the same numbers.
 
 ## The columns
 
-The files of the five cards of the big picture and `now.sql` return at most one row. Each column is the value of one value tile, or (a column that ends with `_change_pct`) the percent change of one change tile, against the 7 days before. A column with no number is `NULL`: its tile selects only the rows where the column is not `NULL`, so it shows HyperDX's empty state, never 0. A query returns no row when its source has no data.
+The files of the six cards of the big picture and `now.sql` return at most one row. Each column is a value of the line of the card, or (a column that ends with `_change_pct`) the percent change against the 7 days before. It is already a percent: 57 means 57%. A column with no number is `NULL`: the tile ends in `WHERE <value> IS NOT NULL`, so it shows HyperDX's empty state, never 0. A query returns no row when its source has no data.
 
 The other files return one row for each series, with these columns:
 

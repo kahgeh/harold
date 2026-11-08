@@ -339,14 +339,12 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
 | signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
-| the big picture | The HyperDX dashboard "Harold: the big picture", five cards, each a value and its change against the 7 days before | "KPI dashboard", "scorecard" |
+| the big picture | The HyperDX dashboard "Harold: the big picture", six cards, each one line with a value and its change against the 7 days before | "big picture page", "KPI dashboard", "scorecard" |
 | lever | A way of working that moves quality, speed, waste or token cost: spec quality, slot use, model mix, slicing and sizing, the user's waiting time, test and release time, tooling | "KPI", "metric" for it |
-| card (of a dashboard) | One block of the big picture under one name, made of number tiles: a value tile and its change tile, and detail tiles where the card needs them | "pair", "KPI" |
-| value tile | The number tile of a card that shows the value for the last 7 days, with its unit | "KPI" |
-| change tile | The number tile beside a value tile that shows the percent change against the 7 days before | "delta", "trend" (a trend is a chart over time) |
+| card (of a dashboard) | One HyperDX chart or table on a dashboard. On the big picture, a card is one table tile with one line | "pair", "KPI" |
 | work waiting (a card) | A card of "Harold trends" with the specs and work records that wait in each list, the oldest age and the item-days | "inventory" for it. The glossary's inventory is the agent monitor's pane scan. `pod.inventory.*` stays only as the name of the signal |
 | inventory cost (a card) | The card of the big picture with the stock of tokens spent on work not delivered, and the user's attention cost | "inventory" alone, "work waiting" |
-| Harold now | The HyperDX dashboard of this moment, with the tiles working, of all, and in progress | "Now card" (the big picture has no Now card), "live dashboard" |
+| Harold now | The HyperDX dashboard of this moment, with the agents working of all agents and the specs in progress, each one line with the time of the reading | "Now card" (the big picture has no Now card), "live dashboard" |
 | release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
 | push checks | The Linux and macOS workflows that run on each push to `main`. A release needs both to have passed on its commit | "CI" alone, "pre-release checks" |
 | release run | The GitHub run of `build.yml` on a published release. It only builds, checks the binaries and uploads them | "build" for the whole release |

@@ -1002,7 +1002,7 @@ Four cards read the pod signals: Waste, Slicing and sizing, Now and Work waiting
 
 ### Tokens and turns card
 
-The card "Tokens and turns" reads the turn token counters. It shows the tokens, the turns and the tile Specs past the limit. The readings below (the share of each model, tokens per merged spec, the build worker on Opus and the role `other`) are not on the card now. They are the diagnosis of the tokens number: read the counters by `role` and `model` with `bin/logq`. It is a card of "Harold: the big picture" (see [Harold: the big picture](#harold-the-big-picture)), with its SQL in `queries/tokens-and-turns.sql`. Use the counter rule for every reading.
+The card "Tokens and turns" reads the turn token counters. It shows the tokens with their change, then the turns. The readings below (the share of each model, tokens per merged spec, the build worker on Opus and the role `other`) are not on the card now. They are the diagnosis of the tokens number: read the counters by `role` and `model` with `bin/logq`. It is a card of "Harold: the big picture" (see [Harold: the big picture](#harold-the-big-picture)), with its SQL in `queries/tokens-and-turns.sql`. Use the counter rule for every reading.
 
 | Card | The question | Reads | Weekly comparison | Note (info only, no alert) | Diagnosis |
 |---|---|---|---|---|---|
@@ -1080,27 +1080,28 @@ Two limits remain:
 
 ## Harold: the big picture
 
-`big-picture.json` is the dashboard "Harold: the big picture". It has five cards, each with one number and its change against the 7 days before: Value created, Waste, Tokens and turns, Products changed and Inventory cost. The dashboard has no product filter: it reads all products.
+`big-picture.json` is the dashboard "Harold: the big picture". It has six cards, each one line with a value and its change against the 7 days before: Value created, Delivery lead time, Waste, Tokens and turns, Products changed and Inventory cost. The dashboard has no product filter: it reads all products.
 
-**A card** is one block under one name. It is made of number tiles, because a HyperDX number tile shows one number and cannot show a second one. A **value tile** shows the number of the last 7 days with its unit. The **change tile** beside it shows the percent change against the 7 days before: `(this - before) / before * 100`, rounded to a whole percent. A markdown tile above the tiles gives the name of the card and what it shows. Tokens and turns has two value tiles with two change tiles, and a third tile, Specs past the limit. Inventory cost has detail tiles: the answer hours, the count of attention requests and the words per attention request.
+**A card** is ONE table tile with ONE line of text, for example `4,717 turns  ▲ 56% on last week`. The column of the tile is named after the card. HyperDX 2.40 cannot do this with a number tile: a number tile shows one number only and gives "Error loading chart" for text. The line is the value with its unit, then the change against the 7 days before: `(this - before) / before * 100` in the query, rounded to a whole percent. `▲` is a rise and `▼` is a fall. No change gives `0%` with no arrow. With no number or 0 in the 7 days before, the line ends in `no change figure`. A table cell has no colour, so the arrow gives the direction only. A text tile over the cards says which way is better: higher for Value created and Products changed, lower for the others. Tokens and turns adds the turns after the tokens (`4.7 M tokens  ▼ 12% on last week · 4,717 turns`). Inventory cost adds your attention after the tokens (`1.2 M tokens  ▲ 8% on last week · attention 350 AUD (3.5 h, 12 requests)`). With no answer in the 7 days it reads `attention: no data yet`. With answers and no rate it reads `attention: no rate set`.
 
 The last 7 days are the 7 days before now, and the 7 days before are the 7 days before those. The window is in each query, not in the time range. Open the dashboard with a time range of at least the last 14 days.
 
-**The empty state.** A number tile whose query returns no row shows HyperDX's empty state. The tile never shows 0 or `null` for no data. Each tile selects one column and keeps only the rows where that column is not `NULL`. HyperDX 2.40 has no field for the empty text of a number tile, so the markdown tile of the card tells what an empty tile means: "no data yet" for a value tile, "no change figure" for a change tile (the 7 days before have no number, or the number is 0), and "no rate set" for the attention cost tile.
+**The empty state.** A card whose query returns no row shows HyperDX's own text, "No data found within time range.". The text over the cards says that this means "no data yet". A tile never shows 0, `null` or `N/A` for no data. The `concat` of the line gives `NULL` when its value is `NULL`, and an aggregate query always returns one row, so the tile ends in `WHERE <value> IS NOT NULL`: with no value it returns no row. Value created and Delivery lead time are stubs: `value-created.sql` and `delivery-lead-time-tile.sql` return no row until the specs value-created-signals and delivery-lead-time-tile fill them.
 
-| Card | The value tiles | Source metrics | Note |
+| Card | The line shows | Source metrics | Note |
 |---|---|---|---|
-| Value created | The work records that the user checked | `harold.work.checked` | Empty until a work record is checked. Work at `released` that the user did not use is not counted. |
+| Value created | The work records that the user checked, in work records | `harold.work.checked` | A stub: empty until value-created-signals fills it. Work at `released` that the user did not use is not counted. |
+| Delivery lead time | The days from the idea to the user's check | None yet | A stub: empty until delivery-lead-time-tile fills it. The table on "Harold trends" shows the p50 by phase. |
 | Waste | Hours of free slots while work waited, plus redo hours, in whole hours | `pod.slots.idle_with_work`, `pod.spec.effort` | A day above 2 slot hours of free slots with work waiting needs a look. So does a spec above 2 redo hours. |
-| Tokens and turns | Tokens in M with one decimal, and turns. Specs past the limit | `harold.turn.tokens`, `harold.turns`, `harold.turn.tokens.by_spec` | The flow: all tokens spent in the 7 days, on all work. A build worker on Opus is the first thing to check. |
+| Tokens and turns | Tokens in M with one decimal, with their change, then the turns | `harold.turn.tokens`, `harold.turns`, `harold.turn.tokens.by_spec` | The flow: all tokens spent in the 7 days, on all work. A build worker on Opus is the first thing to check. |
 | Products changed | The products with at least one merge | `pod.merges` | None. |
-| Inventory cost | The tokens held in work not delivered, in M. The attention cost in the currency of the settings, the answer hours, the attention requests and the words per attention request | `harold.turn.tokens.by_spec` with `pod.spec.words`; `harold.attention.hourly_rate` through the dictionary `otel.harold_settings`; the events `chief.attention_request` and `chief.attention_answered` | The stock: the tokens already spent, at any time, on the specs that are approved or in progress now. |
+| Inventory cost | The tokens held in work not delivered, in M, with their change, then the attention cost in the currency of the settings with the answer hours and the attention requests | `harold.turn.tokens.by_spec` with `pod.spec.words`; `harold.attention.hourly_rate` through the dictionary `otel.harold_settings`; the events `chief.attention_request` and `chief.attention_answered` | The stock: the tokens already spent, at any time, on the specs that are approved or in progress now. |
 
 **Tokens and turns against Inventory cost.** Tokens and turns is the flow: all tokens spent in the 7 days. Inventory cost is the stock: the tokens already spent on work that has not reached the user. The change of the stock compares the stock now with the stock 7 days ago.
 
-**The overflow note.** The metric `harold.turn.tokens.by_spec` has 2 series for each spec. Past the series limit, new series fall into the overflow series, which has the attribute `otel.metric.overflow = true`. Then the tokens of each spec are a lower bound. `tokens-and-turns.sql` and `inventory-cost.sql` each return the column `overflow`: 1 when the overflow series has a point in the 7 days. The tile Specs past the limit shows it, and it is empty at 0. The markdown tiles of Tokens and turns and Inventory cost carry the note.
+**The overflow note.** The metric `harold.turn.tokens.by_spec` has 2 series for each spec. Past the series limit, new series fall into the overflow series, which has the attribute `otel.metric.overflow = true`. Then the tokens of each spec are a lower bound. `tokens-and-turns.sql` and `inventory-cost.sql` each return the column `overflow`: 1 when the overflow series has a point in the 7 days. No tile shows it now: read it with `bin/logq --named <card>`.
 
-**The attention cost.** The query reads the rate with `dictGetOrNull` from the ClickHouse dictionary `otel.harold_settings` (the gauge `harold.attention.hourly_rate`, from the `[attention]` setting of Harold). ClickHouse raises an error for a dictionary that does not exist, so the dictionary must exist before the query runs. With no rate in the dictionary the cost tile is empty. The unit of the cost tile is `@ATTENTION_CURRENCY@`: the apply step fills it with the currency of the dictionary. After a change of currency, apply the dashboard again. The events `chief.attention_request` and `chief.attention_answered` come from the spec user-attention-signals. Until it merges, the attention tiles are empty.
+**The attention cost.** The query reads the rate with `dictGetOrNull` from the ClickHouse dictionary `otel.harold_settings` (the gauge `harold.attention.hourly_rate`, from the `[attention]` setting of Harold). ClickHouse raises an error for a dictionary that does not exist, so the dictionary must exist before the query runs. The query returns the currency in its `currency` column, and the line writes it: no apply step fills it. With no rate in the dictionary the line reads `attention: no rate set`. The events `chief.attention_request` and `chief.attention_answered` come from the spec user-attention-signals. Until it merges, the line reads `attention: no data yet`.
 
 **How a card counts.** A counter of Harold (`harold.*` and `pod.*`) uses the counter rule above: the card sums the rise of each point, and a drop counts its whole value. A week with no point gives no number, never a 0.
 
@@ -1113,7 +1114,7 @@ The last 7 days are the 7 days before now, and the 7 days before are the 7 days 
 | Test and release time | release-attempts |
 | Clarification requests per day, by cause | telemetry-record-tool |
 
-**The SQL of a tile** is the file `queries/<card>.sql`. A number tile holds `SELECT <column> FROM (` the text of the file `) WHERE <column> IS NOT NULL`. The tile Specs past the limit has `WHERE overflow = 1`. A table tile of "Harold trends" holds the text of its file. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, when a file has no tile, when a title names a spec or a caveat, or when a card query can return more than one row. After you edit a query file, make the same change in its tiles. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
+**The SQL of a tile** is one `SELECT concat(...) AS "<card name>" FROM (` the text of the file `) WHERE <value> IS NOT NULL`. The file `queries/<card>.sql` keeps its number columns, so `bin/logq --named <card>` prints numbers. A table tile of "Harold trends" holds the text of its file. The test `scripts/tests/test_big_picture.py` fails when a tile and its file differ, when a file has no tile, when a title names a spec or a caveat, or when a card query can return more than one row. It also runs the line on fake rows (constants only) through `bin/logq`, and skips those tests when `bin/logq` or ClickHouse is not there, as in CI. After you edit a query file, make the same change in its tiles. See [`queries/README.md`](queries/README.md) for the files and for `bin/logq --named <card>`.
 
 **The clarification card's producer.** The chief records the counter with the telemetry tool. Run this once, after the telemetry tool is installed. It seeds the four series at 0:
 
@@ -1131,16 +1132,16 @@ The name is `chief.clarification_requests` everywhere. HyperDX reads it as `agen
 
 ## Harold now
 
-`now.json` is the dashboard "Harold now", apart from "Harold: the big picture". It shows what runs at this moment, with the line "the agents working and the specs in progress, at this moment". It has two cards and no change tile, because a reading of this moment has no week.
+`now.json` is the dashboard "Harold now", apart from "Harold: the big picture". It shows what runs at this moment, with the line "the agents working and the specs in progress, at this moment". It has two cards, each ONE table tile with ONE line, in the form of the big picture. It has no change, because a reading of this moment has no week.
 
 | Card | The tiles | Source metrics |
 |---|---|---|
-| Agents working | "working" and "of all": two number tiles side by side, for example 2 and 11 | `harold.agents` (all providers and Rex hosts): the newest export, the state `working`, and every state |
-| Specs in progress | One number tile: the in-progress specs of every pod | `pod.inventory.items` with `list = in_progress`, summed over the products: the newest export |
+| Agents working | `2 working of 11 agents`, and `1 working of 1 agent` for one | `harold.agents` (all providers and Rex hosts): the newest export, the state `working`, and every state |
+| Specs in progress | `4 specs in progress`, and `1 spec in progress` for one: the in-progress specs of every pod | `pod.inventory.items` with `list = in_progress`, summed over the products: the newest export |
 
-An in-progress spec has a branch and no parked handoff file. Parked specs and specs that are not clear are not counted. The SQL is the file `queries/now.sql`, which returns one row with the columns `working`, `all` and `in_progress`. `bin/logq --named now` prints the row. Each tile selects one column. The test `scripts/tests/test_now.py` checks that each tile holds the text of the file.
+An in-progress spec has a branch and no parked handoff file. Parked specs and specs that are not clear are not counted. Each line ends with the time of the reading, in local time with its zone name, for example `at 18:05 AEDT`. ClickHouse does not know the zone of the Mac, so the tile SQL holds the zone `Australia/Melbourne` and names `AEDT` or `AEST` from its offset. A reading older than 2 minutes is not shown: the card shows HyperDX's "No data found within time range.", and the text over the cards says that this means no reading in the last 2 minutes. The SQL is the file `queries/now.sql`, which returns one row with the columns `working`, `all`, `in_progress` and `read_at` from the newest export of the last 2 minutes. `bin/logq --named now` prints the row. The test `scripts/tests/test_now.py` checks that each tile holds the text of the file and runs the line on fake rows through `bin/logq` (skipped when `bin/logq` or ClickHouse is not there).
 
-**Diagnosis.** Harold exports both gauges every 30 seconds. An empty working or of-all tile points at `harold.agents`: check that it has a point in the last minute, and its `state` attribute. An empty in-progress tile points at `pod.inventory.items`: check its `list` and `pod.product` attributes and the time of the newest export. A tile that is empty while `bin/logq --named now` returns a row is a defect.
+**Diagnosis.** Harold exports both gauges every 30 seconds. An empty Agents working card points at `harold.agents`: check that it has a point in the last 2 minutes, and its `state` attribute. An empty Specs in progress card points at `pod.inventory.items`: check its `list` and `pod.product` attributes and the time of the newest export. A card that is empty for more than 2 minutes while `bin/logq --named now` returns a row is a defect.
 
 ## Machine stats
 
@@ -1394,16 +1395,12 @@ export CLICKHOUSE_CONNECTION_ID=$(hdx "$HYPERDX_URL/api/v2/connections" | jq -r 
 export METRICS_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Metrics") | .id')
 export TRACES_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Traces") | .id')
 export LOGS_SOURCE_ID=$(hdx "$HYPERDX_URL/api/v2/sources" | jq -r '.data[] | select(.name == "Logs") | .id')
-# The unit of the attention cost tile: the currency of the dictionary otel.harold_settings.
-# Read it with bin/logq of the chief-of-pods repository. It is AUD while the dictionary has no rate.
-export ATTENTION_CURRENCY=$(echo "SELECT ifNull(dictGetOrNull('otel.harold_settings', 'currency', tuple('harold.attention.hourly_rate')), 'AUD')" | logq | tr -d '\n')
 
 fill() {
   sed -e "s/@CLICKHOUSE_CONNECTION_ID@/$CLICKHOUSE_CONNECTION_ID/g" \
       -e "s/@METRICS_SOURCE_ID@/$METRICS_SOURCE_ID/g" \
       -e "s/@TRACES_SOURCE_ID@/$TRACES_SOURCE_ID/g" \
       -e "s/@LOGS_SOURCE_ID@/$LOGS_SOURCE_ID/g" \
-      -e "s/@ATTENTION_CURRENCY@/$ATTENTION_CURRENCY/g" \
       -e "s/@WEBHOOK_ID@/$WEBHOOK_ID/g" "docs/references/telemetry/hyperdx/$1"
 }
 
