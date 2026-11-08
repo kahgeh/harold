@@ -9,6 +9,7 @@ use time::{OffsetDateTime, UtcOffset};
 use tonic::{Request, Response, Status};
 
 use super::check::{Env, SpecReport, check_product};
+use super::chief_line::{ChiefLine, NoChief, tell_missing};
 use crate::clickhouse_read::{ClickhouseSource, ReqwestSource};
 use crate::pod_stats::{Git, Product, SystemGit, read_registry};
 use crate::settings::FactoryFlowSettings;
@@ -19,6 +20,8 @@ pub(super) struct EvidenceToolService<G = SystemGit> {
     settings: FactoryFlowSettings,
     git: G,
     source: Arc<dyn ClickhouseSource>,
+    /// Types the line for a missing spec into the chief's pane.
+    chief: Arc<dyn ChiefLine>,
 }
 
 impl EvidenceToolService {
@@ -44,7 +47,14 @@ impl<G: Git> EvidenceToolService<G> {
             settings,
             git,
             source,
+            chief: Arc::new(NoChief),
         }
+    }
+
+    /// Sets the port that types the evidence line into the chief's pane.
+    pub(super) fn with_chief(mut self, chief: Arc<dyn ChiefLine>) -> Self {
+        self.chief = chief;
+        self
     }
 
     fn products(&self) -> Result<Vec<Product>, Status> {
@@ -99,7 +109,9 @@ impl<G: Git> EvidenceToolService<G> {
             source: self.source.as_ref(),
             settings: &self.settings,
         };
-        check_product(&env, product, only, now, offset).await
+        let reports = check_product(&env, product, only, now, offset).await;
+        tell_missing(self.chief.as_ref(), product, now, offset).await;
+        reports
     }
 }
 

@@ -486,6 +486,8 @@ pub(crate) struct Instruments {
     pub factory_flow_reads: Counter<u64>,
     /// One for each read of the evidence check, by `outcome`.
     pub evidence_reads: Counter<u64>,
+    /// One for each try to type an evidence line into the chief's pane, by `outcome`.
+    pub evidence_lines: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -608,6 +610,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         web_app_collection_pages: counter("harold.web_app.collection_pages", "{page}"),
         factory_flow_reads: counter("harold.factory_flow.reads", "{read}"),
         evidence_reads: counter("harold.evidence.reads", "{read}"),
+        evidence_lines: counter("harold.evidence.lines", "{line}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -1764,12 +1767,27 @@ pub(crate) const EVIDENCE_OUTCOMES: [&str; 7] = [
     "bad_row",
 ];
 
-/// Records 0 for each `outcome` of `harold.evidence.reads`. Harold calls it at its start.
+/// Every `outcome` of `harold.evidence.lines`.
+pub(crate) const EVIDENCE_LINE_OUTCOMES: [&str; 3] = ["typed", "no_chief", "not_typed"];
+
+/// Records 0 for each `outcome` of `harold.evidence.reads` and `harold.evidence.lines`.
+/// Harold calls it at its start.
 pub(crate) fn register_evidence_counters() {
     let reads = &instruments().evidence_reads;
     for outcome in EVIDENCE_OUTCOMES {
         reads.add(0, &[KeyValue::new("outcome", outcome)]);
     }
+    let lines = &instruments().evidence_lines;
+    for outcome in EVIDENCE_LINE_OUTCOMES {
+        lines.add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+}
+
+/// Counts one try to type an evidence line into the chief's pane with its `outcome`.
+pub(crate) fn count_evidence_line(outcome: &'static str) {
+    instruments()
+        .evidence_lines
+        .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
 /// Counts one read of the evidence check with its `outcome`.
@@ -4562,10 +4580,11 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 3] = [
+pub(crate) const HAROLD_FEATURES: [&str; 4] = [
     "factory-flow-page",
     "opencode-done-on-mac",
     "evidence-check",
+    "evidence-follow-up",
 ];
 
 /// Counts one use of the product feature `spec_id`.

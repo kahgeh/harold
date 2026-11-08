@@ -27,6 +27,15 @@ pub(crate) struct EvidenceFile {
     pub extra_lines: Vec<String>,
 }
 
+impl EvidenceFile {
+    /// True when the chief got the line for this file.
+    pub(crate) fn is_told(&self) -> bool {
+        self.extra_lines
+            .iter()
+            .any(|line| line.starts_with("told:"))
+    }
+}
+
 fn time_text(time: OffsetDateTime) -> String {
     time.format(&Rfc3339).unwrap_or_default()
 }
@@ -119,6 +128,20 @@ pub(crate) fn write_evidence(pod: &Path, id: &str, file: &EvidenceFile) -> io::R
         file.extra_lines = old.extra_lines;
     }
     write_atomic(&pod.join("evidence"), id, &render(id, &file))
+}
+
+/// Adds `told: <time>` to `evidence/<id>.md` unless the file has a `told:` line. Returns
+/// true when it added the line. A missing or unreadable file gives `Ok(false)`.
+pub(crate) fn add_told_once(pod: &Path, id: &str, at: OffsetDateTime) -> io::Result<bool> {
+    let Some(mut file) = read_evidence(pod, id) else {
+        return Ok(false);
+    };
+    if file.is_told() {
+        return Ok(false);
+    }
+    file.extra_lines.push(format!("told: {}", time_text(at)));
+    write_atomic(&pod.join("evidence"), id, &render(id, &file))?;
+    Ok(true)
 }
 
 /// Writes `confirmed/<id>.md` unless it exists. Returns true when it wrote the file.

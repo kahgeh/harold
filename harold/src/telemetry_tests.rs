@@ -5816,6 +5816,31 @@ fn the_evidence_log_fields_are_allowed() {
 #[test]
 fn evidence_check_is_a_listed_product_feature() {
     assert!(HAROLD_FEATURES.contains(&"evidence-check"));
+    assert!(HAROLD_FEATURES.contains(&"evidence-follow-up"));
+}
+
+#[test]
+fn register_evidence_counters_seeds_each_line_outcome_at_zero() {
+    test_support::install();
+    register_evidence_counters();
+    assert_eq!(EVIDENCE_LINE_OUTCOMES, ["typed", "no_chief", "not_typed"]);
+    for outcome in EVIDENCE_LINE_OUTCOMES {
+        let point =
+            test_support::exact_counter_value("harold.evidence.lines", &[("outcome", outcome)]);
+        assert!(point.is_some(), "{outcome}");
+    }
+}
+
+#[test]
+fn count_evidence_line_adds_one_for_its_outcome() {
+    test_support::install();
+    let value = || {
+        test_support::exact_counter_value("harold.evidence.lines", &[("outcome", "typed")])
+            .unwrap_or(0)
+    };
+    let before = value();
+    count_evidence_line("typed");
+    assert_eq!(value(), before + 1);
 }
 
 #[test]

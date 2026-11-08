@@ -10,6 +10,7 @@ use crate::settings::FactoryFlowSettings;
 use crate::tools::{ToolError, ToolHandle};
 
 mod check;
+mod chief_line;
 mod files;
 mod schedule;
 mod service;
@@ -71,3 +72,7 @@ mod service_tests;
 #[cfg(test)]
 #[path = "schedule_tests.rs"]
 mod schedule_tests;
+
+#[cfg(test)]
+#[path = "chief_line_tests.rs"]
+mod chief_line_tests;
