@@ -1221,6 +1221,128 @@ async fn an_event_with_a_number_range_sends_declared_values_only() {
     );
 }
 
+#[tokio::test]
+async fn the_attention_events_take_their_declared_ranges_and_channels() {
+    let s = Setup::new().await;
+    let service = s.service();
+    let channels = ["imessage", "web_app", "machine_audio_output", "chief_pane"];
+    declare_meaning(
+        &service,
+        CHIEF_PANE,
+        "chief.attention_request",
+        pb::Kind::Event,
+        "A message from the chief that needs the user's decision or answer",
+        vec![attr("words", &["1-500"]), attr("channel", &channels)],
+    )
+    .await
+    .unwrap();
+    declare_meaning(
+        &service,
+        CHIEF_PANE,
+        "chief.attention_answered",
+        pb::Kind::Event,
+        "The user answered an attention request",
+        vec![attr("seconds", &["1-604800"]), attr("channel", &channels)],
+    )
+    .await
+    .unwrap();
+    s.signals.clear();
+    for words in ["1", "500"] {
+        event(
+            &service,
+            CHIEF_PANE,
+            "chief.attention_request",
+            vec![pair("words", words), pair("channel", "imessage")],
+        )
+        .await
+        .unwrap();
+    }
+    for seconds in ["1", "604800"] {
+        event(
+            &service,
+            CHIEF_PANE,
+            "chief.attention_answered",
+            vec![pair("seconds", seconds), pair("channel", "web_app")],
+        )
+        .await
+        .unwrap();
+    }
+    for channel in channels {
+        event(
+            &service,
+            CHIEF_PANE,
+            "chief.attention_request",
+            vec![pair("words", "10"), pair("channel", channel)],
+        )
+        .await
+        .unwrap();
+        event(
+            &service,
+            CHIEF_PANE,
+            "chief.attention_answered",
+            vec![pair("seconds", "10"), pair("channel", channel)],
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(s.signals.records().len(), 4 + 2 * channels.len());
+    s.signals.clear();
+    let cases = [
+        (
+            "chief.attention_request",
+            pair("words", "501"),
+            "words=501 is not declared: use 1-500",
+        ),
+        (
+            "chief.attention_request",
+            pair("words", "0"),
+            "words=0 is not declared: use 1-500",
+        ),
+        (
+            "chief.attention_answered",
+            pair("seconds", "604801"),
+            "seconds=604801 is not declared: use 1-604800",
+        ),
+    ];
+    for (name, bad, text) in cases {
+        let other = if name == "chief.attention_request" {
+            pair("channel", "imessage")
+        } else {
+            pair("channel", "web_app")
+        };
+        let (code, reason, message) =
+            refusal(event(&service, CHIEF_PANE, name, vec![bad, other]).await);
+        assert_eq!(
+            (code, reason.as_str()),
+            (Code::InvalidArgument, "undeclared_value")
+        );
+        assert_eq!(message, text);
+    }
+    for (name, number) in [
+        ("chief.attention_request", pair("words", "10")),
+        ("chief.attention_answered", pair("seconds", "10")),
+    ] {
+        let (code, reason, message) = refusal(
+            event(
+                &service,
+                CHIEF_PANE,
+                name,
+                vec![number, pair("channel", "email")],
+            )
+            .await,
+        );
+        assert_eq!(
+            (code, reason.as_str()),
+            (Code::InvalidArgument, "undeclared_value")
+        );
+        assert!(
+            message.starts_with("channel=email is not declared"),
+            "{message}"
+        );
+    }
+    assert!(s.signals.records().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Remove and list
 // ---------------------------------------------------------------------------

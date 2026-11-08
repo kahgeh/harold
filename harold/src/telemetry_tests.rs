@@ -2415,12 +2415,13 @@ const HISTOGRAM_RULE: [&str; 4] = [
 /// `scripts/tests/test_big_picture.py` checks that each holds the text of its file and that
 /// every file follows the counter rule. The comments of those files say "rise", so the
 /// SQL check of this file skips them.
-const NAMED_QUERY_TILES: [&str; 5] = [
+const NAMED_QUERY_TILES: [&str; 6] = [
     "delivery-lead-time",
     "work-waiting",
     "slicing-and-sizing",
     "test-and-release-time",
     "clarification-requests",
+    "attention-recording",
 ];
 
 /// The spec's trends table, in order.
