@@ -2239,6 +2239,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             browser_collector: browser_collector.as_deref(),
             knowledge: cfg.knowledge.enabled(),
             pod_registry: pod_registry.as_deref(),
+            factory_flow: &cfg.factory_flow,
         },
     )
     .await;

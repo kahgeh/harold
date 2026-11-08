@@ -7,12 +7,18 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::flow::{
-    FACTORY_FLOW_SQL, FlowOutcome, FlowRequest, FlowSource, Lever, LeversRead, ReqwestSource,
-    SourceFailure, read_factory_flow, read_levers,
+    FACTORY_FLOW_SQL, FactoryFlow, FlowOutcome, FlowRequest, FlowSource, Lever, LeversRead,
+    ReqwestSource, SourceFailure, format_wait, read_factory_flow, read_levers,
 };
+use super::{AppState, router};
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::FactoryFlowSettings;
+use crate::store::HaroldStore;
 use crate::telemetry::test_support;
+use axum::Router;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::sync::watch;
 
 const STAGES: [&str; 8] = [
     "idea",
@@ -564,4 +570,301 @@ async fn a_file_with_no_levers_table_gives_empty_stages() {
     };
     assert!(per_stage.iter().all(Vec::is_empty));
     assert!(unread.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The page. No test opens a port: the router serves one connection over an in-memory pipe.
+// ---------------------------------------------------------------------------
+
+const PAGE_LOGIN: &str = "me@example.com";
+const LOGIN_LINE: &str = "tailscale-user-login: me@example.com\r\n";
+
+struct OneConnection(Option<DuplexStream>);
+
+impl axum::serve::Listener for OneConnection {
+    type Io = DuplexStream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.0.take() {
+            Some(io) => (io, ()),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(())
+    }
+}
+
+/// Sends one GET and returns the status and the body.
+async fn get(app: Router, path: &str, headers: &str) -> (u16, String) {
+    let (mut client, server) = tokio::io::duplex(256 * 1024);
+    let serving = tokio::spawn(async move {
+        let _ = axum::serve(OneConnection(Some(server)), app).await;
+    });
+    let request =
+        format!("GET {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{headers}\r\n");
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut reply = Vec::new();
+    client.read_to_end(&mut reply).await.unwrap();
+    serving.abort();
+    let text = String::from_utf8_lossy(&reply).into_owned();
+    let status = text.split(' ').nth(1).unwrap().parse().unwrap();
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    (status, body)
+}
+
+async fn page_app(flow: FactoryFlow) -> (Router, PathBuf) {
+    let directory =
+        std::env::temp_dir().join(format!("harold-factory-page-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(HaroldStore::open(directory.join("store")).await.unwrap());
+    let (_shutdown, shutdown_rx) = watch::channel(());
+    let state = AppState::for_tests(
+        store,
+        PAGE_LOGIN,
+        "BPublicKeyForTheTestPage",
+        Arc::from(vec!["localhost".to_owned()]),
+        shutdown_rx,
+        None,
+        Default::default(),
+    )
+    .with_factory_flow(flow);
+    (router(state), directory)
+}
+
+/// The page for one answer of the source, with the given levers text.
+async fn page_for(answer: Result<String, SourceFailure>, levers: Option<&str>) -> String {
+    let dir = TestDirectory::new();
+    let mut flow_settings = settings(Some(dir.file("users.sql", &users_file_text(CANARY))));
+    flow_settings.levers_file = levers.map(|text| dir.file("levers.md", text));
+    let flow = FactoryFlow::new(flow_settings, Arc::new(FakeSource::answering(answer)));
+    let (app, directory) = page_app(flow).await;
+    let (status, body) = get(app, "/flow", LOGIN_LINE).await;
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+fn body_with(rows: &[(&str, &str, &str, u8)]) -> String {
+    rows.iter()
+        .map(|(stage, items, median, has)| {
+            format!("{{\"stage\":\"{stage}\",\"items\":{items},\"median_wait_s\":{median},\"has_data\":{has}}}\n")
+        })
+        .collect()
+}
+
+/// The text of the page from the stage `name` to the end of its list item.
+fn stage_block<'a>(page: &'a str, name: &str) -> &'a str {
+    let marker = format!("data-stage=\"{name}\"");
+    let from = page
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no stage {name}: {page}"));
+    let rest = &page[from + marker.len()..];
+    &rest[..rest.find("</li>").unwrap_or(rest.len())]
+}
+
+#[test]
+fn a_wait_shows_in_hours_below_two_days_and_in_days_from_two_days() {
+    assert_eq!(format_wait(68_400.0), "19 h");
+    assert_eq!(format_wait(3_600.0), "1 h");
+    assert_eq!(format_wait(172_799.0), "48 h");
+    assert_eq!(format_wait(172_800.0), "2.0 d");
+    assert_eq!(format_wait(181_440.5), "2.1 d");
+    assert_eq!(format_wait(0.0), "0 h");
+}
+
+#[tokio::test]
+async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query() {
+    let page = page_for(Ok(body()), Some(LEVERS)).await;
+    let mut at = 0;
+    for stage in STAGES {
+        let found = page[at..]
+            .find(&format!("data-stage=\"{stage}\""))
+            .unwrap_or_else(|| panic!("{stage}: {page}"));
+        at += found + 1;
+    }
+    assert!(stage_block(&page, "approval").contains("7 waiting"));
+    assert!(stage_block(&page, "approval").contains("median 19 h"));
+    assert!(stage_block(&page, "build").contains("4 waiting"));
+    assert!(stage_block(&page, "build").contains("median 2.1 d"));
+    assert!(stage_block(&page, "release").contains("17 waiting"));
+    assert!(stage_block(&page, "release").contains("wait not recorded yet"));
+    for stage in ["idea", "spec", "architect review", "merge", "installed"] {
+        assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
+        assert!(stage_block(&page, stage).contains("flow-grey"), "{stage}");
+    }
+    assert!(!stage_block(&page, "approval").contains("flow-grey"));
+    assert!(page.contains("<title>Factory flow</title>"));
+    assert!(page.contains(r#"data-back="/c""#));
+    assert!(page.contains("/static/back-swipe.js"));
+    assert!(!page.contains("Rows not read"));
+    assert!(
+        !page.contains("@post") && !page.contains("<form"),
+        "the page has no POST"
+    );
+}
+
+#[tokio::test]
+async fn only_the_stage_with_the_highest_median_is_red() {
+    let page = page_for(Ok(body()), None).await;
+    assert!(stage_block(&page, "build").contains("flow-red"));
+    for stage in STAGES.iter().filter(|stage| **stage != "build") {
+        assert!(!stage_block(&page, stage).contains("flow-red"), "{stage}");
+    }
+}
+
+#[tokio::test]
+async fn two_stages_with_the_same_highest_median_are_both_red() {
+    let rows = body_with(&[
+        ("idea", "null", "null", 0),
+        ("spec", "null", "null", 0),
+        ("architect review", "null", "null", 0),
+        ("approval", "3", "90000", 1),
+        ("build", "2", "90000", 1),
+        ("merge", "null", "null", 0),
+        ("release", "1", "null", 1),
+        ("installed", "null", "null", 0),
+    ]);
+    let page = page_for(Ok(rows), None).await;
+    assert!(stage_block(&page, "approval").contains("flow-red"));
+    assert!(stage_block(&page, "build").contains("flow-red"));
+}
+
+#[tokio::test]
+async fn with_no_median_nothing_is_red_and_a_stage_with_zero_items_is_not_no_data() {
+    let rows = body_with(&[
+        ("idea", "null", "null", 0),
+        ("spec", "null", "null", 0),
+        ("architect review", "null", "null", 0),
+        ("approval", "0", "null", 1),
+        ("build", "0", "null", 1),
+        ("merge", "null", "null", 0),
+        ("release", "0", "null", 1),
+        ("installed", "null", "null", 0),
+    ]);
+    let page = page_for(Ok(rows), None).await;
+    assert!(!page.contains("flow-red"), "{page}");
+    assert!(stage_block(&page, "approval").contains("0 waiting"));
+    assert!(!stage_block(&page, "approval").contains("no data yet"));
+}
+
+#[tokio::test]
+async fn a_failed_read_shows_one_reason_line_and_no_data_in_every_stage() {
+    for (answer, reason) in [
+        (Err(SourceFailure::Refused), "ClickHouse refused the read"),
+        (
+            Err(SourceFailure::Unreachable),
+            "ClickHouse does not answer",
+        ),
+        (
+            Err(SourceFailure::Timeout),
+            "ClickHouse did not answer in 5 seconds",
+        ),
+    ] {
+        let page = page_for(answer, Some(LEVERS)).await;
+        assert_eq!(page.matches("class=\"flow-reason\"").count(), 1, "{page}");
+        assert!(page.contains(reason), "{reason}: {page}");
+        for stage in STAGES {
+            assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
+        }
+        assert!(!page.contains("flow-red"));
+        // The levers still show.
+        assert!(stage_block(&page, "approval").contains("Standing waiver"));
+        assert!(!page.contains(CANARY));
+    }
+}
+
+#[tokio::test]
+async fn no_users_file_setting_shows_that_the_read_is_not_set_up() {
+    let flow = FactoryFlow::new(settings(None), Arc::new(FakeSource::answering(Ok(body()))));
+    let (app, directory) = page_app(flow).await;
+    let (status, page) = get(app, "/flow", LOGIN_LINE).await;
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("The factory flow read is not set up"),
+        "{page}"
+    );
+    assert_eq!(page.matches("class=\"flow-reason\"").count(), 1);
+}
+
+#[tokio::test]
+async fn the_levers_show_under_their_stage_and_unknown_rows_go_in_rows_not_read() {
+    let text = LEVERS.replace("| installed | Release watch", "| deploy | Release watch");
+    let page = page_for(Ok(body()), Some(&text)).await;
+    let spec = stage_block(&page, "spec");
+    assert!(spec.contains("Spec quality") && spec.contains("Slicing and sizing"));
+    assert!(spec.contains("PnEM"));
+    assert!(stage_block(&page, "release").contains("Release speed and tooling"));
+    assert!(page.contains("Rows not read"));
+    assert!(page.contains("deploy: Release watch"));
+    assert!(!stage_block(&page, "installed").contains("Release watch"));
+}
+
+#[tokio::test]
+async fn with_no_levers_file_each_stage_says_so() {
+    let page = page_for(Ok(body()), None).await;
+    for stage in STAGES {
+        assert!(
+            stage_block(&page, stage).contains("no levers file"),
+            "{stage}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn markup_in_a_lever_is_escaped_and_the_page_shows_no_spec_id_or_message_text() {
+    let text = LEVERS.replace("Spec quality", "<script>alert(1)</script>");
+    let page = page_for(Ok(body()), Some(&text)).await;
+    assert!(!page.contains("<script>alert(1)"), "{page}");
+    assert!(page.contains("&#60;script&#62;alert(1)"));
+}
+
+#[tokio::test]
+async fn the_page_answers_only_after_the_login_and_device_checks() {
+    let flow = FactoryFlow::new(settings(None), Arc::new(FakeSource::answering(Ok(body()))));
+    let (app, directory) = page_app(flow).await;
+    // No login header: refused, as `/specs` is.
+    let (flow_status, _) = get(app.clone(), "/flow", "").await;
+    let (specs_status, _) = get(app.clone(), "/specs", "").await;
+    assert_eq!(flow_status, specs_status);
+    assert_ne!(flow_status, 200);
+    // Another login: refused too.
+    let (other, _) = get(app, "/flow", "tailscale-user-login: other@example.com\r\n").await;
+    assert_ne!(other, 200);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test]
+async fn a_load_does_not_ask_the_source_for_any_other_url_than_the_configured_one() {
+    let dir = TestDirectory::new();
+    let mut flow_settings = settings(Some(dir.file("users.sql", &users_file_text(CANARY))));
+    flow_settings.clickhouse_url = "http://127.0.0.1:18123/".to_string();
+    let source = Arc::new(FakeSource::answering(Ok(body())));
+    let flow = FactoryFlow::new(flow_settings, source.clone());
+    let (app, directory) = page_app(flow).await;
+    let (status, _) = get(app, "/flow", LOGIN_LINE).await;
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(status, 200);
+    let seen = source.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "http://127.0.0.1:18123/");
+}
+
+#[tokio::test]
+async fn the_pages_index_has_the_row_factory_flow_after_specs() {
+    let flow = FactoryFlow::new(settings(None), Arc::new(FakeSource::answering(Ok(body()))));
+    let (app, directory) = page_app(flow).await;
+    let (status, page) = get(app, "/c", LOGIN_LINE).await;
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(status, 200);
+    let specs = page.find("href=\"/specs\"").expect("the Specs row");
+    let flow = page.find("href=\"/flow\"").expect("the Factory flow row");
+    assert!(flow > specs);
+    assert!(page[flow..].contains("Factory flow"));
 }

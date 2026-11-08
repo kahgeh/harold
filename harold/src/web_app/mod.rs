@@ -159,6 +159,8 @@ pub(crate) struct Agents<'a> {
     /// `[telemetry] pod_registry`: the products whose specs the spec pages show; none
     /// without it.
     pub pod_registry: Option<&'a Path>,
+    /// `[factory_flow]`: where the factory flow page reads its numbers and its levers.
+    pub factory_flow: &'a crate::settings::FactoryFlowSettings,
 }
 
 /// How long a page may go unheard before it stops counting as on screen. The page beats
@@ -452,6 +454,8 @@ pub(crate) struct AppState {
     pub browser_traces: Arc<browser_traces::BrowserTraces>,
     /// The paired devices, and the pairing code's tries.
     pub pairing: Arc<pair::Pairing>,
+    /// The factory flow page's settings and its source of rows.
+    pub factory_flow: Arc<flow::FactoryFlow>,
 }
 
 #[cfg(test)]
@@ -498,7 +502,14 @@ impl AppState {
             pages: Arc::default(),
             browser_traces: Arc::new(browser_traces::BrowserTraces::new(None)),
             pairing: Arc::new(pair::Pairing::off()),
+            factory_flow: Arc::new(flow::FactoryFlow::from_settings(&Default::default())),
         }
+    }
+
+    /// This state with `factory_flow` in place of the one that reads the local ClickHouse.
+    pub(crate) fn with_factory_flow(mut self, factory_flow: flow::FactoryFlow) -> Self {
+        self.factory_flow = Arc::new(factory_flow);
+        self
     }
 
     /// This state with `pairing` in place of the one that admits every device.
@@ -544,6 +555,7 @@ pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
         browser_collector: None,
         knowledge: false,
         pod_registry: None,
+        factory_flow: Box::leak(Box::default()),
     }
 }
 
@@ -613,6 +625,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/c/{collection}/{file}", get(collections::get_page))
         .route("/c/{collection}/{file}/raw", get(collections::get_raw))
         .route("/specs", get(specs::get_list))
+        .route("/flow", get(flow::get_flow))
         .route("/specs/{product}/{id}", get(specs::get_spec))
         .route("/specs/{product}/{id}/share", post(specs::post_share))
         .route("/speech-check", get(speech_check::get_page))
@@ -783,6 +796,7 @@ pub(crate) async fn start(
         pages: Arc::default(),
         browser_traces: Arc::new(browser_traces::BrowserTraces::new(agents.browser_collector)),
         pairing: Arc::clone(&pairing),
+        factory_flow: Arc::new(flow::FactoryFlow::from_settings(agents.factory_flow)),
     };
     // The voice worker loads while a page is on screen, so a call finds it ready.
     if let Some(calls) = &calls {

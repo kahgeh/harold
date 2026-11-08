@@ -492,6 +492,11 @@ pub(crate) async fn index_response(
         href: "/specs".to_owned(),
         badge: None,
     });
+    rows.push(IndexRow {
+        title: "Factory flow".to_owned(),
+        href: "/flow".to_owned(),
+        badge: None,
+    });
     if notes_on {
         rows.push(IndexRow {
             title: "Notes".to_owned(),

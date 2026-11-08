@@ -395,3 +395,141 @@ fn parse_levers(text: &str) -> LeversRead {
     }
     LeversRead::Read { per_stage, unread }
 }
+
+// ---------------------------------------------------------------------------
+// The page
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+use askama::Template;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
+
+use super::AppState;
+
+/// The factory flow page's settings and its source of rows.
+pub(crate) struct FactoryFlow {
+    settings: FactoryFlowSettings,
+    source: Arc<dyn FlowSource>,
+}
+
+impl FactoryFlow {
+    pub(crate) fn new(settings: FactoryFlowSettings, source: Arc<dyn FlowSource>) -> Self {
+        Self { settings, source }
+    }
+
+    /// The page as Harold runs it: rows from ClickHouse over HTTP.
+    pub(crate) fn from_settings(settings: &FactoryFlowSettings) -> Self {
+        Self::new(settings.clone(), Arc::new(ReqwestSource::new()))
+    }
+}
+
+/// A wait of `seconds`, in hours below 2 days, else in days with one decimal.
+pub(crate) fn format_wait(seconds: f64) -> String {
+    const TWO_DAYS: f64 = 172_800.0;
+    if seconds < TWO_DAYS {
+        format!("{:.0} h", seconds / 3_600.0)
+    } else {
+        format!("{:.1} d", seconds / 86_400.0)
+    }
+}
+
+struct StageView {
+    name: &'static str,
+    /// `flow-red`, `flow-grey` or empty.
+    class: &'static str,
+    summary: String,
+    levers: Vec<Lever>,
+    /// Shown when the stage has no levers: "no levers file" or "no levers".
+    levers_note: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "web_app/flow.html")]
+struct FlowPage {
+    app_name: String,
+    has_icon: bool,
+    /// The one line that tells why the numbers are missing; empty when the read worked.
+    reason: &'static str,
+    stages: Vec<StageView>,
+    unread: Vec<String>,
+}
+
+fn reason_of(outcome: FlowOutcome) -> &'static str {
+    match outcome {
+        FlowOutcome::Ok => "",
+        FlowOutcome::NotSetUp => "The factory flow read is not set up",
+        FlowOutcome::Refused => "ClickHouse refused the read, or the users file has no password",
+        FlowOutcome::Unreachable => "ClickHouse does not answer",
+        FlowOutcome::Timeout => "ClickHouse did not answer in 5 seconds",
+    }
+}
+
+fn summary_of(row: &StageRow) -> String {
+    if !row.has_data {
+        return "no data yet".to_string();
+    }
+    let waiting = format!("{} waiting", row.items.unwrap_or(0.0).round() as i64);
+    match row.median_wait_s {
+        Some(seconds) => format!("{waiting} \u{b7} median {}", format_wait(seconds)),
+        None => format!("{waiting} \u{b7} wait not recorded yet"),
+    }
+}
+
+fn build_view(read: &FlowRead, levers: LeversRead) -> (Vec<StageView>, Vec<String>) {
+    let highest = read
+        .rows
+        .iter()
+        .filter_map(|row| row.median_wait_s)
+        .fold(None, |highest: Option<f64>, wait| {
+            Some(highest.map_or(wait, |known| known.max(wait)))
+        });
+    let (mut per_stage, unread, note) = match levers {
+        LeversRead::NoFile => (vec![Vec::new(); STAGES.len()], Vec::new(), "no levers file"),
+        LeversRead::Read { per_stage, unread } => (per_stage, unread, "no levers"),
+    };
+    let stages = STAGES
+        .iter()
+        .enumerate()
+        .map(|(at, name)| {
+            let row = read.rows.get(at);
+            let red = row.is_some_and(|row| highest.is_some() && row.median_wait_s == highest);
+            let grey = row.is_none_or(|row| !row.has_data);
+            StageView {
+                name,
+                class: if red {
+                    "flow-red"
+                } else if grey {
+                    "flow-grey"
+                } else {
+                    ""
+                },
+                summary: row.map_or_else(|| "no data yet".to_string(), summary_of),
+                levers: std::mem::take(&mut per_stage[at]),
+                levers_note: note,
+            }
+        })
+        .collect();
+    (stages, unread)
+}
+
+/// `GET /flow`: the eight flow stages. It reads again at each load and has no POST.
+pub(crate) async fn get_flow(State(state): State<AppState>) -> Response {
+    let flow = &state.factory_flow;
+    let read = read_factory_flow(&flow.settings, flow.source.as_ref()).await;
+    let levers = read_levers(flow.settings.levers_file.as_deref()).await;
+    let (stages, unread) = build_view(&read, levers);
+    let page = FlowPage {
+        app_name: state.identity.name.clone(),
+        has_icon: state.identity.icon.is_some(),
+        reason: reason_of(read.outcome),
+        stages,
+        unread,
+    };
+    match page.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
