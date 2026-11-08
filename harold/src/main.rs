@@ -5,6 +5,7 @@ mod away_message;
 mod build_features;
 mod channels;
 mod cli;
+mod clickhouse_read;
 mod crash_guard;
 mod cron;
 mod inbound;

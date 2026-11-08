@@ -7,10 +7,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::flow::{
-    FACTORY_FLOW_SQL, FactoryFlow, FlowOutcome, FlowRequest, FlowSource, Lever, LeversRead,
-    ReqwestSource, SourceFailure, format_wait, read_factory_flow, read_levers,
+    FACTORY_FLOW_SQL, FactoryFlow, FlowOutcome, Lever, LeversRead, format_wait, read_factory_flow,
+    read_levers,
 };
 use super::{AppState, router};
+use crate::clickhouse_read::{
+    ClickhouseRequest as FlowRequest, ClickhouseSource as FlowSource, ReqwestSource, SourceFailure,
+};
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::FactoryFlowSettings;
 use crate::store::HaroldStore;
