@@ -68,6 +68,7 @@ pub(crate) mod collections;
 mod counted_listener;
 #[cfg(feature = "calls")]
 pub(crate) mod echo_test;
+pub(crate) mod flow;
 pub(crate) mod login;
 pub(crate) mod notes;
 pub(crate) mod origin;
@@ -85,6 +86,10 @@ pub(crate) mod updates;
 #[cfg(test)]
 #[path = "flow_tests.rs"]
 mod flow_tests;
+
+#[cfg(test)]
+#[path = "factory_flow_tests.rs"]
+mod factory_flow_tests;
 
 #[cfg(all(test, feature = "calls"))]
 #[path = "echo_test_tests.rs"]

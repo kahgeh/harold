@@ -330,6 +330,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | lead time (of a work record) | The time from the creation of the work record to `checked by the user`. It is not `pod.spec.lead_time`, which measures a spec from open to merged | "cycle time" |
 | slice | One spec that a work record links to. A work record split into three specs has three slices | "stage" (a stage is a part of a spec, as in linux-satellite stage 2b) |
 | phase (of a lead time) | A named part of a lead time. For a spec (`pod.spec.lead_time`): `open_to_approved`, `approved_to_started`, `started_to_completed`. For a work record (`harold.work.lead_time`): `discovery`, `spec_and_approval`, `build_and_merge`, `release_and_check` and `whole` | "stage" |
+| factory flow page | The web app page `/flow` that shows the eight flow stages, each with its items waiting, its median wait and its levers. | "pipeline page", "dashboard" (the dashboard is HyperDX's) |
+| flow stage | One of the eight steps of the factory flow: idea, spec, architect review, approval, build, merge, release, installed. | "stage" alone (a stage is a part of a spec), "phase" (a phase is a part of a lead time) |
+| median wait | The median time that items spent in a flow stage, from the rows of the query `factory-flow`. | "average", "lead time" (a lead time spans several flow stages) |
+| has data | A flow stage whose numbers come from a signal that Harold records. A stage without it shows "no data yet". | "empty" (a stage with data can have 0 items) |
 | rotation | Harold's move of the open work records to a new work file every `rotation_days` days | "archive" for the move |
 | agent signal | A counter, gauge or event that a pane records with `harold tool telemetry`, exported as `agent.<name>`. It is not an agent's state | "custom metric" |
 | agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
