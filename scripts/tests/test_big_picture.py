@@ -35,14 +35,14 @@ DASHBOARD = HYPERDX / "big-picture.json"
 TRENDS = HYPERDX / "trends.json"
 QUERIES = TELEMETRY / "queries"
 # agent-counter.sql is a helper that other queries copy. factory-flow.sql feeds the web app page /flow. No tile reads them.
-NOT_CARDS = {"agent-counter.sql", "factory-flow.sql"}
+NOT_CARDS = {"agent-counter.sql", "factory-flow.sql", "unused-features.sql", "unconfirmed-fixes.sql", "unkinded-specs.sql"}
 # These dashboards may hold a tile that reads a query file.
 DASHBOARD_FILES = ["big-picture.json", "trends.json", "dashboard.json", "now.json"]
 
 # card file -> the card. "fmt" is count (whole number with thousands separators) or d1 (one decimal).
 # "extra" names the part after the change. "better" is the direction that is better.
 CARDS = {
-    "value-created": dict(title="Value created", value="value", unit="work records", fmt="count",
+    "value-created": dict(title="Value created", value="value", unit="features and fixes", fmt="count",
                           change="value_change_pct", extra=None, better="higher"),
     "delivery-lead-time-tile": dict(title="Delivery lead time", value="days", unit="days", fmt="d1",
                                     change="days_change_pct", extra=None, better="lower"),
@@ -56,7 +56,7 @@ CARDS = {
                            change="tokens_m_change_pct", extra="attention", better="lower"),
 }
 # The stubs return no row until the spec that fills them is built.
-STUBS = {"value-created": "value-created-signals"}
+STUBS = {}
 INTRO = (
     "The last 7 days, against the 7 days before. All products. Each card is one line: the value, "
     "then its change on last week. \u25b2 is up and \u25bc is down. "
@@ -64,7 +64,6 @@ INTRO = (
     "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
     "Higher is better: Value created, Products changed. "
     "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost. "
-    "Value created shows no data yet until value-created-signals fills its query. "
     "Delivery lead time has data after the first release that follows spec-release-phase. "
     "In Inventory cost, \"attention: no data yet\" means no answer in the last 7 days, "
     "and \"attention: no rate set\" means answers but no hourly rate."
@@ -476,7 +475,7 @@ class LineWrapTest(unittest.TestCase):
 
     def test_a_rise_a_fall_and_no_change(self):
         self.assertEqual(self.line("value-created", value=4717, value_change_pct=57),
-                         "4,717 work records  \u25b2 57% on last week")
+                         "4,717 features and fixes  \u25b2 57% on last week")
         self.assertEqual(self.line("waste", hours=9, hours_change_pct=-12),
                          "9 hours  \u25bc 12% on last week")
         self.assertEqual(self.line("waste", hours=9, hours_change_pct=0), "9 hours  0% on last week")

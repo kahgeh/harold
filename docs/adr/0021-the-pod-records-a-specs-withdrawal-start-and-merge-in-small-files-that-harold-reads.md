@@ -10,6 +10,7 @@ Harold guessed a spec's later states from git and worktrees. It could not see a 
 ## Decision
 
 - The pod's shared tools write three files once, in a fixed `key: value` form: `withdrawn/<id>.md`, `started/<id>.md` and `merged/<id>.md`. Harold reads them first, with the older sources as a fallback.
+- The evidence check also writes `confirmed/<id>.md` when the evidence of a fix is present, with the lines `confirmed:` and `evidence:`. Harold reads it as it reads the other files.
 - Harold still never writes in the pod folder.
 - `pod_stats`, a core module, reads Harold's agent snapshot directly, pane ids and folders only, to count pods and agents by role. The tool ports of ADR 0004 stay for tools.
 

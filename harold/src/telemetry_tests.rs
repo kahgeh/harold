@@ -8029,3 +8029,223 @@ fn a_panic_on_a_panic_helper_thread_calls_previous_and_spawns_nothing() {
 fn the_unsent_sink_writes_a_line_with_its_newline_in_one_piece() {
     assert_eq!(unsent_bytes("a line unsent=true"), b"a line unsent=true\n");
 }
+
+// The named queries of the spec value-created-signals, on fixture rows. The fixture rows are
+// literal constants in a SELECT: the test replaces each otel table of the query with them,
+// so it reads no real data and writes nothing. It asks the read-only tool `bin/logq`. It skips
+// when the tool or ClickHouse cannot be reached (CI has none).
+
+mod value_created_fixture {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const QUERIES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/references/telemetry/queries"
+    );
+
+    const SUM: &str = "otel.otel_metrics_sum";
+    const GAUGE: &str = "otel.otel_metrics_gauge";
+    const HISTOGRAM: &str = "otel.otel_metrics_histogram";
+
+    /// The read-only tool, or `None` when this machine has none or it cannot reach ClickHouse.
+    fn logq() -> Option<PathBuf> {
+        // `LOGQ` names the tool. Without it, `logq` is looked up on the PATH.
+        let path = std::env::var_os("LOGQ").map_or_else(|| PathBuf::from("logq"), PathBuf::from);
+        (run(&path, "SELECT 1")? == "1").then_some(path)
+    }
+
+    fn run(logq: &Path, sql: &str) -> Option<String> {
+        let mut child = Command::new(logq)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(sql.as_bytes()).ok()?;
+        let done = child.wait_with_output().ok()?;
+        done.status
+            .success()
+            .then(|| String::from_utf8_lossy(&done.stdout).trim().to_owned())
+    }
+
+    /// One fixture row of a table: `spec` and `product` are attributes, `hours_ago` is the
+    /// time of the point and `value` its value (the `Count` and `Sum` of a histogram).
+    struct Row {
+        metric: &'static str,
+        spec: &'static str,
+        hours_ago: u32,
+        value: f64,
+        extra: Vec<(&'static str, &'static str)>,
+    }
+
+    fn row(metric: &'static str, spec: &'static str, hours_ago: u32, value: f64) -> Row {
+        Row {
+            metric,
+            spec,
+            hours_ago,
+            value,
+            extra: Vec::new(),
+        }
+    }
+
+    fn fixture(rows: &[Row]) -> String {
+        let mut selects: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let mut attributes = format!("'spec.id', '{}', 'pod.product', 'p'", row.spec);
+                for (key, value) in &row.extra {
+                    attributes.push_str(&format!(", '{key}', '{value}'"));
+                }
+                // A gauge of `pod.fix.confirmed_at` holds a time in Unix seconds. The fixture
+                // gives it as `value` hours before now.
+                let value = if row.metric == "pod.fix.confirmed_at" {
+                    format!(
+                        "toFloat64(toUnixTimestamp(now() - toIntervalHour({})))",
+                        row.value
+                    )
+                } else {
+                    format!("toFloat64({})", row.value)
+                };
+                format!(
+                    "SELECT '{}' AS MetricName, map({attributes}) AS Attributes, \
+                     map('service.name', 'h') AS ResourceAttributes, \
+                     toDateTime64(now() - toIntervalHour({}), 9) AS TimeUnix, {value} AS Value, \
+                     toUInt64(1) AS Count, toFloat64(0) AS Sum",
+                    row.metric, row.hours_ago
+                )
+            })
+            .collect();
+        selects.push(
+            "SELECT '' AS MetricName, CAST(map(), 'Map(String, String)') AS Attributes, \
+             CAST(map(), 'Map(String, String)') AS ResourceAttributes, \
+             CAST(now() AS DateTime64(9)) AS TimeUnix, toFloat64(0) AS Value, toUInt64(0) AS Count, \
+             toFloat64(0) AS Sum WHERE 0"
+                .to_owned(),
+        );
+        format!("(\n{}\n)", selects.join("\nUNION ALL\n"))
+    }
+
+    /// The query `file` with each otel table replaced by the fixture rows of that table.
+    fn on_fixture(file: &str, sum: &[Row], gauge: &[Row], histogram: &[Row]) -> String {
+        let text = std::fs::read_to_string(format!("{QUERIES}/{file}")).expect("read the query");
+        text.replace(SUM, &fixture(sum))
+            .replace(GAUGE, &fixture(gauge))
+            .replace(HISTOGRAM, &fixture(histogram))
+    }
+
+    fn answer(logq: &Path, file: &str, sum: &[Row], gauge: &[Row], histogram: &[Row]) -> String {
+        let sql = on_fixture(file, sum, gauge, histogram);
+        run(logq, &sql).unwrap_or_else(|| panic!("{file} failed on the fixture:\n{sql}"))
+    }
+
+    const USED: &str = "harold.feature.used";
+    const CONFIRMED: &str = "pod.fix.confirmed_at";
+    const DAY: u32 = 24;
+
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn value_created_sql_on_a_clickhouse_fixture() {
+        let Some(logq) = logq() else {
+            eprintln!("skipped: bin/logq or ClickHouse cannot be reached");
+            return;
+        };
+        let value =
+            |sum: &[Row], gauge: &[Row]| answer(&logq, "value-created.sql", sum, gauge, &[]);
+
+        // Two product features used and one fix confirmed give 3.
+        let sum = [
+            row(USED, "a", 20 * DAY, 0.0),
+            row(USED, "a", 2 * DAY, 1.0),
+            row("other.feature.used", "b", 20 * DAY, 0.0),
+            row("other.feature.used", "b", 3 * DAY, 2.0),
+        ];
+        let gauge = [row(CONFIRMED, "f1", 1, 48.0), row(CONFIRMED, "f1", 2, 48.0)];
+        assert_eq!(value(&sum, &gauge).split('\t').next(), Some("3"));
+
+        // No series gives no row.
+        assert_eq!(value(&[], &[]), "");
+
+        // One rise of factory-flow-page gives 1.
+        let sum = [
+            row(USED, "factory-flow-page", 20 * DAY, 0.0),
+            row(USED, "factory-flow-page", DAY, 1.0),
+        ];
+        assert_eq!(value(&sum, &[]).split('\t').next(), Some("1"));
+
+        // A feature seeded at 0 with no use gives 0, not nothing.
+        let sum = [
+            row(USED, "factory-flow-page", 20 * DAY, 0.0),
+            row(USED, "factory-flow-page", DAY, 0.0),
+        ];
+        assert_eq!(value(&sum, &[]).split('\t').next(), Some("0"));
+
+        // A restart: the counter dropped to 0 and rose by 1, and the fix gauge was exported
+        // again with the same time. The fix counts once and only the new use counts.
+        let sum = [
+            row(USED, "a", 10 * DAY, 5.0),
+            row(USED, "a", 6 * DAY, 5.0),
+            row(USED, "a", 5 * DAY, 0.0),
+            row(USED, "a", 2 * DAY, 1.0),
+        ];
+        let gauge = [
+            row(CONFIRMED, "f1", 30, 48.0),
+            row(CONFIRMED, "f1", 4 * DAY, 48.0),
+            row(CONFIRMED, "f1", 2, 48.0),
+        ];
+        assert_eq!(value(&sum, &gauge), "2\t100");
+
+        // unused-features: the feature with no rise in 14 days is listed.
+        let sum = [
+            row(USED, "idle", 20 * DAY, 0.0),
+            row(USED, "idle", 2 * DAY, 0.0),
+            row(USED, "busy", 20 * DAY, 0.0),
+            row(USED, "busy", 2 * DAY, 3.0),
+        ];
+        assert_eq!(answer(&logq, "unused-features.sql", &sum, &[], &[]), "idle");
+
+        // unconfirmed-fixes: a fix released over 7 days ago with no confirmed series.
+        let kind_fix = vec![("spec.kind", "fix"), ("state", "completed")];
+        let effort = |spec: &'static str| Row {
+            extra: kind_fix.clone(),
+            ..row("pod.spec.effort", spec, 3 * DAY, 0.0)
+        };
+        let released = |spec: &'static str, hours_ago: u32| Row {
+            extra: vec![("phase", "merged_to_released")],
+            ..row("pod.spec.lead_time", spec, hours_ago, 0.0)
+        };
+        let gauge = [
+            effort("late"),
+            effort("done"),
+            effort("fresh"),
+            row(CONFIRMED, "done", 1, 48.0),
+        ];
+        let histogram = [
+            released("late", 10 * DAY),
+            released("done", 10 * DAY),
+            released("fresh", DAY),
+        ];
+        assert_eq!(
+            answer(&logq, "unconfirmed-fixes.sql", &[], &gauge, &histogram),
+            "late"
+        );
+
+        // unkinded-specs: an approved spec with no kind, first seen in the last 14 days.
+        let effort =
+            |spec: &'static str, kind: &'static str, state: &'static str, hours_ago: u32| Row {
+                extra: vec![("spec.kind", kind), ("state", state)],
+                ..row("pod.spec.effort", spec, hours_ago, 0.0)
+            };
+        let gauge = [
+            effort("bare", "unkinded", "approved", 5 * DAY),
+            effort("open-one", "unkinded", "open", 5 * DAY),
+            effort("kinded", "fix", "approved", 5 * DAY),
+            effort("old", "unkinded", "approved", 20 * DAY),
+        ];
+        assert_eq!(
+            answer(&logq, "unkinded-specs.sql", &[], &gauge, &[]),
+            "bare"
+        );
+    }
+}

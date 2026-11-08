@@ -7,3 +7,4 @@ web_app::factory_flow_tests::the_real_source_sends_the_user_the_key_the_limits_a
 web_app::factory_flow_tests::a_refusal_from_clickhouse_is_refused
 web_app::factory_flow_tests::a_port_with_no_listener_is_unreachable
 web_app::factory_flow_tests::a_server_that_never_answers_is_a_timeout
+telemetry::tests::value_created_fixture::value_created_sql_on_a_clickhouse_fixture

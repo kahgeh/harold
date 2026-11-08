@@ -7,7 +7,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | Harold | The daemon on each machine that watches agents, notifies the user, routes replies and hosts tools | "the server" |
-| feature | A Cargo feature of Harold that builds one platform part in, such as `imessage`. It is chosen when Harold is built and is not a setting | "flag" alone, "toggle". "Feature flag" stays allowed: it is your own word |
+| feature | A Cargo feature of Harold that builds one platform part in, such as `imessage`. It is chosen when Harold is built and is not a setting. For a part of a product that people use, see product feature. | "flag" alone, "toggle". "Feature flag" stays allowed: it is your own word |
 | feature set | A named group of features: `mac-defaults` (the default) or `linux-defaults` | "profile", "preset" |
 | timing test | A test that asserts a real time, and so can fail on a busy machine. It runs only with `--features timing-tests`, locally | "flaky test" |
 | test log | The kept log of one test run, with its header and footer, in the test log folder | "test output" for the kept file |
@@ -78,6 +78,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
 | free slot with work waiting | A free slot while an approved spec of its pod is not started. A free slot alone (`pod.slots.free`, the `slot-idle` alert, "idle slots" in the telemetry README) counts every free slot. This counts only the free slots that work waits for, which is waste. `pod.slots.idle_with_work` stays as the signal name | "idle slot with work", "idle slot" for this one |
 | redo | Build work after a `direction` or `defect` revision of a spec that had started | "rework", "rejected" |
+| value created | The product features whose use count rose in the 7 days, plus the fixes confirmed in them | "work checked" for it (the old meaning), "output" |
+| product feature | A part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. Not the Cargo feature | "feature flag" for it |
+| kind (of a spec) | `feature` (a product feature), `fix` or `other`, from the spec's `**Kind.**` line | "type". Not the Cargo feature |
+| feature-use count | The counter `<product>.feature.used` with `spec.id`, which rises at each use of a product feature | "usage metric". Not the Cargo feature |
+| confirmed file | The file `confirmed/<id>.md` in a pod folder, which the evidence check writes when the evidence query of a fix finds its signal. It sits beside the approval, merged and withdrawn files | |
 | spec size | Small (under half a day of build), medium (up to a day) or large (split before approval), in the spec's `**Size.**` line | "estimate", "points" |
 | item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |
 | wording (revision tag) | A revision that changes words only: it counts as a revision and is never redo | "typo fix" for the tag |

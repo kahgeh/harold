@@ -9,7 +9,10 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | File | What it shows | Parameter |
 | --- | --- | --- |
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
-| `value-created.sql` | A stub that returns no row until the spec value-created-signals fills it: the card "Value created". Columns `value`, `value_change_pct` | none |
+| `value-created.sql` | The `spec.id` values whose `*.feature.used` counter rose in the 7 days plus the fixes whose `pod.fix.confirmed_at` time falls in the 7 days, and the change: the card "Value created". Columns `value`, `value_change_pct` | none |
+| `unused-features.sql` | The `spec.id` values of `*.feature.used` whose rise in the last 14 days is 0. The chief's weekly digest runs it. Column `spec_id` | none |
+| `unconfirmed-fixes.sql` | The fix specs with a `merged_to_released` point older than 7 days and no `pod.fix.confirmed_at` series. The chief's weekly digest runs it. Column `spec_id` | none |
+| `unkinded-specs.sql` | The specs with `spec.kind = unkinded` at state `approved` or later, first seen in the last 14 days. The chief's weekly digest runs it. Column `spec_id` | none |
 | `delivery-lead-time-tile.sql` | The median days from the first draft of a spec to the release that holds it, for the specs released in the 7 days, and the change: the card "Delivery lead time" of the big picture. Columns `days`, `days_change_pct` | none |
 | `delivery-lead-time.sql` | The p50 days of each phase, from idea to the user's check, and the spec time from open to merged: the table "Lead time by phase" on "Harold trends" | none |
 | `work-waiting.sql` | The items in each list, the oldest age in days and the item-days, with a total: the card "Work waiting" | none |
