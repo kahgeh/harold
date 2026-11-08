@@ -21,8 +21,9 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | `products-changed.sql` | The number of products with a merge, and the change: the card "Products changed". Columns `products`, `products_change_pct` | none |
 | `now.sql` | The agents working, all agents and the specs in progress, in one row, from the last 2 minutes: the dashboard "Harold now". Columns `working`, `all`, `in_progress`, `read_at` | none |
 | `clarification-requests.sql` | The times the user asked the chief what a word or reply meant, by cause: the card "Clarification requests per day, by cause" | none |
+| `attention-recording.sql` | One row for each of the last 14 days: the attention requests, the answers and the chief's messages sent: the card "Attention requests against chief messages". Columns `day`, `attention_requests`, `answers`, `chief_messages` | none |
 
-Six files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `delivery-lead-time-tile.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql` and `clarification-requests.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
+Six files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `delivery-lead-time-tile.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql`, `clarification-requests.sql` and `attention-recording.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
 
 Two names look alike. The file `delivery-lead-time.sql` feeds the card "Lead time by phase". The glossary term "delivery lead time" names `delivery-lead-time-tile.sql`.
 
@@ -36,7 +37,7 @@ The other files return one row for each series, with these columns:
 
 | Column | Meaning |
 | --- | --- |
-| `series` | In the five files of "Harold trends", a label for the row, such as `harold` or `tokens per merged spec`. In `agent-counter.sql`, the series' attributes as `key=value` pairs, sorted by key and joined by commas, empty for a counter with no attributes |
+| `series` | In the six files of "Harold trends", a label for the row, such as `harold` or `tokens per merged spec`. In `agent-counter.sql`, the series' attributes as `key=value` pairs, sorted by key and joined by commas, empty for a counter with no attributes |
 | `this_week` | The count in the last 7 days |
 | `last_week` | The count in the 7 days before |
 

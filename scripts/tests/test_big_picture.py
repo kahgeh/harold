@@ -76,6 +76,7 @@ TRENDS_CARDS = [
     "test-and-release-time",
     "clarification-requests",
     "work-waiting",
+    "attention-recording",
 ]
 CAVEAT = re.compile(r"(?i)\b(empty|no data yet|waits? for)\b")
 MACRO = re.compile(r"\$__\w+")
@@ -503,6 +504,21 @@ class LineWrapTest(unittest.TestCase):
         self.assertEqual(
             self.line("inventory-cost", attention_hours=3.5, attention_cost=None, **base),
             "1.2 M tokens  \u25b2 8% on last week \u00b7 attention: no rate set")
+
+
+class AttentionRecordingCard(unittest.TestCase):
+    """The trends card that shows the attention requests against the chief's messages."""
+
+    def test_the_query_has_the_columns_and_the_14_days(self):
+        text = (QUERIES / "attention-recording.sql").read_text(encoding="utf-8")
+        code = strip_comments(text)
+        for column in ("day", "attention_requests", "answers", "chief_messages"):
+            self.assertRegex(code, rf"\bAS {column}\b")
+        self.assertIn("range(14)", code)
+        for name in ("chief.attention_request", "chief.attention_answered", "harold.notifications"):
+            self.assertIn(name, code)
+        self.assertIn("Dev/p/chief-of-pods", code)
+        self.assertIn("'sent'", code)
 
 
 if __name__ == "__main__":
