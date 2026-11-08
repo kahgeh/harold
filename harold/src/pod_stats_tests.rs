@@ -5257,3 +5257,53 @@ fn a_ready_spec_is_ready_not_merged_and_stays_in_progress() {
     assert_eq!(lists["ready_not_merged"].items, 1);
     assert!((lists["ready_not_merged"].oldest_hours - 2.0).abs() < 1e-9);
 }
+
+#[tokio::test]
+async fn set_idea_count_is_exported_as_list_idea() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let _ = gauge_snapshot();
+    let signals = PodSignals::new();
+    let idea = |product: &str| {
+        test_support::gauge_value(
+            "pod.inventory.items",
+            &[("pod.product", product), ("list", "idea")],
+        )
+    };
+    signals.set_idea_count(&product, 3);
+    assert_eq!(idea(&product), Some(3));
+    // A later count replaces the earlier one.
+    signals.set_idea_count(&product, 0);
+    assert_eq!(idea(&product), Some(0));
+}
+
+#[tokio::test]
+async fn a_signals_handle_with_no_pod_stats_drops_every_call() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let _ = gauge_snapshot();
+    let signals = PodSignals::none();
+    signals.set_idea_count(&product, 4);
+    signals.record_idea_opened(&product, "an-idea", 60.0);
+    assert_eq!(
+        test_support::gauge_value("pod.inventory.items", &[("pod.product", product.as_str())]),
+        None
+    );
+    assert_eq!(
+        test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
+        None
+    );
+}
+
+#[test]
+fn record_idea_opened_records_the_phase_idea_to_open() {
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    PodSignals::new().record_idea_opened(&product, "an-idea", 90.0);
+    let series = lead_time_series(&product, "idea_to_open");
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].0["spec.id"], "an-idea");
+    assert_eq!(
+        test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
+        Some(90.0)
+    );
+}

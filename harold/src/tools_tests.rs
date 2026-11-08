@@ -80,6 +80,7 @@ pub(crate) fn no_extras() -> Extras {
         cli_path: "claude".into(),
         grpc_addr: None,
         pod_registry: None,
+        pod_signals: PodSignals::none(),
         watch_counts: Arc::new(tokio::sync::watch::channel(WatchCounts::default()).0),
         factory_flow: Default::default(),
     }
@@ -1197,6 +1198,7 @@ async fn the_question_tool_refuses_to_start_without_typing() {
             tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
         ),
         pod_registry: None,
+        pod_signals: PodSignals::none(),
     })
     .await;
 

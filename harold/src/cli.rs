@@ -5837,6 +5837,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -5922,6 +5923,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -6963,6 +6965,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -7034,6 +7037,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -7617,6 +7621,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -8732,6 +8737,7 @@ mod tests {
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
             ),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -8970,6 +8976,7 @@ mod tests {
             ),
             cli_path: "/usr/bin/true".into(),
             pod_registry: Some(registry),
+            pod_signals: crate::pod_stats::PodSignals::none(),
             shutdown,
         })
         .await
@@ -9021,6 +9028,7 @@ mod tests {
             model_environment: Vec::new(),
             cli_path: "/usr/bin/true".into(),
             pod_registry: None,
+            pod_signals: crate::pod_stats::PodSignals::none(),
             grpc_addr: None,
             watch_counts: std::sync::Arc::new(
                 tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
@@ -10236,6 +10244,7 @@ mod tests {
                 model_environment: Vec::new(),
                 cli_path: "agent".into(),
                 pod_registry: None,
+                pod_signals: crate::pod_stats::PodSignals::none(),
                 grpc_addr: None,
                 watch_counts: std::sync::Arc::new(
                     tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,

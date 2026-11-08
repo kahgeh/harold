@@ -702,6 +702,7 @@ async fn serve_backlog(
         model_environment: Vec::new(),
         cli_path: String::new(),
         pod_registry: None,
+        pod_signals: crate::pod_stats::PodSignals::none(),
         grpc_addr: None,
         watch_counts: std::sync::Arc::new(
             tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,

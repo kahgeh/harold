@@ -940,6 +940,7 @@ async fn start_creates_questions_db_and_serves() {
             tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
         ),
         pod_registry: None,
+        pod_signals: crate::pod_stats::PodSignals::none(),
         shutdown: shutdown_rx,
     })
     .await
@@ -1002,6 +1003,7 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
             tokio::sync::watch::channel(crate::tools::WatchCounts::default()).0,
         ),
         pod_registry: None,
+        pod_signals: crate::pod_stats::PodSignals::none(),
         shutdown: shutdown_rx,
     })
     .await;

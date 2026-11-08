@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::agent::domain::EffectiveAgentState;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
-use crate::pod_stats::{self, PodSnapshot};
+use crate::pod_stats::{self, PodSignals, PodSnapshot};
 use crate::settings::{AgentProviderSettings, FactoryFlowSettings, Settings, WatchSettings};
 use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
@@ -160,6 +160,8 @@ pub(crate) struct ToolContext {
     pub(crate) grpc_addr: Option<std::net::SocketAddr>,
     /// The path of `products.toml`; `None` when no pod registry is set.
     pub(crate) pod_registry: Option<PathBuf>,
+    /// How the backlog tool reports its idea count and phase to pod stats.
+    pub(crate) pod_signals: PodSignals,
     /// Where the watch tool pushes its counts. The host holds one receiver, for the
     /// snapshot publisher. The sender is shared because it is not `Clone`.
     pub(crate) watch_counts: Arc<tokio::sync::watch::Sender<WatchCounts>>,
@@ -178,6 +180,8 @@ pub(crate) struct Extras {
     pub(crate) cli_path: String,
     /// The path of `products.toml`, for the release tool.
     pub(crate) pod_registry: Option<PathBuf>,
+    /// The handle pod stats makes for the backlog tool.
+    pub(crate) pod_signals: PodSignals,
     /// The knowledge tool's launch; `None` unless `[knowledge] vault` is set.
     pub(crate) knowledge: Option<knowledge::Launch>,
     /// Harold's own gRPC address, for `ToolContext::grpc_addr`.
@@ -265,6 +269,7 @@ pub(crate) async fn start(
         model_environment: cfg.activity_summary.environment.0.clone(),
         cli_path: cfg.activity_summary.cli_path.clone(),
         pod_registry: cfg.telemetry.pod_registry_path(),
+        pod_signals: PodSignals::new(),
         knowledge: cfg.knowledge.enabled().then(|| knowledge::Launch {
             settings: cfg.knowledge.clone(),
             machine_name: cfg.machine_name.clone(),
@@ -382,6 +387,7 @@ fn contexts(
         cli_path: extras.cli_path.clone(),
         grpc_addr: extras.grpc_addr,
         pod_registry: extras.pod_registry.clone(),
+        pod_signals: extras.pod_signals,
         watch_counts: Arc::clone(&extras.watch_counts),
         shutdown: shutdown.clone(),
     };

@@ -1938,6 +1938,63 @@ pub(crate) fn first_merged_file(pod: &Path, offset: UtcOffset) -> Option<OffsetD
 }
 
 /// The gauge of the specs in a list of work waiting, and its unit.
+/// The `list` value of the ideas: the backlog items with no spec file.
+const IDEA_LIST: &str = "idea";
+
+/// The idea count of each product, as the backlog tool last reported it.
+static IDEA_COUNTS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
+
+/// What the backlog tool tells pod stats about the ideas. The backlog tool keeps its own
+/// storage and makes no instrument: pod stats owns `pod.inventory.items` and
+/// `pod.spec.lead_time`.
+pub(crate) trait IdeaSignals: Send + Sync {
+    /// Sets the number of backlog items of `product` that have no spec.
+    fn set_idea_count(&self, product: &str, count: u32);
+    /// Records the phase `idea_to_open` of the spec `id`: `wait_s` seconds from the first
+    /// entry of the item in the backlog to the draft time of its spec.
+    fn record_idea_opened(&self, product: &str, id: &str, wait_s: f64);
+}
+
+/// The handle that pod stats gives the backlog tool. It holds no store.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PodSignals {
+    live: bool,
+}
+
+impl PodSignals {
+    /// The handle that reaches the pod instruments.
+    pub(crate) fn new() -> Self {
+        Self { live: true }
+    }
+
+    /// A handle that drops every call, for a tool that runs without pod stats.
+    pub(crate) fn none() -> Self {
+        Self { live: false }
+    }
+}
+
+impl IdeaSignals for PodSignals {
+    fn set_idea_count(&self, product: &str, count: u32) {
+        if self.live {
+            lock(&IDEA_COUNTS).insert(product.to_owned(), count);
+        }
+    }
+
+    fn record_idea_opened(&self, product: &str, id: &str, wait_s: f64) {
+        if !self.live {
+            return;
+        }
+        telemetry::instruments().pod_spec_lead_time.record(
+            wait_s,
+            &[
+                KeyValue::new("pod.product", product.to_owned()),
+                KeyValue::new("phase", "idea_to_open"),
+                KeyValue::new("spec.id", id.to_owned()),
+            ],
+        );
+    }
+}
+
 pub(crate) const INVENTORY_ITEMS: (&str, &str) = ("pod.inventory.items", "{spec}");
 /// The gauge of the age of the oldest spec in a list of work waiting, and its unit.
 pub(crate) const INVENTORY_OLDEST_HOURS: (&str, &str) = ("pod.inventory.oldest_hours", "h");
@@ -3026,6 +3083,15 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                 .with_unit(INVENTORY_ITEMS.1)
                 .with_callback(move |observer| {
                     items(&|value, attributes| observer.observe(value as u64, attributes));
+                    for (product, count) in lock(&IDEA_COUNTS).iter() {
+                        observer.observe(
+                            u64::from(*count),
+                            &[
+                                KeyValue::new("pod.product", product.clone()),
+                                KeyValue::new("list", IDEA_LIST),
+                            ],
+                        );
+                    }
                 })
                 .build(),
             _inventory_oldest_hours: meter

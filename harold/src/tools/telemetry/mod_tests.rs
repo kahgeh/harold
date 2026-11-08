@@ -84,6 +84,7 @@ fn context(
         cli_path: "claude".into(),
         grpc_addr: None,
         pod_registry: None,
+        pod_signals: crate::pod_stats::PodSignals::none(),
         watch_counts: Arc::new(tokio::sync::watch::channel(WatchCounts::default()).0),
         shutdown,
     }
