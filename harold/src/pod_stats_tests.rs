@@ -4873,7 +4873,10 @@ fn draft_time_takes_the_time_of_a_first_heading_that_has_one() {
 fn draft_time_takes_the_birth_time_when_the_first_heading_has_only_a_date() {
     let text = "## 2026-11-02, rev 1 (first)\n\n## 2026-11-03 10:00, rev 2\n";
     let birth = at("2026-11-05T12:00:00Z");
-    assert_eq!(draft_time(Some(text), Some(birth), UtcOffset::UTC), Some(birth));
+    assert_eq!(
+        draft_time(Some(text), Some(birth), UtcOffset::UTC),
+        Some(birth)
+    );
 }
 
 #[test]
@@ -4887,5 +4890,157 @@ fn draft_time_takes_the_birth_time_when_there_is_no_revisions_file() {
 fn draft_time_takes_an_earlier_birth_time() {
     let text = "## 2026-11-02 09:30, rev 1 (first)\n";
     let birth = at("2026-11-01T08:00:00Z");
-    assert_eq!(draft_time(Some(text), Some(birth), UtcOffset::UTC), Some(birth));
+    assert_eq!(
+        draft_time(Some(text), Some(birth), UtcOffset::UTC),
+        Some(birth)
+    );
+}
+
+// --- the reviews file and the three phases ---
+
+const TWO_ROUNDS: &str = "# Reviews: g\n\n\
+sent: 2026-11-08T10:10:00Z sha256:bd85a4c5b901\n\
+verdict: 2026-11-08T10:30:00Z revise\n\
+sent: 2026-11-08T11:00:00Z sha256:5d43735fbe17\n\
+verdict: 2026-11-08T11:20:00Z ok\n";
+
+fn reviewed(text: &str) -> SpecFacts {
+    SpecFacts {
+        reviews: parse_reviews(text),
+        open_at: Some(at("2026-11-08T10:00:00Z")),
+        approved_at: Some(at("2026-11-08T12:00:00Z")),
+        ..spec("g", SpecState::Completed, "2026-11-08T13:00:00Z")
+    }
+}
+
+fn phase_sum(product: &str, phase: &str) -> Option<f64> {
+    test_support::histogram_sum(
+        "pod.spec.lead_time",
+        &[("pod.product", product), ("phase", phase)],
+    )
+}
+
+fn record_reviewed(text: &str) -> String {
+    test_support::install();
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let spec_ref = SpecRef {
+        id: "g".into(),
+        stage: None,
+    };
+    record_lead_time(
+        &product,
+        &spec_ref,
+        &reviewed(text),
+        at("2026-11-08T13:00:00Z"),
+        true,
+    );
+    product
+}
+
+#[test]
+fn two_review_rounds_give_three_phases_that_add_up_to_open_to_approved() {
+    let product = record_reviewed(TWO_ROUNDS);
+    // 10 min + 30 min of writing, 20 + 20 min of review, 40 min of approval.
+    assert_eq!(phase_sum(&product, "spec_writing"), Some(2400.0));
+    assert_eq!(phase_sum(&product, "architect_review"), Some(2400.0));
+    assert_eq!(phase_sum(&product, "approval_wait"), Some(2400.0));
+    assert_eq!(phase_sum(&product, "open_to_approved"), Some(7200.0));
+}
+
+#[test]
+fn a_skipped_spec_gives_architect_review_0_and_the_phases_still_add_up() {
+    let product = record_reviewed("# Reviews: g\n\nskipped: 2026-11-08T10:30:00Z\n");
+    assert_eq!(phase_sum(&product, "spec_writing"), Some(1800.0));
+    assert_eq!(phase_sum(&product, "architect_review"), Some(0.0));
+    assert_eq!(phase_sum(&product, "approval_wait"), Some(5400.0));
+    assert_eq!(phase_sum(&product, "open_to_approved"), Some(7200.0));
+}
+
+#[test]
+fn no_reviews_file_gives_no_new_phase() {
+    test_support::install();
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let facts = SpecFacts {
+        reviews: None,
+        ..reviewed(TWO_ROUNDS)
+    };
+    let spec_ref = SpecRef {
+        id: "g".into(),
+        stage: None,
+    };
+    record_lead_time(
+        &product,
+        &spec_ref,
+        &facts,
+        at("2026-11-08T13:00:00Z"),
+        true,
+    );
+    for phase in ["spec_writing", "architect_review", "approval_wait"] {
+        assert_eq!(lead_time_series(&product, phase), Vec::new(), "{phase}");
+    }
+    assert_eq!(phase_sum(&product, "open_to_approved"), Some(7200.0));
+}
+
+#[test]
+fn a_draft_time_after_the_first_line_gives_no_review_phase() {
+    // The first line is before the open time: a phase would be negative.
+    let product = record_reviewed("# Reviews: g\n\nskipped: 2026-11-08T09:00:00Z\n");
+    for phase in ["spec_writing", "architect_review", "approval_wait"] {
+        assert_eq!(lead_time_series(&product, phase), Vec::new(), "{phase}");
+    }
+}
+
+#[test]
+fn a_reviews_file_with_a_line_out_of_order_does_not_parse() {
+    for text in [
+        "# Reviews: g\n\nverdict: 2026-11-08T10:30:00Z ok\n",
+        "sent: 2026-11-08T10:10:00Z sha256:aa\nsent: 2026-11-08T10:20:00Z sha256:bb\n",
+        "sent: not-a-time sha256:aa\n",
+        "verdict: 2026-11-08T10:30:00Z maybe\n",
+        "# Reviews: g\n",
+        "other: 2026-11-08T10:30:00Z\n",
+    ] {
+        assert_eq!(parse_reviews(text), None, "{text}");
+    }
+}
+
+#[test]
+fn a_reviews_file_ignores_a_blank_line_and_reads_any_offset() {
+    let lines = parse_reviews(
+        "# Reviews: g\n\nsent: 2026-11-08T21:10:00+11:00 sha256:aa\n\nverdict: 2026-11-08T21:30:00+11:00 ok\n\n",
+    )
+    .unwrap();
+    assert_eq!(
+        lines,
+        [
+            ReviewLine::Sent(at("2026-11-08T10:10:00Z")),
+            ReviewLine::Verdict(at("2026-11-08T10:30:00Z"), true),
+        ]
+    );
+}
+
+#[test]
+fn read_specs_reads_the_reviews_file_and_logs_a_bad_one_once() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    for id in ["ok", "bad", "none"] {
+        write(&dir.join(format!("specs/{id}.md")), "# Spec\n");
+    }
+    write(&dir.join("reviews/ok.md"), TWO_ROUNDS);
+    write(
+        &dir.join("reviews/bad.md"),
+        "verdict: 2026-11-08T10:30:00Z ok\n",
+    );
+
+    let read = read_files(&dir);
+    let specs = by_id(read.specs);
+
+    assert_eq!(specs["ok"].reviews.as_ref().map(Vec::len), Some(4));
+    assert_eq!(specs["bad"].reviews, None);
+    assert_eq!(specs["none"].reviews, None);
+    assert_eq!(read.notices.len(), 1, "{:?}", read.notices);
+    assert!(matches!(
+        &read.notices[0],
+        Notice::Unreadable { id, file, .. } if id == "bad" && file == "reviews/bad.md"
+    ));
 }

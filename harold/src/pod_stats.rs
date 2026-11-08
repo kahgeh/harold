@@ -870,6 +870,8 @@ pub(crate) struct SpecFacts {
     /// False when `approvals/<id>.md` names (`spec-sha256:`) another text than the spec
     /// has now. True when it names the current text or has no such line.
     pub approval_current: bool,
+    /// The lines of `reviews/<id>.md`. None when the spec has no readable reviews file.
+    pub reviews: Option<Vec<ReviewLine>>,
 }
 
 impl Default for SpecFacts {
@@ -899,6 +901,7 @@ impl Default for SpecFacts {
             evidence_missing: None,
             awaiting: false,
             approval_current: true,
+            reviews: None,
         }
     }
 }
@@ -1130,6 +1133,16 @@ fn read_pod_file<T>(
     id: &str,
     parse: impl Fn(&HashMap<&str, &str>) -> Option<T>,
 ) -> PodFile<T> {
+    read_pod_text(pod, folder, id, |text| parse(&key_values(text)))
+}
+
+/// Like `read_pod_file`, for a file whose keys repeat, so `parse` reads the whole text.
+fn read_pod_text<T>(
+    pod: &Path,
+    folder: &str,
+    id: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> PodFile<T> {
     let name = format!("{folder}/{id}.md");
     let path = pod.join(&name);
     if !path.exists() {
@@ -1145,10 +1158,96 @@ fn read_pod_file<T>(
     let Some(text) = read_text(&path) else {
         return bad(String::new());
     };
-    match parse(&key_values(&text)) {
+    match parse(&text) {
         Some(value) => PodFile::Read(value),
         None => bad(text),
     }
+}
+
+/// One line of `reviews/<id>.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewLine {
+    /// `sent:` the SPEC line went to the architect.
+    Sent(OffsetDateTime),
+    /// `verdict:` the answer came back: true for `ok`, false for `revise`.
+    Verdict(OffsetDateTime, bool),
+    /// `skipped:` the chief approved the spec with no architect review.
+    Skipped(OffsetDateTime),
+}
+
+impl ReviewLine {
+    pub(crate) fn at(self) -> OffsetDateTime {
+        match self {
+            Self::Sent(at) | Self::Verdict(at, _) | Self::Skipped(at) => at,
+        }
+    }
+}
+
+/// Reads `reviews/<id>.md`: an optional `# ` title, then one line each of
+/// `sent: <time> sha256:<hex>`, `verdict: <time> ok|revise` and `skipped: <time>`. A blank
+/// line is skipped. None when a line does not parse, when a `verdict:` does not follow a
+/// `sent:`, when a `sent:` or `skipped:` follows a `sent:` with no verdict, or when the file
+/// has no line.
+pub(crate) fn parse_reviews(text: &str) -> Option<Vec<ReviewLine>> {
+    let mut lines = Vec::new();
+    let mut in_review = false;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, rest) = line.split_once(':')?;
+        let mut words = rest.split_whitespace();
+        let at = parse_time(words.next()?)?;
+        let parsed = match (key, in_review) {
+            ("sent", false) => {
+                words.next()?.strip_prefix("sha256:")?;
+                in_review = true;
+                ReviewLine::Sent(at)
+            }
+            ("verdict", true) => {
+                let ok = match words.next()? {
+                    "ok" => true,
+                    "revise" => false,
+                    _ => return None,
+                };
+                in_review = false;
+                ReviewLine::Verdict(at, ok)
+            }
+            ("skipped", false) => ReviewLine::Skipped(at),
+            _ => return None,
+        };
+        lines.push(parsed);
+    }
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// The three waits of a spec with a reviews file, in seconds, as `(phase, seconds)`:
+/// `spec_writing`, `architect_review` and `approval_wait`. They add up to the time from
+/// `open` to `approved`. None when a wait is negative or the last line is a `sent:`.
+pub(crate) fn review_phases(
+    open: OffsetDateTime,
+    approved: OffsetDateTime,
+    lines: &[ReviewLine],
+) -> Option<[(&'static str, f64); 3]> {
+    let (mut writing, mut review) = (0.0, 0.0);
+    let (mut cursor, mut sent_at) = (open, None);
+    for line in lines {
+        let at = line.at();
+        match line {
+            ReviewLine::Sent(_) | ReviewLine::Skipped(_) => {
+                writing += (at - cursor).as_seconds_f64();
+                sent_at = matches!(line, ReviewLine::Sent(_)).then_some(at);
+            }
+            ReviewLine::Verdict(..) => review += (at - sent_at.take()?).as_seconds_f64(),
+        }
+        cursor = at;
+    }
+    let waiting = (approved - cursor).as_seconds_f64();
+    (sent_at.is_none() && writing >= 0.0 && review >= 0.0 && waiting >= 0.0).then_some([
+        ("spec_writing", writing),
+        ("architect_review", review),
+        ("approval_wait", waiting),
+    ])
 }
 
 /// The reasons a withdrawn file may give.
@@ -1356,7 +1455,9 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         read_pod_file(pod, "confirmed", id, parse_confirmed).split();
     let (evidence_file, evidence_notice) =
         read_pod_file(pod, "evidence", id, parse_evidence_missing).split();
+    let (reviews_file, reviews_notice) = read_pod_text(pod, "reviews", id, parse_reviews).split();
     let mut notices: Vec<Notice> = [
+        reviews_notice,
         withdrawn_notice,
         started_notice,
         merged_notice,
@@ -1465,6 +1566,7 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         evidence_missing: evidence_file,
         awaiting,
         approval_current,
+        reviews: reviews_file,
     };
     Some((facts, notices))
 }
@@ -1730,11 +1832,21 @@ fn record_lead_time(
             Some(completed_at),
         ),
     ];
-    for (phase, wanted, from, to) in phases {
-        let (true, Some(from), Some(to)) = (wanted, from, to) else {
-            continue;
-        };
-        let seconds = (to - from).as_seconds_f64();
+    let mut waits: Vec<(&str, f64)> = phases
+        .into_iter()
+        .filter_map(|(phase, wanted, from, to)| {
+            let (true, Some(from), Some(to)) = (wanted, from, to) else {
+                return None;
+            };
+            Some((phase, (to - from).as_seconds_f64()))
+        })
+        .collect();
+    if let (true, Some(open), Some(approved), Some(lines)) =
+        (first, facts.open_at, facts.approved_at, &facts.reviews)
+    {
+        waits.extend(review_phases(open, approved, lines).into_iter().flatten());
+    }
+    for (phase, seconds) in waits {
         if seconds < 0.0 {
             continue;
         }
