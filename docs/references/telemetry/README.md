@@ -512,6 +512,7 @@ These fields were added so that the log lines of the collector work show their i
 | `chars` | A count of characters, never the text. On `sending iMessage` and `summary question dropped` |
 | `matched_share` | A share from 0 to 100, never text. On `summary question dropped` |
 | `fell_back` | True when the check left no sentence and Harold used the whole reply. On `summary question dropped` |
+| `lag_s` | Whole seconds from the tag time of a release to its first start on this machine, never text. On `release installed` |
 | `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
 | `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |
 | `add_dirs` | A count of the folders that a watch skill names, never the paths. On `watch run finished` and `watch run failed` |
