@@ -6788,8 +6788,10 @@ fn the_attention_rate_gauge_carries_the_rate_and_the_currency() {
 #[test]
 fn the_price_gauges_carry_each_list_price_and_the_exchange_rate() {
     test_support::install();
-    let mut prices = crate::settings::PricesSettings::default();
-    prices.exchange_rate_usd_to_aud = 1.5;
+    let mut prices = crate::settings::PricesSettings {
+        exchange_rate_usd_to_aud: 1.5,
+        ..Default::default()
+    };
     prices.list.insert(
         "claude-test-price".into(),
         crate::settings::ModelPrices {

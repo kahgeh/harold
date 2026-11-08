@@ -129,6 +129,15 @@ The section `[attention]` holds what the time of the user is worth. The HyperDX 
 
 Override both in `config/local.toml`, then run `haroldctl restart`. A rate of 0 or below, or a currency that is not three capital letters, stops the start. Harold sends the rate as the gauge `harold.attention.hourly_rate` at each export. The cost on the card changes after the next export and the next reload of the ClickHouse dictionary `otel.harold_settings`. The recorded answer seconds do not change.
 
+### The prices settings
+
+The section `[prices]` holds the list prices and the exchange rate that the HyperDX Inventory cost card uses to show the tokens in Australian dollars.
+
+- `exchange_rate_usd_to_aud`: the number of AUD for 1 USD. A number above 0. The default is a cross rate of the ECB euro reference rates, with its date in `config/default.toml`.
+- `[prices.list.<model>]`: the public Anthropic API list price of one model, in USD per million tokens. It has four keys: `input`, `output`, `cache_write` and `cache_read`. Each is a number of 0 or more. The default holds `claude-opus-5-5` and `claude-sonnet-5-5`, with the page address and the date of the prices in `config/default.toml`.
+
+Override a value in `config/local.toml`, then run `haroldctl restart`. For a new model, add a `[prices.list.<model>]` section with the four keys. A rate of 0 or below, or a price below 0, stops the start. Harold sends the values as the gauges `harold.list_price.per_mtok` and `harold.exchange_rate.usd_to_aud` at each export. The card changes after the next export and the next reload of the ClickHouse dictionary `otel.harold_settings`. A change prices the whole stock again, the stock of 7 days before too.
+
 ## The store
 
 Harold keeps everything it records in one folder: `<prefix>/harold/data/store/` for the installed service, and `[store] path` for a directly run binary. The folder holds four entries:
