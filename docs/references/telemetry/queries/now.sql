@@ -1,71 +1,35 @@
--- Note: None. The card shows the agents that work now, of all agents.
+-- Note: None. The row shows the agents that work now, of all agents, and the specs in progress now.
 -- Waits for: nothing
--- Agents now: the newest export of each gauge. A series that Harold stopped to export does not count.
--- This week reads the newest export of the last 7 days. Last week reads the newest export of the 7 days before them.
--- The rows "<product>: working" and "<product>: all" read pod.agents, summed over the roles. "all" counts every state.
--- The rows "all Harold agents: working" and "all Harold agents: all" read harold.agents, summed over the providers and the Rex hosts. They have no product.
--- The product filter applies to the pod.agents rows only. A week with no export gives no number for that week.
--- Columns: series, this_week, last_week.
+-- Agents now: the newest export of the gauge harold.agents of the last 7 days, summed over the providers and the Rex hosts. "all" counts every state.
+-- A series that Harold stopped to export does not count. working is the sum of the state working.
+-- Specs in progress now: the newest export of the gauge pod.inventory.items of the last 7 days, the attribute list = in_progress, summed over the products.
+-- An in-progress spec has a branch and no parked handoff file. Parked and not clear specs are not counted.
+-- A source with no export in the last 7 days gives NULL, and its tile shows HyperDX's empty state. With no source at all there is no row.
+-- Columns: working, all, in_progress.
 SELECT
-    concat(product, ': ', kind) AS series,
-    if(countIf(wk = 'this') = 0, NULL, sumIf(v, wk = 'this')) AS this_week,
-    if(countIf(wk = 'last') = 0, NULL, sumIf(v, wk = 'last')) AS last_week
+    agents.working AS working,
+    agents.all_agents AS `all`,
+    items.in_progress AS in_progress
 FROM (
     SELECT
-        'this' AS wk,
-        if(Attributes['pod.product'] = '', 'no product', Attributes['pod.product']) AS product,
-        Attributes['state'] AS state,
-        sum(Value) AS v
-    FROM otel.otel_metrics_gauge
-    WHERE MetricName = 'pod.agents'
-      AND TimeUnix = (
-          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge
-          WHERE MetricName = 'pod.agents' AND TimeUnix > now() - INTERVAL 7 DAY
-      )
-      AND $__filters
-    GROUP BY product, state
-    UNION ALL
-    SELECT
-        'this' AS wk,
-        'all Harold agents' AS product,
-        Attributes['state'] AS state,
-        sum(Value) AS v
+        if(count() = 0, NULL, round(sumIf(Value, Attributes['state'] = 'working'))) AS working,
+        if(count() = 0, NULL, round(sum(Value))) AS all_agents
     FROM otel.otel_metrics_gauge
     WHERE MetricName = 'harold.agents'
       AND TimeUnix = (
           SELECT max(TimeUnix) FROM otel.otel_metrics_gauge
           WHERE MetricName = 'harold.agents' AND TimeUnix > now() - INTERVAL 7 DAY
       )
-    GROUP BY product, state
-    UNION ALL
+) AS agents
+CROSS JOIN (
     SELECT
-        'last' AS wk,
-        if(Attributes['pod.product'] = '', 'no product', Attributes['pod.product']) AS product,
-        Attributes['state'] AS state,
-        sum(Value) AS v
+        if(count() = 0, NULL, round(sumIf(Value, Attributes['list'] = 'in_progress'))) AS in_progress
     FROM otel.otel_metrics_gauge
-    WHERE MetricName = 'pod.agents'
+    WHERE MetricName = 'pod.inventory.items'
       AND TimeUnix = (
           SELECT max(TimeUnix) FROM otel.otel_metrics_gauge
-          WHERE MetricName = 'pod.agents' AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY
+          WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY
       )
-      AND $__filters
-    GROUP BY product, state
-    UNION ALL
-    SELECT
-        'last' AS wk,
-        'all Harold agents' AS product,
-        Attributes['state'] AS state,
-        sum(Value) AS v
-    FROM otel.otel_metrics_gauge
-    WHERE MetricName = 'harold.agents'
-      AND TimeUnix = (
-          SELECT max(TimeUnix) FROM otel.otel_metrics_gauge
-          WHERE MetricName = 'harold.agents' AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY
-      )
-    GROUP BY product, state
-)
-ARRAY JOIN if(state = 'working', ['working', 'all'], ['all']) AS kind
-GROUP BY series
-HAVING isNotNull(this_week) OR isNotNull(last_week)
-ORDER BY series
+) AS items
+WHERE working IS NOT NULL OR in_progress IS NOT NULL
+LIMIT 1

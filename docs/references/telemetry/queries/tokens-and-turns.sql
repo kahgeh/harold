@@ -1,217 +1,51 @@
--- Note: A build worker on an Opus model is the first thing to check, because build workers belong on Sonnet. The role `other` above a fifth of the tokens means turns do not reach a pod, and the tokens of subagents are not counted.
+-- Note: A build worker on an Opus model is the first thing to check, because build workers belong on Sonnet. The tokens of subagents are not counted.
 -- Waits for: nothing
--- Tokens and turns: the rise of the counters harold.turn.tokens (all four kinds), harold.turns, harold.turn.tokens.by_spec and pod.merges.
+-- Tokens and turns is the flow: all tokens spent in the 7 days, on all work. Inventory cost is the stock.
+-- The tokens are the rise of the counter harold.turn.tokens (all four kinds, models other than none: the seeded start points are left out), in M with one decimal.
+-- The turns are the rise of the counter harold.turns.
 -- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
 -- previous point of its series. A first point, or a point below the previous one (Harold restarted), rises by its whole value.
 -- The query reads the points of 21 days: 14 days of two weeks and 7 days before them for the previous point.
--- A week with no point for a source gives no number for that week, never a 0. Tokens with the model none (the seeded start points) are left out.
--- The rows "share of tokens, <model>" are percentages of all tokens. The row "tokens, build worker on Opus" counts the tokens of the role build_worker on a model whose name has opus.
--- The row "share of tokens, role other" is the percentage of the tokens with the role other.
--- The rows "tokens per merged spec" and "turns per merged spec" divide by the merged specs. A week with no merged spec gives no number.
--- The rows "tokens per merged spec" use harold.turn.tokens.by_spec and pod.merges. They ignore the product filter, because by_spec has no product.
--- The product filter applies to the other rows.
--- Columns: series, this_week, last_week.
-WITH r AS (
-    SELECT
-        'tokens' AS src,
-        Attributes['model'] AS model,
-        Attributes['role'] AS role,
-        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
-        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
-    FROM (
-        SELECT
-            Attributes,
-            TimeUnix,
-            if(Value >= before, Value - before, Value) AS rise
-        FROM (
-            SELECT
-                Attributes,
-                TimeUnix,
-                Value,
-                lagInFrame(Value, 1, toFloat64(0)) OVER (
-                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
-                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
-            FROM otel.otel_metrics_sum
-            WHERE MetricName = 'harold.turn.tokens'
-              AND TimeUnix > now() - INTERVAL 21 DAY
-              AND Attributes['model'] != 'none'
-              AND $__filters
-        )
-    )
-    GROUP BY model, role
-    UNION ALL
-    SELECT
-        'turns' AS src,
-        '' AS model,
-        '' AS role,
-        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
-        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
-    FROM (
-        SELECT
-            Attributes,
-            TimeUnix,
-            if(Value >= before, Value - before, Value) AS rise
-        FROM (
-            SELECT
-                Attributes,
-                TimeUnix,
-                Value,
-                lagInFrame(Value, 1, toFloat64(0)) OVER (
-                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
-                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
-            FROM otel.otel_metrics_sum
-            WHERE MetricName = 'harold.turns'
-              AND TimeUnix > now() - INTERVAL 21 DAY
-              AND $__filters
-        )
-    )
-    GROUP BY model, role
-    UNION ALL
-    SELECT
-        'merges' AS src,
-        '' AS model,
-        '' AS role,
-        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
-        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
-    FROM (
-        SELECT
-            Attributes,
-            TimeUnix,
-            if(Value >= before, Value - before, Value) AS rise
-        FROM (
-            SELECT
-                Attributes,
-                TimeUnix,
-                Value,
-                lagInFrame(Value, 1, toFloat64(0)) OVER (
-                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
-                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
-            FROM otel.otel_metrics_sum
-            WHERE MetricName = 'pod.merges'
-              AND TimeUnix > now() - INTERVAL 21 DAY
-              AND $__filters
-        )
-    )
-    GROUP BY model, role
-    UNION ALL
-    SELECT
-        'merges_all' AS src,
-        '' AS model,
-        '' AS role,
-        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
-        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
-    FROM (
-        SELECT
-            Attributes,
-            TimeUnix,
-            if(Value >= before, Value - before, Value) AS rise
-        FROM (
-            SELECT
-                Attributes,
-                TimeUnix,
-                Value,
-                lagInFrame(Value, 1, toFloat64(0)) OVER (
-                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
-                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
-            FROM otel.otel_metrics_sum
-            WHERE MetricName = 'pod.merges'
-              AND TimeUnix > now() - INTERVAL 21 DAY
-        )
-    )
-    GROUP BY model, role
-    UNION ALL
-    SELECT
-        'by_spec' AS src,
-        '' AS model,
-        '' AS role,
-        if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS this_rise,
-        if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL, sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS last_rise
-    FROM (
-        SELECT
-            Attributes,
-            TimeUnix,
-            if(Value >= before, Value - before, Value) AS rise
-        FROM (
-            SELECT
-                Attributes,
-                TimeUnix,
-                Value,
-                lagInFrame(Value, 1, toFloat64(0)) OVER (
-                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
-                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
-            FROM otel.otel_metrics_sum
-            WHERE MetricName = 'harold.turn.tokens.by_spec'
-              AND TimeUnix > now() - INTERVAL 21 DAY
-        )
-    )
-    GROUP BY model, role
-)
-SELECT series, this_week, last_week
+-- A source with no point in the 7 days gives no number (the column is NULL, and its tile shows HyperDX's empty state). It never gives 0.
+-- A change column is empty when the 7 days before have no number.
+-- overflow is 1 when harold.turn.tokens.by_spec has its overflow series (otel.metric.overflow = true) with a point in the 7 days, and 0 otherwise.
+-- With an overflow series the per spec tokens are a lower bound.
+-- Columns: tokens_m, tokens_m_change_pct, turns, turns_change_pct, overflow.
+SELECT
+    if(tokens_n = 0, NULL, round(tokens_now / 1000000, 1)) AS tokens_m,
+    round((tokens_now - tokens_before) / nullIf(tokens_before, 0) * 100) AS tokens_m_change_pct,
+    if(turns_n = 0, NULL, round(turns_now)) AS turns,
+    round((turns_now - turns_before) / nullIf(turns_before, 0) * 100) AS turns_change_pct,
+    toUInt8(overflow_n > 0) AS overflow
 FROM (
     SELECT
-        'tokens' AS series,
-        toFloat64(sum(this_rise)) AS this_week,
-        toFloat64(sum(last_rise)) AS last_week
-    FROM r
-    WHERE src = 'tokens'
-    GROUP BY src
-    UNION ALL
-    SELECT
-        concat('share of tokens, ', model) AS series,
-        100 * sum(this_rise) / nullIf(sum(sum(this_rise)) OVER (), 0) AS this_week,
-        100 * sum(last_rise) / nullIf(sum(sum(last_rise)) OVER (), 0) AS last_week
-    FROM r
-    WHERE src = 'tokens'
-    GROUP BY model
-    UNION ALL
-    SELECT
-        'tokens, build worker on Opus' AS series,
-        if(isNull(sum(this_rise)), NULL, toFloat64(ifNull(sumIf(this_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0), 0))) AS this_week,
-        if(isNull(sum(last_rise)), NULL, toFloat64(ifNull(sumIf(last_rise, role = 'build_worker' AND positionCaseInsensitive(model, 'opus') > 0), 0))) AS last_week
-    FROM r
-    WHERE src = 'tokens'
-    GROUP BY src
-    UNION ALL
-    SELECT
-        'share of tokens, role other' AS series,
-        100 * sumIf(this_rise, role = 'other') / nullIf(sum(this_rise), 0) AS this_week,
-        100 * sumIf(last_rise, role = 'other') / nullIf(sum(last_rise), 0) AS last_week
-    FROM r
-    WHERE src = 'tokens'
-    GROUP BY src
-    UNION ALL
-    SELECT
-        'turns' AS series,
-        toFloat64(sum(this_rise)) AS this_week,
-        toFloat64(sum(last_rise)) AS last_week
-    FROM r
-    WHERE src = 'turns'
-    GROUP BY src
-    UNION ALL
-    SELECT
-        'merged specs' AS series,
-        toFloat64(sum(this_rise)) AS this_week,
-        toFloat64(sum(last_rise)) AS last_week
-    FROM r
-    WHERE src = 'merges'
-    GROUP BY src
-    UNION ALL
-    SELECT
-        'tokens per merged spec' AS series,
-        sumIf(this_rise, src = 'by_spec') / nullIf(sumIf(this_rise, src = 'merges_all'), 0) AS this_week,
-        sumIf(last_rise, src = 'by_spec') / nullIf(sumIf(last_rise, src = 'merges_all'), 0) AS last_week
-    FROM r
-    WHERE src IN ('by_spec', 'merges_all')
-    GROUP BY 1
-    UNION ALL
-    SELECT
-        'turns per merged spec' AS series,
-        sumIf(this_rise, src = 'turns') / nullIf(sumIf(this_rise, src = 'merges'), 0) AS this_week,
-        sumIf(last_rise, src = 'turns') / nullIf(sumIf(last_rise, src = 'merges'), 0) AS last_week
-    FROM r
-    WHERE src IN ('turns', 'merges')
-    GROUP BY 1
+        sumIf(rise, MetricName = 'harold.turn.tokens' AND Attributes['model'] != 'none' AND TimeUnix > now() - INTERVAL 7 DAY) AS tokens_now,
+        sumIf(rise, MetricName = 'harold.turn.tokens' AND Attributes['model'] != 'none' AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS tokens_before,
+        countIf(MetricName = 'harold.turn.tokens' AND Attributes['model'] != 'none' AND TimeUnix > now() - INTERVAL 7 DAY) AS tokens_n,
+        sumIf(rise, MetricName = 'harold.turns' AND TimeUnix > now() - INTERVAL 7 DAY) AS turns_now,
+        sumIf(rise, MetricName = 'harold.turns' AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS turns_before,
+        countIf(MetricName = 'harold.turns' AND TimeUnix > now() - INTERVAL 7 DAY) AS turns_n,
+        countIf(MetricName = 'harold.turn.tokens.by_spec' AND Attributes['otel.metric.overflow'] = 'true' AND TimeUnix > now() - INTERVAL 7 DAY) AS overflow_n
+    FROM (
+        SELECT
+            MetricName,
+            Attributes,
+            TimeUnix,
+            if(Value >= before, Value - before, Value) AS rise
+        FROM (
+            SELECT
+                MetricName,
+                Attributes,
+                TimeUnix,
+                Value,
+                lagInFrame(Value, 1, toFloat64(0)) OVER (
+                    PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+                    ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+            FROM otel.otel_metrics_sum
+            WHERE MetricName IN ('harold.turn.tokens', 'harold.turns', 'harold.turn.tokens.by_spec')
+              AND TimeUnix > now() - INTERVAL 21 DAY
+        )
+    )
 )
-GROUP BY series, this_week, last_week
-HAVING isNotNull(this_week) OR isNotNull(last_week)
-ORDER BY series
+WHERE tokens_n > 0 OR turns_n > 0
+LIMIT 1
