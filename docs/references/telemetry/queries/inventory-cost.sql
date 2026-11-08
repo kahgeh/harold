@@ -1,5 +1,5 @@
 -- Note: The stock is the tokens already spent on specs that have not reached you, at any time. Tokens and turns is the flow of the 7 days.
--- Waits for: user-attention-signals
+-- Waits for: nothing
 -- Inventory cost, the stock: the tokens spent so far (harold.turn.tokens.by_spec, all kinds) on the specs that are approved or in progress now,
 -- in M with one decimal. The spec.id of a series joins the newest state of the spec in pod.spec.words (the points of the last 37 days).
 -- The change compares the stock now with the stock 7 days ago: the tokens spent up to then on the specs that were approved or in progress then.
@@ -9,7 +9,7 @@
 -- overflow is 1 when harold.turn.tokens.by_spec has its overflow series (otel.metric.overflow = true) with a point in the 7 days, and 0 otherwise.
 -- Inventory cost, your attention: the answer hours (the sum of agent.attr.seconds of the chief.attention_answered lines, divided by 3600),
 -- the cost (the hours times the rate of the ClickHouse dictionary otel.harold_settings, read with dictGetOrNull), the count of chief.attention_request
--- lines and their median agent.attr.words. The events come from user-attention-signals. Until it merges there is no line, and the attention columns are NULL.
+-- lines and their median agent.attr.words. The chief records the events (the README section "The attention part's producer"). The attention columns are NULL until the first recorded answer, and the rate shows after the release that brings the gauge.
 -- With no rate in the dictionary, attention_cost and currency are NULL: the cost tile shows HyperDX's empty state, and the card says "no rate set".
 -- A column with no number is NULL, and its tile shows HyperDX's empty state. It is never 0. A change column is empty when the 7 days before have no number.
 -- Columns: tokens_m, tokens_m_change_pct, attention_hours, attention_cost, attention_cost_change_pct, currency, attention_requests, words_per_request, overflow.
