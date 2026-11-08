@@ -219,15 +219,18 @@ GROUP BY 1
 | `awaiting_approval` | It is open and its first line is `Waiting for your approval.` | the time it opened | pod stats, each poll |
 | `approved_not_started` | It is approved, not started, on or after the cutoff | the approval | pod stats, each poll |
 | `in_progress` | It is in progress | the time it started | pod stats, each poll |
+| `in_spec_writing` | It is in `awaiting_approval` and the last line of `reviews/<id>.md` is `verdict: … revise` | the time it opened | pod stats, each poll |
+| `in_architect_review` | It is in `awaiting_approval` and the last line of `reviews/<id>.md` is `sent:` | the time it opened | pod stats, each poll |
 | `merged_not_released` | It is merged and not in the newest release | the merge | the release tool, every 10 minutes |
 
 The release tool is the only reader of the release tag. It publishes its own series on instruments with the same three names and units, which pod stats exports as constants. A paused product, or a product with no git answer, has no `merged_not_released` series. A product that leaves the registry ends its series. A failed read keeps the last numbers. The pods port stays read-only, and pod stats never calls the release tool.
 
 **Steps** (`pod.spec.lead_time`) are recorded once per spec, when it first becomes `completed` from its `merged/<id>.md`. The `phase` attribute is:
 
-- `open_to_approved`: from the creation of `specs/<id>.md` to the creation of `approvals/<id>.md`;
+- `open_to_approved`: from the draft time of the spec to the creation of `approvals/<id>.md`;
 - `approved_to_started`: from the approval to `started:`;
 - `started_to_completed`: from `started:` to `merged:`;
+- `spec_writing`, `architect_review` and `approval_wait`: recorded with `open_to_approved`, for a spec that has `reviews/<id>.md`. `spec_writing` runs from the draft time to the first `sent:` or `skipped:` line, plus each time from a `verdict:` line to the next `sent:` or `skipped:` line. `architect_review` adds each time from a `sent:` line to its `verdict:` line (0 for a spec with only `skipped:`). `approval_wait` runs from the last line to the approval. The three add up to `open_to_approved`. Pod stats records none of them when a wait is negative or the last line is `sent:`. The draft time is the time of the first `## ` heading of `specs/<id>.revisions.md` when that heading has a clock time, else the creation time of `specs/<id>.md`; the earlier one wins. A reviews file that does not parse logs `pod file unreadable` once;
 - `merged_to_released`: from `merged:` to the time of the first release tag that holds the spec's merge commit. The release tool records it, not pod stats. See [The release-tips file](#the-release-tips-file).
 
 A step with a missing or negative time is skipped. Harold records a spec's steps in one of two cases:
@@ -424,10 +427,10 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
 | `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), `spec.kind` (`feature`, `fix`, `other`, `unkinded`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
 | `pod.slots.idle_with_work` | gauge, `{slot}` | `pod.product` |
-| `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`) |
+| `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`, `in_spec_writing`, `in_architect_review`) |
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |
 | `pod.inventory.item_days` | gauge, `d` | `pod.product`, `list` |
-| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`open_to_approved`, `approved_to_started`, `started_to_completed`, `merged_to_released`, `spec_writing`, `architect_review`, `approval_wait`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 | `pod.fix.confirmed_at` | gauge, `s` (Unix seconds) | `pod.product`, `spec.id` |
 | `pod.evidence.missing` | gauge, `{spec}` | `pod.product`, `spec.id`. 1 when the state of `evidence/<id>.md` is `missing`, else 0. No point for a spec with no evidence file |
 | `pod.pods` | gauge, `{pod}` | `pod.product`, `state` (`running`, `stopped`) |
