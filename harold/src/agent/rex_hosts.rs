@@ -314,7 +314,7 @@ impl RexHostInventory {
         })
     }
 
-    /// The Rex call that failed in the last scan. `None` when no call failed.
+    /// The Rex call that failed the last scan. `None` when the scan worked.
     pub(crate) fn failed_operation(&self) -> Option<&'static str> {
         *self
             .failed_operation
@@ -369,10 +369,11 @@ impl RexHostInventory {
             && (answered.is_empty() || stop_requested())
         {
             // A reply that does not parse is a failed `process` call too.
-            self.failed_operation
+            *self
+                .failed_operation
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get_or_insert(MultiplexerOperation::Process.as_str());
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some(MultiplexerOperation::Process.as_str());
             return Err(error);
         }
         let mut hits = Vec::new();
@@ -483,6 +484,11 @@ impl RexHostInventory {
             }
         }
         *seen = next;
+        // The scan worked, so no call failed it.
+        *self
+            .failed_operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         Ok(agents)
     }
 
@@ -542,12 +548,12 @@ impl RexHostInventory {
 }
 
 /// The name of a Rex call that can fail a scan, for the `operation` field of the log line.
+/// A failed `status` call does not fail a scan, so it has no name.
 fn failed_operation_name(operation: MultiplexerOperation) -> Option<&'static str> {
     match operation {
         MultiplexerOperation::List
         | MultiplexerOperation::Layout
-        | MultiplexerOperation::Process
-        | MultiplexerOperation::Status => Some(operation.as_str()),
+        | MultiplexerOperation::Process => Some(operation.as_str()),
         _ => None,
     }
 }

@@ -846,3 +846,29 @@ fn the_failed_operation_names_the_first_failing_call() {
     assert!(inventory.scan().outcome.is_err());
     assert_eq!(inventory.failed_operation(), Some("list"));
 }
+
+#[test]
+fn a_failed_status_call_does_not_name_an_operation_for_the_scan() {
+    let fake = Fake::new("gap-status-only");
+    let inventory = fake.inventory("omarchy", None, clock(1));
+    std::fs::remove_file(fake.dir.join("status-b1.json")).unwrap();
+    let scan = inventory.scan();
+    assert_eq!(scan.outcome, Ok(()));
+    assert_eq!(scan.agents[0].state, HostAgentState::Unknown);
+    assert_eq!(inventory.failed_operation(), None);
+}
+
+#[test]
+fn a_failed_status_call_in_an_earlier_scan_does_not_hide_a_failed_process_call() {
+    let fake = Fake::new("gap-status-then-process");
+    let inventory = fake.inventory("omarchy", None, clock(1));
+    let status = std::fs::read_to_string(fake.dir.join("status-b1.json")).unwrap();
+    std::fs::remove_file(fake.dir.join("status-b1.json")).unwrap();
+    assert_eq!(inventory.scan().outcome, Ok(()));
+    fake.put("status-b1.json", &status);
+    // Now every `process` call fails, as a call, not as a reply that does not parse.
+    std::fs::remove_file(fake.dir.join("process-b1.json")).unwrap();
+    std::fs::remove_file(fake.dir.join("process-b2.json")).unwrap();
+    assert!(inventory.scan().outcome.is_err());
+    assert_eq!(inventory.failed_operation(), Some("process"));
+}
