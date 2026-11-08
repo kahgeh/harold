@@ -1832,6 +1832,11 @@ fn record_lead_time(
     completed_at: OffsetDateTime,
     first: bool,
 ) {
+    // A ready time outside the build gives neither ready phase, so the two always add up.
+    let ready_at = facts
+        .started_at
+        .zip(facts.ready_at)
+        .and_then(|(started, ready)| (started <= ready && ready <= completed_at).then_some(ready));
     let phases = [
         ("open_to_approved", first, facts.open_at, facts.approved_at),
         (
@@ -1848,13 +1853,8 @@ fn record_lead_time(
         ),
         // The build splits at the ready time, at the first merge only: the ready file
         // holds the first ready time, so a later merge has no split.
-        ("started_to_ready", first, facts.started_at, facts.ready_at),
-        (
-            "ready_to_completed",
-            first,
-            facts.ready_at,
-            Some(completed_at),
-        ),
+        ("started_to_ready", first, facts.started_at, ready_at),
+        ("ready_to_completed", first, ready_at, Some(completed_at)),
     ];
     let mut waits: Vec<(&str, f64)> = phases
         .into_iter()

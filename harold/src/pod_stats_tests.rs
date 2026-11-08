@@ -5182,9 +5182,18 @@ fn no_ready_file_gives_neither_phase() {
 }
 
 #[test]
-fn a_ready_time_after_the_merge_gives_no_negative_phase() {
+fn a_ready_time_after_the_merge_gives_neither_ready_phase() {
     let product = record_built(&built(Some("2026-11-08T14:00:00Z")), true);
+    assert_eq!(phase_sum(&product, "started_to_ready"), None);
     assert_eq!(phase_sum(&product, "ready_to_completed"), None);
+}
+
+#[test]
+fn a_ready_time_before_the_start_gives_neither_ready_phase() {
+    let product = record_built(&built(Some("2026-11-08T11:00:00Z")), true);
+    assert_eq!(phase_sum(&product, "started_to_ready"), None);
+    assert_eq!(phase_sum(&product, "ready_to_completed"), None);
+    assert_eq!(phase_sum(&product, "started_to_completed"), Some(3600.0));
 }
 
 #[test]
