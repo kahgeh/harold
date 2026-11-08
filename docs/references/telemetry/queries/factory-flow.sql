@@ -1,6 +1,6 @@
 -- Note: The flow stage with the highest median wait is the first one to ask about.
 -- Waits for: nothing
--- Empty: idea and installed: no data yet (has_data is 0 and the numbers are empty)
+-- Empty: installed: no data yet (has_data is 0 and the numbers are empty)
 -- The factory flow, one row for each flow stage, in order: idea, spec, architect review, approval, build, merge, release, installed. All products together.
 -- Items: the newest export of pod.inventory.items for the list of the stage, summed over the products. It is the rule of work-waiting.sql
 -- (rows "specs: <list>", the first SELECT of "this" week), with one change: it takes the newest export of each list,
@@ -9,6 +9,7 @@
 -- A wait is the mean of a lead time, the rise of Sum divided by the rise of Count, by the rise rule of delivery-lead-time.sql
 -- (the rows "spec: <phase>", the inner SELECT with lagInFrame): a first point, or a point below the previous one, rises by its whole value.
 -- The query reads the points of pod.spec.lead_time of the last 30 days. Harold records one lead time for each spec and phase.
+-- idea: items = idea (the backlog items with no spec file). The wait is the phase idea_to_open of each spec that has it (empty when none has it).
 -- spec: items = in_spec_writing. The wait is the phase spec_writing of each spec that has it (empty when none has it).
 -- architect review: items = in_architect_review. The wait is the phase architect_review of each spec that has it.
 -- approval: items = awaiting_approval minus in_spec_writing and in_architect_review (never below 0). The wait is the phase approval_wait of
@@ -28,7 +29,7 @@ latest AS (
     FROM otel.otel_metrics_gauge
     WHERE MetricName = 'pod.inventory.items'
       AND Attributes['list'] IN ('awaiting_approval', 'approved_not_started', 'in_progress', 'merged_not_released',
-                                   'in_spec_writing', 'in_architect_review', 'ready_not_merged')
+                                   'in_spec_writing', 'in_architect_review', 'ready_not_merged', 'idea')
       AND (Attributes['list'], TimeUnix) IN (
           SELECT Attributes['list'], max(TimeUnix) FROM otel.otel_metrics_gauge
           WHERE MetricName = 'pod.inventory.items' AND TimeUnix > now() - INTERVAL 7 DAY
@@ -71,6 +72,8 @@ rises AS (
 per_spec AS (
     SELECT
         spec_id,
+        sumIf(wait_s, phase = 'idea_to_open') AS idea_s,
+        countIf(phase = 'idea_to_open') AS has_idea,
         sumIf(wait_s, phase = 'open_to_approved') AS approval_s,
         countIf(phase = 'open_to_approved') AS has_approval,
         sumIf(wait_s, phase = 'spec_writing') AS writing_s,
@@ -92,7 +95,12 @@ per_spec AS (
 )
 SELECT stage, items, median_wait_s, has_data
 FROM (
-    SELECT 1 AS ord, 'idea' AS stage, CAST(NULL AS Nullable(Float64)) AS items, CAST(NULL AS Nullable(Float64)) AS median_wait_s, 0 AS has_data
+    SELECT
+        1 AS ord,
+        'idea' AS stage,
+        toNullable(coalesce((SELECT n FROM latest WHERE list = 'idea'), 0)) AS items,
+        (SELECT if(countIf(has_idea > 0) = 0, NULL, quantileExactIf(0.5)(idea_s, has_idea > 0)) FROM per_spec) AS median_wait_s,
+        1 AS has_data
     UNION ALL
     SELECT
         2,

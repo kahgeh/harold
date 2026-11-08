@@ -164,7 +164,7 @@ fn settings(users_file: Option<String>) -> FactoryFlowSettings {
 /// The eight rows as ClickHouse prints them in `JSONEachRow`.
 fn body() -> String {
     let rows = [
-        ("idea", "null", "null", 0),
+        ("idea", "4", "21600", 1),
         ("spec", "2", "7200", 1),
         ("architect review", "3", "10800", 1),
         ("approval", "7", "68400", 1),
@@ -248,7 +248,13 @@ async fn a_good_answer_gives_eight_rows_and_sends_the_user_the_url_and_the_query
         (release.items, release.median_wait_s, release.has_data),
         (Some(17.0), None, true)
     );
-    assert!(!read.rows[0].has_data && read.rows[0].items.is_none());
+    let idea = &read.rows[0];
+    assert_eq!(
+        (idea.items, idea.median_wait_s, idea.has_data),
+        (Some(4.0), Some(21600.0), true)
+    );
+    let installed = &read.rows[7];
+    assert!(!installed.has_data && installed.items.is_none());
     let seen = source.seen.lock().unwrap();
     assert_eq!(
         seen[0],
@@ -703,11 +709,14 @@ async fn the_page_shows_the_eight_stages_in_order_with_the_numbers_of_the_query(
     assert!(stage_block(&page, "merge").contains("1 waiting"));
     assert!(stage_block(&page, "merge").contains("median 1 h"));
     assert!(!stage_block(&page, "merge").contains("no data yet"));
-    for stage in ["idea", "installed"] {
+    assert!(stage_block(&page, "idea").contains("4 waiting"));
+    assert!(stage_block(&page, "idea").contains("median 6 h"));
+    assert!(!stage_block(&page, "idea").contains("no data yet"));
+    for stage in ["installed"] {
         assert!(stage_block(&page, stage).contains("no data yet"), "{stage}");
         assert!(stage_block(&page, stage).contains("flow-grey"), "{stage}");
     }
-    for stage in ["spec", "architect review", "approval"] {
+    for stage in ["idea", "spec", "architect review", "approval"] {
         assert!(!stage_block(&page, stage).contains("flow-grey"), "{stage}");
     }
     assert!(page.contains("<title>Factory flow</title>"));
