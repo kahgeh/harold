@@ -367,6 +367,13 @@ class BigPictureTest(unittest.TestCase):
         self.assertIn("dictGetOrNull('otel.harold_settings'", code)
         self.assertIn("harold.attention.hourly_rate", code)
 
+    def test_a_later_rate_changes_the_cost_but_not_the_hours(self):
+        code = strip_comments(self.query_text("inventory-cost"))
+        hours = re.search(r"(?m)^\s*if\(([^\n]*?)\) AS attention_hours,", code).group(1)
+        cost = re.search(r"(?m)^\s*if\(([^\n]*?)\) AS attention_cost,", code).group(1)
+        self.assertNotRegex(hours, r"\brate\b")
+        self.assertIn("hours_now * rate", cost)
+
     def test_change_percent_is_whole_and_safe_for_zero(self):
         for card in CARDS:
             if card in STUBS:
