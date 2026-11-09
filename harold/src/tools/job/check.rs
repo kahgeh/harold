@@ -34,11 +34,14 @@ pub(super) struct Report {
 
 /// What the check remembers between passes in this run of Harold.
 #[derive(Default)]
-struct Memory {
+pub(super) struct Memory {
     /// Jobs whose line met a busy pane at least once.
-    waited: HashSet<i64>,
+    pub(super) waited: HashSet<i64>,
     /// Jobs whose `job end not told` line is logged.
-    logged: HashSet<i64>,
+    pub(super) logged: HashSet<i64>,
+    /// The same two sets for the jobs of slaves, by host, name and start time.
+    pub(super) waited_slave: HashSet<(String, String, i64)>,
+    pub(super) logged_slave: HashSet<(String, String, i64)>,
 }
 
 /// What the check found for one running job.
@@ -49,15 +52,30 @@ enum Still {
 }
 
 pub(super) struct Checker {
-    store: Arc<JobStore>,
+    pub(super) store: Arc<JobStore>,
     processes: Arc<dyn ProcessPort>,
     units: Arc<dyn UnitPort>,
-    typing: Arc<dyn PaneTyping>,
+    pub(super) typing: Arc<dyn PaneTyping>,
     now_ms: Clock,
-    feed: Arc<JobsFeed>,
-    memory: Mutex<Memory>,
+    pub(super) feed: Arc<JobsFeed>,
+    pub(super) memory: Mutex<Memory>,
+    /// This Harold is a slave: its master counts the ends and types the end lines.
+    slave: bool,
     /// The keep-awake files. `None` when `[job] keep_awake_folder` is empty.
     awake: Option<Arc<KeepAwake>>,
+}
+
+/// `JOB <name> on <host> ended after <n> m (pid <pid>). Check its output.` for a process
+/// that ran on a slave.
+pub(super) fn end_line_text_pid_on(name: &str, host: &str, pid: u32, ran_ms: i64) -> String {
+    let name: String = name.chars().take(LINE_NAME_MAX).collect();
+    let minutes = ran_ms / 60_000;
+    let ran = if minutes == 0 {
+        "<1 m".to_string()
+    } else {
+        format!("{minutes} m")
+    };
+    format!("JOB {name} on {host} ended after {ran} (pid {pid}). Check its output.")
 }
 
 /// `JOB <name> ended after <n> m: exit 0.` for a unit. The text is `failed (exit 2)` for a
@@ -119,7 +137,15 @@ impl Checker {
             feed,
             memory: Mutex::new(Memory::default()),
             awake: None,
+            slave: false,
         }
+    }
+
+    /// On a slave the check only records `end_line = master`. The master counts each end,
+    /// logs it and types the line.
+    pub(super) fn with_role(mut self, slave: bool) -> Self {
+        self.slave = slave;
+        self
     }
 
     /// Writes a keep-awake file for each job that runs, and deletes it at the end.
@@ -153,8 +179,13 @@ impl Checker {
                 Ok(true)
             ) {
                 report.changed = true;
+                if self.slave {
+                    let _ = self.store.set_end_line(job.id, "master").await;
+                    continue;
+                }
                 obs::job_ended(
                     &job,
+                    exit_code,
                     (now - job.started_at_ms) / 1_000,
                     (now - job.due_at_ms).max(0) / 1_000,
                 );
@@ -169,8 +200,10 @@ impl Checker {
             }
         }
         self.log_untold(now).await;
+        report.changed |= self.pass_slaves(now).await;
         let _ = self.store.prune(now).await;
         self.feed.refresh(&self.store, now).await;
+        self.feed.age_slaves(now);
         report
     }
 
@@ -205,23 +238,15 @@ impl Checker {
         } else {
             end_line_text_unit(&job.name, "", ran_ms, job.exit_code)
         };
-        let outcome = match self.typing.type_line(&job.pane_id, &line).await {
-            Typing::Typed { .. } => {
-                let waited = self
-                    .memory
-                    .lock()
-                    .is_ok_and(|memory| memory.waited.contains(&job.id));
-                if waited { "typed_at_turn_end" } else { "typed" }
+        let waited = self
+            .memory
+            .lock()
+            .is_ok_and(|memory| memory.waited.contains(&job.id));
+        let Some(outcome) = self.type_outcome(&job.pane_id, &line, waited).await else {
+            if let Ok(mut memory) = self.memory.lock() {
+                memory.waited.insert(job.id);
             }
-            Typing::NoPane => "no_pane",
-            // The text is in the input box and Enter failed: typing again would repeat it.
-            Typing::EnterFailed => "failed",
-            Typing::PaneBusy(_) => {
-                if let Ok(mut memory) = self.memory.lock() {
-                    memory.waited.insert(job.id);
-                }
-                return false;
-            }
+            return false;
         };
         if self.store.set_end_line(job.id, outcome).await.is_err() {
             return false;
@@ -231,6 +256,23 @@ impl Checker {
             memory.waited.remove(&job.id);
         }
         true
+    }
+
+    /// Types `line` into the pane once. The outcome word, or `None` when the pane is busy
+    /// and the line waits for the next check.
+    pub(super) async fn type_outcome(
+        &self,
+        pane_id: &str,
+        line: &str,
+        waited: bool,
+    ) -> Option<&'static str> {
+        match self.typing.type_line(pane_id, line).await {
+            Typing::Typed { .. } => Some(if waited { "typed_at_turn_end" } else { "typed" }),
+            Typing::NoPane => Some("no_pane"),
+            // The text is in the input box and Enter failed: typing again would repeat it.
+            Typing::EnterFailed => Some("failed"),
+            Typing::PaneBusy(_) => None,
+        }
     }
 
     /// Logs `job end not told` once for each job that ended at least 10 minutes ago and

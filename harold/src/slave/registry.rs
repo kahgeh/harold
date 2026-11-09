@@ -16,6 +16,7 @@ use crate::agent::pane_route::{host_pane_id, parse_host_pane_id, valid_host_labe
 use crate::agent::rex::{BLOCK_PREFIX, valid_rex_pane_id};
 use crate::agent::rex_host_runner::{HostAgents, HostReport};
 use crate::agent::rex_hosts::{HostAgentState, RexHostAgent};
+use crate::tools::job::JobsFeed;
 
 /// The result of the master's turn-end path for one turn.
 pub(crate) type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
@@ -36,6 +37,8 @@ pub(crate) struct SlaveRegistry {
     hosts: HostAgents,
     turns: Arc<dyn TurnSink>,
     slaves: Mutex<HashMap<String, Entry>>,
+    /// Where the jobs of the slaves go. The snapshot that the master serves reads it.
+    jobs: Arc<JobsFeed>,
 }
 
 impl SlaveRegistry {
@@ -44,7 +47,15 @@ impl SlaveRegistry {
             hosts,
             turns,
             slaves: Mutex::new(HashMap::new()),
+            jobs: Arc::clone(JobsFeed::global()),
         }
+    }
+
+    /// Puts the jobs of the slaves in `jobs` and not in the feed of this process. Tests use it.
+    #[cfg(test)]
+    pub(crate) fn with_jobs_feed(mut self, jobs: Arc<JobsFeed>) -> Self {
+        self.jobs = jobs;
+        self
     }
 
     /// Whether the slave link of `label` is up. The Rex inventory skips such a label: it reads
@@ -84,6 +95,9 @@ impl MasterSink for SlaveRegistry {
             return;
         }
         let now_ms = epoch_ms();
+        // The jobs of the slave go into the snapshot that this master serves.
+        self.jobs
+            .set_slave_jobs(slave, snapshot.jobs.clone(), now_ms);
         let mut rows: Vec<RexHostAgent> = Vec::new();
         let mut icon = String::new();
         for pane in &snapshot.panes {
@@ -142,6 +156,7 @@ impl MasterSink for SlaveRegistry {
             self.entries().entry(slave.to_owned()).or_default();
         }
         self.hosts.set_linked(slave, up);
+        self.jobs.slave_link(slave, up, epoch_ms());
     }
 }
 

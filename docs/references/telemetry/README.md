@@ -418,7 +418,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.factory_flow.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`). One for each load of the page `/flow` |
 | `harold.evidence.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`). One for each read of one evidence query by the evidence check |
 | `harold.evidence.lines` | counter, `{line}` | `outcome` (`typed`, `no_chief`, `not_typed`). One for each try to type an `EVIDENCE` line into the chief's pane. Each outcome starts at 0 |
-| `harold.job.ends` | counter, `{job}` | `how` (`ended`, `removed`) and `end_line` (`typed`, `typed_at_turn_end`, `no_pane`, `failed`, and `none` for a removed job). One for each agent job that ended or was removed, counted when its end line is done. Each series starts at 0 |
+| `harold.job.ends` | counter, `{job}` | `how` (`ended`, `removed`), `end_line` (`typed`, `typed_at_turn_end`, `no_pane`, `failed`, `remote_pane`, and `none` for a removed job) and `host` (the empty string for a job on this machine, or the label of the slave that ran it). One for each agent job that ended or was removed, counted when its end line is done. For a slave's job, only the master counts. Each series of the empty `host` starts at 0 |
 | `harold.job.past_due` | gauge, `{job}` | none. The running agent jobs past their expected end. Starts at 0 |
 | `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
 | `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
@@ -519,7 +519,7 @@ These fields were added so that the log lines of the collector work show their i
 | `due_in_s` | Whole seconds from the recording of an agent job to its expected end. On `job added` |
 | `run_s` | Whole seconds from the recording of an agent job to the check that found it ended. On `job ended` |
 | `past_due_s` | Whole seconds that an agent job ran past its expected end, 0 when it did not. On `job ended` |
-| `end_line` | How the end line of an agent job went: `typed`, `typed_at_turn_end`, `no_pane` or `failed`. A removed job has `none`. On `harold.job.ends` |
+| `end_line` | How the end line of an agent job went: `typed`, `typed_at_turn_end`, `no_pane`, `failed` or `remote_pane` (the agent pane is on a Rex host, where the master cannot type yet). A removed job has `none`. On `harold.job.ends` |
 | `lag_s` | Whole seconds from the tag time of a release to its first start on this machine, never text. On `release installed` |
 | `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
 | `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |
@@ -1084,7 +1084,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.factory_flow.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`);
 - `harold.evidence.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`);
 - `harold.evidence.lines`, for each `outcome` (`typed`, `no_chief`, `not_typed`);
-- `harold.job.ends`, for each series of `how` and `end_line` (`ended` with `typed`, `typed_at_turn_end`, `no_pane` and `failed`, and `removed` with `none`), and `harold.job.past_due` as 0;
+- `harold.job.ends`, for each series of `how` and `end_line` with an empty `host` (`ended` with `typed`, `typed_at_turn_end`, `no_pane`, `failed` and `remote_pane`, and `removed` with `none`), and `harold.job.past_due` as 0;
 - `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.telemetry.log_records.unsent`, for each `outcome` (`resent`, `file_only`);

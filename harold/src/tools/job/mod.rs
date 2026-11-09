@@ -17,6 +17,7 @@ mod check;
 mod feed;
 mod obs;
 pub(crate) mod process;
+mod remote;
 mod service;
 mod store;
 #[cfg(test)]
@@ -24,16 +25,17 @@ mod test_support;
 mod unit;
 mod validate;
 
-pub(crate) use feed::{subscribe, with_jobs};
+pub(crate) use feed::{JobsFeed, subscribe, with_jobs};
 
 pub(crate) const NAME: &str = "job";
 
-static SETTINGS: std::sync::OnceLock<JobSettings> = std::sync::OnceLock::new();
+static SETTINGS: std::sync::OnceLock<(JobSettings, bool)> = std::sync::OnceLock::new();
 
-/// Sets the `[job]` settings of this run of Harold. The host calls it before `start`.
-/// Without a call, the job tool keeps no file awake.
-pub(crate) fn configure(settings: JobSettings) {
-    let _ = SETTINGS.set(settings);
+/// Sets the `[job]` settings of this run of Harold, and whether it is a slave (`[master]`
+/// is set). The host calls it before `start`. Without a call, the job tool keeps no file
+/// awake and is no slave.
+pub(crate) fn configure(settings: JobSettings, slave: bool) {
+    let _ = SETTINGS.set((settings, slave));
 }
 
 /// The reason `start` gives when `jobs.db` cannot be opened. The error's own text names
@@ -63,7 +65,11 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let units: Arc<dyn unit::UnitPort> = Arc::new(unit::SystemUnits);
     let clock: service::Clock = Arc::new(now_ms);
     let feed = Arc::clone(feed::JobsFeed::global());
-    let awake = SETTINGS.get().and_then(awake::KeepAwake::new).map(Arc::new);
+    let slave = SETTINGS.get().is_some_and(|(_, slave)| *slave);
+    let awake = SETTINGS
+        .get()
+        .and_then(|(settings, _)| awake::KeepAwake::new(settings))
+        .map(Arc::new);
     if let Some(awake) = &awake {
         let running = store.running().await.unwrap_or_default();
         let names: Vec<String> = running.into_iter().map(|job| job.name).collect();
@@ -77,7 +83,8 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         Arc::clone(&clock),
         Arc::clone(&feed),
     )
-    .with_awake(awake.clone());
+    .with_awake(awake.clone())
+    .with_role(slave);
     let service = service::JobToolService::new(
         store,
         processes,

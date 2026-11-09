@@ -236,3 +236,48 @@ fn slave_lock_decides_away_for_slave_agents() {
     registry.link_changed(LABEL, false);
     assert_eq!(registry.pane_lock(pane_id), Some(true));
 }
+
+#[test]
+fn a_slave_snapshot_puts_its_jobs_in_the_feed_and_a_closed_link_makes_them_unknown() {
+    use harold_api::harold::AgentJob;
+    let feed = Arc::new(JobsFeed::new());
+    let (registry, _hosts, _turns) = registry();
+    let registry = registry.with_jobs_feed(feed.clone());
+    let mut state = snapshot(Vec::new());
+    state.jobs = vec![AgentJob {
+        name: "calibration".into(),
+        pane_id: "block:7".into(),
+        unit: "cal-1".into(),
+        state: "running".into(),
+        ..AgentJob::default()
+    }];
+    registry.link_changed(LABEL, true);
+    registry.apply_snapshot(LABEL, state);
+    let view = feed.current();
+    assert_eq!(view.jobs.len(), 1);
+    assert_eq!(
+        (view.jobs[0].host.as_str(), view.jobs[0].state.as_str()),
+        (LABEL, "running")
+    );
+    registry.link_changed(LABEL, false);
+    let view = feed.current();
+    assert_eq!(view.jobs[0].state, "unknown");
+    assert!(view.jobs[0].unreached_since_ms > 0);
+    registry.link_changed(LABEL, true);
+    assert_eq!(feed.current().jobs[0].state, "running");
+}
+
+#[test]
+fn a_snapshot_from_a_name_that_is_not_a_host_label_adds_no_jobs() {
+    let feed = Arc::new(JobsFeed::new());
+    let (registry, _hosts, _turns) = registry();
+    let registry = registry.with_jobs_feed(feed.clone());
+    let mut state = snapshot(Vec::new());
+    state.jobs = vec![harold_api::harold::AgentJob {
+        name: "x".into(),
+        state: "running".into(),
+        ..Default::default()
+    }];
+    registry.apply_snapshot("Not A Label", state);
+    assert!(feed.current().jobs.is_empty());
+}

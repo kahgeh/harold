@@ -1,4 +1,5 @@
 use super::*;
+use crate::harold::AgentJob;
 use crate::tools::job::store::NewJob;
 use crate::tools::job::test_support::Temp;
 
@@ -104,4 +105,72 @@ async fn a_subscriber_wakes_on_a_change_and_each_feed_is_its_own() {
     feed.refresh(&store, 0).await;
     assert!(receiver.has_changed().unwrap());
     assert!(other.current().jobs.is_empty());
+}
+
+fn remote_job(name: &str, state: &str, ended_at_ms: i64) -> AgentJob {
+    AgentJob {
+        name: name.into(),
+        pane_id: "block:7".into(),
+        unit: "cal-1".into(),
+        started_at_ms: 1_000,
+        due_at_ms: 9_000,
+        ended_at_ms,
+        state: state.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_slave_job_shows_with_its_host_and_a_closed_link_gives_unknown_until_it_opens_again() {
+    let feed = JobsFeed::new();
+    feed.set_slave_jobs("omarchy", vec![remote_job("cal", "running", 0)], 5_000);
+    let view = feed.current();
+    assert_eq!(view.jobs.len(), 1);
+    assert_eq!(
+        (view.jobs[0].host.as_str(), view.jobs[0].state.as_str()),
+        ("omarchy", "running")
+    );
+    // A quiet open link keeps the job running: nothing changes with time.
+    feed.age_slaves(5_000 + 3_600_000);
+    assert_eq!(feed.current().jobs[0].state, "running");
+    feed.slave_link("omarchy", false, 10_000);
+    let view = feed.current();
+    assert_eq!(view.jobs[0].state, "unknown");
+    assert_eq!(view.jobs[0].unreached_since_ms, 10_000);
+    feed.slave_link("omarchy", true, 20_000);
+    let view = feed.current();
+    assert_eq!(view.jobs[0].state, "running");
+    assert_eq!(view.jobs[0].unreached_since_ms, 0);
+}
+
+#[test]
+fn an_ended_slave_job_leaves_the_snapshot_10_minutes_after_its_end() {
+    let feed = JobsFeed::new();
+    feed.set_slave_jobs(
+        "omarchy",
+        vec![remote_job("cal", "ended", 100_000)],
+        100_000,
+    );
+    assert_eq!(feed.current().jobs.len(), 1);
+    feed.age_slaves(100_000 + 9 * 60_000);
+    assert_eq!(feed.current().jobs.len(), 1);
+    feed.age_slaves(100_000 + 10 * 60_000);
+    assert!(feed.current().jobs.is_empty());
+}
+
+#[test]
+fn the_jobs_of_this_machine_and_of_a_slave_are_one_list_that_each_side_can_change() {
+    let feed = JobsFeed::new();
+    feed.publish(vec![remote_job("mine", "running", 0)]);
+    feed.set_slave_jobs("omarchy", vec![remote_job("cal", "running", 0)], 0);
+    assert_eq!(feed.current().jobs.len(), 2);
+    feed.publish(Vec::new());
+    assert_eq!(feed.current().jobs[0].name, "cal");
+    let revision = feed.current().revision;
+    feed.set_slave_jobs("omarchy", vec![remote_job("cal", "running", 0)], 1);
+    assert_eq!(
+        feed.current().revision,
+        revision,
+        "the same list is no change"
+    );
 }

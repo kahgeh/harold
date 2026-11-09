@@ -1889,11 +1889,12 @@ pub(crate) fn count_evidence_read(outcome: &'static str) {
 
 /// The series of `harold.job.ends`, as `(how, end_line)`. A job that ended has a line
 /// outcome. A removed job is not an end and has no line: its `end_line` is `none`.
-pub(crate) const JOB_END_SERIES: [(&str, &str); 5] = [
+pub(crate) const JOB_END_SERIES: [(&str, &str); 6] = [
     ("ended", "typed"),
     ("ended", "typed_at_turn_end"),
     ("ended", "no_pane"),
     ("ended", "failed"),
+    ("ended", "remote_pane"),
     ("removed", "none"),
 ];
 
@@ -1924,19 +1925,28 @@ pub(crate) fn register_job_instruments() {
             &[
                 KeyValue::new("how", how),
                 KeyValue::new("end_line", end_line),
+                KeyValue::new("host", ""),
             ],
         );
     }
     set_jobs_past_due(0);
 }
 
-/// Counts one agent job that ended, with `how` and the outcome of its end line.
+/// Counts one agent job that ended, with `how` and the outcome of its end line. The job
+/// ran on this machine: `host` is empty.
 pub(crate) fn count_job_end(how: &'static str, end_line: &str) {
+    count_job_end_on(how, end_line, "");
+}
+
+/// As `count_job_end`, for a job that ran on `host`: the label of a slave, or empty for
+/// this machine.
+pub(crate) fn count_job_end_on(how: &'static str, end_line: &str, host: &str) {
     instruments().job_ends.add(
         1,
         &[
             KeyValue::new("how", how),
             KeyValue::new("end_line", end_line.to_owned()),
+            KeyValue::new("host", host.to_owned()),
         ],
     );
 }

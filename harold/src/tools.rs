@@ -263,7 +263,7 @@ pub(crate) async fn start(
         // The address the specs listener bound; none when it is not open.
         specs_url: specs_addr.map(|addr| format!("http://{addr}")),
     };
-    job::configure(cfg.job.clone());
+    job::configure(cfg.job.clone(), cfg.master.is_some());
     let extras = Extras {
         watch_typing: Arc::new(TmuxTyping {
             ports: Arc::clone(&ports),

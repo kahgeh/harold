@@ -5868,20 +5868,34 @@ fn the_job_instruments_start_at_zero_for_each_series_and_count_one_end() {
     for (how, end_line) in JOB_END_SERIES {
         let point = test_support::exact_counter_value(
             "harold.job.ends",
-            &[("how", how), ("end_line", end_line)],
+            &[("how", how), ("end_line", end_line), ("host", "")],
         );
         assert!(point.is_some(), "{how} {end_line}");
     }
     let value = || {
         test_support::exact_counter_value(
             "harold.job.ends",
-            &[("how", "ended"), ("end_line", "typed")],
+            &[("how", "ended"), ("end_line", "typed"), ("host", "")],
         )
         .unwrap_or(0)
     };
     let before = value();
     count_job_end("ended", "typed");
     assert_eq!(value(), before + 1);
+    let on_omarchy = || {
+        test_support::exact_counter_value(
+            "harold.job.ends",
+            &[
+                ("how", "ended"),
+                ("end_line", "remote_pane"),
+                ("host", "omarchy"),
+            ],
+        )
+        .unwrap_or(0)
+    };
+    let before = on_omarchy();
+    count_job_end_on("ended", "remote_pane", "omarchy");
+    assert_eq!(on_omarchy(), before + 1);
     assert_eq!(
         test_support::gauge_value("harold.job.past_due", &[]),
         Some(0)

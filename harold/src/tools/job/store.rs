@@ -92,6 +92,60 @@ const ADDED_COLUMNS: [&str; 3] = [
     "exit_code INTEGER",
 ];
 
+const INSERT_TOLD: &str =
+    "INSERT OR IGNORE INTO told (host, name, started_at_ms) VALUES (?1, ?2, ?3)";
+
+/// The key of a slave's job in the master's `told` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ToldKey {
+    pub host: String,
+    pub name: String,
+    pub started_at_ms: i64,
+}
+
+impl ToldKey {
+    fn params(&self) -> impl turso::IntoParams {
+        turso::params_from_iter(vec![
+            Value::from(self.host.as_str()),
+            Value::from(self.name.as_str()),
+            Value::from(self.started_at_ms),
+        ])
+    }
+
+    fn params_with(&self, fourth: Value) -> impl turso::IntoParams {
+        turso::params_from_iter(vec![
+            Value::from(self.host.as_str()),
+            Value::from(self.name.as_str()),
+            Value::from(self.started_at_ms),
+            fourth,
+        ])
+    }
+}
+
+/// What the master recorded for a slave's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Told {
+    /// When the master saw the end. 0 until then.
+    pub ended_seen_ms: i64,
+    /// `None` until the end line is done.
+    pub end_line: Option<String>,
+    /// The time the link closed for the outage that `job host not reached` was logged for.
+    pub unreached_mark_ms: i64,
+}
+
+fn to_told(row: &turso::Row) -> Result<Told> {
+    let end_line = if row.get_value(1)?.is_null() {
+        None
+    } else {
+        Some(text(row, 1)?)
+    };
+    Ok(Told {
+        ended_seen_ms: integer(row, 0)?,
+        end_line,
+        unreached_mark_ms: integer(row, 2)?,
+    })
+}
+
 pub(super) struct JobStore {
     conn: Mutex<Connection>,
     // The database handle stays alive as long as the connection is used.
@@ -126,6 +180,20 @@ impl JobStore {
                 ended_at_ms INTEGER NOT NULL DEFAULT 0, \
                 state TEXT NOT NULL CHECK (state IN ('running','ended','removed')), \
                 end_line TEXT)",
+            (),
+        )
+        .await?;
+        // The master's record of what it did for the jobs of slaves. Key: host, name and
+        // start time, so two runs of one name are two rows.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS told (\
+                host TEXT NOT NULL, \
+                name TEXT NOT NULL, \
+                started_at_ms INTEGER NOT NULL, \
+                ended_seen_ms INTEGER NOT NULL DEFAULT 0, \
+                end_line TEXT, \
+                unreached_mark_ms INTEGER NOT NULL DEFAULT 0, \
+                PRIMARY KEY (host, name, started_at_ms))",
             (),
         )
         .await?;
@@ -292,6 +360,114 @@ impl JobStore {
         }
         .await;
         finish(&conn, work).await
+    }
+
+    /// The record of a slave's job, if the master made one.
+    pub(super) async fn told(&self, key: &ToldKey) -> Result<Option<Told>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                "SELECT ended_seen_ms, end_line, unreached_mark_ms FROM told \
+                 WHERE host = ?1 AND name = ?2 AND started_at_ms = ?3",
+                key.params(),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(to_told(&row)?))
+    }
+
+    /// Makes the record when it is missing, and sets the time that the master saw the end
+    /// when it is not set. Returns `true` when this call set that time.
+    pub(super) async fn told_seen_end(&self, key: &ToldKey, now_ms: i64) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            conn.execute(INSERT_TOLD, key.params()).await?;
+            let changed = conn
+                .execute(
+                    "UPDATE told SET ended_seen_ms = ?4 WHERE host = ?1 AND name = ?2 \
+                     AND started_at_ms = ?3 AND ended_seen_ms = 0",
+                    key.params_with(Value::from(now_ms)),
+                )
+                .await?;
+            Ok(changed > 0)
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    /// Records how the end line went.
+    pub(super) async fn told_set_line(&self, key: &ToldKey, outcome: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            conn.execute(
+                "UPDATE told SET end_line = ?4 WHERE host = ?1 AND name = ?2 \
+                 AND started_at_ms = ?3",
+                key.params_with(Value::from(outcome)),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    /// Records the outage (the time the link closed) that `job host not reached` was
+    /// logged for. Makes the record when it is missing.
+    pub(super) async fn told_set_unreached(&self, key: &ToldKey, mark_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        let work = async {
+            conn.execute(INSERT_TOLD, key.params()).await?;
+            conn.execute(
+                "UPDATE told SET unreached_mark_ms = ?4 WHERE host = ?1 AND name = ?2 \
+                 AND started_at_ms = ?3",
+                key.params_with(Value::from(mark_ms)),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        finish(&conn, work).await
+    }
+
+    /// The records whose end line is `no_pane` or `failed`, and whose end the master saw at
+    /// least `min_age_ms` and under `max_age_ms` before `now_ms`.
+    pub(super) async fn told_untold(
+        &self,
+        now_ms: i64,
+        min_age_ms: i64,
+        max_age_ms: i64,
+    ) -> Result<Vec<(ToldKey, String)>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                "SELECT host, name, started_at_ms, end_line FROM told \
+                 WHERE end_line IN ('no_pane', 'failed') AND ended_seen_ms > 0 \
+                 AND ended_seen_ms <= ?1 AND ended_seen_ms > ?2",
+                turso::params_from_iter(vec![
+                    Value::from(now_ms - min_age_ms),
+                    Value::from(now_ms - max_age_ms),
+                ]),
+            )
+            .await?;
+        let mut found = Vec::new();
+        while let Some(row) = rows.next().await? {
+            found.push((
+                ToldKey {
+                    host: text(&row, 0)?,
+                    name: text(&row, 1)?,
+                    started_at_ms: integer(&row, 2)?,
+                },
+                text(&row, 3)?,
+            ));
+        }
+        Ok(found)
     }
 
     async fn fetch(&self, condition: &str, params: impl turso::IntoParams) -> Result<Vec<JobRow>> {
