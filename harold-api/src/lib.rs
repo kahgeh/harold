@@ -25,6 +25,11 @@ pub mod tools {
             tonic::include_proto!("harold.tools.backlog.v1");
         }
     }
+    pub mod job {
+        pub mod v1 {
+            tonic::include_proto!("harold.tools.job.v1");
+        }
+    }
     pub mod knowledge {
         pub mod v1 {
             tonic::include_proto!("harold.tools.knowledge.v1");

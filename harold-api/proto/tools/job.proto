@@ -1,0 +1,71 @@
+// The job tool: an agent records a long command that it started outside its pane.
+// Harold checks the process, shows the command under the agent's row, and types one
+// end line into the agent's pane when the process ends.
+//
+//   Add     records a job. `name` is 1 to 48 characters of a-z, 0-9 and "-". `pid` is a
+//           process that runs now. `for_secs` is the expected run time, 1 to 604800.
+//           `pane_id` is the agent's pane. `what` is an optional line of at most 120
+//           characters. Harold reads the process start time, so a later process with
+//           the same pid is not the job.
+//   List    every job that runs, and every job that ended in the last 10 minutes.
+//   Remove  takes away a wrong record. It is not an end: Harold types no line.
+//
+// Refusals:
+//   InvalidArgument      message "invalid <field>", for example "invalid name".
+//   NotFound             "no_such_process" (Add), "unknown_job" (Remove).
+//   FailedPrecondition   "name_in_use" (Add: a job of that name runs).
+//   Unavailable          the database write failed.
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tools.job.v1;
+
+service JobService {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+}
+
+message AddRequest {
+  string name = 1;
+  uint32 pid = 2;
+  uint32 for_secs = 3;
+  string pane_id = 4;
+  string what = 5;
+}
+
+message AddResponse {
+  string name = 1;
+  int64 started_at_ms = 2;
+  int64 due_at_ms = 3;
+}
+
+message ListRequest {}
+
+message Job {
+  string name = 1;
+  string what = 2;
+  string pane_id = 3;
+  uint32 pid = 4;
+  int64 started_at_ms = 5;
+  int64 due_at_ms = 6;
+  // 0 while the job runs.
+  int64 ended_at_ms = 7;
+  // "running" or "ended".
+  string state = 8;
+  // "", "typed", "typed_at_turn_end", "no_pane" or "failed". Empty while no end line is done.
+  string end_line = 9;
+}
+
+message ListResponse {
+  repeated Job jobs = 1;
+}
+
+message RemoveRequest {
+  string name = 1;
+}
+
+message RemoveResponse {
+  string name = 1;
+}
