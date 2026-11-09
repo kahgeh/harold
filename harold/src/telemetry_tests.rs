@@ -5844,6 +5844,43 @@ fn count_evidence_line_adds_one_for_its_outcome() {
 }
 
 #[test]
+fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
+    for field in [
+        "job.name", "pane_id", "due_in_s", "run_s", "past_due_s", "reason", "how", "end_line",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    assert!(HAROLD_FEATURES.contains(&"agent-jobs"));
+}
+
+#[test]
+fn the_job_instruments_start_at_zero_for_each_series_and_count_one_end() {
+    test_support::install();
+    register_job_instruments();
+    for (how, end_line) in JOB_END_SERIES {
+        let point = test_support::exact_counter_value(
+            "harold.job.ends",
+            &[("how", how), ("end_line", end_line)],
+        );
+        assert!(point.is_some(), "{how} {end_line}");
+    }
+    let value = || {
+        test_support::exact_counter_value(
+            "harold.job.ends",
+            &[("how", "ended"), ("end_line", "typed")],
+        )
+        .unwrap_or(0)
+    };
+    let before = value();
+    count_job_end("ended", "typed");
+    assert_eq!(value(), before + 1);
+    assert_eq!(test_support::gauge_value("harold.job.past_due", &[]), Some(0));
+    set_jobs_past_due(2);
+    assert_eq!(test_support::gauge_value("harold.job.past_due", &[]), Some(2));
+    set_jobs_past_due(0);
+}
+
+#[test]
 fn web_request_counters_are_seeded_at_zero() {
     test_support::install();
     register_web_request_counters();

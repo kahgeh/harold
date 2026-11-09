@@ -15,6 +15,8 @@ use harold_api::tools::backlog::v1 as backlog_api;
 use harold_api::tools::backlog::v1::backlog_service_client::BacklogServiceClient;
 use harold_api::tools::evidence::v1 as evidence_api;
 use harold_api::tools::evidence::v1::evidence_service_client::EvidenceServiceClient;
+use harold_api::tools::job::v1 as job_api;
+use harold_api::tools::job::v1::job_service_client::JobServiceClient;
 use harold_api::tools::knowledge::v1 as knowledge_api;
 use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
 use harold_api::tools::questions::v1 as questions;
@@ -284,6 +286,7 @@ const TOOL_USAGE_LINE: &str =
     "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
 const RELEASE_USAGE_LINE: &str =
     "invalid argument: usage is harold tool release next [product] [--json]";
+const JOB_USAGE_LINE: &str = "invalid argument: usage is harold tool job add NAME --pid PID --for TIME --agent PANE [--what TEXT] | list | remove NAME";
 const EVIDENCE_USAGE_LINE: &str =
     "invalid argument: usage is harold tool evidence check <product> [<id>]";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
@@ -394,6 +397,7 @@ pub(crate) enum ToolCommand {
     Backlog(BacklogCommand),
     Telemetry(TelemetryCommand),
     Watch(WatchCommand),
+    Job(JobCommand),
     Release(ReleaseCommand),
     Evidence(EvidenceCommand),
     Knowledge(KnowledgeCommand),
@@ -1131,6 +1135,181 @@ pub(crate) fn parse_minutes(text: &str, field: &str) -> Result<u32, String> {
     }
 }
 
+/// A `harold tool job` command. The daemon checks the ranges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JobCommand {
+    Add {
+        name: String,
+        pid: u32,
+        for_secs: u32,
+        agent: String,
+        what: String,
+    },
+    List,
+    Remove {
+        name: String,
+    },
+}
+
+/// Reads a time such as `90s`, `20m`, `2h`. A bare number is minutes.
+pub(crate) fn parse_job_secs(text: &str, field: &str) -> Result<u32, String> {
+    let invalid = || format!("invalid {field}");
+    let (digits, unit) = match text.chars().last() {
+        Some('s') => (&text[..text.len() - 1], 1),
+        Some('m') => (&text[..text.len() - 1], 60),
+        Some('h') => (&text[..text.len() - 1], 3600),
+        _ => (text, 60),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    digits
+        .parse::<u32>()
+        .map_err(|_| invalid())?
+        .checked_mul(unit)
+        .ok_or_else(invalid)
+}
+
+fn parse_job(args: &[&str]) -> Result<JobCommand, String> {
+    match args {
+        ["list"] => Ok(JobCommand::List),
+        ["remove", name] => Ok(JobCommand::Remove {
+            name: (*name).into(),
+        }),
+        ["add", name, flags @ ..] if !name.starts_with('-') => parse_job_add(name, flags),
+        _ => Err(JOB_USAGE_LINE.into()),
+    }
+}
+
+fn parse_job_add(name: &str, flags: &[&str]) -> Result<JobCommand, String> {
+    let (mut pid, mut time, mut agent, mut what) = (None, None, None, None);
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let slot = match *flag {
+            "--pid" => &mut pid,
+            "--for" => &mut time,
+            "--agent" => &mut agent,
+            "--what" => &mut what,
+            _ => return Err(JOB_USAGE_LINE.into()),
+        };
+        let value = rest.next().ok_or_else(|| JOB_USAGE_LINE.to_string())?;
+        if slot.replace((*value).to_string()).is_some() {
+            return Err(JOB_USAGE_LINE.into());
+        }
+    }
+    let (Some(pid), Some(time), Some(agent)) = (pid, time, agent) else {
+        return Err(JOB_USAGE_LINE.into());
+    };
+    let pid = pid
+        .parse::<u32>()
+        .ok()
+        .filter(|_| pid.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| "invalid pid".to_string())?;
+    Ok(JobCommand::Add {
+        name: name.into(),
+        pid,
+        for_secs: parse_job_secs(&time, "for")?,
+        agent,
+        what: what.unwrap_or_default(),
+    })
+}
+
+/// The line printed for a refusal from the job service.
+fn job_refusal_line(status: &tonic::Status, command: &JobCommand) -> String {
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve jobs".into(),
+        (tonic::Code::NotFound, "no_such_process") => match command {
+            JobCommand::Add { pid, .. } => format!("no process runs with pid {pid}"),
+            _ => "no such process".into(),
+        },
+        (tonic::Code::NotFound, "unknown_job") => match command {
+            JobCommand::Remove { name } => format!("unknown job {name}"),
+            _ => "unknown job".into(),
+        },
+        (tonic::Code::FailedPrecondition, "name_in_use") => match command {
+            JobCommand::Add { name, .. } => format!("a job named {name} runs already"),
+            _ => "name in use".into(),
+        },
+        _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
+        _ => status.message().to_string(),
+    }
+}
+
+/// One line for each job: `name · pid N · running, ends about HH:MM · agent PANE`.
+fn job_list_line(job: &job_api::Job, offset: time::UtcOffset) -> String {
+    let state = if job.state == "running" {
+        format!("running, ends about {}", watch_time(job.due_at_ms, offset))
+    } else {
+        format!("ended at {}", watch_time(job.ended_at_ms, offset))
+    };
+    format!("{} · pid {} · {state} · agent {}", job.name, job.pid, job.pane_id)
+}
+
+pub(crate) async fn job_within(
+    address: &str,
+    command: &JobCommand,
+    offset: time::UtcOffset,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = JobServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| job_refusal_line(&status, command);
+        match command {
+            JobCommand::Add {
+                name,
+                pid,
+                for_secs,
+                agent,
+                what,
+            } => {
+                let added = client
+                    .add(job_api::AddRequest {
+                        name: name.clone(),
+                        pid: *pid,
+                        for_secs: *for_secs,
+                        pane_id: agent.clone(),
+                        what: what.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "added {}, ends about {}",
+                    added.name,
+                    watch_time(added.due_at_ms, offset)
+                ))
+            }
+            JobCommand::List => {
+                let listed = client
+                    .list(job_api::ListRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                if listed.jobs.is_empty() {
+                    return Ok("no jobs".into());
+                }
+                Ok(listed
+                    .jobs
+                    .iter()
+                    .map(|job| job_list_line(job, offset))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            JobCommand::Remove { name } => {
+                let removed = client
+                    .remove(job_api::RemoveRequest { name: name.clone() })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!("removed {}", removed.name))
+            }
+        }
+    })
+    .await
+}
+
 /// A `harold tool release` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReleaseCommand {
@@ -1740,6 +1919,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
         ["telemetry", rest @ ..] => parse_telemetry(rest).map(ToolCommand::Telemetry),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
+        ["job", rest @ ..] => parse_job(rest).map(ToolCommand::Job),
         ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
         ["evidence", rest @ ..] => parse_evidence(rest).map(ToolCommand::Evidence),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
@@ -2442,6 +2622,15 @@ pub(crate) async fn tool(
         )
         .await;
     }
+    if let ToolCommand::Job(job) = command {
+        return job_within(
+            address,
+            job,
+            crate::telemetry::local_offset(),
+            CALL_DEADLINE,
+        )
+        .await;
+    }
     if let ToolCommand::Release(release) = command {
         return release_within(address, release, CALL_DEADLINE).await;
     }
@@ -3031,6 +3220,7 @@ pub(crate) async fn tool_within(
             ToolCommand::Backlog(_)
             | ToolCommand::Telemetry(_)
             | ToolCommand::Watch(_)
+            | ToolCommand::Job(_)
             | ToolCommand::Release(_)
             | ToolCommand::Evidence(_)
             | ToolCommand::Knowledge(_)
@@ -7977,6 +8167,89 @@ mod tests {
             Ok(other) => panic!("not a watch command: {other:?}"),
             Err(line) => Err(line),
         }
+    }
+
+    #[test]
+    fn tool_job_add_list_and_remove_parse() {
+        let job = |args: &[&str]| match parse(&[&["tool", "job"][..], args].concat()) {
+            Ok(Mode::Tool(ToolCommand::Job(command))) => Ok(command),
+            Ok(other) => panic!("not a job command: {other:?}"),
+            Err(line) => Err(line),
+        };
+        assert_eq!(
+            job(&["add", "calibration", "--pid", "4121", "--for", "20m", "--agent", "block:1"]),
+            Ok(JobCommand::Add {
+                name: "calibration".into(),
+                pid: 4121,
+                for_secs: 1200,
+                agent: "block:1".into(),
+                what: String::new(),
+            })
+        );
+        assert!(matches!(
+            job(&["add", "a", "--what", "x y", "--for", "2h", "--pid", "1", "--agent", "p"]),
+            Ok(JobCommand::Add { for_secs: 7200, .. })
+        ));
+        assert_eq!(job(&["list"]), Ok(JobCommand::List));
+        assert_eq!(
+            job(&["remove", "a"]),
+            Ok(JobCommand::Remove { name: "a".into() })
+        );
+        // A bad time, a bad pid and missing or repeated flags are refused.
+        assert_eq!(
+            job(&["add", "a", "--pid", "1", "--for", "soon", "--agent", "p"]),
+            Err("invalid for".into())
+        );
+        assert_eq!(
+            job(&["add", "a", "--pid", "x1", "--for", "5", "--agent", "p"]),
+            Err("invalid pid".into())
+        );
+        for bad in [
+            vec!["add", "a", "--pid", "1", "--for", "5"],
+            vec!["add", "a", "--pid", "1", "--pid", "2", "--for", "5", "--agent", "p"],
+            vec!["add", "--pid", "1"],
+            vec!["remove"],
+            vec![],
+        ] {
+            assert_eq!(job(&bad), Err(JOB_USAGE_LINE.into()), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn job_times_take_seconds_minutes_or_hours() {
+        assert_eq!(parse_job_secs("90s", "for"), Ok(90));
+        assert_eq!(parse_job_secs("20m", "for"), Ok(1200));
+        assert_eq!(parse_job_secs("20", "for"), Ok(1200));
+        assert_eq!(parse_job_secs("2h", "for"), Ok(7200));
+        for bad in ["", "h", "-5", "1.5h", "5d", "4294967295h"] {
+            assert_eq!(parse_job_secs(bad, "for"), Err("invalid for".into()), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn job_refusals_print_a_plain_line() {
+        let add = JobCommand::Add {
+            name: "a".into(),
+            pid: 77,
+            for_secs: 60,
+            agent: "p".into(),
+            what: String::new(),
+        };
+        assert_eq!(
+            job_refusal_line(&tonic::Status::not_found("no_such_process"), &add),
+            "no process runs with pid 77"
+        );
+        assert_eq!(
+            job_refusal_line(&tonic::Status::failed_precondition("name_in_use"), &add),
+            "a job named a runs already"
+        );
+        assert_eq!(
+            job_refusal_line(
+                &tonic::Status::not_found("unknown_job"),
+                &JobCommand::Remove { name: "z".into() }
+            ),
+            "unknown job z"
+        );
     }
 
     #[test]

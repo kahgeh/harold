@@ -206,6 +206,11 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "session_by",
     "alert",
     "pod.product",
+    "job.name",
+    "due_in_s",
+    "run_s",
+    "past_due_s",
+    "end_line",
     "role",
     "waited_s",
     "product",
@@ -559,6 +564,8 @@ pub(crate) struct Instruments {
     pub evidence_reads: Counter<u64>,
     /// One for each try to type an evidence line into the chief's pane, by `outcome`.
     pub evidence_lines: Counter<u64>,
+    /// `harold.job.ends`, `{job}`, by `how` and `end_line`: one for each agent job that ended.
+    pub job_ends: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -688,6 +695,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         factory_flow_reads: counter("harold.factory_flow.reads", "{read}"),
         evidence_reads: counter("harold.evidence.reads", "{read}"),
         evidence_lines: counter("harold.evidence.lines", "{line}"),
+        job_ends: counter("harold.job.ends", "{job}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -1872,6 +1880,64 @@ pub(crate) fn count_evidence_read(outcome: &'static str) {
     instruments()
         .evidence_reads
         .add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
+// ---------------------------------------------------------------------------
+// Agent jobs
+// ---------------------------------------------------------------------------
+
+/// The series of `harold.job.ends`, as `(how, end_line)`. A job that ended has a line
+/// outcome. A removed job is not an end and has no line: its `end_line` is `none`.
+pub(crate) const JOB_END_SERIES: [(&str, &str); 5] = [
+    ("ended", "typed"),
+    ("ended", "typed_at_turn_end"),
+    ("ended", "no_pane"),
+    ("ended", "failed"),
+    ("removed", "none"),
+];
+
+static JOBS_PAST_DUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn job_past_due_gauge() {
+    static GAUGE: OnceLock<opentelemetry::metrics::ObservableGauge<u64>> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        meter()
+            .u64_observable_gauge("harold.job.past_due")
+            .with_unit("{job}")
+            .with_callback(|observer| {
+                observer.observe(JOBS_PAST_DUE.load(std::sync::atomic::Ordering::Relaxed), &[]);
+            })
+            .build()
+    });
+}
+
+/// Records 0 for each series of `harold.job.ends` and sets `harold.job.past_due` to 0.
+/// The job tool calls it at its start.
+pub(crate) fn register_job_instruments() {
+    for (how, end_line) in JOB_END_SERIES {
+        instruments().job_ends.add(
+            0,
+            &[KeyValue::new("how", how), KeyValue::new("end_line", end_line)],
+        );
+    }
+    set_jobs_past_due(0);
+}
+
+/// Counts one agent job that ended, with `how` and the outcome of its end line.
+pub(crate) fn count_job_end(how: &'static str, end_line: &str) {
+    instruments().job_ends.add(
+        1,
+        &[
+            KeyValue::new("how", how),
+            KeyValue::new("end_line", end_line.to_owned()),
+        ],
+    );
+}
+
+/// Sets what `harold.job.past_due` reads: the running jobs past their expected end.
+pub(crate) fn set_jobs_past_due(count: u64) {
+    JOBS_PAST_DUE.store(count, std::sync::atomic::Ordering::Relaxed);
+    job_past_due_gauge();
 }
 
 // ---------------------------------------------------------------------------
@@ -4657,11 +4723,12 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 4] = [
+pub(crate) const HAROLD_FEATURES: [&str; 5] = [
     "factory-flow-page",
     "opencode-done-on-mac",
     "evidence-check",
     "evidence-follow-up",
+    "agent-jobs",
 ];
 
 /// Counts one use of the product feature `spec_id`.

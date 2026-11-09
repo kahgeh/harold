@@ -7,6 +7,7 @@ use harold_api::tools::job::v1 as pb;
 use harold_api::tools::job::v1::job_service_server::JobService;
 use tonic::{Request, Response, Status};
 
+use super::obs;
 use super::process::ProcessPort;
 use super::store::{JobRow, JobState, JobStore, NewJob};
 use super::validate;
@@ -79,11 +80,15 @@ impl JobService for JobToolService {
             due_at_ms: now + i64::from(req.for_secs) * 1_000,
         };
         match self.store.add(&job).await {
-            Ok(true) => Ok(Response::new(pb::AddResponse {
+            Ok(true) => {
+                crate::telemetry::feature_used("agent-jobs");
+                obs::job_added(&job.name, &job.pane_id, i64::from(req.for_secs));
+                Ok(Response::new(pb::AddResponse {
                 name: job.name,
                 started_at_ms: job.started_at_ms,
                 due_at_ms: job.due_at_ms,
-            })),
+                }))
+            }
             Ok(false) => Err(Status::failed_precondition("name_in_use")),
             Err(_) => Err(unavailable()),
         }
@@ -109,7 +114,10 @@ impl JobService for JobToolService {
     ) -> Result<Response<pb::RemoveResponse>, Status> {
         let name = request.into_inner().name;
         match self.store.remove(&name, (self.now_ms)()).await {
-            Ok(Some(job)) => Ok(Response::new(pb::RemoveResponse { name: job.name })),
+            Ok(Some(job)) => {
+                crate::telemetry::count_job_end("removed", "none");
+                Ok(Response::new(pb::RemoveResponse { name: job.name }))
+            }
             Ok(None) => Err(Status::not_found("unknown_job")),
             Err(_) => Err(unavailable()),
         }

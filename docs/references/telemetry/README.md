@@ -418,6 +418,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.factory_flow.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`). One for each load of the page `/flow` |
 | `harold.evidence.reads` | counter, `{read}` | `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`). One for each read of one evidence query by the evidence check |
 | `harold.evidence.lines` | counter, `{line}` | `outcome` (`typed`, `no_chief`, `not_typed`). One for each try to type an `EVIDENCE` line into the chief's pane. Each outcome starts at 0 |
+| `harold.job.ends` | counter, `{job}` | `how` (`ended`, `removed`) and `end_line` (`typed`, `typed_at_turn_end`, `no_pane`, `failed`, and `none` for a removed job). One for each agent job that ended or was removed, counted when its end line is done. Each series starts at 0 |
+| `harold.job.past_due` | gauge, `{job}` | none. The running agent jobs past their expected end. Starts at 0 |
 | `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
 | `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
 | `harold.web_app.request.duration` | histogram, `s`, buckets 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | `route_class`, never `updates`. The time from the request's arrival to the first byte of the answer |
@@ -512,6 +514,11 @@ These fields were added so that the log lines of the collector work show their i
 | `chars` | A count of characters, never the text. On `sending iMessage` and `summary question dropped` |
 | `matched_share` | A share from 0 to 100, never text. On `summary question dropped` |
 | `fell_back` | True when the check left no sentence and Harold used the whole reply. On `summary question dropped` |
+| `job.name` | The name of an agent job: 1 to 48 characters of `a-z`, `0-9` and `-`, set by the agent. On `job added`, `job ended` and `job end not told` |
+| `due_in_s` | Whole seconds from the recording of an agent job to its expected end. On `job added` |
+| `run_s` | Whole seconds from the recording of an agent job to the check that found it ended. On `job ended` |
+| `past_due_s` | Whole seconds that an agent job ran past its expected end, 0 when it did not. On `job ended` |
+| `end_line` | How the end line of an agent job went: `typed`, `typed_at_turn_end`, `no_pane` or `failed`. A removed job has `none`. On `harold.job.ends` |
 | `lag_s` | Whole seconds from the tag time of a release to its first start on this machine, never text. On `release installed` |
 | `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
 | `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |

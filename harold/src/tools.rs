@@ -174,6 +174,8 @@ pub(crate) struct ToolContext {
 pub(crate) struct Extras {
     /// Types as `Writer::Tool("watch")`, so the pane locks tell the writers apart.
     pub(crate) watch_typing: Arc<dyn PaneTyping>,
+    /// Types as `Writer::Tool("job")`.
+    pub(crate) job_typing: Arc<dyn PaneTyping>,
     pub(crate) agents: Arc<dyn Agents>,
     pub(crate) pods: Arc<dyn Pods>,
     pub(crate) watch_settings: WatchSettings,
@@ -266,6 +268,10 @@ pub(crate) async fn start(
             ports: Arc::clone(&ports),
             writer: Writer::Tool(watch::NAME),
         }),
+        job_typing: Arc::new(TmuxTyping {
+            ports: Arc::clone(&ports),
+            writer: Writer::Tool(job::NAME),
+        }),
         agents: Arc::new(agents),
         pods: Arc::new(GaugePods),
         watch_settings: cfg.watch.clone(),
@@ -317,6 +323,18 @@ async fn start_with(
     };
     let knowledge_launch = extras.knowledge.clone();
     let knowledge_shutdown = shutdown.clone();
+    let job_ctx = tool_context(
+        store_path,
+        job::NAME,
+        Some(Arc::clone(&extras.job_typing)),
+        &ToolHost {
+            chief_pane: &chief_pane,
+            pane_folder: &pane_folder,
+            products: &products,
+            extras: &extras,
+            shutdown: &shutdown,
+        },
+    );
     let [
         (questions_name, questions_ctx),
         (backlog_name, backlog_ctx),
@@ -347,6 +365,7 @@ async fn start_with(
         telemetry::start(telemetry_ctx).await,
         &mut tools,
     );
+    start_tool(job::NAME, job::start(job_ctx).await, &mut tools);
     start_tool(
         evidence::NAME,
         evidence::start(evidence_launch).await,
@@ -379,22 +398,15 @@ fn contexts(
     extras: Extras,
     shutdown: tokio::sync::watch::Receiver<()>,
 ) -> [(&'static str, ToolContext); 6] {
-    let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
-        data_folder: data_folder(store_path, name),
-        typing,
-        chief_pane: Arc::clone(&chief_pane),
-        pane_folder: Arc::clone(&pane_folder),
-        products: Arc::clone(&products),
-        agents: Arc::clone(&extras.agents),
-        pods: Arc::clone(&extras.pods),
-        watch_settings: extras.watch_settings.clone(),
-        model_environment: extras.model_environment.clone(),
-        cli_path: extras.cli_path.clone(),
-        grpc_addr: extras.grpc_addr,
-        pod_registry: extras.pod_registry.clone(),
-        pod_signals: extras.pod_signals,
-        watch_counts: Arc::clone(&extras.watch_counts),
-        shutdown: shutdown.clone(),
+    let host = ToolHost {
+        chief_pane: &chief_pane,
+        pane_folder: &pane_folder,
+        products: &products,
+        extras: &extras,
+        shutdown: &shutdown,
+    };
+    let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| {
+        tool_context(store_path, name, typing, &host)
     };
     [
         (questions::NAME, context(questions::NAME, Some(typing))),
@@ -407,6 +419,42 @@ fn contexts(
         (release::NAME, context(release::NAME, None)),
         (telemetry::NAME, context(telemetry::NAME, None)),
     ]
+}
+
+/// What every tool's context shares: the ports the host holds.
+struct ToolHost<'a> {
+    chief_pane: &'a Arc<dyn ChiefPane>,
+    pane_folder: &'a Arc<dyn PaneFolder>,
+    products: &'a Arc<dyn Products>,
+    extras: &'a Extras,
+    shutdown: &'a tokio::sync::watch::Receiver<()>,
+}
+
+/// The context of the tool `name`, with the given `typing`.
+fn tool_context(
+    store_path: &str,
+    name: &str,
+    typing: Option<Arc<dyn PaneTyping>>,
+    host: &ToolHost<'_>,
+) -> ToolContext {
+    let extras = host.extras;
+    ToolContext {
+        data_folder: data_folder(store_path, name),
+        typing,
+        chief_pane: Arc::clone(host.chief_pane),
+        pane_folder: Arc::clone(host.pane_folder),
+        products: Arc::clone(host.products),
+        agents: Arc::clone(&extras.agents),
+        pods: Arc::clone(&extras.pods),
+        watch_settings: extras.watch_settings.clone(),
+        model_environment: extras.model_environment.clone(),
+        cli_path: extras.cli_path.clone(),
+        grpc_addr: extras.grpc_addr,
+        pod_registry: extras.pod_registry.clone(),
+        pod_signals: extras.pod_signals,
+        watch_counts: Arc::clone(&extras.watch_counts),
+        shutdown: host.shutdown.clone(),
+    }
 }
 
 /// Adds a started tool's routes and task to `tools`, or logs why it could not

@@ -133,6 +133,7 @@ impl Checker {
         if self.store.set_end_line(job.id, outcome).await.is_err() {
             return false;
         }
+        crate::telemetry::count_job_end("ended", outcome);
         if let Ok(mut memory) = self.memory.lock() {
             memory.waited.remove(&job.id);
         }
