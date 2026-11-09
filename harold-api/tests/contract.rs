@@ -1,6 +1,6 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentSeenRequest, AgentSeenResponse, AgentState, AgentStateSnapshot,
+    AgentJob, AgentPaneState, AgentSeenRequest, AgentSeenResponse, AgentState, AgentStateSnapshot,
     CallAction, CallRequest, CallResponse, CallResult, CallState, GetHaroldStateResponse,
     ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
     SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
@@ -432,7 +432,7 @@ fn set_tts_muted_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
-    assert_eq!(snapshot_fields.len(), 11);
+    assert_eq!(snapshot_fields.len(), 12);
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn set_messaging_paused_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
-    assert_eq!(snapshot_fields.len(), 11);
+    assert_eq!(snapshot_fields.len(), 12);
 }
 
 #[test]
@@ -559,13 +559,52 @@ fn agent_state_snapshot_carries_harold_version_in_field_seven() {
         ("watches_paused", 9),
         ("watches_capped", 10),
         ("focus_known", 11),
+        ("jobs", 12),
     ] {
         assert!(
             fields.contains(&(expected.0.to_string(), expected.1)),
             "{expected:?}"
         );
     }
-    assert_eq!(fields.len(), 11);
+    assert_eq!(fields.len(), 12);
+}
+
+#[test]
+fn agent_jobs_contract_is_additive() {
+    let fields = message_fields("AgentStateSnapshot");
+    assert!(fields.contains(&("jobs".to_string(), 12)));
+    let job_fields = message_fields("AgentJob");
+    for expected in [
+        ("name", 1),
+        ("what", 2),
+        ("pane_id", 3),
+        ("host", 4),
+        ("pid", 5),
+        ("started_at_ms", 6),
+        ("due_at_ms", 7),
+        ("ended_at_ms", 8),
+        ("state", 9),
+    ] {
+        assert!(
+            job_fields.contains(&(expected.0.to_string(), expected.1)),
+            "{expected:?}"
+        );
+    }
+    assert_eq!(job_fields.len(), 9);
+    let snapshot = AgentStateSnapshot {
+        jobs: vec![AgentJob {
+            name: "calibration".into(),
+            pid: 4121,
+            state: "running".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let decoded = round_trip(&snapshot);
+    assert_eq!(decoded.jobs.len(), 1);
+    assert_eq!((decoded.jobs[0].name.as_str(), decoded.jobs[0].pid), ("calibration", 4121));
+    // An older sender leaves the field out: it decodes as no jobs.
+    assert!(round_trip(&AgentStateSnapshot::default()).jobs.is_empty());
 }
 
 #[test]

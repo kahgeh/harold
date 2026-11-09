@@ -62,6 +62,7 @@ fn demo_app() -> App {
         ConnectionState::Live,
         Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,

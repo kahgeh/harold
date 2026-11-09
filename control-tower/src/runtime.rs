@@ -1300,6 +1300,7 @@ impl RuntimeCore {
                 Snapshot {
                     // Unknown until the first snapshot: the local focus probe runs.
                     focus_known: None,
+                    jobs: Vec::new(),
                     harold_version: None,
                     tts_muted: false,
                     messaging_paused: false,
@@ -4794,6 +4795,7 @@ mod tests {
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,

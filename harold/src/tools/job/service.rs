@@ -7,6 +7,7 @@ use harold_api::tools::job::v1 as pb;
 use harold_api::tools::job::v1::job_service_server::JobService;
 use tonic::{Request, Response, Status};
 
+use super::feed::JobsFeed;
 use super::obs;
 use super::process::ProcessPort;
 use super::store::{JobRow, JobState, JobStore, NewJob};
@@ -19,6 +20,7 @@ pub(super) struct JobToolService {
     store: Arc<JobStore>,
     processes: Arc<dyn ProcessPort>,
     now_ms: Clock,
+    feed: Arc<JobsFeed>,
 }
 
 impl JobToolService {
@@ -26,11 +28,13 @@ impl JobToolService {
         store: Arc<JobStore>,
         processes: Arc<dyn ProcessPort>,
         now_ms: Clock,
+        feed: Arc<JobsFeed>,
     ) -> Self {
         Self {
             store,
             processes,
             now_ms,
+            feed,
         }
     }
 }
@@ -83,6 +87,7 @@ impl JobService for JobToolService {
             Ok(true) => {
                 crate::telemetry::feature_used("agent-jobs");
                 obs::job_added(&job.name, &job.pane_id, i64::from(req.for_secs));
+                self.feed.refresh(&self.store, now).await;
                 Ok(Response::new(pb::AddResponse {
                 name: job.name,
                 started_at_ms: job.started_at_ms,
@@ -116,6 +121,7 @@ impl JobService for JobToolService {
         match self.store.remove(&name, (self.now_ms)()).await {
             Ok(Some(job)) => {
                 crate::telemetry::count_job_end("removed", "none");
+                self.feed.refresh(&self.store, (self.now_ms)()).await;
                 Ok(Response::new(pb::RemoveResponse { name: job.name }))
             }
             Ok(None) => Err(Status::not_found("unknown_job")),

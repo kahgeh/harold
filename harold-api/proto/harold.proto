@@ -212,6 +212,28 @@ message AgentStateSnapshot {
   uint32 watches_capped = 10;
   // Whether Harold knows which pane has focus. Absent means unknown (an older Harold).
   optional bool focus_known = 11;
+  // The agent jobs that run, and those that ended in the last 10 minutes. A change of a job
+  // raises `through_event_version`. An older control-tower ignores the field.
+  repeated AgentJob jobs = 12;
+}
+
+// A long command that an agent started outside its pane and recorded with Harold.
+message AgentJob {
+  string name = 1;
+  // An optional line from the agent. Empty when none.
+  string what = 2;
+  // The pane of the agent that recorded the job.
+  string pane_id = 3;
+  // The host label. Empty for Harold's own machine.
+  string host = 4;
+  uint32 pid = 5;
+  int64 started_at_ms = 6;
+  // When the agent expects the job to end.
+  int64 due_at_ms = 7;
+  // Zero while the job runs.
+  int64 ended_at_ms = 8;
+  // `running` or `ended`.
+  string state = 9;
 }
 
 message SetTtsMutedRequest {

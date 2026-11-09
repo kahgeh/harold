@@ -12,6 +12,7 @@ use tonic::service::Routes;
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
 mod check;
+mod feed;
 mod obs;
 pub(crate) mod process;
 mod service;
@@ -19,6 +20,8 @@ mod store;
 #[cfg(test)]
 mod test_support;
 mod validate;
+
+pub(crate) use feed::{JobsView, subscribe, with_jobs};
 
 pub(crate) const NAME: &str = "job";
 
@@ -47,13 +50,15 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let store = Arc::new(store);
     let processes: Arc<dyn process::ProcessPort> = Arc::new(process::SystemProcesses);
     let clock: service::Clock = Arc::new(now_ms);
+    let feed = Arc::clone(feed::JobsFeed::global());
     let checker = check::Checker::new(
         Arc::clone(&store),
         Arc::clone(&processes),
         typing,
         Arc::clone(&clock),
+        Arc::clone(&feed),
     );
-    let service = service::JobToolService::new(store, processes, clock);
+    let service = service::JobToolService::new(store, processes, clock, feed);
     let task = tokio::spawn(run(checker, ctx.shutdown));
     Ok(ToolHandle {
         routes: Routes::new(JobServiceServer::new(service)),

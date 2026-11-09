@@ -196,6 +196,29 @@ pub struct MonitorHealth {
     pub observed_at_ms: i64,
 }
 
+/// A long command that an agent started outside its pane, as Harold reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub name: String,
+    /// An optional line from the agent. Empty when none.
+    pub what: String,
+    /// The pane of the agent that recorded the job.
+    pub pane_id: String,
+    /// The host label. Empty for Harold's own machine.
+    pub host: String,
+    pub pid: u32,
+    pub started_at_ms: i64,
+    pub due_at_ms: i64,
+    /// Zero while the job runs.
+    pub ended_at_ms: i64,
+}
+
+impl Job {
+    pub fn is_running(&self) -> bool {
+        self.ended_at_ms == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub through_event_version: u64,
@@ -213,6 +236,9 @@ pub struct Snapshot {
     /// Whether Harold knows which pane has focus. `None` when Harold sends nothing: an
     /// older Harold, so the control-tower keeps its own waiting rule.
     pub focus_known: Option<bool>,
+    /// The agent jobs that run, and those that ended in the last 10 minutes. An older
+    /// Harold sends none.
+    pub jobs: Vec<Job>,
     /// The release Harold reports, `None` while disconnected or when it sent none.
     pub harold_version: Option<String>,
 }
@@ -1919,6 +1945,7 @@ mod tests {
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
         let empty = Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             through_event_version: 0,
             server_time_ms: 0,
@@ -1976,6 +2003,7 @@ mod tests {
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2137,6 +2165,7 @@ mod tests {
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2162,6 +2191,7 @@ mod tests {
         assert!(
             !app.apply_later_snapshot(Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2180,6 +2210,7 @@ mod tests {
         assert!(
             app.apply_later_snapshot(Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2855,6 +2886,7 @@ mod tests {
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -2976,6 +3008,7 @@ mod tests {
     fn live_voice_app(muted: bool) -> App {
         let snapshot = Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             through_event_version: 1,
             server_time_ms: 0,
@@ -3079,6 +3112,7 @@ mod tests {
             ConnectionState::Connecting,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -3169,6 +3203,7 @@ mod tests {
             ConnectionState::Connecting,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -3796,6 +3831,7 @@ mod tests {
             ConnectionState::Connecting,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,

@@ -1277,6 +1277,7 @@ mod tests {
     fn snapshot(version: u64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             through_event_version: version,
             server_time_ms: 0,
             monitor_health: Vec::new(),

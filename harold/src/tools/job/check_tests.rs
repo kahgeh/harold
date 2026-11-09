@@ -30,6 +30,7 @@ fn checker(
         processes.clone(),
         pane.clone(),
         Arc::new(move || clock.load(Ordering::SeqCst)),
+        Arc::new(crate::tools::job::feed::JobsFeed::new()),
     )
 }
 

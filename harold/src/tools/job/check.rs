@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::feed::JobsFeed;
 use super::obs;
 use super::process::ProcessPort;
 use super::service::Clock;
@@ -43,6 +44,7 @@ pub(super) struct Checker {
     processes: Arc<dyn ProcessPort>,
     typing: Arc<dyn PaneTyping>,
     now_ms: Clock,
+    feed: Arc<JobsFeed>,
     memory: Mutex<Memory>,
 }
 
@@ -65,12 +67,14 @@ impl Checker {
         processes: Arc<dyn ProcessPort>,
         typing: Arc<dyn PaneTyping>,
         now_ms: Clock,
+        feed: Arc<JobsFeed>,
     ) -> Self {
         Self {
             store,
             processes,
             typing,
             now_ms,
+            feed,
             memory: Mutex::new(Memory::default()),
         }
     }
@@ -106,6 +110,7 @@ impl Checker {
         }
         self.log_untold(now).await;
         let _ = self.store.prune(now).await;
+        self.feed.refresh(&self.store, now).await;
         report
     }
 

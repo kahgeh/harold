@@ -946,8 +946,11 @@ async fn forward_agent_snapshots(
     );
     let initial = with_watch_counts(initial, *counts.borrow_and_update());
     let initial = with_waiting(initial, &waiting.borrow_and_update());
+    let mut jobs = tools::job::subscribe();
+    let initial = tools::job::with_jobs(initial, &jobs.borrow_and_update());
     let mut counts_open = true;
     let mut waiting_open = true;
+    let mut jobs_open = true;
     if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
         return;
     }
@@ -965,6 +968,7 @@ async fn forward_agent_snapshots(
                     map_agent_snapshot(snapshots.borrow_and_update().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -976,6 +980,7 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -987,6 +992,7 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -998,6 +1004,7 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -1013,6 +1020,7 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -1028,6 +1036,22 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+            changed = jobs.changed(), if jobs_open => {
+                if changed.is_err() {
+                    // The job tool is gone: the last jobs stay, and the stream goes on.
+                    jobs_open = false;
+                    continue;
+                }
+                // A job change raises `through_event_version` through the revision of the list.
+                let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
+                let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
+                let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -1039,6 +1063,7 @@ async fn forward_agent_snapshots(
                 let snapshot = map_agent_snapshot(snapshots.borrow().clone(), &steps, &recaps, &hosts, &window_names, &local_icon, &roles);
                 let snapshot = with_watch_counts(snapshot, *counts.borrow_and_update());
                 let snapshot = with_waiting(snapshot, &waiting.borrow_and_update());
+                let snapshot = tools::job::with_jobs(snapshot, &jobs.borrow_and_update());
                 if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
                     break;
                 }
@@ -1361,6 +1386,7 @@ fn map_agent_snapshot(
     let pod_roles = roles.pod_roles();
     AgentStateSnapshot {
         focus_known: None,
+        jobs: Vec::new(),
         watches_running: 0,
         watches_paused: 0,
         watches_capped: 0,

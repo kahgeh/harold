@@ -11,7 +11,7 @@ use ratatui::widgets::{
 
 use crate::api::{HAROLD_VERSION_LIMIT, WorkDetail};
 use crate::app::{
-    AgentState, App, CallState, CallView, RuntimeStatus, StateCounts, ViewMode, VoiceState,
+    AgentState, App, CallState, CallView, Job, RuntimeStatus, StateCounts, ViewMode, VoiceState,
 };
 use crate::questions::{
     ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
@@ -904,6 +904,9 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let mut heights = Vec::new();
     // The table row of the question's first line; its lines follow one to a row.
     let mut question_at = None;
+    // The job lines: the table row of each, its text and its tone. The table draws them
+    // blank and the text goes over them, as the todos rows do.
+    let mut job_lines: Vec<(usize, String, JobTone)> = Vec::new();
     let mut selected_index = None;
     if !chief_shown {
         push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
@@ -1021,7 +1024,40 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             if chief == Some(&agent.incarnation) {
                 push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
             }
+            let own = app.snapshot.jobs.iter().filter(|job| {
+                job.pane_id == agent.incarnation.pane_id && job.host == agent.host
+            });
+            push_job_rows(own, now_ms, &mut rows, &mut heights, &mut job_lines);
         }
+    }
+    // A job whose pane has no row (the agent is gone) shows under its own group.
+    let mut orphans: Vec<&Job> = app
+        .snapshot
+        .jobs
+        .iter()
+        .filter(|job| {
+            !app.snapshot
+                .rows
+                .iter()
+                .any(|row| row.incarnation.pane_id == job.pane_id && row.host == job.host)
+        })
+        .collect();
+    if !orphans.is_empty() {
+        orphans.sort_by_key(|job| (job.started_at_ms, job.name.clone()));
+        let margin = wide && !rows.is_empty();
+        let mut header = Row::new(vec![
+            Cell::from(""),
+            Cell::from(Line::styled(
+                fit(JOBS_WITHOUT_AGENT, usize::from(where_width)).into_owned(),
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            )),
+        ]);
+        if margin {
+            header = header.top_margin(1);
+        }
+        rows.push(header);
+        heights.push(1 + u16::from(margin));
+        push_job_rows(orphans.into_iter(), now_ms, &mut rows, &mut heights, &mut job_lines);
     }
     if let Some(at) = question_at
         && let Some(cursor) = question_lines
@@ -1079,6 +1115,23 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         table
     };
     frame.render_stateful_widget(table, area, &mut state);
+    // The table drew the job rows blank; the text goes over them, cut with `…`.
+    for (row_index, text, tone) in &job_lines {
+        if let Some(y) = row_y(&heights, state.offset(), *row_index, list.height) {
+            let row = Rect {
+                y: list.y + y,
+                height: 1,
+                ..list
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    fit(text, usize::from(row.width)).into_owned(),
+                    tone.style(),
+                )),
+                row,
+            );
+        }
+    }
     // The table drew the question rows blank; the text goes over them, as wide as
     // the list is.
     let Some(first) = question_at else {
@@ -1101,6 +1154,108 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         && row_y(&heights, state.offset(), row, list.height).is_none()
     {
         render_question_edge(frame, inner, row < state.offset(), view.waiting);
+    }
+}
+
+/// The title of the group of jobs whose agent has no row.
+const JOBS_WITHOUT_AGENT: &str = "jobs with no agent";
+
+/// How a job line is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobTone {
+    Running,
+    PastDue,
+    Ended,
+}
+
+impl JobTone {
+    fn style(self) -> Style {
+        match self {
+            JobTone::PastDue => Style::default().fg(AMBER),
+            JobTone::Running | JobTone::Ended => Style::default().fg(MUTED),
+        }
+    }
+}
+
+/// `<1 m` or `N m`.
+fn job_minutes(ms: i64) -> String {
+    match ms.max(0) / 60_000 {
+        0 => "<1 m".to_owned(),
+        minutes => format!("{minutes} m"),
+    }
+}
+
+/// The text of a job line, with the tone to draw it in. It starts at the todos indent:
+///
+/// - `⏵ job macos-tests · pid 4121 · 12 m of 20 m, ends about 06:55` while it runs;
+/// - `⏵ job macos-tests · pid 4121 · 4 m past its end (expected 06:43)` after its expected end;
+/// - `⏵ job release-build · pid 3977 · ended 2 m ago` for 10 minutes after the end.
+///
+/// A job on another host names the host before the pid.
+fn job_line_text<Tz>(job: &Job, now_ms: i64, tz: &Tz) -> (String, JobTone)
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let at = |ms: i64| match chrono::DateTime::from_timestamp_millis(ms) {
+        Some(time) => time.with_timezone(tz).format("%H:%M").to_string(),
+        None => "--:--".to_owned(),
+    };
+    let who = if job.host.is_empty() {
+        format!("pid {}", job.pid)
+    } else {
+        format!("{} · pid {}", job.host, job.pid)
+    };
+    let (tail, tone) = if !job.is_running() {
+        (
+            format!("ended {} ago", job_minutes(now_ms - job.ended_at_ms)),
+            JobTone::Ended,
+        )
+    } else if now_ms > job.due_at_ms {
+        (
+            format!(
+                "{} past its end (expected {})",
+                job_minutes(now_ms - job.due_at_ms),
+                at(job.due_at_ms)
+            ),
+            JobTone::PastDue,
+        )
+    } else {
+        (
+            format!(
+                "{} of {}, ends about {}",
+                job_minutes(now_ms - job.started_at_ms),
+                job_minutes(job.due_at_ms - job.started_at_ms),
+                at(job.due_at_ms)
+            ),
+            JobTone::Running,
+        )
+    };
+    (
+        format!(
+            "{}⏵ job {} · {who} · {tail}",
+            " ".repeat(QUESTION_HEADER_INDENT),
+            job.name
+        ),
+        tone,
+    )
+}
+
+/// Appends a blank table row, and the text to draw over it, for each job.
+fn push_job_rows<'a>(
+    jobs: impl Iterator<Item = &'a Job>,
+    now_ms: i64,
+    rows: &mut Vec<Row<'_>>,
+    heights: &mut Vec<u16>,
+    lines: &mut Vec<(usize, String, JobTone)>,
+) {
+    let mut jobs: Vec<&Job> = jobs.collect();
+    jobs.sort_by_key(|job| (job.started_at_ms, job.name.clone()));
+    for job in jobs {
+        let (text, tone) = job_line_text(job, now_ms, &chrono::Local);
+        lines.push((rows.len(), text, tone));
+        rows.push(Row::new(Vec::<Cell>::new()).style(Style::default().bg(BOARD)));
+        heights.push(1);
     }
 }
 
@@ -2446,7 +2601,8 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::text::Line;
 
-    use super::{MUTED, QStop, fit, render};
+    use super::{AMBER, JobTone, MUTED, QStop, QUESTION_HEADER_INDENT, fit, job_line_text, render};
+    use crate::app::Job;
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, CallState, CallView, ConnectionState,
         MonitorHealth, MonitorHealthState, SearchState, Snapshot,
@@ -2460,6 +2616,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2598,6 +2755,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -2645,6 +2803,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -3018,6 +3177,7 @@ mod tests {
             ConnectionState::Stale,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -3110,6 +3270,7 @@ mod tests {
 
         app.apply_later_snapshot(Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -3135,6 +3296,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -3351,6 +3513,7 @@ mod tests {
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -4338,6 +4501,7 @@ mod tests {
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
             focus_known: None,
+            jobs: Vec::new(),
             harold_version: None,
             tts_muted: false,
             messaging_paused: false,
@@ -5385,6 +5549,7 @@ mod tests {
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
@@ -6254,6 +6419,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -6842,6 +7008,122 @@ mod tests {
     /// What a screen line holds between the list's borders.
     fn inner(line: &str) -> &str {
         line.trim_start_matches('│').trim_end_matches('│').trim()
+    }
+
+    fn job(name: &str, pane_id: &str, started_ms: i64, due_ms: i64, ended_ms: i64) -> Job {
+        Job {
+            name: name.into(),
+            what: String::new(),
+            pane_id: pane_id.into(),
+            host: String::new(),
+            pid: 4121,
+            started_at_ms: started_ms,
+            due_at_ms: due_ms,
+            ended_at_ms: ended_ms,
+        }
+    }
+
+    const MIN: i64 = 60_000;
+
+    #[test]
+    fn a_job_line_reads_running_past_its_end_or_ended() {
+        let tz = plus_eleven();
+        let start = SAMPLE_MS;
+        let running = job("macos-tests", "%3", start, start + 20 * MIN, 0);
+        let (text, tone) = job_line_text(&running, start + 12 * MIN, &tz);
+        assert_eq!(
+            text,
+            "    ⏵ job macos-tests · pid 4121 · 12 m of 20 m, ends about 22:07"
+        );
+        assert_eq!(tone, JobTone::Running);
+        let (text, tone) = job_line_text(&running, start + 24 * MIN, &tz);
+        assert_eq!(
+            text,
+            "    ⏵ job macos-tests · pid 4121 · 4 m past its end (expected 22:07)"
+        );
+        assert_eq!(tone, JobTone::PastDue);
+        let ended = job("release-build", "%3", start, start + 20 * MIN, start + 18 * MIN);
+        let (text, tone) = job_line_text(&ended, start + 20 * MIN, &tz);
+        assert_eq!(text, "    ⏵ job release-build · pid 4121 · ended 2 m ago");
+        assert_eq!(tone, JobTone::Ended);
+        let (text, _) = job_line_text(&running, start + 10_000, &tz);
+        assert!(text.contains("<1 m of 20 m"), "{text}");
+        let mut remote = running.clone();
+        remote.host = "omarchy".into();
+        assert!(job_line_text(&remote, start, &tz).0.contains("· omarchy · pid 4121 ·"));
+    }
+
+    #[test]
+    fn the_job_line_sits_under_its_agent_row_even_when_the_agent_is_idle() {
+        let mut app = user_layout();
+        let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
+        let now = SAMPLE_MS + 12 * MIN;
+        app.snapshot.jobs = vec![job("macos-tests", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, 0)];
+        let lines = text_lines(&app, 100, 60, now);
+        let at = lines
+            .iter()
+            .position(|l| l.contains("⏵ job macos-tests"))
+            .unwrap_or_else(|| panic!("job line:\n{}", lines.join("\n")));
+        assert!(inner(&lines[at]).starts_with("⏵ job macos-tests · pid 4121 · 12 m of 20 m, ends about"));
+        // The row above it is the agent's row, and the line has the todos indent.
+        assert!(lines[at - 1].contains(&pane) || lines[at - 1].contains("IDLE") || lines[at - 1].contains("DONE") || lines[at - 1].contains("WORKING"), "{}", lines[at - 1]);
+        let indent = lines[at].find('⏵').unwrap() - lines[at].find('│').unwrap();
+        assert!(indent >= QUESTION_HEADER_INDENT, "{indent}");
+    }
+
+    #[test]
+    fn a_job_past_its_end_is_amber_and_a_running_one_is_muted() {
+        let mut app = user_layout();
+        let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
+        let now = SAMPLE_MS + 24 * MIN;
+        app.snapshot.jobs = vec![job("late", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, 0)];
+        let buffer = rendered_buffer(&app, 100, 60, now);
+        assert_styled_occurrences(&buffer, "past its end", AMBER, 1);
+        app.snapshot.jobs = vec![job("fine", &pane, SAMPLE_MS, SAMPLE_MS + 40 * MIN, 0)];
+        let buffer = rendered_buffer(&app, 100, 60, now);
+        assert_styled_occurrences(&buffer, "ends about", MUTED, 1);
+    }
+
+    #[test]
+    fn an_ended_job_shows_ended_ago_and_no_job_means_no_line() {
+        let mut app = user_layout();
+        let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
+        let now = SAMPLE_MS + 20 * MIN;
+        app.snapshot.jobs = vec![job("done", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, now - 2 * MIN)];
+        assert!(rendered(&app, 100, 60, now).contains("ended 2 m ago"));
+        app.snapshot.jobs.clear();
+        assert!(!rendered(&app, 100, 60, now).contains("⏵ job"));
+    }
+
+    #[test]
+    fn a_job_with_no_agent_row_shows_under_jobs_with_no_agent_at_the_end() {
+        let mut app = user_layout();
+        app.snapshot.jobs = vec![job("orphan", "%999", SAMPLE_MS, SAMPLE_MS + 20 * MIN, 0)];
+        let lines = text_lines(&app, 100, 60, SAMPLE_MS + MIN);
+        let header = lines
+            .iter()
+            .position(|l| l.contains("jobs with no agent"))
+            .unwrap_or_else(|| panic!("group:\n{}", lines.join("\n")));
+        assert!(lines[header + 1].contains("⏵ job orphan"), "{}", lines[header + 1]);
+        let last_agent = lines.iter().rposition(|l| l.contains("IDLE") || l.contains("DONE") || l.contains("WORKING")).unwrap();
+        assert!(header > last_agent);
+    }
+
+    #[test]
+    fn a_narrow_window_cuts_the_job_line_with_an_ellipsis() {
+        let mut app = user_layout();
+        let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
+        app.snapshot.jobs = vec![job(
+            "a-job-with-a-rather-long-name-for-a-narrow-window",
+            &pane,
+            SAMPLE_MS,
+            SAMPLE_MS + 20 * MIN,
+            0,
+        )];
+        let lines = text_lines(&app, 80, 40, SAMPLE_MS + 12 * MIN);
+        let line = lines.iter().find(|l| l.contains("⏵ job a-job")).expect("job line");
+        assert!(inner(line).ends_with('…'), "{line}");
+        assert!(Line::raw(line.as_str()).width() <= 80);
     }
 
     #[test]
@@ -7991,6 +8273,7 @@ mod agent_view_golden {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
@@ -8164,6 +8447,7 @@ mod work_view_tests {
             ConnectionState::Live,
             Snapshot {
                 focus_known: None,
+                jobs: Vec::new(),
                 harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,

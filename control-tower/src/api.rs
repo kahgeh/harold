@@ -649,12 +649,33 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         watches_paused: snapshot.watches_paused,
         watches_capped: snapshot.watches_capped,
         focus_known: snapshot.focus_known,
+        jobs: snapshot.jobs.into_iter().map(map_job).collect(),
         harold_version: Some(sanitize_display(
             &snapshot.harold_version,
             HAROLD_VERSION_LIMIT,
         ))
         .filter(|version| !version.is_empty()),
     })
+}
+
+/// Maps an agent job. Its text comes from an agent, so it is cleaned and cut. A job that
+/// runs has no end time, and an ended job always has one.
+fn map_job(job: harold_api::harold::AgentJob) -> crate::app::Job {
+    let ended_at_ms = if job.state == "running" {
+        0
+    } else {
+        job.ended_at_ms.max(1)
+    };
+    crate::app::Job {
+        name: sanitize_display(&job.name, 48),
+        what: sanitize_display(&job.what, 120),
+        pane_id: job.pane_id,
+        host: sanitize_display(&job.host, 48),
+        pid: job.pid,
+        started_at_ms: job.started_at_ms,
+        due_at_ms: job.due_at_ms,
+        ended_at_ms,
+    }
 }
 
 /// The answer to `GetRemoteOrder`. `Unimplemented` (an older Harold) is an empty order.
@@ -1055,6 +1076,37 @@ mod tests {
     }
 
     #[test]
+    fn maps_the_agent_jobs_and_an_older_harold_sends_none() {
+        use harold_api::harold::AgentJob;
+        let job = |state: &str, ended_at_ms: i64| AgentJob {
+            name: "macos-tests".into(),
+            what: "the\x1b[31m suite".into(),
+            pane_id: "%4".into(),
+            host: String::new(),
+            pid: 4121,
+            started_at_ms: 1_000,
+            due_at_ms: 9_000,
+            ended_at_ms,
+            state: state.into(),
+        };
+        let mapped = map_snapshot(AgentStateSnapshot {
+            jobs: vec![job("running", 0), job("ended", 7_000)],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(mapped.jobs.len(), 2);
+        assert!(mapped.jobs[0].is_running());
+        assert_eq!(mapped.jobs[1].ended_at_ms, 7_000);
+        assert_eq!(
+            (mapped.jobs[0].name.as_str(), mapped.jobs[0].pid, mapped.jobs[0].due_at_ms),
+            ("macos-tests", 4121, 9_000)
+        );
+        assert!(!mapped.jobs[0].what.contains('\x1b'));
+        let older = map_snapshot(AgentStateSnapshot::default()).unwrap();
+        assert!(older.jobs.is_empty());
+    }
+
+    #[test]
     fn focus_known_absent_maps_to_none() {
         // An older Harold sends no `focus_known`: the control-tower keeps its own rule.
         let mapped = map_snapshot(AgentStateSnapshot::default()).unwrap();
@@ -1143,6 +1195,7 @@ mod tests {
         .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1196,6 +1249,7 @@ mod tests {
     #[test]
     fn maps_every_monitor_health_state_and_unknown_enum_values_to_unknown() {
         let mapped = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1273,6 +1327,7 @@ mod tests {
             .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1320,6 +1375,7 @@ mod tests {
     #[test]
     fn a_recap_with_control_characters_is_shown_clean() {
         let row = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1349,6 +1405,7 @@ mod tests {
     #[test]
     fn a_long_recap_keeps_up_to_400_characters() {
         let row = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1375,6 +1432,7 @@ mod tests {
     fn api_maps_current_step() {
         let map = |step: Option<String>| {
             map_snapshot(AgentStateSnapshot {
+                jobs: Vec::new(),
                 focus_known: None,
                 watches_running: 0,
                 watches_paused: 0,
@@ -1427,6 +1485,7 @@ mod tests {
         };
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1521,6 +1580,7 @@ mod tests {
     #[tokio::test]
     async fn reader_maps_generated_snapshot_before_delivery_then_closes_at_eof() {
         let generated = AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -1551,6 +1611,7 @@ mod tests {
         let mut invalid = proto_pane("%1");
         invalid.pane_pid = 0;
         let mut stream = spawn_reader(FakeReader::new([Ok(Some(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,
@@ -2034,6 +2095,7 @@ mod tests {
 
     fn mapping_error(panes: Vec<AgentPaneState>) -> ProtocolError {
         map_snapshot(AgentStateSnapshot {
+            jobs: Vec::new(),
             focus_known: None,
             watches_running: 0,
             watches_paused: 0,

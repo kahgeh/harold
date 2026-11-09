@@ -6,7 +6,7 @@ async fn service() -> (JobToolService, Arc<FakeProcesses>, Temp) {
     let store = dir.store().await;
     let processes = Arc::new(FakeProcesses::default());
     processes.0.lock().unwrap().insert(4121, 1_700_000_000);
-    let svc = JobToolService::new(store, processes.clone(), Arc::new(|| 1_000_000));
+    let svc = JobToolService::new(store, processes.clone(), Arc::new(|| 1_000_000), Arc::new(crate::tools::job::feed::JobsFeed::new()));
     (svc, processes, dir)
 }
 
