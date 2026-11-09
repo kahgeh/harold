@@ -5847,6 +5847,7 @@ fn count_evidence_line_adds_one_for_its_outcome() {
 fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
     for field in [
         "job.name",
+        "folder",
         "pane_id",
         "due_in_s",
         "run_s",

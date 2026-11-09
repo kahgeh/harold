@@ -196,6 +196,16 @@ machine_audio_output = ["chief-of-pods"]
 hourly_rate = 100   # a whole number above 0, in the currency below
 currency = "AUD"    # three capital letters (ISO 4217)
 
+[job]
+# Keep the machine awake while an agent job runs. The folder belongs to the machine's
+# idle-suspend; Harold writes only its own harold-job-<name> files in it. Empty: no file.
+# On omarchy, local.toml sets it to ~/.local/state/agent-activity.
+# See docs/references/operation/README.md.
+keep_awake_folder = ""
+# Seconds between two writes of the file of a running job. Keep it well inside the
+# 45-minute window of the idle-suspend.
+keep_awake_every_s = 300
+
 [prices]
 # List prices and the exchange rate. The HyperDX Inventory cost card prices the tokens with them.
 # Change them in local.toml. A price change here prices the whole stock again.

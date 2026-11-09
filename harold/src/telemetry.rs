@@ -207,6 +207,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "alert",
     "pod.product",
     "job.name",
+    "folder",
     "due_in_s",
     "run_s",
     "past_due_s",

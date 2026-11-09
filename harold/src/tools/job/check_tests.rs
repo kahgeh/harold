@@ -497,3 +497,40 @@ async fn a_unit_past_its_expected_end_counts_as_past_due() {
     r.advance(21 * MIN);
     assert_eq!(r.checker.pass().await.past_due, 1);
 }
+
+#[tokio::test]
+async fn a_running_job_keeps_its_file_and_the_end_deletes_it() {
+    use crate::settings::JobSettings;
+    use crate::tools::job::awake::KeepAwake;
+    let mut r = rig().await;
+    let folder = Temp::new();
+    let awake = Arc::new(
+        KeepAwake::new(&JobSettings {
+            keep_awake_folder: folder.0.display().to_string(),
+            keep_awake_every_s: 300,
+        })
+        .unwrap(),
+    );
+    r.checker = checker(&r.store, &r.processes, &r.units, &r.pane, &r.clock)
+        .with_awake(Some(awake.clone()));
+    r.store.add(&job("cal", r.now())).await.unwrap();
+    r.checker.pass().await;
+    assert!(folder.0.join("harold-job-cal").exists(), "written at once");
+    assert!(awake.has_file("cal"));
+    r.end_process().await;
+    r.advance(15_000);
+    r.checker.pass().await;
+    assert!(
+        !folder.0.join("harold-job-cal").exists(),
+        "deleted at the end"
+    );
+}
+
+#[tokio::test]
+async fn with_no_keep_awake_folder_no_file_is_written() {
+    let r = rig().await;
+    r.store.add(&job("cal", r.now())).await.unwrap();
+    r.checker.pass().await;
+    // The rig has no `KeepAwake`: nothing to write and nothing to fail.
+    assert_eq!(r.only_job().await.state, JobState::Running);
+}

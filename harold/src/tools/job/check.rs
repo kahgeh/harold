@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::awake::KeepAwake;
 use super::feed::JobsFeed;
 use super::obs;
 use super::process::ProcessPort;
@@ -55,6 +56,8 @@ pub(super) struct Checker {
     now_ms: Clock,
     feed: Arc<JobsFeed>,
     memory: Mutex<Memory>,
+    /// The keep-awake files. `None` when `[job] keep_awake_folder` is empty.
+    awake: Option<Arc<KeepAwake>>,
 }
 
 /// `JOB <name> ended after <n> m: exit 0.` for a unit. The text is `failed (exit 2)` for a
@@ -115,7 +118,14 @@ impl Checker {
             now_ms,
             feed,
             memory: Mutex::new(Memory::default()),
+            awake: None,
         }
+    }
+
+    /// Writes a keep-awake file for each job that runs, and deletes it at the end.
+    pub(super) fn with_awake(mut self, awake: Option<Arc<KeepAwake>>) -> Self {
+        self.awake = awake;
+        self
     }
 
     /// One check: ends the jobs whose process is gone, types the lines that wait, logs the
@@ -126,12 +136,14 @@ impl Checker {
         let Ok(running) = self.store.running().await else {
             return report;
         };
+        let mut still_running: Vec<String> = Vec::new();
         for job in running {
             let exit_code = match self.still_runs(&job).await {
                 Still::Runs => {
                     if now > job.due_at_ms {
                         report.past_due += 1;
                     }
+                    still_running.push(job.name.clone());
                     continue;
                 }
                 Still::Ended(exit_code) => exit_code,
@@ -147,6 +159,9 @@ impl Checker {
                     (now - job.due_at_ms).max(0) / 1_000,
                 );
             }
+        }
+        if let Some(awake) = &self.awake {
+            awake.tick(&still_running, now);
         }
         if let Ok(waiting) = self.store.waiting_for_line().await {
             for job in waiting {

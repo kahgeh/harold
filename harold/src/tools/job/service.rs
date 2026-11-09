@@ -7,6 +7,7 @@ use harold_api::tools::job::v1 as pb;
 use harold_api::tools::job::v1::job_service_server::JobService;
 use tonic::{Request, Response, Status};
 
+use super::awake::KeepAwake;
 use super::feed::JobsFeed;
 use super::obs;
 use super::process::ProcessPort;
@@ -25,6 +26,7 @@ pub(super) struct JobToolService {
     systemd: bool,
     now_ms: Clock,
     feed: Arc<JobsFeed>,
+    awake: Option<Arc<KeepAwake>>,
 }
 
 /// What `add` tells the agent when the unit does not stay loaded after it ends.
@@ -47,7 +49,20 @@ impl JobToolService {
             systemd,
             now_ms,
             feed,
+            awake: None,
         }
+    }
+
+    /// Lets `list` show `keeps awake`, and `remove` delete the keep-awake file.
+    pub(super) fn with_awake(mut self, awake: Option<Arc<KeepAwake>>) -> Self {
+        self.awake = awake;
+        self
+    }
+
+    fn keeps_awake(&self, name: &str) -> bool {
+        self.awake
+            .as_ref()
+            .is_some_and(|awake| awake.has_file(name))
     }
 }
 
@@ -55,7 +70,7 @@ fn unavailable() -> Status {
     Status::unavailable("store_failed")
 }
 
-pub(super) fn to_pb(job: &JobRow) -> pb::Job {
+pub(super) fn to_pb(job: &JobRow, keeps_awake: bool) -> pb::Job {
     pb::Job {
         name: job.name.clone(),
         what: job.what.clone(),
@@ -71,7 +86,7 @@ pub(super) fn to_pb(job: &JobRow) -> pb::Job {
         .into(),
         end_line: job.end_line.clone().unwrap_or_default(),
         unit: job.unit.clone(),
-        keeps_awake: false,
+        keeps_awake,
         exit_code: job.exit_code.unwrap_or(0),
         exit_known: job.exit_code.is_some(),
     }
@@ -152,7 +167,10 @@ impl JobService for JobToolService {
             .await
             .map_err(|_| unavailable())?;
         Ok(Response::new(pb::ListResponse {
-            jobs: jobs.iter().map(to_pb).collect(),
+            jobs: jobs
+                .iter()
+                .map(|job| to_pb(job, self.keeps_awake(&job.name)))
+                .collect(),
         }))
     }
 
@@ -163,6 +181,9 @@ impl JobService for JobToolService {
         let name = request.into_inner().name;
         match self.store.remove(&name, (self.now_ms)()).await {
             Ok(Some(job)) => {
+                if let Some(awake) = &self.awake {
+                    awake.clear(&job.name);
+                }
                 crate::telemetry::count_job_end("removed", "none");
                 self.feed.refresh(&self.store, (self.now_ms)()).await;
                 Ok(Response::new(pb::RemoveResponse { name: job.name }))

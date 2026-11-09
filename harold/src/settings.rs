@@ -241,6 +241,35 @@ impl WorkSettings {
     }
 }
 
+/// The `[job]` table: the job tool's keep-awake files.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct JobSettings {
+    /// The folder of the machine's idle-suspend. Empty: Harold writes no file. Harold writes
+    /// only its own `harold-job-<name>` files in it.
+    pub(crate) keep_awake_folder: String,
+    /// Seconds between two writes of a running job's file. It stays inside the idle-suspend
+    /// window of 45 minutes: Harold keeps it between 10 s and 20 min.
+    pub(crate) keep_awake_every_s: u64,
+}
+
+impl Default for JobSettings {
+    fn default() -> Self {
+        Self {
+            keep_awake_folder: String::new(),
+            keep_awake_every_s: 300,
+        }
+    }
+}
+
+impl JobSettings {
+    /// The keep-awake folder with `~` expanded, or `None` when the setting is empty.
+    pub(crate) fn keep_awake_path(&self) -> Option<std::path::PathBuf> {
+        let text = self.keep_awake_folder.trim();
+        (!text.is_empty()).then(|| expand_tilde(text).into())
+    }
+}
+
 /// The `[watch]` table: the model every watch runs, and the user's optional budgets. A
 /// budget is enforced only when set; an absent one is never treated as 0.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1923,6 +1952,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) watch: WatchSettings,
     #[serde(default)]
+    pub(crate) job: JobSettings,
+    #[serde(default)]
     pub(crate) work: WorkSettings,
     #[serde(default)]
     pub(crate) knowledge: KnowledgeSettings,
@@ -2800,6 +2831,22 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             assert_eq!(settings.rotation_days, days);
             assert!(settings.validate().is_empty());
         }
+    }
+
+    #[test]
+    fn job_settings_ship_no_folder_and_a_5_minute_interval() {
+        let settings = crate::settings::settings_with("");
+        assert_eq!(settings.job.keep_awake_folder, "");
+        assert_eq!(settings.job.keep_awake_every_s, 300);
+        assert_eq!(settings.job.keep_awake_path(), None);
+        let set = crate::settings::settings_with(
+            "[job]\nkeep_awake_folder = \"/state/agent-activity\"\nkeep_awake_every_s = 120",
+        );
+        assert_eq!(
+            set.job.keep_awake_path(),
+            Some(std::path::PathBuf::from("/state/agent-activity"))
+        );
+        assert_eq!(set.job.keep_awake_every_s, 120);
     }
 
     #[test]

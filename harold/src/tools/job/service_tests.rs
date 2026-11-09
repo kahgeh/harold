@@ -223,3 +223,31 @@ async fn a_unit_is_refused_where_there_is_no_systemd() {
         (tonic::Code::FailedPrecondition, "no_systemd".into())
     );
 }
+
+#[tokio::test]
+async fn list_shows_keeps_awake_for_a_job_with_its_file_and_remove_deletes_the_file() {
+    use crate::settings::JobSettings;
+    use crate::tools::job::awake::KeepAwake;
+    let (svc, _processes, _units, _dir) = service_on(true).await;
+    let folder = Temp::new();
+    let awake = Arc::new(
+        KeepAwake::new(&JobSettings {
+            keep_awake_folder: folder.0.display().to_string(),
+            keep_awake_every_s: 300,
+        })
+        .unwrap(),
+    );
+    let svc = svc.with_awake(Some(awake.clone()));
+    svc.add(Request::new(request("a", 4121, 60))).await.unwrap();
+    awake.tick(&["a".to_string()], 0);
+    let listed = svc
+        .list(Request::new(pb::ListRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(listed.jobs[0].keeps_awake);
+    svc.remove(Request::new(pb::RemoveRequest { name: "a".into() }))
+        .await
+        .unwrap();
+    assert!(!folder.0.join("harold-job-a").exists());
+}

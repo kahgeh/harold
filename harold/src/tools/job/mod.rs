@@ -9,8 +9,10 @@ use std::sync::Arc;
 use harold_api::tools::job::v1::job_service_server::JobServiceServer;
 use tonic::service::Routes;
 
+use crate::settings::JobSettings;
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
+mod awake;
 mod check;
 mod feed;
 mod obs;
@@ -25,6 +27,14 @@ mod validate;
 pub(crate) use feed::{subscribe, with_jobs};
 
 pub(crate) const NAME: &str = "job";
+
+static SETTINGS: std::sync::OnceLock<JobSettings> = std::sync::OnceLock::new();
+
+/// Sets the `[job]` settings of this run of Harold. The host calls it before `start`.
+/// Without a call, the job tool keeps no file awake.
+pub(crate) fn configure(settings: JobSettings) {
+    let _ = SETTINGS.set(settings);
+}
 
 /// The reason `start` gives when `jobs.db` cannot be opened. The error's own text names
 /// the data folder's path, so it is not passed on.
@@ -53,6 +63,12 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let units: Arc<dyn unit::UnitPort> = Arc::new(unit::SystemUnits);
     let clock: service::Clock = Arc::new(now_ms);
     let feed = Arc::clone(feed::JobsFeed::global());
+    let awake = SETTINGS.get().and_then(awake::KeepAwake::new).map(Arc::new);
+    if let Some(awake) = &awake {
+        let running = store.running().await.unwrap_or_default();
+        let names: Vec<String> = running.into_iter().map(|job| job.name).collect();
+        awake.sweep(&names);
+    }
     let checker = check::Checker::new(
         Arc::clone(&store),
         Arc::clone(&processes),
@@ -60,7 +76,8 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         typing,
         Arc::clone(&clock),
         Arc::clone(&feed),
-    );
+    )
+    .with_awake(awake.clone());
     let service = service::JobToolService::new(
         store,
         processes,
@@ -68,7 +85,8 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         cfg!(target_os = "linux"),
         clock,
         feed,
-    );
+    )
+    .with_awake(awake);
     let task = tokio::spawn(run(checker, ctx.shutdown));
     Ok(ToolHandle {
         routes: Routes::new(JobServiceServer::new(service)),

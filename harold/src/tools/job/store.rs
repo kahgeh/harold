@@ -199,6 +199,7 @@ impl JobStore {
     }
 
     /// Marks a running job as ended at `now_ms`. Returns `false` when it did not run.
+    #[cfg(test)]
     pub(super) async fn mark_ended(&self, id: i64, now_ms: i64) -> Result<bool> {
         self.mark_ended_with(id, now_ms, None).await
     }
