@@ -516,6 +516,8 @@ These fields were added so that the log lines of the collector work show their i
 | `fell_back` | True when the check left no sentence and Harold used the whole reply. On `summary question dropped` |
 | `job.name` | The name of an agent job: 1 to 48 characters of `a-z`, `0-9` and `-`, set by the agent. On `job added`, `job ended` and `job end not told` |
 | `folder` | The keep-awake folder of an agent job, as the setting `[job] keep_awake_folder` writes it (for example `~/.local/state/agent-activity`), never the expanded path. On `job keeps machine awake` and `job keep awake failed` |
+| `host` | On the job lines: the label of the slave that ran the job, for example `omarchy`. On `job ended`, `job end not told` and `job host not reached`, logged by the master for a job of a slave |
+| `exit_code` | On `job ended` of a job that is a systemd unit: its `ExecMainStatus`, left out when it is unknown |
 | `due_in_s` | Whole seconds from the recording of an agent job to its expected end. On `job added` |
 | `run_s` | Whole seconds from the recording of an agent job to the check that found it ended. On `job ended` |
 | `past_due_s` | Whole seconds that an agent job ran past its expected end, 0 when it did not. On `job ended` |
@@ -856,9 +858,10 @@ The watch tool logs the pause and resume of a watch and the life of each reminde
 | `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder), `schedule` (`in`, `at` or `cron`), `missed` (always 0: a reminder is one shot) |
 | `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it), `schedule` (`in`, `at` or `cron`) |
 | `job added` (`info`) | `job.name`, `pane_id`, `due_in_s`. One for each accepted `harold tool job add` |
-| `job ended` (`info`) | `job.name`, `pane_id`, `run_s`, `past_due_s`. The check found the process gone, or with a new start time |
+| `job ended` (`info`) | `job.name`, `pane_id`, `run_s`, `past_due_s`, and `exit_code` for a unit. The check found the process gone, or with a new start time, or the unit ended. For a slave's job the master logs it, with `host`, and the slave logs nothing |
 | `job keeps machine awake` (`info`) | `job.name`, `folder`. Logged once, when Harold writes the first keep-awake file of a job. It is on the machine that runs the job |
 | `job keep awake failed` (`warn`) | `job.name`, `folder`, `reason` (`not_found`, `permission_denied` or `other`). Logged once for each job when a write fails. It is not an alert |
+| `job host not reached` (`info`) | `host`, `job.name`, `pane_id`. The master logs it once for each job and link outage, when a slave's job has been `unknown` for 30 minutes. The master writes the mark in its `told` table, so a restart does not log it again. It is not an alert. Check the slave link, then the job on the slave with ssh. Expected rate: under 1 a week |
 | `job end not told` (`info`) | `job.name`, `pane_id`, `reason` (`no_pane` or `failed`). Logged once, 10 minutes after the end, for a job whose end line did not reach the agent. A busy pane that still gets its line later logs nothing. It is not an alert |
 
 A reminder also writes the lines of its report slot: `watch report waiting`, `watch report typed` and `watch report replaced`. They carry `watch=<reminder name>` and `run=0`. Read them for the reasons a reminder waited, for example `agent_busy`.
@@ -1092,7 +1095,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.work.checked`, for each `priority`;
-- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` and `agent-jobs`);
+- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up`, `agent-jobs` and `agent-jobs-hosts`);
 - `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 

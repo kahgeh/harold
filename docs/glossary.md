@@ -139,7 +139,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | watch reminder | A `REMIND <name>: <text>` line that the watch tool types once at a set time, with no model | "alarm", "timer" |
 | agent job | A long command that an agent started outside its pane and recorded with `harold tool job add`. Harold checks it and tells the agent when it ends. The bare word "job" is allowed only in the job tool and its names (`harold tool job`, job line, `harold.job.*`) | "background job" (Harold's own threads), "workflow", "task" |
 | job line | The line under an agent row that shows one of its agent jobs | "job row" (a row is an agent row) |
-| end line (of an agent job) | The line that Harold types into the agent's pane when its job ends: `JOB <name> ended after <n> m (pid <pid>). Check its output.` | "job notice", "done message" |
+| end line (of an agent job) | The line that Harold types into the agent's pane when its job ends: `JOB <name> ended after <n> m (pid <pid>). Check its output.` For a unit: `JOB <name> on <host> ended after <n> m: exit 0.` (`failed (exit 2)` or `exit unknown` when it differs). The master types it for a slave's job | "job notice", "done message" |
+| unit (of an agent job) | A systemd unit on a Linux machine that runs an agent job, named with `--unit`. | "service" alone, "job" for the unit itself |
+| unknown (an agent job) | The state of a slave's agent job while the master's slave link to that slave is closed. It is not the agent state `unknown`. | "lost", "stale" |
+| keep-awake file | The file `harold-job-<name>` that Harold writes for a running agent job in the agent-activity folder (`[job] keep_awake_folder`), so omarchy's idle-suspend does not suspend the machine. | "heartbeat file", "lock" |
+| host (of an agent job) | The slave's name, which is also its Rex host label, for example `omarchy`. Empty for a job on the master's own machine. | "machine name" for it (that is this Mac's name) |
 | facts | What Harold hands the model on each watch run: agents, pods, the chief's pane and the run numbers; and, for a call, the call facts | "context", "evidence" |
 
 ## Watching agents

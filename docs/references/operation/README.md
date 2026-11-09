@@ -372,6 +372,45 @@ The alert `slave-link-down` fires when a slave's `harold.slave_link.connected` s
 
 To silence the alert for a long time off, remove the name from `[slaves] names`. [The telemetry reference](../telemetry/README.md#slave-link) has the metrics and the log lines.
 
+## Keep a machine awake during an agent job
+
+A job that an agent starts on omarchy with `systemd-run` writes no activity file, so the idle-suspend of omarchy can suspend the machine in the middle of the job. On 2026-11-09, omarchy suspended at 07:17 in the middle of a 20-minute calibration. The job tool keeps the machine awake with a file for each running job.
+
+### The contract with the idle-suspend
+
+The idle-suspend of omarchy, not Harold, owns these rules. Harold only follows them.
+
+| Item | Value |
+| --- | --- |
+| The script | `~/.local/bin/idle-suspend`, which swayidle runs after 30 minutes of user idle |
+| The folder | `~/.local/state/agent-activity` |
+| The rule | The script does not suspend while a file in the folder changed in the last 45 minutes |
+| The file of Harold | `harold-job-<name>`, one for each running job |
+| The interval | Harold writes the file again every 5 minutes (`keep_awake_every_s = 300`). It must stay inside the 45-minute window |
+
+If the script changes (the folder, the file rule or the window), a suspend in the middle of a job can come back. Change the settings in the same step. Harold does not change the script, swayidle or the stay-awake indicator. Harold writes and deletes only its own `harold-job-*` files in the folder.
+
+### Settings
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `[job] keep_awake_folder` | `""` | The folder of the idle-suspend. Empty: Harold writes no file. The `~` at the start is the home folder |
+| `[job] keep_awake_every_s` | `300` | Seconds between two writes of the file of a running job. Harold keeps it between 10 seconds and 20 minutes |
+
+On omarchy, add this to the `local.toml` of the slave's Harold, then restart that Harold:
+
+```toml
+[job]
+keep_awake_folder = "~/.local/state/agent-activity"
+```
+
+### What Harold does
+
+- While a job runs, Harold writes the file at once and again at each interval. It deletes the file when the job ends or is removed.
+- At start, Harold deletes each `harold-job-*` file that names no running job. A file that a stopped Harold left ages out of the 45 minutes by itself.
+- When a write fails, Harold logs `job keep awake failed` once for each job. Check the path and the permissions of the folder on omarchy.
+- A sign that it works: `job keeps machine awake` shows on omarchy at each calibration. A sign that it fails: a closed slave link (`slave link closed` on the master) while a job runs, then `job host not reached`.
+
 ## Shutdown
 
 `haroldctl stop` disables the job, unloads it, and waits for its process to stop within a bounded period. A clean shutdown exits 0 and marks the crash file `clean`. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The agent monitor has a bounded shutdown deadline.

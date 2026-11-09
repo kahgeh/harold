@@ -143,6 +143,9 @@ impl JobService for JobToolService {
         match self.store.add(&job).await {
             Ok(true) => {
                 crate::telemetry::feature_used("agent-jobs");
+                if !job.unit.is_empty() {
+                    crate::telemetry::feature_used("agent-jobs-hosts");
+                }
                 obs::job_added(&job.name, &job.pane_id, i64::from(req.for_secs));
                 self.feed.refresh(&self.store, now).await;
                 Ok(Response::new(pb::AddResponse {

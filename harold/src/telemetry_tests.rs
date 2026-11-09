@@ -5859,6 +5859,7 @@ fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
         assert!(ALLOWED_FIELDS.contains(&field), "{field}");
     }
     assert!(HAROLD_FEATURES.contains(&"agent-jobs"));
+    assert!(HAROLD_FEATURES.contains(&"agent-jobs-hosts"));
 }
 
 #[test]
