@@ -251,3 +251,21 @@ async fn list_shows_keeps_awake_for_a_job_with_its_file_and_remove_deletes_the_f
         .unwrap();
     assert!(!folder.0.join("harold-job-a").exists());
 }
+
+#[tokio::test]
+async fn add_writes_the_keep_awake_file_at_once() {
+    use crate::settings::JobSettings;
+    use crate::tools::job::awake::KeepAwake;
+    let (svc, _processes, _units, _dir) = service_on(true).await;
+    let folder = Temp::new();
+    let awake = Arc::new(
+        KeepAwake::new(&JobSettings {
+            keep_awake_folder: folder.0.display().to_string(),
+            keep_awake_every_s: 300,
+        })
+        .unwrap(),
+    );
+    let svc = svc.with_awake(Some(awake));
+    svc.add(Request::new(request("a", 4121, 60))).await.unwrap();
+    assert!(folder.0.join("harold-job-a").exists());
+}

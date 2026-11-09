@@ -147,6 +147,9 @@ impl JobService for JobToolService {
                     crate::telemetry::feature_used("agent-jobs-hosts");
                 }
                 obs::job_added(&job.name, &job.pane_id, i64::from(req.for_secs));
+                if let Some(awake) = &self.awake {
+                    awake.begin(&job.name, now);
+                }
                 self.feed.refresh(&self.store, now).await;
                 Ok(Response::new(pb::AddResponse {
                     name: job.name,

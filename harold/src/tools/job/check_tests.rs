@@ -534,3 +534,26 @@ async fn with_no_keep_awake_folder_no_file_is_written() {
     // The rig has no `KeepAwake`: nothing to write and nothing to fail.
     assert_eq!(r.only_job().await.state, JobState::Running);
 }
+
+#[tokio::test]
+async fn a_file_left_for_a_job_that_ends_after_a_restart_is_deleted_at_the_first_check() {
+    use crate::settings::JobSettings;
+    use crate::tools::job::awake::KeepAwake;
+    let mut r = rig().await;
+    let folder = Temp::new();
+    // The file is there from the run before the restart. The new `KeepAwake` tracks none.
+    std::fs::write(folder.0.join("harold-job-cal"), "old").unwrap();
+    let awake = Arc::new(
+        KeepAwake::new(&JobSettings {
+            keep_awake_folder: folder.0.display().to_string(),
+            keep_awake_every_s: 300,
+        })
+        .unwrap(),
+    );
+    r.checker =
+        checker(&r.store, &r.processes, &r.units, &r.pane, &r.clock).with_awake(Some(awake));
+    r.store.add(&job("cal", r.now())).await.unwrap();
+    r.end_process().await;
+    r.checker.pass().await;
+    assert!(!folder.0.join("harold-job-cal").exists());
+}

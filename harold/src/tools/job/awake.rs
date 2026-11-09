@@ -73,6 +73,13 @@ impl KeepAwake {
         self.written().at_ms.contains_key(name)
     }
 
+    /// Writes the file of a job that was just added, when it has none.
+    pub(crate) fn begin(&self, name: &str, now_ms: i64) {
+        if !self.has_file(name) {
+            self.write(name, now_ms);
+        }
+    }
+
     /// Writes the file of each running job at once, and again when `keep_awake_every_s`
     /// has passed. Deletes the file of each tracked job that is not in `running`.
     pub(crate) fn tick(&self, running: &[String], now_ms: i64) {

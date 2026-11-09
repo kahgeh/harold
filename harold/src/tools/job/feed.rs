@@ -32,6 +32,9 @@ struct FeedState {
     own: Vec<AgentJob>,
     /// The jobs of each slave, by the slave's name.
     slaves: BTreeMap<String, SlaveJobs>,
+    /// The last time that a caller gave. Every list that is sent uses it to age the jobs
+    /// of the slaves, so a send with no time never brings an aged job back.
+    last_now_ms: i64,
 }
 
 /// The jobs of one slave as the master last got them, with the host set.
@@ -78,14 +81,14 @@ impl JobsFeed {
     pub(super) fn publish(&self, jobs: Vec<AgentJob>) {
         let mut state = self.state();
         state.own = jobs;
-        self.send(&state, None);
+        self.send(&mut state, None);
     }
 
     /// The master got the jobs of the slave's snapshot.
     pub(crate) fn set_slave_jobs(&self, slave: &str, jobs: Vec<AgentJob>, now_ms: i64) {
         let mut state = self.state();
         state.slaves.entry(slave.to_owned()).or_default().jobs = jobs;
-        self.send(&state, Some(now_ms));
+        self.send(&mut state, Some(now_ms));
     }
 
     /// The master's slave link to `slave` opened or closed. While it is closed, the jobs
@@ -94,14 +97,14 @@ impl JobsFeed {
         let mut state = self.state();
         let entry = state.slaves.entry(slave.to_owned()).or_default();
         entry.closed_at_ms = if up { None } else { Some(now_ms) };
-        self.send(&state, Some(now_ms));
+        self.send(&mut state, Some(now_ms));
     }
 
     /// Takes the ended jobs of the slaves away 10 minutes after their end. The check calls
     /// it, because a closed link brings no snapshot.
     pub(super) fn age_slaves(&self, now_ms: i64) {
-        let state = self.state();
-        self.send(&state, Some(now_ms));
+        let mut state = self.state();
+        self.send(&mut state, Some(now_ms));
     }
 
     /// The jobs of each slave as the slave last sent them, for the master's end lines.
@@ -123,7 +126,11 @@ impl JobsFeed {
             .collect()
     }
 
-    fn send(&self, state: &FeedState, now_ms: Option<i64>) {
+    fn send(&self, state: &mut FeedState, now_ms: Option<i64>) {
+        if let Some(now_ms) = now_ms {
+            state.last_now_ms = state.last_now_ms.max(now_ms);
+        }
+        let now_ms = state.last_now_ms;
         let mut jobs = state.own.clone();
         for (host, slave) in &state.slaves {
             for job in &slave.jobs {
@@ -131,10 +138,7 @@ impl JobsFeed {
                     host: host.clone(),
                     ..job.clone()
                 };
-                if let Some(now_ms) = now_ms
-                    && job.state == "ended"
-                    && job.ended_at_ms <= now_ms - SHOW_AFTER_END_MS
-                {
+                if job.state == "ended" && job.ended_at_ms <= now_ms - SHOW_AFTER_END_MS {
                     continue;
                 }
                 if let Some(closed) = slave.closed_at_ms {

@@ -174,3 +174,21 @@ fn the_jobs_of_this_machine_and_of_a_slave_are_one_list_that_each_side_can_chang
         "the same list is no change"
     );
 }
+
+#[test]
+fn a_publish_while_the_link_is_closed_does_not_bring_an_aged_slave_job_back() {
+    let feed = JobsFeed::new();
+    feed.set_slave_jobs(
+        "omarchy",
+        vec![remote_job("cal", "ended", 100_000)],
+        100_000,
+    );
+    feed.slave_link("omarchy", false, 100_001);
+    feed.age_slaves(100_000 + 11 * 60_000);
+    assert!(feed.current().jobs.is_empty());
+    let revision = feed.current().revision;
+    feed.publish(Vec::new());
+    feed.age_slaves(100_000 + 12 * 60_000);
+    assert!(feed.current().jobs.is_empty());
+    assert_eq!(feed.current().revision, revision, "no churn");
+}

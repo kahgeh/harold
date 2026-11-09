@@ -179,6 +179,10 @@ impl Checker {
                 Ok(true)
             ) {
                 report.changed = true;
+                if let Some(awake) = &self.awake {
+                    // Also a file that an earlier run of Harold left for this job.
+                    awake.clear(&job.name);
+                }
                 if self.slave {
                     let _ = self.store.set_end_line(job.id, "master").await;
                     continue;
@@ -202,8 +206,8 @@ impl Checker {
         self.log_untold(now).await;
         report.changed |= self.pass_slaves(now).await;
         let _ = self.store.prune(now).await;
-        self.feed.refresh(&self.store, now).await;
         self.feed.age_slaves(now);
+        self.feed.refresh(&self.store, now).await;
         report
     }
 
