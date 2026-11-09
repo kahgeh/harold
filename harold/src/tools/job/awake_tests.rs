@@ -145,3 +145,20 @@ fn a_folder_that_is_not_there_gives_not_found() {
     assert!(text.contains("reason=not_found"), "{text}");
     assert!(!awake.has_file("cal"));
 }
+
+#[test]
+fn a_failed_read_of_the_running_jobs_skips_the_start_sweep() {
+    let dir = Temp::new();
+    std::fs::write(dir.0.join("harold-job-run"), "x").unwrap();
+    let awake = awake(&dir);
+    awake.sweep_if_read::<()>(Err(()));
+    assert!(
+        dir.0.join("harold-job-run").exists(),
+        "kept: the list is not known"
+    );
+    awake.sweep_if_read::<()>(Ok(Vec::new()));
+    assert!(
+        !dir.0.join("harold-job-run").exists(),
+        "a known empty list sweeps"
+    );
+}

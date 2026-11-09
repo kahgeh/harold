@@ -71,9 +71,11 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         .and_then(|(settings, _)| awake::KeepAwake::new(settings))
         .map(Arc::new);
     if let Some(awake) = &awake {
-        let running = store.running().await.unwrap_or_default();
-        let names: Vec<String> = running.into_iter().map(|job| job.name).collect();
-        awake.sweep(&names);
+        let running = store
+            .running()
+            .await
+            .map(|jobs| jobs.into_iter().map(|job| job.name).collect::<Vec<_>>());
+        awake.sweep_if_read(running);
     }
     let checker = check::Checker::new(
         Arc::clone(&store),

@@ -135,6 +135,14 @@ impl KeepAwake {
         let _ = std::fs::remove_file(self.file(name));
     }
 
+    /// The start sweep, for the result of reading the running jobs. When the read failed
+    /// the list of running jobs is not known, so the sweep does nothing.
+    pub(crate) fn sweep_if_read<E>(&self, running: Result<Vec<String>, E>) {
+        if let Ok(names) = running {
+            self.sweep(&names);
+        }
+    }
+
     /// At start: deletes each `harold-job-*` file that names no running job. It leaves
     /// every other file and every folder alone. A link is deleted, never followed.
     pub(crate) fn sweep(&self, running: &[String]) {
