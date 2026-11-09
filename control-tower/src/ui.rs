@@ -1024,10 +1024,11 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             if chief == Some(&agent.incarnation) {
                 push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
             }
-            let own =
-                app.snapshot.jobs.iter().filter(|job| {
-                    job.pane_id == agent.incarnation.pane_id && job.host == agent.host
-                });
+            let own = app
+                .snapshot
+                .jobs
+                .iter()
+                .filter(|job| job.pane_id == agent.incarnation.pane_id);
             push_job_rows(own, now_ms, &mut rows, &mut heights, &mut job_lines);
         }
     }
@@ -1040,7 +1041,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             !app.snapshot
                 .rows
                 .iter()
-                .any(|row| row.incarnation.pane_id == job.pane_id && row.host == job.host)
+                .any(|row| row.incarnation.pane_id == job.pane_id)
         })
         .collect();
     if !orphans.is_empty() {
@@ -1198,7 +1199,11 @@ fn job_minutes(ms: i64) -> String {
 /// - `⏵ job macos-tests · pid 4121 · 4 m past its end (expected 06:43)` after its expected end;
 /// - `⏵ job release-build · pid 3977 · ended 2 m ago` for 10 minutes after the end.
 ///
-/// A job on another host names the host before the pid.
+/// A job on another host names the host before the pid or the unit:
+///
+/// - `⏵ job calibration · omarchy · unit cal-1 · 12 m of 20 m, ends about 07:00`;
+/// - `⏵ job calibration · omarchy · unit cal-1 · omarchy not reached for 3 m` while the
+///   master's slave link to the host is closed (the end is not assumed).
 fn job_line_text<Tz>(job: &Job, now_ms: i64, tz: &Tz) -> (String, JobTone)
 where
     Tz: chrono::TimeZone,
@@ -1208,12 +1213,28 @@ where
         Some(time) => time.with_timezone(tz).format("%H:%M").to_string(),
         None => "--:--".to_owned(),
     };
-    let who = if job.host.is_empty() {
+    // A unit has a name; a process has a pid. A job on another host names the host first.
+    let what = if job.unit.is_empty() {
         format!("pid {}", job.pid)
     } else {
-        format!("{} · pid {}", job.host, job.pid)
+        format!("unit {}", job.unit)
     };
-    let (tail, tone) = if !job.is_running() {
+    let who = if job.host.is_empty() {
+        what
+    } else {
+        format!("{} · {what}", job.host)
+    };
+    let (tail, tone) = if job.unknown {
+        // The master's slave link to the host is closed: the end is not known.
+        (
+            format!(
+                "{} not reached for {}",
+                job.host,
+                job_minutes(now_ms - job.unreached_since_ms)
+            ),
+            JobTone::Running,
+        )
+    } else if !job.is_running() {
         (
             format!("ended {} ago", job_minutes(now_ms - job.ended_at_ms)),
             JobTone::Ended,
@@ -7071,6 +7092,47 @@ mod tests {
                 .0
                 .contains("· omarchy · pid 4121 ·")
         );
+    }
+
+    #[test]
+    fn a_job_that_runs_on_a_slave_sits_under_its_agent_on_this_mac() {
+        // The job runs on omarchy, and its agent is a row of this Mac: the pane id is the
+        // key, not the host of the job.
+        let mut app = user_layout();
+        let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
+        let mut remote = job("calibration", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, 0);
+        remote.host = "omarchy".into();
+        remote.unit = "cal-1".into();
+        app.snapshot.jobs = vec![remote];
+        let text = text_lines(&app, 100, 60, SAMPLE_MS + 12 * MIN).join("\n");
+        assert!(
+            text.contains("⏵ job calibration · omarchy · unit cal-1"),
+            "{text}"
+        );
+        assert!(!text.contains("jobs with no agent"), "{text}");
+    }
+
+    #[test]
+    fn a_unit_job_on_a_host_reads_host_and_unit_and_an_unreached_host_reads_not_reached() {
+        let tz = plus_eleven();
+        let start = SAMPLE_MS;
+        let mut unit = job("calibration", "%3", start, start + 20 * MIN, 0);
+        unit.host = "omarchy".into();
+        unit.unit = "cal-1".into();
+        unit.pid = 0;
+        let (text, _) = job_line_text(&unit, start + 12 * MIN, &tz);
+        assert_eq!(
+            text,
+            "    ⏵ job calibration · omarchy · unit cal-1 · 12 m of 20 m, ends about 22:07"
+        );
+        unit.unknown = true;
+        unit.unreached_since_ms = start + 9 * MIN;
+        let (text, tone) = job_line_text(&unit, start + 12 * MIN, &tz);
+        assert_eq!(
+            text,
+            "    ⏵ job calibration · omarchy · unit cal-1 · omarchy not reached for 3 m"
+        );
+        assert_eq!(tone, JobTone::Running);
     }
 
     #[test]
