@@ -1,33 +1,13 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use super::*;
-
-/// A process table that tests change by hand.
-#[derive(Default)]
-pub(in crate::tools::job) struct FakeProcesses(pub(in crate::tools::job) Mutex<HashMap<u32, i64>>);
-
-impl ProcessPort for FakeProcesses {
-    fn start_time(&self, pid: u32) -> Option<i64> {
-        self.0.lock().unwrap().get(&pid).copied()
-    }
-}
-
-struct Temp(std::path::PathBuf);
-
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::tools::job::test_support::{FakeProcesses, Temp};
 
 async fn service() -> (JobToolService, Arc<FakeProcesses>, Temp) {
-    let dir = std::env::temp_dir().join(format!("harold-jobsvc-{}", uuid::Uuid::new_v4()));
-    let store = Arc::new(JobStore::open(&dir).await.unwrap());
+    let dir = Temp::new();
+    let store = dir.store().await;
     let processes = Arc::new(FakeProcesses::default());
     processes.0.lock().unwrap().insert(4121, 1_700_000_000);
     let svc = JobToolService::new(store, processes.clone(), Arc::new(|| 1_000_000));
-    (svc, processes, Temp(dir))
+    (svc, processes, dir)
 }
 
 fn request(name: &str, pid: u32, for_secs: u32) -> pb::AddRequest {

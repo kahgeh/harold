@@ -5,8 +5,12 @@
 //! An agent job is not a background job of Harold's own threads.
 
 pub(crate) mod process;
+mod check;
+mod obs;
 mod service;
 mod store;
+#[cfg(test)]
+mod test_support;
 mod validate;
 
 pub(crate) const NAME: &str = "job";
