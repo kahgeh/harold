@@ -1024,9 +1024,10 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             if chief == Some(&agent.incarnation) {
                 push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
             }
-            let own = app.snapshot.jobs.iter().filter(|job| {
-                job.pane_id == agent.incarnation.pane_id && job.host == agent.host
-            });
+            let own =
+                app.snapshot.jobs.iter().filter(|job| {
+                    job.pane_id == agent.incarnation.pane_id && job.host == agent.host
+                });
             push_job_rows(own, now_ms, &mut rows, &mut heights, &mut job_lines);
         }
     }
@@ -1057,7 +1058,13 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         }
         rows.push(header);
         heights.push(1 + u16::from(margin));
-        push_job_rows(orphans.into_iter(), now_ms, &mut rows, &mut heights, &mut job_lines);
+        push_job_rows(
+            orphans.into_iter(),
+            now_ms,
+            &mut rows,
+            &mut heights,
+            &mut job_lines,
+        );
     }
     if let Some(at) = question_at
         && let Some(cursor) = question_lines
@@ -7042,7 +7049,13 @@ mod tests {
             "    ⏵ job macos-tests · pid 4121 · 4 m past its end (expected 22:07)"
         );
         assert_eq!(tone, JobTone::PastDue);
-        let ended = job("release-build", "%3", start, start + 20 * MIN, start + 18 * MIN);
+        let ended = job(
+            "release-build",
+            "%3",
+            start,
+            start + 20 * MIN,
+            start + 18 * MIN,
+        );
         let (text, tone) = job_line_text(&ended, start + 20 * MIN, &tz);
         assert_eq!(text, "    ⏵ job release-build · pid 4121 · ended 2 m ago");
         assert_eq!(tone, JobTone::Ended);
@@ -7050,7 +7063,11 @@ mod tests {
         assert!(text.contains("<1 m of 20 m"), "{text}");
         let mut remote = running.clone();
         remote.host = "omarchy".into();
-        assert!(job_line_text(&remote, start, &tz).0.contains("· omarchy · pid 4121 ·"));
+        assert!(
+            job_line_text(&remote, start, &tz)
+                .0
+                .contains("· omarchy · pid 4121 ·")
+        );
     }
 
     #[test]
@@ -7058,15 +7075,31 @@ mod tests {
         let mut app = user_layout();
         let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
         let now = SAMPLE_MS + 12 * MIN;
-        app.snapshot.jobs = vec![job("macos-tests", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, 0)];
+        app.snapshot.jobs = vec![job(
+            "macos-tests",
+            &pane,
+            SAMPLE_MS,
+            SAMPLE_MS + 20 * MIN,
+            0,
+        )];
         let lines = text_lines(&app, 100, 60, now);
         let at = lines
             .iter()
             .position(|l| l.contains("⏵ job macos-tests"))
             .unwrap_or_else(|| panic!("job line:\n{}", lines.join("\n")));
-        assert!(inner(&lines[at]).starts_with("⏵ job macos-tests · pid 4121 · 12 m of 20 m, ends about"));
+        assert!(
+            inner(&lines[at])
+                .starts_with("⏵ job macos-tests · pid 4121 · 12 m of 20 m, ends about")
+        );
         // The row above it is the agent's row, and the line has the todos indent.
-        assert!(lines[at - 1].contains(&pane) || lines[at - 1].contains("IDLE") || lines[at - 1].contains("DONE") || lines[at - 1].contains("WORKING"), "{}", lines[at - 1]);
+        assert!(
+            lines[at - 1].contains(&pane)
+                || lines[at - 1].contains("IDLE")
+                || lines[at - 1].contains("DONE")
+                || lines[at - 1].contains("WORKING"),
+            "{}",
+            lines[at - 1]
+        );
         let indent = lines[at].find('⏵').unwrap() - lines[at].find('│').unwrap();
         assert!(indent >= QUESTION_HEADER_INDENT, "{indent}");
     }
@@ -7089,7 +7122,13 @@ mod tests {
         let mut app = user_layout();
         let pane = app.snapshot.rows[0].incarnation.pane_id.clone();
         let now = SAMPLE_MS + 20 * MIN;
-        app.snapshot.jobs = vec![job("done", &pane, SAMPLE_MS, SAMPLE_MS + 20 * MIN, now - 2 * MIN)];
+        app.snapshot.jobs = vec![job(
+            "done",
+            &pane,
+            SAMPLE_MS,
+            SAMPLE_MS + 20 * MIN,
+            now - 2 * MIN,
+        )];
         assert!(rendered(&app, 100, 60, now).contains("ended 2 m ago"));
         app.snapshot.jobs.clear();
         assert!(!rendered(&app, 100, 60, now).contains("⏵ job"));
@@ -7104,8 +7143,15 @@ mod tests {
             .iter()
             .position(|l| l.contains("jobs with no agent"))
             .unwrap_or_else(|| panic!("group:\n{}", lines.join("\n")));
-        assert!(lines[header + 1].contains("⏵ job orphan"), "{}", lines[header + 1]);
-        let last_agent = lines.iter().rposition(|l| l.contains("IDLE") || l.contains("DONE") || l.contains("WORKING")).unwrap();
+        assert!(
+            lines[header + 1].contains("⏵ job orphan"),
+            "{}",
+            lines[header + 1]
+        );
+        let last_agent = lines
+            .iter()
+            .rposition(|l| l.contains("IDLE") || l.contains("DONE") || l.contains("WORKING"))
+            .unwrap();
         assert!(header > last_agent);
     }
 
@@ -7121,7 +7167,10 @@ mod tests {
             0,
         )];
         let lines = text_lines(&app, 80, 40, SAMPLE_MS + 12 * MIN);
-        let line = lines.iter().find(|l| l.contains("⏵ job a-job")).expect("job line");
+        let line = lines
+            .iter()
+            .find(|l| l.contains("⏵ job a-job"))
+            .expect("job line");
         assert!(inner(line).ends_with('…'), "{line}");
         assert!(Line::raw(line.as_str()).width() <= 80);
     }

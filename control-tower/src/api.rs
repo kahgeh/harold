@@ -1098,7 +1098,11 @@ mod tests {
         assert!(mapped.jobs[0].is_running());
         assert_eq!(mapped.jobs[1].ended_at_ms, 7_000);
         assert_eq!(
-            (mapped.jobs[0].name.as_str(), mapped.jobs[0].pid, mapped.jobs[0].due_at_ms),
+            (
+                mapped.jobs[0].name.as_str(),
+                mapped.jobs[0].pid,
+                mapped.jobs[0].due_at_ms
+            ),
             ("macos-tests", 4121, 9_000)
         );
         assert!(!mapped.jobs[0].what.contains('\x1b'));

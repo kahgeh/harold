@@ -76,8 +76,21 @@ async fn shown_keeps_an_ended_job_for_10_minutes() {
     store.add(&job("a")).await.unwrap();
     let id = store.running().await.unwrap()[0].id;
     store.mark_ended(id, 100_000).await.unwrap();
-    assert_eq!(store.shown(100_000 + SHOW_AFTER_END_MS - 1).await.unwrap().len(), 1);
-    assert!(store.shown(100_000 + SHOW_AFTER_END_MS).await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .shown(100_000 + SHOW_AFTER_END_MS - 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .shown(100_000 + SHOW_AFTER_END_MS)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -103,7 +116,13 @@ async fn prune_deletes_only_finished_jobs_older_than_7_days() {
     store.mark_ended(id, 10).await.unwrap();
     store.set_end_line(id, "typed").await.unwrap();
     store.prune(10 + KEEP_MS + 1).await.unwrap();
-    let names: Vec<String> = store.running().await.unwrap().into_iter().map(|j| j.name).collect();
+    let names: Vec<String> = store
+        .running()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.name)
+        .collect();
     assert_eq!(names, vec!["running".to_string()]);
     assert!(store.fetch("name = 'old'", ()).await.unwrap().is_empty());
 }

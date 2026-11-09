@@ -1905,7 +1905,10 @@ fn job_past_due_gauge() {
             .u64_observable_gauge("harold.job.past_due")
             .with_unit("{job}")
             .with_callback(|observer| {
-                observer.observe(JOBS_PAST_DUE.load(std::sync::atomic::Ordering::Relaxed), &[]);
+                observer.observe(
+                    JOBS_PAST_DUE.load(std::sync::atomic::Ordering::Relaxed),
+                    &[],
+                );
             })
             .build()
     });
@@ -1917,7 +1920,10 @@ pub(crate) fn register_job_instruments() {
     for (how, end_line) in JOB_END_SERIES {
         instruments().job_ends.add(
             0,
-            &[KeyValue::new("how", how), KeyValue::new("end_line", end_line)],
+            &[
+                KeyValue::new("how", how),
+                KeyValue::new("end_line", end_line),
+            ],
         );
     }
     set_jobs_past_due(0);

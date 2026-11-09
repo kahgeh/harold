@@ -25,10 +25,18 @@ async fn the_snapshot_carries_the_running_jobs_with_the_fields_the_proto_names()
     assert_eq!(view.jobs.len(), 1);
     let job = &view.jobs[0];
     assert_eq!(
-        (job.name.as_str(), job.what.as_str(), job.pane_id.as_str(), job.host.as_str()),
+        (
+            job.name.as_str(),
+            job.what.as_str(),
+            job.pane_id.as_str(),
+            job.host.as_str()
+        ),
         ("macos-tests", "tests", "%4", "")
     );
-    assert_eq!((job.pid, job.started_at_ms, job.due_at_ms, job.ended_at_ms), (4121, 1_000, 2_000, 0));
+    assert_eq!(
+        (job.pid, job.started_at_ms, job.due_at_ms, job.ended_at_ms),
+        (4121, 1_000, 2_000, 0)
+    );
     assert_eq!(job.state, "running");
 }
 
@@ -42,18 +50,31 @@ async fn a_job_change_raises_through_event_version_and_no_change_does_not() {
         ..Default::default()
     };
     feed.refresh(&store, 0).await;
-    assert_eq!(with_jobs(base.clone(), &feed.current()).through_event_version, 40);
+    assert_eq!(
+        with_jobs(base.clone(), &feed.current()).through_event_version,
+        40
+    );
     store.add(&new_job("a")).await.unwrap();
     feed.refresh(&store, 0).await;
-    assert_eq!(with_jobs(base.clone(), &feed.current()).through_event_version, 41);
+    assert_eq!(
+        with_jobs(base.clone(), &feed.current()).through_event_version,
+        41
+    );
     feed.refresh(&store, 0).await;
-    assert_eq!(with_jobs(base.clone(), &feed.current()).through_event_version, 41, "same list");
+    assert_eq!(
+        with_jobs(base.clone(), &feed.current()).through_event_version,
+        41,
+        "same list"
+    );
     let id = store.running().await.unwrap()[0].id;
     store.mark_ended(id, 3_000).await.unwrap();
     feed.refresh(&store, 3_000).await;
     let ended = with_jobs(base.clone(), &feed.current());
     assert_eq!(ended.through_event_version, 42);
-    assert_eq!((ended.jobs[0].state.as_str(), ended.jobs[0].ended_at_ms), ("ended", 3_000));
+    assert_eq!(
+        (ended.jobs[0].state.as_str(), ended.jobs[0].ended_at_ms),
+        ("ended", 3_000)
+    );
 }
 
 #[tokio::test]
@@ -77,7 +98,7 @@ async fn a_subscriber_wakes_on_a_change_and_each_feed_is_its_own() {
     let dir = Temp::new();
     let store = dir.store().await;
     let (feed, other) = (JobsFeed::new(), JobsFeed::new());
-    let mut receiver = feed.subscribe();
+    let receiver = feed.subscribe();
     store.add(&new_job("a")).await.unwrap();
     feed.refresh(&store, 0).await;
     assert!(receiver.has_changed().unwrap());

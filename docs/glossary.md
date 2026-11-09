@@ -126,7 +126,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | push | How the web app shows a phone notification on the phone's lock screen, through the phone's push service | "alert" for a push |
 | machine name | This Mac's name, as tagged on its messages | — |
 | routing tag | The `[machine/pane]` text at the start of a reply that picks its pane | — |
-| watch | A schedule an agent asks Harold for: run one of its skills with a model every few minutes or on a cron expression, for a set time or with no end, and report to the chief or the agent itself. It is not the agent monitor's watching of agents ("Watching agents"), and not the `WatchAgentStates` stream | "scheduled job", "monitoring job", "job" (a background job is Harold's own thread), "watcher", "monitor" |
+| watch | A schedule an agent asks Harold for: run one of its skills with a model every few minutes or on a cron expression, for a set time or with no end, and report to the chief or the agent itself. It is not the agent monitor's watching of agents ("Watching agents"), and not the `WatchAgentStates` stream. See also agent job, which is its own term and is not a watch | "scheduled job", "monitoring job", "job" (a background job is Harold's own thread), "watcher", "monitor" |
 | watch skill | The Claude Code skill a watch runs, named under the watch's folder's `.claude/skills/` (its files there or in a watch skill folder), holding the checks, what is worth reporting, and in `allowed-tools` what the model may use, and in `add-dirs` the folders outside the watch's folder its run may reach | "watch prompt", "watch config" |
 | watch skill folder | A folder the user lists in `[watch] skill_folders`, where a watch skill linked into `.claude/skills/` may keep its files, such as the chief-of-pods repository's standard watch skills or an organisation repository's own | "skill root", "skill path", "skills directory" |
 | watch run | One run of a watch's model, with its facts and its answer | "tick", "job run" |
@@ -137,6 +137,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | paused watch | A watch that runs nothing until `watch resume` or its pause ends. It is not the **messaging pause** | "suspended" |
 | capped watch | An open-ended watch that the spent daily budget paused until the next local day. `list` shows it as `paused (budget)`. `resume` and `W` do not resume it | "over budget" for the state |
 | watch reminder | A `REMIND <name>: <text>` line that the watch tool types once at a set time, with no model | "alarm", "timer" |
+| agent job | A long command that an agent started outside its pane and recorded with `harold tool job add`. Harold checks it and tells the agent when it ends. The bare word "job" is allowed only in the job tool and its names (`harold tool job`, job line, `harold.job.*`) | "background job" (Harold's own threads), "workflow", "task" |
+| job line | The line under an agent row that shows one of its agent jobs | "job row" (a row is an agent row) |
+| end line (of an agent job) | The line that Harold types into the agent's pane when its job ends: `JOB <name> ended after <n> m (pid <pid>). Check its output.` | "job notice", "done message" |
 | facts | What Harold hands the model on each watch run: agents, pods, the chief's pane and the run numbers; and, for a call, the call facts | "context", "evidence" |
 
 ## Watching agents

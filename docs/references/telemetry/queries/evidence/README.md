@@ -30,6 +30,8 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `flow-release-1.sql` | `pod.spec.lead_time` with `phase = merged_to_released` rose after `since`. Reasons `phase_seen` and `no_release_yet` |
 | `flow-installed-1.sql` | `harold.release.install_lag` rose after `since`. Reasons `install_seen` and `no_install_yet` |
 | `flow-installed-2.sql` | `pod.inventory.items` with `list = released_not_installed` has points after `since`. Reasons `list_seen` and `no_list` |
+| `agent-jobs-1.sql` | `harold.feature.used` with `spec.id = agent-jobs` rose after `since`. Reasons `job_added` and `no_job_yet` |
+| `agent-jobs-2.sql` | `harold.job.ends` with `how = ended` rose after `since`, with no `end_line = failed`. Reasons `end_told`, `no_end_yet` and `end_not_told` |
 
 ## Run one
 

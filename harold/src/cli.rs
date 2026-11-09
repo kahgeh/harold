@@ -1242,7 +1242,10 @@ fn job_list_line(job: &job_api::Job, offset: time::UtcOffset) -> String {
     } else {
         format!("ended at {}", watch_time(job.ended_at_ms, offset))
     };
-    format!("{} · pid {} · {state} · agent {}", job.name, job.pid, job.pane_id)
+    format!(
+        "{} · pid {} · {state} · agent {}",
+        job.name, job.pid, job.pane_id
+    )
 }
 
 pub(crate) async fn job_within(
@@ -8177,7 +8180,16 @@ mod tests {
             Err(line) => Err(line),
         };
         assert_eq!(
-            job(&["add", "calibration", "--pid", "4121", "--for", "20m", "--agent", "block:1"]),
+            job(&[
+                "add",
+                "calibration",
+                "--pid",
+                "4121",
+                "--for",
+                "20m",
+                "--agent",
+                "block:1"
+            ]),
             Ok(JobCommand::Add {
                 name: "calibration".into(),
                 pid: 4121,
@@ -8187,7 +8199,9 @@ mod tests {
             })
         );
         assert!(matches!(
-            job(&["add", "a", "--what", "x y", "--for", "2h", "--pid", "1", "--agent", "p"]),
+            job(&[
+                "add", "a", "--what", "x y", "--for", "2h", "--pid", "1", "--agent", "p"
+            ]),
             Ok(JobCommand::Add { for_secs: 7200, .. })
         ));
         assert_eq!(job(&["list"]), Ok(JobCommand::List));
@@ -8206,7 +8220,9 @@ mod tests {
         );
         for bad in [
             vec!["add", "a", "--pid", "1", "--for", "5"],
-            vec!["add", "a", "--pid", "1", "--pid", "2", "--for", "5", "--agent", "p"],
+            vec![
+                "add", "a", "--pid", "1", "--pid", "2", "--for", "5", "--agent", "p",
+            ],
             vec!["add", "--pid", "1"],
             vec!["remove"],
             vec![],
@@ -8222,7 +8238,11 @@ mod tests {
         assert_eq!(parse_job_secs("20", "for"), Ok(1200));
         assert_eq!(parse_job_secs("2h", "for"), Ok(7200));
         for bad in ["", "h", "-5", "1.5h", "5d", "4294967295h"] {
-            assert_eq!(parse_job_secs(bad, "for"), Err("invalid for".into()), "{bad:?}");
+            assert_eq!(
+                parse_job_secs(bad, "for"),
+                Err("invalid for".into()),
+                "{bad:?}"
+            );
         }
     }
 

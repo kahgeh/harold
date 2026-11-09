@@ -21,7 +21,7 @@ mod store;
 mod test_support;
 mod validate;
 
-pub(crate) use feed::{JobsView, subscribe, with_jobs};
+pub(crate) use feed::{subscribe, with_jobs};
 
 pub(crate) const NAME: &str = "job";
 

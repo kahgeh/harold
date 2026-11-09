@@ -6,7 +6,12 @@ async fn service() -> (JobToolService, Arc<FakeProcesses>, Temp) {
     let store = dir.store().await;
     let processes = Arc::new(FakeProcesses::default());
     processes.0.lock().unwrap().insert(4121, 1_700_000_000);
-    let svc = JobToolService::new(store, processes.clone(), Arc::new(|| 1_000_000), Arc::new(crate::tools::job::feed::JobsFeed::new()));
+    let svc = JobToolService::new(
+        store,
+        processes.clone(),
+        Arc::new(|| 1_000_000),
+        Arc::new(crate::tools::job::feed::JobsFeed::new()),
+    );
     (svc, processes, dir)
 }
 
@@ -35,7 +40,11 @@ async fn add_accepts_a_running_pid_and_list_shows_it() {
         .into_inner();
     assert_eq!(added.started_at_ms, 1_000_000);
     assert_eq!(added.due_at_ms, 1_000_000 + 1_200_000);
-    let listed = svc.list(Request::new(pb::ListRequest {})).await.unwrap().into_inner();
+    let listed = svc
+        .list(Request::new(pb::ListRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(listed.jobs.len(), 1);
     assert_eq!(listed.jobs[0].name, "calibration");
     assert_eq!(listed.jobs[0].state, "running");
@@ -71,11 +80,18 @@ async fn remove_takes_the_job_away_and_refuses_an_unknown_name() {
     svc.remove(Request::new(pb::RemoveRequest { name: "a".into() }))
         .await
         .unwrap();
-    let listed = svc.list(Request::new(pb::ListRequest {})).await.unwrap().into_inner();
+    let listed = svc
+        .list(Request::new(pb::ListRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
     assert!(listed.jobs.is_empty());
     let status = svc
         .remove(Request::new(pb::RemoveRequest { name: "a".into() }))
         .await
         .expect_err("unknown");
-    assert_eq!((status.code(), status.message()), (tonic::Code::NotFound, "unknown_job"));
+    assert_eq!(
+        (status.code(), status.message()),
+        (tonic::Code::NotFound, "unknown_job")
+    );
 }

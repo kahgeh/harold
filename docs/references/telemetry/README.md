@@ -206,7 +206,7 @@ GROUP BY 1
 
 **Spec kind.** `spec.kind` comes from the `**Kind.**` line under the `**Size.**` line: `feature` (a product feature), `fix` or `other`. A spec with no kind line is `unkinded`.
 
-**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check` and `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
+**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane) and `agent-jobs` (one use is one `harold tool job add` that Harold accepts). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
 
 **Confirmed fixes.** The evidence check writes `confirmed/<id>.md` in the pod folder when the evidence query of a fix spec returns `present = 1` after its release. The file has the lines `confirmed:` (RFC 3339 time) and `evidence:` (the name of the evidence query, with no message text). Pod stats reads it and exports the gauge `pod.fix.confirmed_at` for each confirmed file: its value is the `confirmed:` time in Unix seconds, with `spec.id` and `pod.product`. A restart exports the same times again, so the query counts the `spec.id` values whose time falls in the window, not a rise. A file with no valid `confirmed:` time gives no gauge point and one unreadable-file notice.
 
@@ -854,6 +854,9 @@ The watch tool logs the pause and resume of a watch and the life of each reminde
 | `reminder set` (`info`) | `reminder`. The due time, `due_at`, is not on `ALLOWED_FIELDS`, so it does not leave Harold |
 | `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder), `schedule` (`in`, `at` or `cron`), `missed` (always 0: a reminder is one shot) |
 | `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it), `schedule` (`in`, `at` or `cron`) |
+| `job added` (`info`) | `job.name`, `pane_id`, `due_in_s`. One for each accepted `harold tool job add` |
+| `job ended` (`info`) | `job.name`, `pane_id`, `run_s`, `past_due_s`. The check found the process gone, or with a new start time |
+| `job end not told` (`info`) | `job.name`, `pane_id`, `reason` (`no_pane` or `failed`). Logged once, 10 minutes after the end, for a job whose end line did not reach the agent. A busy pane that still gets its line later logs nothing. It is not an alert |
 
 A reminder also writes the lines of its report slot: `watch report waiting`, `watch report typed` and `watch report replaced`. They carry `watch=<reminder name>` and `run=0`. Read them for the reasons a reminder waited, for example `agent_busy`.
 
@@ -1078,6 +1081,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.factory_flow.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`);
 - `harold.evidence.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`);
 - `harold.evidence.lines`, for each `outcome` (`typed`, `no_chief`, `not_typed`);
+- `harold.job.ends`, for each series of `how` and `end_line` (`ended` with `typed`, `typed_at_turn_end`, `no_pane` and `failed`, and `removed` with `none`), and `harold.job.past_due` as 0;
 - `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.telemetry.log_records.unsent`, for each `outcome` (`resent`, `file_only`);
@@ -1085,7 +1089,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.work.checked`, for each `priority`;
-- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check` and `evidence-follow-up`);
+- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` and `agent-jobs`);
 - `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 

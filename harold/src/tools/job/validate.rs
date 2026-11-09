@@ -64,9 +64,15 @@ mod tests {
         assert_eq!(check_add("X", 4121, 1200, "%4", ""), Err("name"));
         assert_eq!(check_add("x", 0, 1200, "%4", ""), Err("pid"));
         assert_eq!(check_add("x", 4121, 0, "%4", ""), Err("for_secs"));
-        assert_eq!(check_add("x", 4121, FOR_MAX_SECS + 1, "%4", ""), Err("for_secs"));
+        assert_eq!(
+            check_add("x", 4121, FOR_MAX_SECS + 1, "%4", ""),
+            Err("for_secs")
+        );
         assert_eq!(check_add("x", 4121, 1200, " ", ""), Err("pane_id"));
         assert_eq!(check_add("x", 4121, 1200, "%4", "a\nb"), Err("what"));
-        assert_eq!(check_add("x", 4121, 1200, "%4", &"w".repeat(121)), Err("what"));
+        assert_eq!(
+            check_add("x", 4121, 1200, "%4", &"w".repeat(121)),
+            Err("what")
+        );
     }
 }

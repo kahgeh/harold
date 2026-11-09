@@ -38,6 +38,7 @@ impl JobsFeed {
         self.sender.subscribe()
     }
 
+    #[cfg(test)]
     pub(crate) fn current(&self) -> Arc<JobsView> {
         Arc::clone(&self.sender.borrow())
     }

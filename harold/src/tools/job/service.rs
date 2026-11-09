@@ -89,9 +89,9 @@ impl JobService for JobToolService {
                 obs::job_added(&job.name, &job.pane_id, i64::from(req.for_secs));
                 self.feed.refresh(&self.store, now).await;
                 Ok(Response::new(pb::AddResponse {
-                name: job.name,
-                started_at_ms: job.started_at_ms,
-                due_at_ms: job.due_at_ms,
+                    name: job.name,
+                    started_at_ms: job.started_at_ms,
+                    due_at_ms: job.due_at_ms,
                 }))
             }
             Ok(false) => Err(Status::failed_precondition("name_in_use")),

@@ -143,10 +143,17 @@ async fn a_busy_pane_gets_the_line_at_a_later_check_and_it_is_marked_typed_at_tu
     assert_eq!(r.only_job().await.end_line, None);
     r.advance(15_000);
     r.checker.pass().await;
-    assert_eq!(r.only_job().await.end_line.as_deref(), Some("typed_at_turn_end"));
+    assert_eq!(
+        r.only_job().await.end_line.as_deref(),
+        Some("typed_at_turn_end")
+    );
     r.advance(15_000);
     r.checker.pass().await;
-    assert_eq!(r.pane.lines().len(), 3, "two busy tries, one typed line, then nothing");
+    assert_eq!(
+        r.pane.lines().len(),
+        3,
+        "two busy tries, one typed line, then nothing"
+    );
 }
 
 #[tokio::test]
@@ -167,7 +174,11 @@ async fn a_failed_enter_gives_failed_and_the_line_is_not_typed_again() {
     let r = rig().await;
     r.store.add(&job("a", r.now())).await.unwrap();
     r.end_process().await;
-    r.pane.answers.lock().unwrap().push_back(Typing::EnterFailed);
+    r.pane
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Typing::EnterFailed);
     r.checker.pass().await;
     assert_eq!(r.only_job().await.end_line.as_deref(), Some("failed"));
     r.advance(15_000);
@@ -182,11 +193,12 @@ async fn the_line_is_typed_once_also_after_a_restart() {
     r.store.add(&job("b", r.now())).await.unwrap();
     r.end_process().await;
     // Job "a" is told. Job "b" meets a busy pane, then Harold restarts.
-    r.pane
-        .answers
-        .lock()
-        .unwrap()
-        .extend([Typing::Typed { insert_pressed: false }, Typing::PaneBusy("pane_busy")]);
+    r.pane.answers.lock().unwrap().extend([
+        Typing::Typed {
+            insert_pressed: false,
+        },
+        Typing::PaneBusy("pane_busy"),
+    ]);
     r.checker.pass().await;
     assert_eq!(r.pane.lines().len(), 2);
     let restarted = checker(&r.store, &r.processes, &r.pane, &r.clock);
@@ -219,7 +231,13 @@ async fn the_name_in_the_line_is_cut_to_48_characters() {
     r.end_process().await;
     r.checker.pass().await;
     let (_, text) = r.pane.lines().remove(0);
-    assert_eq!(text, format!("JOB {} ended after <1 m (pid 4121). Check its output.", "n".repeat(48)));
+    assert_eq!(
+        text,
+        format!(
+            "JOB {} ended after <1 m (pid 4121). Check its output.",
+            "n".repeat(48)
+        )
+    );
 }
 
 #[tokio::test]
@@ -245,27 +263,50 @@ async fn job_end_not_told_logs_once_at_10_minutes_and_only_for_no_pane_or_failed
     r.pane.answers.lock().unwrap().extend([
         Typing::NoPane,
         Typing::PaneBusy("pane_busy"),
-        Typing::Typed { insert_pressed: false },
+        Typing::Typed {
+            insert_pressed: false,
+        },
     ]);
     r.checker.pass().await;
     r.advance(9 * MIN);
-    r.pane.answers.lock().unwrap().push_back(Typing::PaneBusy("pane_busy"));
+    r.pane
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Typing::PaneBusy("pane_busy"));
     r.checker.pass().await;
-    assert!(!logs.text().contains("job end not told"), "not before 10 minutes");
+    assert!(
+        !logs.text().contains("job end not told"),
+        "not before 10 minutes"
+    );
     r.advance(2 * MIN);
-    r.pane.answers.lock().unwrap().push_back(Typing::PaneBusy("pane_busy"));
+    r.pane
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Typing::PaneBusy("pane_busy"));
     r.checker.pass().await;
     r.advance(15_000);
-    r.pane.answers.lock().unwrap().push_back(Typing::PaneBusy("pane_busy"));
+    r.pane
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Typing::PaneBusy("pane_busy"));
     r.checker.pass().await;
     let text = logs.text();
-    let told: Vec<&str> = text.lines().filter(|l| l.contains("job end not told")).collect();
+    let told: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("job end not told"))
+        .collect();
     assert_eq!(told.len(), 1, "{text}");
     assert!(told[0].contains("gone") && told[0].contains("reason=no_pane"));
     // The busy pane gets the line later: it logs nothing.
     r.advance(15_000);
     r.checker.pass().await;
-    assert_eq!(r.only_busy_end_line().await, Some("typed_at_turn_end".to_string()));
+    assert_eq!(
+        r.only_busy_end_line().await,
+        Some("typed_at_turn_end".to_string())
+    );
     assert_eq!(logs.text().matches("job end not told").count(), 1);
 }
 
@@ -290,7 +331,13 @@ async fn job_ended_logs_the_run_and_the_seconds_past_the_expected_end() {
     r.end_process().await;
     r.checker.pass().await;
     let text = logs.text();
-    let line = text.lines().find(|l| l.contains("job ended")).expect("logged");
-    assert!(line.contains("run_s=1500") && line.contains("past_due_s=300"), "{line}");
+    let line = text
+        .lines()
+        .find(|l| l.contains("job ended"))
+        .expect("logged");
+    assert!(
+        line.contains("run_s=1500") && line.contains("past_due_s=300"),
+        "{line}"
+    );
     let _ = &r.dir;
 }

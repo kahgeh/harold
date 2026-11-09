@@ -602,7 +602,10 @@ fn agent_jobs_contract_is_additive() {
     };
     let decoded = round_trip(&snapshot);
     assert_eq!(decoded.jobs.len(), 1);
-    assert_eq!((decoded.jobs[0].name.as_str(), decoded.jobs[0].pid), ("calibration", 4121));
+    assert_eq!(
+        (decoded.jobs[0].name.as_str(), decoded.jobs[0].pid),
+        ("calibration", 4121)
+    );
     // An older sender leaves the field out: it decodes as no jobs.
     assert!(round_trip(&AgentStateSnapshot::default()).jobs.is_empty());
 }

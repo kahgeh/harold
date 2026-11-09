@@ -44,14 +44,6 @@ pub(super) enum JobState {
 }
 
 impl JobState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Ended => "ended",
-            Self::Removed => "removed",
-        }
-    }
-
     fn parse(text: &str) -> Result<Self> {
         match text {
             "running" => Ok(Self::Running),
