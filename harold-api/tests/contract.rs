@@ -584,13 +584,17 @@ fn agent_jobs_contract_is_additive() {
         ("due_at_ms", 7),
         ("ended_at_ms", 8),
         ("state", 9),
+        ("unit", 10),
+        ("exit_code", 11),
+        ("exit_known", 12),
+        ("unreached_since_ms", 13),
     ] {
         assert!(
             job_fields.contains(&(expected.0.to_string(), expected.1)),
             "{expected:?}"
         );
     }
-    assert_eq!(job_fields.len(), 9);
+    assert_eq!(job_fields.len(), 13);
     let snapshot = AgentStateSnapshot {
         jobs: vec![AgentJob {
             name: "calibration".into(),

@@ -7027,6 +7027,9 @@ mod tests {
             started_at_ms: started_ms,
             due_at_ms: due_ms,
             ended_at_ms: ended_ms,
+            unknown: false,
+            unit: String::new(),
+            unreached_since_ms: 0,
         }
     }
 

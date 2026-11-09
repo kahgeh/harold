@@ -13,6 +13,7 @@ use super::obs;
 use super::process::ProcessPort;
 use super::service::Clock;
 use super::store::{JobRow, JobStore, SHOW_AFTER_END_MS};
+use super::unit::UnitPort;
 use crate::tools::{PaneTyping, Typing};
 
 /// How often the check runs.
@@ -39,13 +40,49 @@ struct Memory {
     logged: HashSet<i64>,
 }
 
+/// What the check found for one running job.
+enum Still {
+    Runs,
+    /// Ended, with the exit code when it is known (a unit only).
+    Ended(Option<i32>),
+}
+
 pub(super) struct Checker {
     store: Arc<JobStore>,
     processes: Arc<dyn ProcessPort>,
+    units: Arc<dyn UnitPort>,
     typing: Arc<dyn PaneTyping>,
     now_ms: Clock,
     feed: Arc<JobsFeed>,
     memory: Mutex<Memory>,
+}
+
+/// `JOB <name> ended after <n> m: exit 0.` for a unit. The text is `failed (exit 2)` for a
+/// non-zero code and `exit unknown` when the code is not known. A host adds ` on <host>`.
+pub(super) fn end_line_text_unit(
+    name: &str,
+    host: &str,
+    ran_ms: i64,
+    exit_code: Option<i32>,
+) -> String {
+    let name: String = name.chars().take(LINE_NAME_MAX).collect();
+    let on = if host.is_empty() {
+        String::new()
+    } else {
+        format!(" on {host}")
+    };
+    let minutes = ran_ms / 60_000;
+    let ran = if minutes == 0 {
+        "<1 m".to_string()
+    } else {
+        format!("{minutes} m")
+    };
+    let exit = match exit_code {
+        Some(0) => "exit 0".to_string(),
+        Some(code) => format!("failed (exit {code})"),
+        None => "exit unknown".to_string(),
+    };
+    format!("JOB {name}{on} ended after {ran}: {exit}.")
 }
 
 /// `JOB <name> ended after <n> m (pid <pid>). Check its output.` The name is cut to 48
@@ -65,6 +102,7 @@ impl Checker {
     pub(super) fn new(
         store: Arc<JobStore>,
         processes: Arc<dyn ProcessPort>,
+        units: Arc<dyn UnitPort>,
         typing: Arc<dyn PaneTyping>,
         now_ms: Clock,
         feed: Arc<JobsFeed>,
@@ -72,6 +110,7 @@ impl Checker {
         Self {
             store,
             processes,
+            units,
             typing,
             now_ms,
             feed,
@@ -88,13 +127,19 @@ impl Checker {
             return report;
         };
         for job in running {
-            if self.processes.start_time(job.pid) == Some(job.process_start_s) {
-                if now > job.due_at_ms {
-                    report.past_due += 1;
+            let exit_code = match self.still_runs(&job).await {
+                Still::Runs => {
+                    if now > job.due_at_ms {
+                        report.past_due += 1;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if matches!(self.store.mark_ended(job.id, now).await, Ok(true)) {
+                Still::Ended(exit_code) => exit_code,
+            };
+            if matches!(
+                self.store.mark_ended_with(job.id, now, exit_code).await,
+                Ok(true)
+            ) {
                 report.changed = true;
                 obs::job_ended(
                     &job,
@@ -114,9 +159,37 @@ impl Checker {
         report
     }
 
+    /// Whether the job's process or unit still runs. A `systemctl` that fails is not an end.
+    async fn still_runs(&self, job: &JobRow) -> Still {
+        if job.unit.is_empty() {
+            return if self.processes.start_time(job.pid) == Some(job.process_start_s) {
+                Still::Runs
+            } else {
+                Still::Ended(None)
+            };
+        }
+        let Ok(state) = self.units.show(&job.unit, job.user_unit).await else {
+            return Still::Runs;
+        };
+        if state.is_running() {
+            return Still::Runs;
+        }
+        let exit_code = state.exit_code();
+        if state.exists() {
+            // The ended unit stays loaded: stop it once so that it does not stay.
+            self.units.stop(&job.unit, job.user_unit).await;
+        }
+        Still::Ended(exit_code)
+    }
+
     /// Tries once to type the end line. Returns whether an outcome was recorded.
     async fn tell(&self, job: &JobRow) -> bool {
-        let line = end_line_text(&job.name, job.pid, job.ended_at_ms - job.started_at_ms);
+        let ran_ms = job.ended_at_ms - job.started_at_ms;
+        let line = if job.unit.is_empty() {
+            end_line_text(&job.name, job.pid, ran_ms)
+        } else {
+            end_line_text_unit(&job.name, "", ran_ms, job.exit_code)
+        };
         let outcome = match self.typing.type_line(&job.pane_id, &line).await {
             Typing::Typed { .. } => {
                 let waited = self

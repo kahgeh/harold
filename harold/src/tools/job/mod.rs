@@ -19,6 +19,7 @@ mod service;
 mod store;
 #[cfg(test)]
 mod test_support;
+mod unit;
 mod validate;
 
 pub(crate) use feed::{subscribe, with_jobs};
@@ -49,16 +50,25 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     crate::telemetry::register_job_instruments();
     let store = Arc::new(store);
     let processes: Arc<dyn process::ProcessPort> = Arc::new(process::SystemProcesses);
+    let units: Arc<dyn unit::UnitPort> = Arc::new(unit::SystemUnits);
     let clock: service::Clock = Arc::new(now_ms);
     let feed = Arc::clone(feed::JobsFeed::global());
     let checker = check::Checker::new(
         Arc::clone(&store),
         Arc::clone(&processes),
+        Arc::clone(&units),
         typing,
         Arc::clone(&clock),
         Arc::clone(&feed),
     );
-    let service = service::JobToolService::new(store, processes, clock, feed);
+    let service = service::JobToolService::new(
+        store,
+        processes,
+        units,
+        cfg!(target_os = "linux"),
+        clock,
+        feed,
+    );
     let task = tokio::spawn(run(checker, ctx.shutdown));
     Ok(ToolHandle {
         routes: Routes::new(JobServiceServer::new(service)),

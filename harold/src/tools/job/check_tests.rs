@@ -4,7 +4,8 @@ use super::*;
 use crate::outbound::fake::CapturedLogs;
 use crate::tools::Typing;
 use crate::tools::job::store::{JobState, NewJob};
-use crate::tools::job::test_support::{FakePane, FakeProcesses, Temp};
+use crate::tools::job::test_support::{FakePane, FakeProcesses, FakeUnits, Temp};
+use crate::tools::job::unit::UnitState;
 
 const START_S: i64 = 1_700_000_000;
 const MIN: i64 = 60_000;
@@ -13,6 +14,7 @@ struct Rig {
     dir: Temp,
     store: Arc<JobStore>,
     processes: Arc<FakeProcesses>,
+    units: Arc<FakeUnits>,
     pane: Arc<FakePane>,
     clock: Arc<AtomicI64>,
     checker: Checker,
@@ -21,6 +23,7 @@ struct Rig {
 fn checker(
     store: &Arc<JobStore>,
     processes: &Arc<FakeProcesses>,
+    units: &Arc<FakeUnits>,
     pane: &Arc<FakePane>,
     clock: &Arc<AtomicI64>,
 ) -> Checker {
@@ -28,6 +31,7 @@ fn checker(
     Checker::new(
         Arc::clone(store),
         processes.clone(),
+        units.clone(),
         pane.clone(),
         Arc::new(move || clock.load(Ordering::SeqCst)),
         Arc::new(crate::tools::job::feed::JobsFeed::new()),
@@ -39,13 +43,15 @@ async fn rig() -> Rig {
     let store = dir.store().await;
     let processes = Arc::new(FakeProcesses::default());
     processes.0.lock().unwrap().insert(4121, START_S);
+    let units = Arc::new(FakeUnits::default());
     let pane = Arc::new(FakePane::default());
     let clock = Arc::new(AtomicI64::new(1_000 * MIN));
-    let checker = checker(&store, &processes, &pane, &clock);
+    let checker = checker(&store, &processes, &units, &pane, &clock);
     Rig {
         dir,
         store,
         processes,
+        units,
         pane,
         clock,
         checker,
@@ -61,6 +67,7 @@ fn job(name: &str, started_ms: i64) -> NewJob {
         process_start_s: START_S,
         started_at_ms: started_ms,
         due_at_ms: started_ms + 20 * MIN,
+        ..Default::default()
     }
 }
 
@@ -201,7 +208,7 @@ async fn the_line_is_typed_once_also_after_a_restart() {
     ]);
     r.checker.pass().await;
     assert_eq!(r.pane.lines().len(), 2);
-    let restarted = checker(&r.store, &r.processes, &r.pane, &r.clock);
+    let restarted = checker(&r.store, &r.processes, &r.units, &r.pane, &r.clock);
     r.advance(15_000);
     restarted.pass().await;
     let lines = r.pane.lines();
@@ -340,4 +347,153 @@ async fn job_ended_logs_the_run_and_the_seconds_past_the_expected_end() {
         "{line}"
     );
     let _ = &r.dir;
+}
+
+fn unit_job(name: &str, started_ms: i64) -> NewJob {
+    NewJob {
+        unit: "cal-1".into(),
+        user: true,
+        pid: 0,
+        ..job(name, started_ms)
+    }
+}
+
+fn unit_state(active: &str, sub: &str, load: &str, status: Option<i32>) -> UnitState {
+    UnitState {
+        active: active.into(),
+        sub: sub.into(),
+        result: String::new(),
+        exit_status: status,
+        load: load.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_running_unit_keeps_its_job_running() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("active", "running", "loaded", Some(0)),
+    );
+    let report = r.checker.pass().await;
+    assert_eq!(r.only_job().await.state, JobState::Running);
+    assert!(!report.changed);
+    assert!(r.pane.lines().is_empty());
+}
+
+#[tokio::test]
+async fn inactive_failed_exited_and_not_found_units_end_their_job() {
+    for state in [
+        unit_state("inactive", "dead", "loaded", Some(0)),
+        unit_state("failed", "failed", "loaded", Some(2)),
+        unit_state("active", "exited", "loaded", Some(0)),
+        unit_state("inactive", "dead", "not-found", None),
+    ] {
+        let r = rig().await;
+        r.store.add(&unit_job("cal", r.now())).await.unwrap();
+        r.units.set("cal-1", true, state.clone());
+        r.checker.pass().await;
+        assert_eq!(r.only_job().await.state, JobState::Ended, "{state:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_exit_code_comes_from_exec_main_status_and_a_failed_unit_reads_failed() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.advance(21 * MIN);
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("failed", "failed", "loaded", Some(2)),
+    );
+    r.checker.pass().await;
+    assert_eq!(r.only_job().await.exit_code, Some(2));
+    assert_eq!(
+        r.pane.lines(),
+        vec![(
+            "%4".to_string(),
+            "JOB cal ended after 21 m: failed (exit 2).".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_clean_exit_reads_exit_0_and_a_unit_that_is_gone_reads_exit_unknown() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.advance(21 * MIN);
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("active", "exited", "loaded", Some(0)),
+    );
+    r.checker.pass().await;
+    assert_eq!(r.pane.lines()[0].1, "JOB cal ended after 21 m: exit 0.");
+
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("inactive", "dead", "not-found", None),
+    );
+    r.checker.pass().await;
+    assert_eq!(r.only_job().await.exit_code, None);
+    assert_eq!(
+        r.pane.lines()[0].1,
+        "JOB cal ended after <1 m: exit unknown."
+    );
+}
+
+#[tokio::test]
+async fn a_read_exit_code_is_followed_by_one_stop_and_a_unit_that_is_gone_gets_none() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("active", "exited", "loaded", Some(0)),
+    );
+    r.checker.pass().await;
+    r.advance(15_000);
+    r.checker.pass().await;
+    assert_eq!(
+        r.units.stopped.lock().unwrap().clone(),
+        vec![("cal-1".to_string(), true)]
+    );
+
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("inactive", "dead", "not-found", None),
+    );
+    r.checker.pass().await;
+    assert!(r.units.stopped.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_systemctl_that_fails_keeps_the_job_running() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    // The fake has no entry for the unit: its `show` fails.
+    r.checker.pass().await;
+    assert_eq!(r.only_job().await.state, JobState::Running);
+}
+
+#[tokio::test]
+async fn a_unit_past_its_expected_end_counts_as_past_due() {
+    let r = rig().await;
+    r.store.add(&unit_job("cal", r.now())).await.unwrap();
+    r.units.set(
+        "cal-1",
+        true,
+        unit_state("active", "running", "loaded", Some(0)),
+    );
+    r.advance(21 * MIN);
+    assert_eq!(r.checker.pass().await.past_due, 1);
 }

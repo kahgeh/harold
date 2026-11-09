@@ -33,12 +33,18 @@ message AddRequest {
   uint32 for_secs = 3;
   string pane_id = 4;
   string what = 5;
+  // A systemd unit in place of `pid`. Empty for a process.
+  string unit = 6;
+  // The unit belongs to the user's systemd (`systemctl --user`).
+  bool user = 7;
 }
 
 message AddResponse {
   string name = 1;
   int64 started_at_ms = 2;
   int64 due_at_ms = 3;
+  // A warning for the agent. Empty when none.
+  string warning = 4;
 }
 
 message ListRequest {}
@@ -56,6 +62,12 @@ message Job {
   string state = 8;
   // "", "typed", "typed_at_turn_end", "no_pane" or "failed". Empty while no end line is done.
   string end_line = 9;
+  string unit = 10;
+  // Whether the job has its keep-awake file now.
+  bool keeps_awake = 11;
+  // The exit code of an ended unit. Valid when `exit_known` is true.
+  int32 exit_code = 12;
+  bool exit_known = 13;
 }
 
 message ListResponse {

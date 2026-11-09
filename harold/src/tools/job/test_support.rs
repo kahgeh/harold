@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use super::process::ProcessPort;
 use super::store::JobStore;
+use super::unit::{UnitError, UnitPort, UnitState};
 use crate::tools::{BoxFuture, PaneTyping, Typing};
 
 /// A process table that tests change by hand.
@@ -15,6 +16,56 @@ pub(super) struct FakeProcesses(pub(super) Mutex<HashMap<u32, i64>>);
 impl ProcessPort for FakeProcesses {
     fn start_time(&self, pid: u32) -> Option<i64> {
         self.0.lock().unwrap().get(&pid).copied()
+    }
+}
+
+/// A systemd that tests change by hand. A unit with no entry gives an error, as a
+/// `systemctl` that cannot run does.
+#[derive(Default)]
+pub(super) struct FakeUnits {
+    pub(super) states: Mutex<HashMap<(String, bool), UnitState>>,
+    pub(super) remain: Mutex<HashMap<(String, bool), bool>>,
+    pub(super) stopped: Mutex<Vec<(String, bool)>>,
+}
+
+impl FakeUnits {
+    pub(super) fn set(&self, unit: &str, user: bool, state: UnitState) {
+        self.states
+            .lock()
+            .unwrap()
+            .insert((unit.to_string(), user), state);
+    }
+}
+
+impl UnitPort for FakeUnits {
+    fn show<'a>(
+        &'a self,
+        unit: &'a str,
+        user: bool,
+    ) -> BoxFuture<'a, Result<UnitState, UnitError>> {
+        let state = self
+            .states
+            .lock()
+            .unwrap()
+            .get(&(unit.to_string(), user))
+            .cloned()
+            .ok_or(UnitError);
+        Box::pin(async move { state })
+    }
+
+    fn stop<'a>(&'a self, unit: &'a str, user: bool) -> BoxFuture<'a, ()> {
+        self.stopped.lock().unwrap().push((unit.to_string(), user));
+        Box::pin(async {})
+    }
+
+    fn remain_after_exit<'a>(&'a self, unit: &'a str, user: bool) -> BoxFuture<'a, Option<bool>> {
+        let value = self
+            .remain
+            .lock()
+            .unwrap()
+            .get(&(unit.to_string(), user))
+            .copied();
+        Box::pin(async move { value })
     }
 }
 

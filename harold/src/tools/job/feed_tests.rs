@@ -11,6 +11,7 @@ fn new_job(name: &str) -> NewJob {
         process_start_s: 1,
         started_at_ms: 1_000,
         due_at_ms: 2_000,
+        ..Default::default()
     }
 }
 

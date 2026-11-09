@@ -11,6 +11,7 @@ use super::feed::JobsFeed;
 use super::obs;
 use super::process::ProcessPort;
 use super::store::{JobRow, JobState, JobStore, NewJob};
+use super::unit::UnitPort;
 use super::validate;
 
 /// Milliseconds since the epoch, now.
@@ -19,20 +20,31 @@ pub(super) type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub(super) struct JobToolService {
     store: Arc<JobStore>,
     processes: Arc<dyn ProcessPort>,
+    units: Arc<dyn UnitPort>,
+    /// This machine runs systemd. A unit job is refused where it does not.
+    systemd: bool,
     now_ms: Clock,
     feed: Arc<JobsFeed>,
 }
+
+/// What `add` tells the agent when the unit does not stay loaded after it ends.
+const REMAIN_WARNING: &str =
+    "the exit code will be unknown: start the unit with --remain-after-exit";
 
 impl JobToolService {
     pub(super) fn new(
         store: Arc<JobStore>,
         processes: Arc<dyn ProcessPort>,
+        units: Arc<dyn UnitPort>,
+        systemd: bool,
         now_ms: Clock,
         feed: Arc<JobsFeed>,
     ) -> Self {
         Self {
             store,
             processes,
+            units,
+            systemd,
             now_ms,
             feed,
         }
@@ -58,6 +70,10 @@ pub(super) fn to_pb(job: &JobRow) -> pb::Job {
         }
         .into(),
         end_line: job.end_line.clone().unwrap_or_default(),
+        unit: job.unit.clone(),
+        keeps_awake: false,
+        exit_code: job.exit_code.unwrap_or(0),
+        exit_known: job.exit_code.is_some(),
     }
 }
 
@@ -68,10 +84,34 @@ impl JobService for JobToolService {
         request: Request<pb::AddRequest>,
     ) -> Result<Response<pb::AddResponse>, Status> {
         let req = request.into_inner();
-        validate::check_add(&req.name, req.pid, req.for_secs, &req.pane_id, &req.what)
-            .map_err(|field| Status::invalid_argument(format!("invalid {field}")))?;
-        let Some(process_start_s) = self.processes.start_time(req.pid) else {
-            return Err(Status::not_found("no_such_process"));
+        validate::check_add(
+            &req.name,
+            req.pid,
+            &req.unit,
+            req.for_secs,
+            &req.pane_id,
+            &req.what,
+        )
+        .map_err(|field| Status::invalid_argument(format!("invalid {field}")))?;
+        let mut warning = String::new();
+        let process_start_s = if req.unit.is_empty() {
+            let Some(started) = self.processes.start_time(req.pid) else {
+                return Err(Status::not_found("no_such_process"));
+            };
+            started
+        } else {
+            if !self.systemd {
+                return Err(Status::failed_precondition("no_systemd"));
+            }
+            match self.units.show(&req.unit, req.user).await {
+                Ok(state) if state.exists() => {}
+                Ok(_) => return Err(Status::not_found("no_such_unit")),
+                Err(_) => return Err(Status::unavailable("systemctl_failed")),
+            }
+            if self.units.remain_after_exit(&req.unit, req.user).await == Some(false) {
+                warning = REMAIN_WARNING.into();
+            }
+            0
         };
         let now = (self.now_ms)();
         let job = NewJob {
@@ -82,6 +122,8 @@ impl JobService for JobToolService {
             process_start_s,
             started_at_ms: now,
             due_at_ms: now + i64::from(req.for_secs) * 1_000,
+            unit: req.unit,
+            user: req.user,
         };
         match self.store.add(&job).await {
             Ok(true) => {
@@ -92,6 +134,7 @@ impl JobService for JobToolService {
                     name: job.name,
                     started_at_ms: job.started_at_ms,
                     due_at_ms: job.due_at_ms,
+                    warning,
                 }))
             }
             Ok(false) => Err(Status::failed_precondition("name_in_use")),

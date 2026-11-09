@@ -232,8 +232,15 @@ message AgentJob {
   int64 due_at_ms = 7;
   // Zero while the job runs.
   int64 ended_at_ms = 8;
-  // `running` or `ended`.
+  // `running`, `ended`, or `unknown` while the master's slave link to the host is closed.
   string state = 9;
+  // The systemd unit of the job. Empty for a process.
+  string unit = 10;
+  // The exit code of an ended unit. Valid when `exit_known` is true.
+  int32 exit_code = 11;
+  bool exit_known = 12;
+  // When the master's slave link to the host closed. Zero while it is open.
+  int64 unreached_since_ms = 13;
 }
 
 message SetTtsMutedRequest {

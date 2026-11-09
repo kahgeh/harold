@@ -286,7 +286,7 @@ const TOOL_USAGE_LINE: &str =
     "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
 const RELEASE_USAGE_LINE: &str =
     "invalid argument: usage is harold tool release next [product] [--json]";
-const JOB_USAGE_LINE: &str = "invalid argument: usage is harold tool job add NAME --pid PID --for TIME --agent PANE [--what TEXT] | list | remove NAME";
+const JOB_USAGE_LINE: &str = "invalid argument: usage is harold tool job add NAME (--pid PID | --unit UNIT [--user]) --for TIME --agent PANE [--what TEXT] | list | remove NAME";
 const EVIDENCE_USAGE_LINE: &str =
     "invalid argument: usage is harold tool evidence check <product> [<id>]";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
@@ -1144,6 +1144,10 @@ pub(crate) enum JobCommand {
         for_secs: u32,
         agent: String,
         what: String,
+        /// A systemd unit in place of `pid`. Empty for a process.
+        unit: String,
+        /// The unit belongs to the user's systemd.
+        user: bool,
     },
     List,
     Remove {
@@ -1182,7 +1186,8 @@ fn parse_job(args: &[&str]) -> Result<JobCommand, String> {
 }
 
 fn parse_job_add(name: &str, flags: &[&str]) -> Result<JobCommand, String> {
-    let (mut pid, mut time, mut agent, mut what) = (None, None, None, None);
+    let (mut pid, mut time, mut agent, mut what, mut unit) = (None, None, None, None, None);
+    let mut user = false;
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         let slot = match *flag {
@@ -1190,6 +1195,13 @@ fn parse_job_add(name: &str, flags: &[&str]) -> Result<JobCommand, String> {
             "--for" => &mut time,
             "--agent" => &mut agent,
             "--what" => &mut what,
+            "--unit" => &mut unit,
+            "--user" => {
+                if std::mem::replace(&mut user, true) {
+                    return Err(JOB_USAGE_LINE.into());
+                }
+                continue;
+            }
             _ => return Err(JOB_USAGE_LINE.into()),
         };
         let value = rest.next().ok_or_else(|| JOB_USAGE_LINE.to_string())?;
@@ -1197,17 +1209,24 @@ fn parse_job_add(name: &str, flags: &[&str]) -> Result<JobCommand, String> {
             return Err(JOB_USAGE_LINE.into());
         }
     }
-    let (Some(pid), Some(time), Some(agent)) = (pid, time, agent) else {
+    let (Some(time), Some(agent)) = (time, agent) else {
         return Err(JOB_USAGE_LINE.into());
     };
-    let pid = pid
-        .parse::<u32>()
-        .ok()
-        .filter(|_| pid.bytes().all(|byte| byte.is_ascii_digit()))
-        .ok_or_else(|| "invalid pid".to_string())?;
+    // A job has a pid or a unit, never both, and `--user` goes with a unit.
+    let pid = match (pid, &unit) {
+        (Some(pid), None) if !user => pid
+            .parse::<u32>()
+            .ok()
+            .filter(|_| pid.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or_else(|| "invalid pid".to_string())?,
+        (None, Some(_)) => 0,
+        _ => return Err(JOB_USAGE_LINE.into()),
+    };
     Ok(JobCommand::Add {
         name: name.into(),
         pid,
+        unit: unit.unwrap_or_default(),
+        user,
         for_secs: parse_job_secs(&time, "for")?,
         agent,
         what: what.unwrap_or_default(),
@@ -1222,6 +1241,10 @@ fn job_refusal_line(status: &tonic::Status, command: &JobCommand) -> String {
             JobCommand::Add { pid, .. } => format!("no process runs with pid {pid}"),
             _ => "no such process".into(),
         },
+        (tonic::Code::NotFound, "no_such_unit") => "no such unit".into(),
+        (tonic::Code::FailedPrecondition, "no_systemd") => {
+            "this machine has no systemd: --unit is not available".into()
+        }
         (tonic::Code::NotFound, "unknown_job") => match command {
             JobCommand::Remove { name } => format!("unknown job {name}"),
             _ => "unknown job".into(),
@@ -1242,9 +1265,19 @@ fn job_list_line(job: &job_api::Job, offset: time::UtcOffset) -> String {
     } else {
         format!("ended at {}", watch_time(job.ended_at_ms, offset))
     };
+    let who = if job.unit.is_empty() {
+        format!("pid {}", job.pid)
+    } else {
+        format!("unit {}", job.unit)
+    };
+    let awake = if job.keeps_awake {
+        " · keeps awake"
+    } else {
+        ""
+    };
     format!(
-        "{} · pid {} · {state} · agent {}",
-        job.name, job.pid, job.pane_id
+        "{} · {who} · {state} · agent {}{awake}",
+        job.name, job.pane_id
     )
 }
 
@@ -1266,10 +1299,14 @@ pub(crate) async fn job_within(
                 for_secs,
                 agent,
                 what,
+                unit,
+                user,
             } => {
                 let added = client
                     .add(job_api::AddRequest {
                         name: name.clone(),
+                        unit: unit.clone(),
+                        user: *user,
                         pid: *pid,
                         for_secs: *for_secs,
                         pane_id: agent.clone(),
@@ -1278,11 +1315,16 @@ pub(crate) async fn job_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
-                Ok(format!(
+                let line = format!(
                     "added {}, ends about {}",
                     added.name,
                     watch_time(added.due_at_ms, offset)
-                ))
+                );
+                if added.warning.is_empty() {
+                    Ok(line)
+                } else {
+                    Ok(format!("{line}\n{}", added.warning))
+                }
             }
             JobCommand::List => {
                 let listed = client
@@ -8196,8 +8238,46 @@ mod tests {
                 for_secs: 1200,
                 agent: "block:1".into(),
                 what: String::new(),
+                unit: String::new(),
+                user: false,
             })
         );
+        assert_eq!(
+            job(&[
+                "add",
+                "cal",
+                "--unit",
+                "cal-1",
+                "--user",
+                "--for",
+                "20m",
+                "--agent",
+                "rex:omarchy/block:7"
+            ]),
+            Ok(JobCommand::Add {
+                name: "cal".into(),
+                pid: 0,
+                for_secs: 1200,
+                agent: "rex:omarchy/block:7".into(),
+                what: String::new(),
+                unit: "cal-1".into(),
+                user: true,
+            })
+        );
+        // `--unit` and `--pid` are one or the other, and `--user` needs `--unit`.
+        for bad in [
+            vec![
+                "add", "a", "--unit", "u", "--pid", "1", "--for", "5", "--agent", "p",
+            ],
+            vec![
+                "add", "a", "--user", "--pid", "1", "--for", "5", "--agent", "p",
+            ],
+            vec![
+                "add", "a", "--unit", "u", "--user", "--user", "--for", "5", "--agent", "p",
+            ],
+        ] {
+            assert_eq!(job(&bad), Err(JOB_USAGE_LINE.into()), "{bad:?}");
+        }
         assert!(matches!(
             job(&[
                 "add", "a", "--what", "x y", "--for", "2h", "--pid", "1", "--agent", "p"
@@ -8254,7 +8334,17 @@ mod tests {
             for_secs: 60,
             agent: "p".into(),
             what: String::new(),
+            unit: String::new(),
+            user: false,
         };
+        assert_eq!(
+            job_refusal_line(&tonic::Status::failed_precondition("no_systemd"), &add),
+            "this machine has no systemd: --unit is not available"
+        );
+        assert_eq!(
+            job_refusal_line(&tonic::Status::not_found("no_such_unit"), &add),
+            "no such unit"
+        );
         assert_eq!(
             job_refusal_line(&tonic::Status::not_found("no_such_process"), &add),
             "no process runs with pid 77"

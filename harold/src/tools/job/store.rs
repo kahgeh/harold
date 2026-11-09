@@ -24,7 +24,7 @@ pub(super) enum StoreError {
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// A job to store: `add` makes it running with no end line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct NewJob {
     pub name: String,
     pub what: String,
@@ -34,6 +34,10 @@ pub(super) struct NewJob {
     pub process_start_s: i64,
     pub started_at_ms: i64,
     pub due_at_ms: i64,
+    /// The systemd unit. Empty for a process: then `pid` is the job.
+    pub unit: String,
+    /// The unit belongs to the user's systemd.
+    pub user: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,10 +75,22 @@ pub(super) struct JobRow {
     /// `None` until the end line is done. Then `typed`, `typed_at_turn_end`, `no_pane`
     /// or `failed`. A removed job has `None` and gets no line.
     pub end_line: Option<String>,
+    /// Empty for a process.
+    pub unit: String,
+    pub user_unit: bool,
+    /// The exit code that the check read for a unit. `None` when unknown.
+    pub exit_code: Option<i32>,
 }
 
 const COLUMNS: &str = "id, name, what, pane_id, pid, process_start_s, started_at_ms, \
-    due_at_ms, ended_at_ms, state, end_line";
+    due_at_ms, ended_at_ms, state, end_line, unit, user_unit, exit_code";
+
+/// Columns that `jobs.db` of slice 1 lacks. `open` adds each one when it is missing.
+const ADDED_COLUMNS: [&str; 3] = [
+    "unit TEXT NOT NULL DEFAULT ''",
+    "user_unit INTEGER NOT NULL DEFAULT 0",
+    "exit_code INTEGER",
+];
 
 pub(super) struct JobStore {
     conn: Mutex<Connection>,
@@ -113,6 +129,12 @@ impl JobStore {
             (),
         )
         .await?;
+        for column in ADDED_COLUMNS {
+            // Fails when the column exists: that is the normal case.
+            let _ = conn
+                .execute(&format!("ALTER TABLE jobs ADD COLUMN {column}"), ())
+                .await;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             _database: database,
@@ -136,8 +158,8 @@ impl JobStore {
             }
             conn.execute(
                 "INSERT INTO jobs (name, what, pane_id, pid, process_start_s, started_at_ms, \
-                 due_at_ms, ended_at_ms, state, end_line) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'running', NULL)",
+                 due_at_ms, ended_at_ms, state, end_line, unit, user_unit) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'running', NULL, ?8, ?9)",
                 turso::params_from_iter(vec![
                     Value::from(job.name.as_str()),
                     Value::from(job.what.as_str()),
@@ -146,6 +168,8 @@ impl JobStore {
                     Value::from(job.process_start_s),
                     Value::from(job.started_at_ms),
                     Value::from(job.due_at_ms),
+                    Value::from(job.unit.as_str()),
+                    Value::from(i64::from(job.user)),
                 ]),
             )
             .await?;
@@ -176,14 +200,28 @@ impl JobStore {
 
     /// Marks a running job as ended at `now_ms`. Returns `false` when it did not run.
     pub(super) async fn mark_ended(&self, id: i64, now_ms: i64) -> Result<bool> {
+        self.mark_ended_with(id, now_ms, None).await
+    }
+
+    /// As `mark_ended`, and keeps the exit code of a unit when it is known.
+    pub(super) async fn mark_ended_with(
+        &self,
+        id: i64,
+        now_ms: i64,
+        exit_code: Option<i32>,
+    ) -> Result<bool> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         let work = async {
             let changed = conn
                 .execute(
-                    "UPDATE jobs SET state = 'ended', ended_at_ms = ?2 \
+                    "UPDATE jobs SET state = 'ended', ended_at_ms = ?2, exit_code = ?3 \
                      WHERE id = ?1 AND state = 'running'",
-                    turso::params_from_iter(vec![Value::from(id), Value::from(now_ms)]),
+                    turso::params_from_iter(vec![
+                        Value::from(id),
+                        Value::from(now_ms),
+                        exit_code.map_or(Value::Null, |code| Value::from(i64::from(code))),
+                    ]),
                 )
                 .await?;
             Ok(changed > 0)
@@ -339,6 +377,16 @@ fn to_job(row: &turso::Row) -> Result<JobRow> {
         ended_at_ms: integer(row, 8)?,
         state: JobState::parse(&text(row, 9)?)?,
         end_line,
+        unit: text(row, 11)?,
+        user_unit: integer(row, 12)? != 0,
+        exit_code: {
+            let value = row.get_value(13)?;
+            if value.is_null() {
+                None
+            } else {
+                i32::try_from(integer(row, 13)?).ok()
+            }
+        },
     })
 }
 

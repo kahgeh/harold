@@ -661,7 +661,7 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
 /// Maps an agent job. Its text comes from an agent, so it is cleaned and cut. A job that
 /// runs has no end time, and an ended job always has one.
 fn map_job(job: harold_api::harold::AgentJob) -> crate::app::Job {
-    let ended_at_ms = if job.state == "running" {
+    let ended_at_ms = if matches!(job.state.as_str(), "running" | "unknown") {
         0
     } else {
         job.ended_at_ms.max(1)
@@ -675,6 +675,9 @@ fn map_job(job: harold_api::harold::AgentJob) -> crate::app::Job {
         started_at_ms: job.started_at_ms,
         due_at_ms: job.due_at_ms,
         ended_at_ms,
+        unknown: job.state == "unknown",
+        unit: sanitize_display(&job.unit, 48),
+        unreached_since_ms: job.unreached_since_ms,
     }
 }
 
@@ -1088,6 +1091,7 @@ mod tests {
             due_at_ms: 9_000,
             ended_at_ms,
             state: state.into(),
+            ..Default::default()
         };
         let mapped = map_snapshot(AgentStateSnapshot {
             jobs: vec![job("running", 0), job("ended", 7_000)],

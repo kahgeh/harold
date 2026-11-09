@@ -84,6 +84,10 @@ pub(super) fn to_agent_job(job: &JobRow) -> AgentJob {
             JobState::Ended | JobState::Removed => "ended",
         }
         .into(),
+        unit: job.unit.clone(),
+        exit_code: job.exit_code.unwrap_or(0),
+        exit_known: job.exit_code.is_some(),
+        unreached_since_ms: 0,
     }
 }
 

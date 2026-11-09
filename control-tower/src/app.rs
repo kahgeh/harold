@@ -211,6 +211,12 @@ pub struct Job {
     pub due_at_ms: i64,
     /// Zero while the job runs.
     pub ended_at_ms: i64,
+    /// The master cannot see the job's host: its slave link is closed.
+    pub unknown: bool,
+    /// The systemd unit of the job. Empty for a process.
+    pub unit: String,
+    /// When the slave link closed. Zero while it is open.
+    pub unreached_since_ms: i64,
 }
 
 impl Job {
