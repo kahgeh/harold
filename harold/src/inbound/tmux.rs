@@ -191,11 +191,21 @@ pub(crate) fn relay_to_tmux_pane(pane_id: &str, text: &str) -> Result<(), String
     if let Err(refusal) = route_pane(pane_id) {
         return Err(refuse_write(pane_id, "phone_reply", refusal));
     }
-    info!(pane_id, text, "relay_to_tmux_pane");
-    relay_holding_lock(&pane_lock(pane_id), || {
+    relay_logged(pane_id, text, || {
         type_text_into_tmux_pane(pane_id, text)?;
         press_enter_in_tmux_pane(pane_id)
     })
+}
+
+/// Writes the `relay_to_tmux_pane` log line, then runs `type_and_enter` holding the pane's
+/// lock. A test passes a fake writer, so no real pane gets keys.
+fn relay_logged(
+    pane_id: &str,
+    text: &str,
+    type_and_enter: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    info!(pane_id, chars = text.chars().count(), "relay_to_tmux_pane");
+    relay_holding_lock(&pane_lock(pane_id), type_and_enter)
 }
 
 /// Runs `type_and_enter` holding `lock`, waiting for a writer that holds it now. When it

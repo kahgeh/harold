@@ -658,3 +658,14 @@ fn no_log_line_holds_the_reply_text() {
     assert!(text.contains("named=true"), "{text}");
     assert!(text.contains("chars=17"), "{text}");
 }
+
+#[test]
+fn no_log_line_holds_the_relay_reply_text() {
+    let sentinel = "zq-sentinel-relay";
+    let logs = CapturedLogs::start();
+    let panes = [tmux("%1", "one"), tmux("%2", "two")];
+    let _ = semantic_resolve_output(&format!("one\n{sentinel}"), sentinel, &panes);
+    let text = logs.text();
+    assert!(!text.contains(sentinel), "{text}");
+    assert!(text.contains("named=true"), "{text}");
+}

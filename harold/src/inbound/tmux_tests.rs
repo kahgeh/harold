@@ -226,3 +226,33 @@ fn relaying_to_a_host_pane_takes_no_lock_and_logs_no_text() {
     assert!(error.contains("invalid_pane_id"), "{error}");
     assert!(!crate::timed_prompts::has_pane_lock("main:0.1"));
 }
+
+#[test]
+fn relay_log_line_holds_chars_and_no_text() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let mut typed = false;
+
+    relay_logged("%relay-log-1", "zq-sentinel-relay", || {
+        typed = true;
+        Ok(())
+    })
+    .unwrap();
+    relay_logged("%relay-log-2", "zq-sentinel-relay-é€", || Ok(())).unwrap();
+
+    let text = logs.text();
+    assert!(typed);
+    assert!(!text.contains("zq-sentinel-relay"), "{text}");
+    assert!(text.contains("relay_to_tmux_pane"), "{text}");
+    assert!(text.contains("pane_id=\"%relay-log-1\""), "{text}");
+    assert!(text.contains("chars=17"), "{text}");
+    assert!(text.contains("chars=20"), "{text}");
+}
+
+#[test]
+fn relay_to_tmux_pane_logs_through_relay_logged() {
+    let source = include_str!("tmux.rs");
+    let start = source.find("pub(crate) fn relay_to_tmux_pane").unwrap();
+    let body = &source[start..source[start..].find("\n}\n").unwrap() + start];
+    assert!(body.contains("relay_logged(pane_id, text,"), "{body}");
+    assert!(!body.contains("info!"), "{body}");
+}
