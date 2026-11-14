@@ -174,11 +174,12 @@ async fn an_unknown_word_a_bad_tap_a_long_body_or_bad_json_gets_400_and_no_log_l
 }
 
 /// The route as the router serves it: the new fields pass, and the login check still runs.
+/// It does not read the log: the server handler runs on another thread than the test, so the
+/// handler tests above check the log fields.
 /// It opens a loopback port, so it runs only in the container test set and in CI.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "opens a port: runs in the container test set and in CI"]
 async fn the_check_takes_tap_and_started_behind_the_login_and_origin_checks() {
-    let logs = CapturedLogs::start();
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await).await;
     let client = reqwest::Client::new();
@@ -199,10 +200,6 @@ async fn the_check_takes_tap_and_started_behind_the_login_and_origin_checks() {
 
     let response = post(Some(LOGIN), "same-origin").send().await.unwrap();
     assert_eq!(response.status(), 204);
-    let captured = logs.text();
-    assert!(captured.contains("page_ended"), "{captured}");
-    assert!(captured.contains("tap=2"), "{captured}");
-    assert!(captured.contains("started=true"), "{captured}");
 
     for (login, site) in [
         (None, "same-origin"),
