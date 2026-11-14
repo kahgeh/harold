@@ -186,6 +186,8 @@ pub(crate) struct PanePosition<'a> {
 /// How the chief's tmux session was picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionBy {
+    /// The pod role record named the chief's pane.
+    Record,
     /// `[notify] chief_session` named a session with an agent in the folder.
     Setting,
     /// The session of the longest-running agent in the folder.
@@ -195,6 +197,7 @@ enum SessionBy {
 impl SessionBy {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Record => "record",
             Self::Setting => "setting",
             Self::Longest => "longest",
         }
@@ -208,16 +211,50 @@ struct ChiefPick<'a> {
     session_by: SessionBy,
 }
 
-/// The chief among `panes`: see the rule in `resolve_chief`.
+/// The pane that the pod role record names as the chief's, when an agent runs in it. Counts
+/// the lookup: `found`, `no_record` (no record, or one with no pane id) or `agent_gone` (no
+/// agent runs in the recorded pane).
+fn recorded_chief<'a>(panes: &[PanePosition<'a>]) -> Option<PanePosition<'a>> {
+    let outcome;
+    let pane = match crate::pod_roles::chief_pane() {
+        None => {
+            outcome = "no_record";
+            None
+        }
+        Some(recorded) => {
+            let pane = panes.iter().copied().find(|pane| pane.pane_id == recorded);
+            outcome = if pane.is_some() {
+                "found"
+            } else {
+                "agent_gone"
+            };
+            pane
+        }
+    };
+    crate::telemetry::record_pod_role_lookup("chief", outcome, "pick_chief");
+    pane
+}
+
+/// The chief among `panes`. The pane of the pod role record comes first (`SessionBy::Record`).
+/// Without a usable record, the rule in `resolve_chief` applies.
 fn pick_chief<'a>(
     panes: impl IntoIterator<Item = PanePosition<'a>>,
     chief: &str,
     chief_session: Option<&str>,
 ) -> Option<ChiefPick<'a>> {
+    let panes: Vec<PanePosition<'a>> = panes.into_iter().collect();
     let in_folder: Vec<PanePosition<'a>> = panes
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|pane| same_folder(pane.folder, chief))
         .collect();
+    if let Some(pane) = recorded_chief(&panes) {
+        return Some(ChiefPick {
+            pane_id: pane.pane_id,
+            count: in_folder.len(),
+            session_by: SessionBy::Record,
+        });
+    }
     let named = chief_session.filter(|name| in_folder.iter().any(|pane| pane.session == *name));
     let (session, session_by) = match named {
         Some(name) => (name, SessionBy::Setting),
@@ -705,6 +742,133 @@ mod tests {
         assert!(lines[0].contains("session_by=\"setting\""));
         assert!(lines[1].contains("count=1") && lines[1].contains("%2"));
         assert!(!logs.text().contains("/w/"), "no folder is logged");
+    }
+
+    /// A process table with no process: the record keeps a start time of 0.
+    struct NoProcesses;
+
+    impl crate::tools::job::process::ProcessPort for NoProcesses {
+        fn start_time(&self, _pid: u32) -> Option<i64> {
+            None
+        }
+    }
+
+    /// Installs a pod role record in which the chief runs in `pane`, in a temporary folder.
+    /// The record belongs to this test's own thread.
+    fn chief_record(pane: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("harold-pick-chief-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let roles = std::sync::Arc::new(crate::pod_roles::PodRoles::open(
+            &dir,
+            std::sync::Arc::new(NoProcesses),
+        ));
+        roles
+            .record(
+                crate::pod_roles::PodStart {
+                    role: "chief".into(),
+                    product: String::new(),
+                    pane_id: pane.into(),
+                    session_id: "s-c".into(),
+                    transcript_path: String::new(),
+                    folder: "/w/chief-of-pods".into(),
+                    agent_pid: 10,
+                    start_file: String::new(),
+                    source: "startup".into(),
+                },
+                1,
+            )
+            .unwrap();
+        crate::pod_roles::install(roles);
+        dir
+    }
+
+    fn two_sessions() -> [PanePosition<'static>; 3] {
+        [
+            at("%1", "/w/chief-of-pods", "chief", 0, 0, 10),
+            at("%2", "/w/chief-of-pods", "chief-new", 0, 0, 20),
+            at("%3", "/w/harold", "pod", 0, 0, 5),
+        ]
+    }
+
+    #[test]
+    fn a_record_wins_over_the_setting_and_over_the_oldest_session() {
+        crate::pod_roles::reset();
+        let dir = chief_record("%2");
+        let logs = crate::outbound::fake::CapturedLogs::start();
+        let panes = two_sessions();
+        assert_eq!(resolve_chief(panes, CHIEF_SET, Some("chief")), found("%2"));
+        assert!(
+            logs.text().contains("session_by=\"record\""),
+            "{}",
+            logs.text()
+        );
+        crate::pod_roles::reset();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_record_with_no_pane_id_is_skipped_and_the_setting_is_used() {
+        crate::pod_roles::reset();
+        let dir = chief_record("");
+        assert_eq!(
+            resolve_chief(two_sessions(), CHIEF_SET, Some("chief")),
+            found("%1")
+        );
+        crate::pod_roles::reset();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_record_pane_that_runs_no_agent_falls_back_to_the_setting() {
+        crate::pod_roles::reset();
+        let dir = chief_record("%99");
+        assert_eq!(
+            resolve_chief(two_sessions(), CHIEF_SET, Some("chief-new")),
+            found("%2")
+        );
+        crate::pod_roles::reset();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_a_record_the_setting_and_then_the_oldest_session_are_used() {
+        crate::pod_roles::reset();
+        assert_eq!(
+            resolve_chief(two_sessions(), CHIEF_SET, Some("chief-new")),
+            found("%2")
+        );
+        assert_eq!(resolve_chief(two_sessions(), CHIEF_SET, None), found("%1"));
+    }
+
+    #[test]
+    fn each_lookup_of_the_record_is_counted_with_the_caller_pick_chief() {
+        crate::telemetry::test_support::install();
+        let count = |outcome: &str| {
+            crate::telemetry::test_support::exact_counter_value(
+                "harold.pod_role.lookups",
+                &[
+                    ("role", "chief"),
+                    ("outcome", outcome),
+                    ("caller", "pick_chief"),
+                ],
+            )
+            .unwrap_or(0)
+        };
+        let before = (count("no_record"), count("found"), count("agent_gone"));
+        crate::pod_roles::reset();
+        resolve_chief(two_sessions(), CHIEF_SET, None);
+        let dir = chief_record("%2");
+        resolve_chief(two_sessions(), CHIEF_SET, None);
+        let _ = std::fs::remove_dir_all(dir);
+        let dir = chief_record("%99");
+        resolve_chief(two_sessions(), CHIEF_SET, None);
+        let _ = std::fs::remove_dir_all(dir);
+        crate::pod_roles::reset();
+        // The counter is shared by the tests that run at once, so each count rises by at least one.
+        let after = (count("no_record"), count("found"), count("agent_gone"));
+        assert!(after.0 > before.0, "{before:?} {after:?}");
+        assert!(after.1 > before.1, "{before:?} {after:?}");
+        assert!(after.2 > before.2, "{before:?} {after:?}");
     }
 
     #[test]
