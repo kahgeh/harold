@@ -1015,3 +1015,24 @@ fn the_call_facts_have_no_recap() {
     );
     assert!(!facts.to_string().contains("recap"), "{facts}");
 }
+
+#[tokio::test]
+async fn an_answer_records_the_model_call_of_the_call_answer_workflow() {
+    crate::telemetry::test_support::install();
+    let sample = SAMPLE.replace(
+        r#""usage""#,
+        r#""modelUsage":{"claude-wf-answer-1":{}},"usage""#,
+    );
+    let runner = FakeRunner::giving([ok(&sample)]);
+
+    ask(
+        &answerer(sources(), &runner),
+        "how is the chief",
+        &CallSoFar::default(),
+    )
+    .await;
+
+    let found =
+        crate::model_workflow::input_tokens_of("call_answer", "answer", "claude-wf-answer-1");
+    assert_eq!(found, Some(2));
+}

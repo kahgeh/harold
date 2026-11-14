@@ -39,7 +39,7 @@ pub(crate) const CALL_SITES: &[CallSite] = &[
         workflow: "watch",
         step: "run",
         model_file: "tools/watch/runner.rs",
-        record_file: "tools/watch/runner.rs",
+        record_file: "tools/watch/scheduler.rs",
     },
     CallSite {
         workflow: "call_answer",
@@ -222,11 +222,88 @@ pub(crate) fn record(
     }
 }
 
+/// The `usage` of a run result, as the run reports it.
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+pub(crate) struct UsageFields {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
+impl UsageFields {
+    /// The tokens of the call.
+    pub(crate) fn tokens(&self) -> TurnTokens {
+        TurnTokens {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens,
+            cache_write: self.cache_creation_input_tokens,
+        }
+    }
+}
+
+/// The fields of a run result that the recording reads.
+#[derive(serde::Deserialize)]
+struct RunReport {
+    usage: Option<UsageFields>,
+    total_cost_usd: Option<f64>,
+    #[serde(rename = "modelUsage")]
+    model_usage: Option<BTreeMap<String, serde::de::IgnoredAny>>,
+}
+
+/// Records the call of a run whose JSON result is `stdout`. The model is the first model
+/// that the result names, or `model` when it names none. A result that is not JSON, or
+/// that holds no `usage`, records nothing.
+pub(crate) fn record_output(
+    workflow: &str,
+    step: &str,
+    spec: Option<&str>,
+    folder: Option<&Path>,
+    model: &str,
+    stdout: &[u8],
+) {
+    let Ok(report) = serde_json::from_slice::<RunReport>(stdout) else {
+        return;
+    };
+    let Some(usage) = report.usage else {
+        return;
+    };
+    let named = report
+        .model_usage
+        .as_ref()
+        .and_then(|models| models.keys().next());
+    let model = named.map_or(model, String::as_str);
+    let cost = report
+        .total_cost_usd
+        .filter(|cost| cost.is_finite() && *cost >= 0.0);
+    record(workflow, step, spec, folder, model, &usage.tokens(), cost);
+}
+
 /// The UTC day number, for the once-a-day line.
 fn today() -> i64 {
     time::OffsetDateTime::now_utc()
         .unix_timestamp()
         .div_euclid(86_400)
+}
+
+/// The input tokens of the series of one model call with no spec and no product, for the
+/// tests of the call sites. `None` when the series has no point.
+#[cfg(test)]
+pub(crate) fn input_tokens_of(workflow: &str, step: &str, model: &str) -> Option<u64> {
+    let snapshot = crate::telemetry::test_support::counter_snapshot("harold.workflow.tokens");
+    snapshot.value(&[
+        ("workflow", workflow),
+        ("workflow.step", step),
+        ("model", model),
+        ("kind", "input"),
+        ("spec.id", NONE),
+        ("pod.product", NO_PRODUCT),
+    ])
 }
 
 #[cfg(test)]

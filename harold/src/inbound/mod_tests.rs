@@ -5,7 +5,7 @@ use crate::inbound::ownership::Ownership;
 use crate::inbound::type_into_pane_quietly;
 use crate::inbound::{
     AgentAddress, ChiefRouting, RouteReport, RoutingEnv, clear_routing_state, decide_and_route,
-    parse_tag, resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
+    parse_tag, reply_text, resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
     semantic_resolve_output, set_last_away_notification_source_agent,
 };
 use crate::outbound::DeliveryOutcome;
@@ -668,4 +668,57 @@ fn no_log_line_holds_the_relay_reply_text() {
     let text = logs.text();
     assert!(!text.contains(sentinel), "{text}");
     assert!(text.contains("named=true"), "{text}");
+}
+
+// The routing classifier's reply: the same texts as the old plain output, now inside the
+// JSON result of `--output-format json`.
+
+fn json_reply(result: &str) -> Vec<u8> {
+    serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": result,
+        "total_cost_usd": 0.001,
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[test]
+fn the_json_reply_gives_the_text_that_the_plain_output_gave() {
+    assert_eq!(
+        reply_text(&json_reply("  my-agent\nfix it \n")).as_deref(),
+        Some("my-agent\nfix it")
+    );
+    assert_eq!(reply_text(&json_reply("none")).as_deref(), Some("none"));
+}
+
+#[test]
+fn an_error_result_or_unreadable_output_gives_no_text() {
+    let error = br#"{"type":"result","is_error":true,"result":"boom"}"#;
+    assert_eq!(reply_text(error), None);
+    assert_eq!(reply_text(b"my-agent\nfix it"), None);
+    assert_eq!(reply_text(br#"{"type":"result"}"#), None);
+}
+
+#[test]
+fn a_reply_with_a_label_and_a_cleaned_message_picks_that_pane() {
+    let panes = vec![tmux("%1", "work-agent"), tmux("%2", "my-agent")];
+    let (idx, cleaned) = semantic_resolve_output(
+        "LINE1: my-agent\nLINE2: fix it",
+        "To my agent, fix it",
+        &panes,
+    )
+    .unwrap();
+    assert_eq!((idx, cleaned.as_str()), (1, "fix it"));
+}
+
+#[test]
+fn a_reply_of_none_or_empty_picks_no_pane() {
+    let panes = vec![tmux("%1", "work-agent"), tmux("%2", "my-agent")];
+    assert_eq!(semantic_resolve_output("None", "hi", &panes), None);
+    assert_eq!(semantic_resolve_output("", "hi", &panes), None);
+    assert_eq!(semantic_resolve_output("nobody-here", "hi", &panes), None);
 }

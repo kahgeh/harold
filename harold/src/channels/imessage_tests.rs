@@ -202,6 +202,25 @@ fn summarise_returns_a_600_char_cli_text_uncut() {
 
 #[cfg(unix)]
 #[test]
+fn a_summary_records_the_model_call_of_the_notification_summary_workflow() {
+    crate::telemetry::test_support::install();
+    let cli = fake_cli(
+        "cli-usage",
+        "printf '{\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done.\",\"total_cost_usd\":0.002,\"usage\":{\"input_tokens\":13,\"output_tokens\":4},\"modelUsage\":{\"claude-wf-notify-1\":{}}}'\n",
+    );
+
+    summarise_with(Some(&cli), "reply", "prompt");
+
+    let found = crate::model_workflow::input_tokens_of(
+        "notification_summary",
+        "summarize",
+        "claude-wf-notify-1",
+    );
+    assert_eq!(found, Some(13));
+}
+
+#[cfg(unix)]
+#[test]
 fn summarise_returns_the_whole_reply_when_the_cli_fails() {
     let cli = fake_cli("cli-bad", "exit 1\n");
     let reply = format!("{}\n{}", "b".repeat(300), "c".repeat(300));

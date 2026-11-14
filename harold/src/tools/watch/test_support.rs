@@ -285,6 +285,8 @@ impl ModelRunner for FakeRunner {
                         "is_error": false,
                         "result": result,
                         "total_cost_usd": cost,
+                        "usage": {"input_tokens": 100, "output_tokens": 10},
+                        "modelUsage": {"claude-wf-watch-1": {}},
                     });
                     ModelResult::Exited {
                         stdout: json.to_string().into_bytes(),

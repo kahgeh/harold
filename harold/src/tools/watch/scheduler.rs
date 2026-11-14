@@ -1170,6 +1170,14 @@ impl Scheduler {
             ModelResult::FailedToStart => (Err(Failure::ProcessFailed), None, None, run_ms),
             ModelResult::Killed => (Err(Failure::Timeout), None, None, run_ms),
             ModelResult::Exited { stdout, ok, exit } => {
+                crate::model_workflow::record_output(
+                    "watch",
+                    "run",
+                    None,
+                    Some(folder),
+                    &job.model,
+                    &stdout,
+                );
                 let read = answer::read_output(&stdout, ok);
                 let why = read.cause.map(|cause| (exit, cause));
                 (read.answer, read.cost_usd, why, run_ms)

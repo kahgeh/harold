@@ -879,6 +879,16 @@ impl Answerer {
         let started = Instant::now();
         let ran = self.runner.run(&run).await;
         span.record("model_ms", started.elapsed().as_millis() as u64);
+        if let RunResult::Exited { stdout, .. } = &ran {
+            crate::model_workflow::record_output(
+                "call_answer",
+                "answer",
+                None,
+                None,
+                &run.model,
+                stdout,
+            );
+        }
         let (stdout, error) = match ran {
             RunResult::FailedToStart => return fail(span, Failure::NotStarted, None),
             RunResult::Killed => return fail(span, Failure::TimedOut, None),

@@ -312,6 +312,14 @@ pub(crate) fn summarise_with(
 
     match out {
         Ok(o) => {
+            crate::model_workflow::record_output(
+                "notification_summary",
+                "summarize",
+                None,
+                None,
+                "sonnet",
+                &o.stdout,
+            );
             let reply = serde_json::from_slice::<CliReply>(&o.stdout).ok();
             if o.status.success()
                 && let Some(reply) = &reply

@@ -96,6 +96,8 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
             "sonnet",
             "--max-turns",
             "1",
+            "--output-format",
+            "json",
             "--settings",
             r#"{"disableAllHooks":true}"#,
         ])
@@ -103,6 +105,14 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
         .envs(ai_cli_env())
         .output()
         .ok()?;
+    crate::model_workflow::record_output(
+        "inbound_routing",
+        "classify",
+        None,
+        None,
+        "sonnet",
+        &out.stdout,
+    );
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -114,8 +124,18 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
         return None;
     }
 
-    let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let output = reply_text(&out.stdout)?;
     semantic_resolve_output(&output, body, panes)
+}
+
+/// The text of the classifier's `--output-format json` result: its `result`, trimmed.
+/// `None` when the output is not JSON, says it is an error, or holds no `result`.
+fn reply_text(stdout: &[u8]) -> Option<String> {
+    let reply: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    if reply.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
+        return None;
+    }
+    Some(reply.get("result")?.as_str()?.trim().to_string())
 }
 
 /// The pane and text that the model's `output` names. The output repeats the reply, so

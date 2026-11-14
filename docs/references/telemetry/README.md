@@ -459,6 +459,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `state` (`working`, `blocked`, `done`, `idle`, `error`, `unknown`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, `missed`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`). `missed` is a cron match that did not run because it was older than 120 minutes |
 | `watch.cost_usd` | counter, `USD` | `folder` |
+| `harold.workflow.tokens` | counter, `{token}` | `workflow`, `workflow.step`, `spec.id` (or `none`), `model`, `pod.product` (or `harold`) and `kind` (`input`, `output`, `cache_read`, `cache_write`). One count for each model call of Harold's own code |
+| `harold.workflow.cost` | counter, `AUD` | `workflow`, `workflow.step`, `spec.id` (or `none`), `model` and `pod.product` (or `harold`). One count for each model call that has a cost |
 | `harold.multiplexer.calls` | counter, `{call}` | `multiplexer` (`rex` or `tmux`), `host` (the empty string for Harold's own machine, or the label of a Rex host in `rex_hosts`), `operation` (`list`, `layout`, `process`, `screen_size`, `screen_read`, `status`, `type`, `key`, `other`), `outcome` (`ok`, `failed`, `timeout`, `absent`, `malformed`), `purpose` (`state`, `prompt`, `writer`; on `screen_read` only). `malformed` means the multiplexer ran and gave output that Harold could not read: a tmux pane listing with a wrong field, or a Rex reply that is not JSON |
 | `harold.multiplexer.call.duration` | histogram, `ms`, buckets 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 | `multiplexer`, `host`, `operation`, `outcome`, `purpose` (`state`, `prompt`, `writer`; on `screen_read` only) |
 | `harold.agents` | gauge, `{agent}` | `state` (the agent states Harold has), `provider_id`, `multiplexer`, `host` (the empty string for Harold's own machine, or the label of a Rex host) |
@@ -504,6 +506,30 @@ A `screen_read` call also has the attribute `purpose`, which tells why Harold re
 **Turn tokens.** `harold.turn.tokens` adds a count for each of the four kinds on each turn that has tokens. A kind with the value 0 adds 0, so every kind has a series for a real model. A turn with no token fields adds nothing. `model` is the turn's last model if it is `claude-` followed by 1 to 40 of `a-z`, `0-9` and `-`. Any other string counts as `other`, so a caller cannot add series. A turn that sends no model uses `none`. The counter has about 150 series: 4 kinds, a few models, 5 roles and the products.
 
 `harold.turn.tokens.by_spec` has 4 series for each build-worker spec and each model (one for each kind). The 2,000-series limit of an instrument then holds about 500 specs on one model. A spec that spans two models takes 8 series. Past the limit, new series fall into the overflow series (`otel.metric.overflow = true`), and the counts stay in the total. No tile shows the overflow series: `bin/logq --named tokens-and-turns` and `bin/logq --named inventory-cost` return the column `overflow`.
+
+## Model workflows
+
+A model workflow is Harold's own code that calls a model in named workflow steps. Agent sessions are not model workflows: they keep `harold.turn.tokens` and `harold.turn.tokens.by_spec`. Each model call ends with `model_workflow::record`. It adds the tokens to `harold.workflow.tokens` and the cost, in AUD, to `harold.workflow.cost`.
+
+| `workflow` | `workflow.step` | Where |
+|---|---|---|
+| `watch` | `run` | `harold/src/tools/watch/runner.rs` runs the model, and `scheduler.rs` records it |
+| `call_answer` | `answer` | `harold/src/voice_input/answerer.rs` |
+| `turn_end_update` | `update` | `harold/src/voice_input/mac.rs` (the model runs in `answerer.rs`) |
+| `activity_summary` | `summarize` | `harold/src/activity_summary.rs` |
+| `notification_summary` | `summarize` | `harold/src/channels/mod.rs` |
+| `inbound_routing` | `classify` | `harold/src/inbound/mod.rs` |
+
+The model that embeds the knowledge index runs on this Mac, reports no tokens and costs nothing, so it is not in the list. The restart check adds its own entry when its stage merges.
+
+- **The cost.** When the run reports `total_cost_usd`, the cost is that value times `exchange_rate_usd_to_aud`. Otherwise the cost is the tokens times the list prices in `[prices]`, times the rate. A model with no `[prices]` entry and no reported cost adds no cost. Harold then logs `model unpriced` once a day for that model.
+- **The model.** The label `model` is the first model that the run result names in `modelUsage`. When the result names none, it is the model that Harold asked for. A name that is not `claude-` followed by 1 to 40 of `a-z`, `0-9` and `-` counts as `other`.
+- **`pod.product`.** For a watch, Harold finds the product from the watch's folder, with the `match` paths of the pod registry (`telemetry.pod_registry`). The longest matching path wins. A folder in no `match` path, and every other model workflow, give `harold`.
+- **`spec.id`.** A call serves a spec only when its model workflow runs for one spec. Every other call has `spec.id = none`.
+
+| Log line | Fields |
+|---|---|
+| `model unpriced` (`warn`) | `model`, `workflow`. Logged once a day for each model with tokens and no cost. Expected: none |
 
 ## What leaves Harold
 
@@ -1142,6 +1168,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.work.checked`, for each `priority`;
 - `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up`, `agent-jobs`, `agent-jobs-hosts`, `decision-tool` and `agent-restart`);
 - `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
+- `harold.workflow.tokens` and `harold.workflow.cost`, for each model workflow and workflow step in the list `CALL_SITES` of `harold/src/model_workflow.rs`, with `spec.id = none`, `model = none` and `pod.product = harold`. The tokens counter has one seed for each `kind`. A missing series then means a broken `record` call, not a quiet day;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.

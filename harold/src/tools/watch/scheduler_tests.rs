@@ -206,6 +206,18 @@ async fn a_quiet_watch_types_only_its_closing_line() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_run_records_the_model_call_of_the_watch_workflow() {
+    crate::telemetry::test_support::install();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("after-release", 10, 120).await;
+
+    pass(11 * MINUTE).await;
+
+    let found = crate::model_workflow::input_tokens_of("watch", "run", "claude-wf-watch-1");
+    assert!(found.is_some_and(|tokens| tokens >= 100), "{found:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn every_run_types_a_quiet_line_for_each_run() {
     let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
     let mut checked = h.checked("w", 10, 30);

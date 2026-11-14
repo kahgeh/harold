@@ -185,3 +185,56 @@ fn the_registry_match_paths_are_read_with_the_tilde_expanded() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn record_output_reads_usage_cost_and_model_from_the_json_result() {
+    test_support::install();
+    configure(prices(), Vec::new());
+    let stdout = br#"{"type":"result","result":"x","total_cost_usd":0.01,
+        "usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,
+                 "cache_creation_input_tokens":40},
+        "modelUsage":{"claude-wf-json-1":{"inputTokens":10}}}"#;
+    record_output(
+        "call_answer",
+        "answer",
+        Some("wf-json-1"),
+        None,
+        "haiku",
+        stdout,
+    );
+    let labels = [("spec.id", "wf-json-1"), ("workflow", "call_answer")];
+    let snapshot = test_support::counter_snapshot("harold.workflow.tokens");
+    for (kind, count) in [
+        ("input", 10),
+        ("output", 20),
+        ("cache_read", 30),
+        ("cache_write", 40),
+    ] {
+        let wanted = [
+            labels[0],
+            labels[1],
+            ("workflow.step", "answer"),
+            ("pod.product", "harold"),
+            ("kind", kind),
+            ("model", "claude-wf-json-1"),
+        ];
+        assert_eq!(snapshot.value(&wanted), Some(count), "{kind}");
+    }
+    let cost = test_support::counter_f64_value("harold.workflow.cost", &labels).unwrap();
+    assert!((cost - 0.015).abs() < 1e-9);
+}
+
+#[test]
+fn record_output_with_unreadable_output_records_nothing() {
+    test_support::install();
+    record_output(
+        "call_answer",
+        "answer",
+        Some("wf-json-2"),
+        None,
+        "claude-x",
+        b"not json",
+    );
+    let snapshot = test_support::counter_snapshot("harold.workflow.tokens");
+    assert_eq!(snapshot.value(&[("spec.id", "wf-json-2")]), None);
+}

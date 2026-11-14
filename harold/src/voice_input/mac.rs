@@ -427,6 +427,14 @@ impl MacPorts {
             RunResult::Killed => return failed("timeout", None),
             RunResult::Exited { stdout, ok, .. } => (stdout, ok),
         };
+        crate::model_workflow::record_output(
+            "turn_end_update",
+            "update",
+            None,
+            None,
+            &run.model,
+            &stdout,
+        );
         let cost_micros = spent(&stdout).map(|(cost, ..)| cost);
         let Some(answer) = ok.then(|| result_text(&stdout)).flatten() else {
             return failed("failed", cost_micros);
@@ -810,6 +818,21 @@ mod tests {
         assert_eq!(attribute(&update, "cost_micros").as_deref(), Some("269"));
         assert!(!logs.text().contains("call update model failed"));
         assert!(!crate::telemetry::test_support::exported_text().contains("merged the branch"));
+    }
+
+    #[tokio::test]
+    async fn a_kept_answer_records_the_model_call_of_the_turn_end_update_workflow() {
+        let stdout = r#"{"is_error":false,"result":"The chief merged the branch.","total_cost_usd":0.0002694,"usage":{"input_tokens":7,"output_tokens":9},"modelUsage":{"claude-wf-update-1":{}}}"#;
+        let ports = ports_running(Some(ScriptedRunner::answering(stdout)));
+
+        update_of(&ports).await;
+
+        let found = crate::model_workflow::input_tokens_of(
+            "turn_end_update",
+            "update",
+            "claude-wf-update-1",
+        );
+        assert_eq!(found, Some(7));
     }
 
     #[tokio::test]

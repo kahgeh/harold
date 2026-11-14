@@ -110,6 +110,16 @@ impl ActivitySummarizer for ClaudeActivitySummarizer {
         // A failed exchange may leave Claude running (including a blocked stdin).
         // Reap before returning and before deleting its working directory.
         process.finish().await;
+        if let Ok(stdout) = &result {
+            crate::model_workflow::record_output(
+                "activity_summary",
+                "summarize",
+                None,
+                None,
+                &self.settings.model,
+                stdout,
+            );
+        }
         decode_result(&result?)
     }
 

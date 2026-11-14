@@ -64,6 +64,23 @@ async fn successful_json_result_is_sanitized_and_bounded() {
 }
 
 #[tokio::test]
+async fn a_summary_records_the_model_call_of_the_activity_summary_workflow() {
+    crate::telemetry::test_support::install();
+    let fixture = Fixture::new(
+        "import json, sys\nsys.stdin.read()\nprint(json.dumps({'is_error': False, 'result': 'Repaired retry handling', 'total_cost_usd': 0.001, 'usage': {'input_tokens': 11, 'output_tokens': 5}, 'modelUsage': {'claude-wf-summary-1': {}}}))",
+    );
+
+    fixture.summarize().await.unwrap();
+
+    let found = crate::model_workflow::input_tokens_of(
+        "activity_summary",
+        "summarize",
+        "claude-wf-summary-1",
+    );
+    assert_eq!(found, Some(11));
+}
+
+#[tokio::test]
 async fn isolated_cli_receives_bounded_evidence_on_stdin() {
     let fixture = Fixture::new(
         r#"
