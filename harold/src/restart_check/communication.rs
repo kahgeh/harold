@@ -3,7 +3,8 @@
 //! proves the address and the delivery point, not that the agent reads the message.
 
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{Agent, FailLine, Group, LinkRow, LinkTable, Outcome, ViewError};
 
@@ -261,20 +262,40 @@ pub(crate) fn socket_path_in(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Connects to the socket and closes it at once. It writes no byte.
+/// The longest wait for a connection to a messaging socket.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Connects to the socket and closes it at once. It writes no byte. A connection that does
+/// not end in 2 seconds counts as refused.
 pub(crate) fn probe_socket(path: Option<&Path>) -> SocketProbe {
+    probe_with(path, CONNECT_TIMEOUT, |path| {
+        UnixStream::connect(path).map(drop)
+    })
+}
+
+/// The probe with its connect step and its wait given, so a test needs no socket. The connect
+/// step runs in its own thread: a connection that never ends leaves that thread behind and
+/// the probe goes on.
+fn probe_with(
+    path: Option<&Path>,
+    wait: Duration,
+    connect: impl FnOnce(PathBuf) -> std::io::Result<()> + Send + 'static,
+) -> SocketProbe {
     let Some(path) = path else {
         return SocketProbe::Unknown;
     };
     if !path.exists() {
         return SocketProbe::Missing;
     }
-    match UnixStream::connect(path) {
-        Ok(stream) => {
-            drop(stream);
-            SocketProbe::Accepts
-        }
-        Err(_) => SocketProbe::Refused,
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let owned = path.to_path_buf();
+    std::thread::spawn(move || {
+        // The receiver is gone after a timeout: the result then has no reader.
+        let _ = sender.send(connect(owned));
+    });
+    match receiver.recv_timeout(wait) {
+        Ok(Ok(())) => SocketProbe::Accepts,
+        _ => SocketProbe::Refused,
     }
 }
 

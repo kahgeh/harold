@@ -280,3 +280,21 @@ fn the_probe_gives_missing_for_no_path_on_disk_and_refused_for_a_file_that_is_no
     assert_eq!(probe_socket(Some(&plain)), SocketProbe::Refused);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_connection_that_never_ends_is_refused_after_the_wait_and_one_that_ends_is_accepted() {
+    let dir = std::env::temp_dir().join(format!("harold-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("any.sock");
+    std::fs::write(&path, b"").unwrap();
+    let started = std::time::Instant::now();
+    let probe = probe_with(Some(&path), std::time::Duration::from_millis(50), |_| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        Ok(())
+    });
+    assert_eq!(probe, SocketProbe::Refused);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let probe = probe_with(Some(&path), std::time::Duration::from_secs(2), |_| Ok(()));
+    assert_eq!(probe, SocketProbe::Accepts);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
