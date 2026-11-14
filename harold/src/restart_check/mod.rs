@@ -2,10 +2,15 @@
 //! whole and writes the result to the restart receipt file. Stage 1 checks identity and
 //! communication.
 
+mod communication;
 mod identity;
 mod receipt;
 mod render;
 
+pub(crate) use communication::{
+    Delivery, LinkPlan, LinkPorts, LinksResult, PlanRow, Resolved, Roster, SocketProbe,
+    check_links, plan_links, probe_socket, socket_path_in,
+};
 pub(crate) use identity::{
     FileClaim, Held, IdentityInput, PaneView, RecordPort, ViewError, check_identity,
     read_file_claim,
@@ -133,4 +138,6 @@ pub(crate) struct Report {
     pub(crate) identity: IdentityRow,
     pub(crate) communication: LinkTable,
     pub(crate) fails: Vec<FailLine>,
+    /// One line for each check that Harold cannot make, with its reason.
+    pub(crate) not_checked: Vec<String>,
 }

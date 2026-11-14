@@ -25,6 +25,7 @@ fn report(
         identity,
         communication,
         fails,
+        not_checked: vec![],
     }
 }
 
@@ -143,7 +144,13 @@ fn a_build_worker_identity_fail_names_the_fix_and_goes_to_pod_coordination() {
             },
         ],
     );
+    let mut worker = worker;
+    worker.not_checked =
+        vec!["worker decision-tool-a1 -> pod-coordination harold: socket_unknown".into()];
     let text = render(&worker);
+    assert!(text.contains(
+        "\n  not checked worker decision-tool-a1 -> pod-coordination harold: socket_unknown\n"
+    ));
     assert!(text.contains("restart check: worker decision-tool-a1  (session decision-tool, pane 41d7a0)  2026-11-14 16:10\n"));
     assert!(text.contains("  FAIL  worker decision-tool-a1   Harold has pane 3c19e2; the agent now runs in pane 41d7a0\n"));
     assert!(text.contains("not checked"));

@@ -45,6 +45,12 @@ pub(crate) fn render(report: &Report) -> String {
     out.push_str("\ncommunication\n");
     push_table(&mut out, &report.communication);
     push_fails(&mut out, report, Group::Communication);
+    if !report.not_checked.is_empty() {
+        out.push('\n');
+        for line in &report.not_checked {
+            out.push_str(&format!("  not checked {line}\n"));
+        }
+    }
     out.push('\n');
     out.push_str(&result_line(report));
     out
