@@ -166,6 +166,20 @@ impl PodRoles {
         Ok(replaced)
     }
 
+    /// Every record with its product, role and spec id.
+    pub(crate) fn entries(&self) -> Vec<(String, String, String, RoleRecord)> {
+        self.lock()
+            .iter()
+            .filter_map(|(slot, record)| {
+                let mut parts = slot.splitn(3, '/');
+                let product = parts.next()?.to_owned();
+                let role = parts.next()?.to_owned();
+                let spec = parts.next().unwrap_or_default().to_owned();
+                Some((product, role, spec, record.clone()))
+            })
+            .collect()
+    }
+
     /// Corrects the pane and the agent pid of an existing record, with the agent's own
     /// process start time. The restart check calls it after an identity mismatch, when the
     /// multiplexer shows the agent in `pane_id`. Returns `false` when there is no record.

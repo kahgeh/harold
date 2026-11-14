@@ -43,6 +43,10 @@ pub(crate) struct ViewError;
 pub(crate) trait PaneView: Send + Sync {
     /// The agent pid of the pane: `Ok(None)` when the pane does not exist or holds no agent.
     fn agent_pid(&self, pane: &str) -> Result<Option<u32>, ViewError>;
+    /// The label of the multiplexer session that holds the pane, when it is known.
+    fn session_label(&self, _pane: &str) -> Option<String> {
+        None
+    }
 }
 
 /// What a file of the pod names for the agent. Harold never writes it.

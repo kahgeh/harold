@@ -6,17 +6,19 @@ mod communication;
 mod identity;
 mod receipt;
 mod render;
+mod runtime;
 
 pub(crate) use communication::{
     Delivery, LinkPlan, LinkPorts, LinksResult, PlanRow, Resolved, Roster, SocketProbe,
     check_links, plan_links, probe_socket, socket_path_in,
 };
 pub(crate) use identity::{
-    FileClaim, Held, IdentityInput, PaneView, RecordPort, ViewError, check_identity,
+    FileClaim, Held, IdentityInput, PaneView, RecordPort, ViewError, check_identity, pane_in_file,
     read_file_claim,
 };
 pub(crate) use receipt::{receipt_path, write_receipt};
 pub(crate) use render::{clean_name, render};
+pub(crate) use runtime::{Checker, Deliver, Finished, TimeSource};
 
 /// The agent that was checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
