@@ -1763,3 +1763,64 @@ async fn an_alert_whose_top_agents_are_only_none_is_not_a_feature_use() {
     );
     assert_eq!(uses(), before);
 }
+
+#[test]
+fn no_environment_value_reaches_an_error_text_a_debug_output_or_a_panic_message() {
+    const SENTINEL: &str = "sentinel-7f3a";
+    let logs = CapturedLogs::start();
+    let table = [
+        process(200, 1, 2000, "agent"),
+        process(201, 200, 2001, "rustc"),
+        // An agent whose environment cannot be read.
+        process(300, 1, 3000, "agent"),
+        process(301, 300, 3001, "node"),
+    ];
+    let agents = [agent(200, 2000), agent(300, 3000)];
+    // The environment of 200 holds the sentinel in every kept name and in others. The
+    // environment of 300 is unreadable: the fake reader returns `None` for it.
+    let mut env = FakeEnv::with(
+        200,
+        &[
+            ("SECRET_TOKEN", SENTINEL),
+            ("POD_ROLE", SENTINEL),
+            ("POD_PRODUCT", &format!("{SENTINEL}/x")),
+            ("POD_SPEC", &format!("{SENTINEL} spec")),
+        ],
+    );
+    let mut walker = Walker::default();
+    let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        walker.assign(&table, &agents, None, &mut env)
+    }));
+    let owners = match walked {
+        Ok(owners) => owners,
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                .unwrap_or_default();
+            panic!(
+                "the walk panicked: {}",
+                message.replace(SENTINEL, "<sentinel>")
+            );
+        }
+    };
+    // Every value that Harold can show: owners, the kept environments (the cache), the
+    // process table, the agents and the log text.
+    let shown = format!(
+        "{owners:?} | {:?} | {table:?} | {agents:?} | {}",
+        walker.environments,
+        logs.text()
+    );
+    assert!(!shown.contains(SENTINEL), "{shown}");
+    assert!(!shown.contains("SECRET_TOKEN"), "{shown}");
+    // The unreadable environment is read once, kept as empty, and gives `other`.
+    assert_eq!(owner_of(&owners, 301), ("other", "other", "none"));
+    assert_eq!(env.reads.iter().filter(|pid| **pid == 300).count(), 1);
+    // The checked values that failed their rules are not kept at all.
+    let kept = &walker.environments[&(200, 2000)];
+    assert_eq!(*kept, PodEnv::default());
+    // The error value of the poll path: a failed reading logs a fixed reason only.
+    let reason = format!("{:?}", Err::<Reading, &str>(NO_HOME_DISK));
+    assert!(!reason.contains(SENTINEL));
+}
