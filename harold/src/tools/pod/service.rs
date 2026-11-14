@@ -94,4 +94,35 @@ impl PodService for PodToolService {
             }),
         }))
     }
+
+    async fn check(
+        &self,
+        request: Request<pb::CheckRequest>,
+    ) -> Result<Response<pb::CheckResponse>, Status> {
+        let request = request.into_inner();
+        let product = match (request.role.as_str(), request.product.as_str()) {
+            ("chief", "") => "-",
+            (_, product) => product,
+        };
+        let role = request.role.as_str();
+        if role != crate::pod_roles::BUILD_WORKER && !POD_ROLES.contains(&role) {
+            return Err(Status::invalid_argument("bad_role"));
+        }
+        if (role == crate::pod_roles::BUILD_WORKER) == request.spec.is_empty() {
+            // A build worker needs a spec id, and a pod role takes none.
+            return Err(Status::invalid_argument("bad_spec"));
+        }
+        let agent = crate::restart_check::Agent::from_role(role, product, &request.spec)
+            .ok_or_else(|| Status::invalid_argument("bad_role"))?;
+        let checker = crate::restart_check::installed()
+            .ok_or_else(|| Status::unavailable("restart_check_off"))?;
+        let finished = checker
+            .run(&agent)
+            .await
+            .ok_or_else(|| Status::not_found("no_record"))?;
+        Ok(Response::new(pb::CheckResponse {
+            text: finished.text,
+            fail_count: finished.fails,
+        }))
+    }
 }

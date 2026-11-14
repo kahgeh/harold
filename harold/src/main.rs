@@ -605,10 +605,26 @@ impl Harold for HaroldService {
         let now_ms =
             i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
                 .unwrap_or(i64::MAX);
+        let (role, product, spec) = (
+            start.role.clone(),
+            start.product.clone(),
+            start.spec.clone(),
+        );
+        let (session, pid, source) = (
+            start.session_id.clone(),
+            start.agent_pid,
+            start.source.clone(),
+        );
+        let before = restart_check::session_before(&role, &product, &spec);
         match pod_roles::record_start(start, now_ms) {
             None => Err(Status::unavailable("pod tool")),
             Some(Err(_)) => Err(Status::invalid_argument("pod role or product")),
-            Some(Ok(_)) => Ok(Response::new(PodAgentStartedResponse {})),
+            Some(Ok(_)) => {
+                restart_check::note_role_start(
+                    &role, &product, &spec, before, &session, pid, &source,
+                );
+                Ok(Response::new(PodAgentStartedResponse {}))
+            }
         }
     }
 
@@ -2253,7 +2269,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     });
     let (monitor, monitor_task) = agent::runtime::spawn_agent_monitor(
         Arc::clone(&store),
-        inventory,
+        inventory.clone(),
         screen,
         providers,
         initial_agent_snapshot,
@@ -2368,6 +2384,32 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             data_folder,
         )) as Arc<dyn restart_reminder::TurnEnds>
     });
+    // A restart of a pod role or a build worker is checked at the end of its first turn.
+    let restart_reminder = match pod_roles::installed() {
+        Some(roles) => {
+            let ports = Arc::new(
+                timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone())
+                    .with_chief(&cfg.notify),
+            );
+            let checker = Arc::new(restart_check::Checker::new(
+                roles,
+                Arc::new(tools::job::process::SystemProcesses),
+                Arc::new(restart_check::InventoryView(inventory.clone())),
+                tools::pod::session_file::default_folder(),
+                Arc::new(restart_check::SystemClock),
+                Arc::new(restart_check::PaneDeliver {
+                    ports,
+                    phone: Arc::new(restart_check::GrpcPhone(Arc::clone(cfg))),
+                }),
+            ));
+            restart_check::install(Arc::clone(&checker));
+            Some(Arc::new(restart_check::CheckTurnEnds {
+                checker,
+                next: restart_reminder,
+            }) as Arc<dyn restart_reminder::TurnEnds>)
+        }
+        None => restart_reminder,
+    };
     // At a turn end of the chief, the evidence tool types the lines that wait. It hands
     // each turn end on to the restart reminder.
     let restart_reminder = Some(Arc::new(tools::evidence::EvidenceTurnEnds::new(

@@ -20,7 +20,7 @@ pub(super) struct SessionFiles {
 }
 
 /// The default folder: `SESSION_FOLDER` in the home folder.
-pub(super) fn default_folder() -> PathBuf {
+pub(crate) fn default_folder() -> PathBuf {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(SESSION_FOLDER))
         .unwrap_or_default()

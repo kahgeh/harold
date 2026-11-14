@@ -88,3 +88,51 @@ fn each_reason_has_one_plain_line() {
         "the Harold daemon does not serve the pod tool"
     );
 }
+
+#[test]
+fn check_takes_a_product_a_role_and_an_optional_spec_id() {
+    assert_eq!(
+        parse(&["check", "harold", "pnem"]),
+        Ok(PodCommand::Check {
+            product: "harold".into(),
+            role: "pnem".into(),
+            spec: None
+        })
+    );
+    assert_eq!(
+        parse(&[
+            "check",
+            "harold",
+            "build_worker",
+            "--spec",
+            "decision-tool-a1"
+        ]),
+        Ok(PodCommand::Check {
+            product: "harold".into(),
+            role: "build_worker".into(),
+            spec: Some("decision-tool-a1".into())
+        })
+    );
+    for args in [
+        &["check"][..],
+        &["check", "harold"],
+        &["check", "harold", "pnem", "--spec"],
+        &["check", "harold", "pnem", "--wide", "x"],
+    ] {
+        assert_eq!(parse(args), Err(USAGE_LINE.to_string()), "{args:?}");
+    }
+}
+
+#[test]
+fn a_check_refusal_is_one_line_with_its_reason() {
+    for (status, line) in [
+        (tonic::Status::not_found("no_record"), "no_record"),
+        (
+            tonic::Status::unavailable("restart_check_off"),
+            "restart_check_off",
+        ),
+        (tonic::Status::invalid_argument("bad_spec"), "bad_spec"),
+    ] {
+        assert_eq!(refusal_line(&status), line);
+    }
+}

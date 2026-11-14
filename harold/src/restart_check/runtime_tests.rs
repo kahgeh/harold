@@ -58,7 +58,7 @@ struct World {
     view: Arc<View>,
     processes: Arc<Processes>,
     delivered: Arc<Delivered>,
-    checker: Checker,
+    checker: Arc<Checker>,
 }
 
 impl Drop for World {
@@ -81,14 +81,14 @@ fn world(idle: bool) -> World {
         idle,
         ..Delivered::default()
     });
-    let checker = Checker::new(
+    let checker = Arc::new(Checker::new(
         roles.clone(),
         processes.clone(),
         view.clone(),
         dir.join("sessions"),
         Arc::new(Clock),
         delivered.clone(),
-    );
+    ));
     World {
         dir,
         roles,

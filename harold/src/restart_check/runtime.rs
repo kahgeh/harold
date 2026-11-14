@@ -9,8 +9,8 @@ use tracing::{info, warn};
 
 use super::{
     Agent, IdentityInput, LinkPorts, Outcome, PaneView, Recipient, Report, Resolved, Roster,
-    SocketProbe, ViewError, check_identity, check_links, pane_in_file, plan_links, probe_socket,
-    read_file_claim, receipt_path, render, socket_path_in, write_receipt,
+    SocketProbe, ViewError, check_identity, check_links, clean_name, pane_in_file, plan_links,
+    probe_socket, read_file_claim, receipt_path, render, socket_path_in, write_receipt,
 };
 use crate::pod_roles::PodRoles;
 use crate::tools::job::process::ProcessPort;
@@ -108,8 +108,15 @@ impl Checker {
         }
     }
 
+    /// The session id of the record of a role.
+    pub(crate) fn session_of(&self, product: &str, role: &str, spec: &str) -> Option<String> {
+        self.roles
+            .get_spec(product, role, spec)
+            .map(|record| record.session_id)
+    }
+
     /// Runs the check of a restart that waits for this session, once.
-    pub(crate) async fn on_turn_end(&self, pane: &str, session: &str) {
+    pub(crate) async fn on_turn_end(self: &Arc<Self>, pane: &str, session: &str) {
         let Some(pending) = self.pending().remove(session) else {
             return;
         };
@@ -117,7 +124,7 @@ impl Checker {
     }
 
     /// Runs the check against the record: the pane and the pid that Harold holds.
-    pub(crate) async fn run(&self, agent: &Agent) -> Option<Finished> {
+    pub(crate) async fn run(self: &Arc<Self>, agent: &Agent) -> Option<Finished> {
         let (product, role, spec) = agent.record_key();
         let held = self.roles.get_spec(&product, role, &spec)?;
         self.run_at(agent, &held.pane_id, held.agent_pid).await
@@ -125,8 +132,19 @@ impl Checker {
 
     /// Runs the check for an agent that the hook reports in `pane` with `pid`. `None` when
     /// Harold has no record of the agent.
-    pub(crate) async fn run_at(&self, agent: &Agent, pane: &str, pid: u32) -> Option<Finished> {
-        let (report, folder) = self.build(agent, pane, pid)?;
+    pub(crate) async fn run_at(
+        self: &Arc<Self>,
+        agent: &Agent,
+        pane: &str,
+        pid: u32,
+    ) -> Option<Finished> {
+        // The multiplexer reads run programs: they must not block the runtime.
+        let this = Arc::clone(self);
+        let (owned_agent, owned_pane) = (agent.clone(), pane.to_owned());
+        let (report, folder) =
+            tokio::task::spawn_blocking(move || this.build(&owned_agent, &owned_pane, pid))
+                .await
+                .ok()??;
         let text = render(&report);
         let (_, stamp) = self.clock.now();
         if let Some(folder) = folder {
@@ -276,7 +294,7 @@ fn delivery_line(report: &Report) -> String {
     let lines: Vec<&str> = report.fails.iter().map(|f| f.text.as_str()).collect();
     format!(
         "restart check {}: {}; result: {} FAIL",
-        report.agent.title(),
+        clean_name(&report.agent.title()),
         lines.join("; "),
         report.fails.len()
     )

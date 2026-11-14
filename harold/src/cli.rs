@@ -1294,24 +1294,43 @@ pub(crate) async fn pod_within(
     wait: Duration,
 ) -> Result<String, String> {
     use crate::tools::pod::command as text;
-    let text::PodCommand::Who {
-        product,
-        role,
-        json,
-    } = command;
     call_within(CALL_DEADLINE, wait, async {
         let mut client = PodServiceClient::connect(format!("http://{address}"))
             .await
             .map_err(|_| "the Harold daemon is not reachable".to_string())?;
-        let answer = client
-            .who(pod_api::WhoRequest {
-                product: product.clone(),
-                role: role.clone(),
-            })
-            .await
-            .map_err(|status| text::refusal_line(&status))?
-            .into_inner();
-        Ok(text::render(&answer, *json))
+        match command {
+            text::PodCommand::Who {
+                product,
+                role,
+                json,
+            } => {
+                let answer = client
+                    .who(pod_api::WhoRequest {
+                        product: product.clone(),
+                        role: role.clone(),
+                    })
+                    .await
+                    .map_err(|status| text::refusal_line(&status))?
+                    .into_inner();
+                Ok(text::render(&answer, *json))
+            }
+            text::PodCommand::Check {
+                product,
+                role,
+                spec,
+            } => {
+                let answer = client
+                    .check(pod_api::CheckRequest {
+                        product: product.clone(),
+                        role: role.clone(),
+                        spec: spec.clone().unwrap_or_default(),
+                    })
+                    .await
+                    .map_err(|status| text::refusal_line(&status))?
+                    .into_inner();
+                Ok(answer.text)
+            }
+        }
     })
     .await
 }
@@ -8389,6 +8408,14 @@ mod tests {
                 product: "harold".into(),
                 role: "pnem".into(),
                 json: false
+            })))
+        );
+        assert_eq!(
+            parse(&["tool", "pod", "check", "harold", "pnem"]),
+            Ok(Mode::Tool(ToolCommand::Pod(PodCommand::Check {
+                product: "harold".into(),
+                role: "pnem".into(),
+                spec: None
             })))
         );
         assert_eq!(

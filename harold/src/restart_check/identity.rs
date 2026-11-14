@@ -137,16 +137,18 @@ pub(crate) fn check_identity(
         }
         fixed = Some(held.pane_id);
     }
-    if let Some(file) = &input.file {
-        if file.pane.as_deref() != Some(pane) {
-            let named = file.pane.as_deref().unwrap_or("no pane");
-            let detail = format!("{} names {named}; the agent runs in pane {pane}", file.name);
-            let text = format!(
-                "{subject}: the file {} names {named}, not {pane}; its owner fixes it",
-                file.name
-            );
-            return fail(&subject, detail, text);
-        }
+    if let Some(file) = input
+        .file
+        .as_ref()
+        .filter(|file| file.pane.as_deref() != Some(pane))
+    {
+        let named = file.pane.as_deref().unwrap_or("no pane");
+        let detail = format!("{} names {named}; the agent runs in pane {pane}", file.name);
+        let text = format!(
+            "{subject}: the file {} names {named}, not {pane}; its owner fixes it",
+            file.name
+        );
+        return fail(&subject, detail, text);
     }
     match fixed {
         Some(old) => IdentityResult {

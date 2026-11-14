@@ -3,8 +3,7 @@
 
 use harold_api::tools::pod::v1 as pb;
 
-pub(crate) const USAGE_LINE: &str =
-    "invalid argument: usage is harold tool pod who <product> <role> [--json]";
+pub(crate) const USAGE_LINE: &str = "invalid argument: usage is harold tool pod who <product> <role> [--json] or harold tool pod check <product> <role> [--spec <id>]";
 
 /// A `harold tool pod` command. The daemon checks the values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +12,13 @@ pub(crate) enum PodCommand {
         product: String,
         role: String,
         json: bool,
+    },
+    /// The restart check of one agent. The role is `build_worker` for a build worker, with
+    /// its spec id.
+    Check {
+        product: String,
+        role: String,
+        spec: Option<String>,
     },
 }
 
@@ -28,6 +34,16 @@ pub(crate) fn parse(args: &[&str]) -> Result<PodCommand, String> {
             product: (*product).into(),
             role: (*role).into(),
             json: true,
+        }),
+        ["check", product, role] => Ok(PodCommand::Check {
+            product: (*product).into(),
+            role: (*role).into(),
+            spec: None,
+        }),
+        ["check", product, role, "--spec", spec] => Ok(PodCommand::Check {
+            product: (*product).into(),
+            role: (*role).into(),
+            spec: Some((*spec).into()),
         }),
         _ => Err(usage()),
     }

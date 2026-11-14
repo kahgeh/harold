@@ -269,7 +269,7 @@ pub(crate) fn reset() {
     INSTALLED.with(|slot| *slot.borrow_mut() = None);
 }
 
-fn installed() -> Option<Arc<PodRoles>> {
+pub(crate) fn installed() -> Option<Arc<PodRoles>> {
     #[cfg(not(test))]
     {
         INSTALLED

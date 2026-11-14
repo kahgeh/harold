@@ -245,3 +245,30 @@ async fn the_counter_counts_a_lookup_by_role_outcome_and_caller() {
     let after = telemetry_support::exact_counter_value("harold.pod_role.lookups", &attrs);
     assert_eq!(after, Some(before + 1));
 }
+
+#[tokio::test]
+async fn check_refuses_a_bad_role_a_build_worker_with_no_spec_and_a_daemon_with_no_check() {
+    let rig = rig();
+    let check = |role: &str, spec: &str| {
+        rig.svc.check(Request::new(pb::CheckRequest {
+            product: "harold".into(),
+            role: role.into(),
+            spec: spec.into(),
+        }))
+    };
+    let status = check("surveyor", "").await.unwrap_err();
+    assert_eq!(
+        (status.code(), status.message()),
+        (Code::InvalidArgument, "bad_role")
+    );
+    let status = check("build_worker", "").await.unwrap_err();
+    assert_eq!(
+        (status.code(), status.message()),
+        (Code::InvalidArgument, "bad_spec")
+    );
+    let status = check("pnem", "").await.unwrap_err();
+    assert_eq!(
+        (status.code(), status.message()),
+        (Code::Unavailable, "restart_check_off")
+    );
+}

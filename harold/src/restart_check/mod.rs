@@ -4,21 +4,21 @@
 
 mod communication;
 mod identity;
+mod real;
 mod receipt;
 mod render;
 mod runtime;
 
 pub(crate) use communication::{
-    Delivery, LinkPlan, LinkPorts, LinksResult, PlanRow, Resolved, Roster, SocketProbe,
-    check_links, plan_links, probe_socket, socket_path_in,
+    LinkPorts, Resolved, Roster, SocketProbe, check_links, plan_links, probe_socket, socket_path_in,
 };
 pub(crate) use identity::{
-    FileClaim, Held, IdentityInput, PaneView, RecordPort, ViewError, check_identity, pane_in_file,
-    read_file_claim,
+    IdentityInput, PaneView, ViewError, check_identity, pane_in_file, read_file_claim,
 };
+pub(crate) use real::{CheckTurnEnds, GrpcPhone, InventoryView, PaneDeliver, SystemClock};
 pub(crate) use receipt::{receipt_path, write_receipt};
 pub(crate) use render::{clean_name, render};
-pub(crate) use runtime::{Checker, Deliver, Finished, TimeSource};
+pub(crate) use runtime::{Checker, Deliver, TimeSource};
 
 /// The agent that was checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,23 @@ impl Agent {
                 crate::pod_roles::BUILD_WORKER,
                 spec.clone(),
             ),
+        }
+    }
+}
+
+impl Agent {
+    /// The agent of a role value, a product and a spec id. `None` for a role that is not one
+    /// of the four.
+    pub(crate) fn from_role(role: &str, product: &str, spec: &str) -> Option<Self> {
+        match role {
+            "chief" => Some(Self::Chief),
+            "pnem" => Some(Self::Pnem(product.to_owned())),
+            "pod_coordination" => Some(Self::PodCoordination(product.to_owned())),
+            crate::pod_roles::BUILD_WORKER => Some(Self::BuildWorker {
+                product: product.to_owned(),
+                spec: spec.to_owned(),
+            }),
+            _ => None,
         }
     }
 }
@@ -142,4 +159,63 @@ pub(crate) struct Report {
     pub(crate) fails: Vec<FailLine>,
     /// One line for each check that Harold cannot make, with its reason.
     pub(crate) not_checked: Vec<String>,
+}
+
+use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::Mutex;
+
+#[cfg(not(test))]
+static INSTALLED: Mutex<Option<Arc<Checker>>> = Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    static INSTALLED: std::cell::RefCell<Option<Arc<Checker>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes `checker` the check that the RPC `Check`, the role start and the turn end use.
+pub(crate) fn install(checker: Arc<Checker>) {
+    #[cfg(not(test))]
+    {
+        *INSTALLED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checker);
+    }
+    #[cfg(test)]
+    INSTALLED.with(|slot| *slot.borrow_mut() = Some(checker));
+}
+
+/// The installed check, or `None` when Harold did not start it.
+pub(crate) fn installed() -> Option<Arc<Checker>> {
+    #[cfg(not(test))]
+    {
+        INSTALLED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    #[cfg(test)]
+    INSTALLED.with(|slot| slot.borrow().clone())
+}
+
+/// The session id that the record holds for a role now, before a new start replaces it.
+pub(crate) fn session_before(role: &str, product: &str, spec: &str) -> Option<String> {
+    let product = if role == "chief" { "-" } else { product };
+    installed()?.session_of(product, role, spec)
+}
+
+/// Tells the check about a role start. See `Checker::note_start`.
+pub(crate) fn note_role_start(
+    role: &str,
+    product: &str,
+    spec: &str,
+    before: Option<String>,
+    new_session: &str,
+    agent_pid: u32,
+    source: &str,
+) {
+    let (Some(checker), Some(agent)) = (installed(), Agent::from_role(role, product, spec)) else {
+        return;
+    };
+    checker.note_start(&agent, before, new_session, agent_pid, source);
 }

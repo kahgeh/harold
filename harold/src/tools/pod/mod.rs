@@ -15,7 +15,7 @@ use crate::tools::{ToolContext, ToolError, ToolHandle};
 pub(crate) mod command;
 mod obs;
 mod service;
-mod session_file;
+pub(crate) mod session_file;
 
 pub(crate) const NAME: &str = "pod";
 
