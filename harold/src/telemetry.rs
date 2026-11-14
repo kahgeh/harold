@@ -5185,32 +5185,61 @@ pub(crate) mod test_support {
         })
     }
 
+    /// The data points of one counter, read in one collection.
+    pub(crate) struct CounterSnapshot {
+        points: Vec<(Vec<(String, String)>, u64)>,
+    }
+
+    impl CounterSnapshot {
+        /// The value of the data point whose attributes are exactly `wanted`, or `None`
+        /// when there is no such point. It does not collect.
+        pub(crate) fn value(&self, wanted: &[(&str, &str)]) -> Option<u64> {
+            self.points
+                .iter()
+                .find(|(attributes, _)| {
+                    attributes.len() == wanted.len()
+                        && wanted.iter().all(|(key, value)| {
+                            attributes.iter().any(|(k, v)| k == key && v == value)
+                        })
+                })
+                .map(|(_, value)| *value)
+        }
+    }
+
+    /// The data points of the counter `name`, after one collection. It is empty when the
+    /// counter has no data point.
+    pub(crate) fn counter_snapshot(name: &str) -> CounterSnapshot {
+        let points = read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            Some(
+                sum.data_points()
+                    .map(|point| {
+                        let attributes = point
+                            .attributes()
+                            .map(|kv| (kv.key.as_str().to_owned(), kv.value.as_str().into_owned()))
+                            .collect();
+                        (attributes, point.value())
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+        CounterSnapshot { points }
+    }
+
     /// Checks that the counter `name` has a data point for each attribute set in `sets`,
     /// with exactly those attributes. It collects the metrics once for all the sets, so a
     /// seed test does not pay one collection for each series. It panics and names each
     /// missing set.
     pub(crate) fn assert_seeded(name: &str, sets: &[&[(&str, &str)]]) {
-        let missing: Vec<&[(&str, &str)]> = read_latest(name, |data| {
-            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
-                return None;
-            };
-            let points: Vec<Vec<&opentelemetry::KeyValue>> = sum
-                .data_points()
-                .map(|point| point.attributes().collect())
-                .collect();
-            Some(
-                sets.iter()
-                    .copied()
-                    .filter(|wanted| {
-                        !points.iter().any(|attributes| {
-                            attributes.len() == wanted.len()
-                                && carries_all(attributes.iter().copied(), wanted)
-                        })
-                    })
-                    .collect(),
-            )
-        })
-        .unwrap_or_else(|| sets.to_vec());
+        let snapshot = counter_snapshot(name);
+        let missing: Vec<&[(&str, &str)]> = sets
+            .iter()
+            .copied()
+            .filter(|wanted| snapshot.value(wanted).is_none())
+            .collect();
         assert!(
             missing.is_empty(),
             "the counter {name} has no data point for {missing:?}"

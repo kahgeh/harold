@@ -6253,6 +6253,20 @@ fn assert_seeded_collects_once_for_all_the_sets() {
 }
 
 #[test]
+fn a_counter_snapshot_reads_many_series_from_one_collection() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    register_work_counters();
+    let before = test_support::collections_on_this_thread();
+    let snapshot = test_support::counter_snapshot("harold.work.rotations");
+    assert!(snapshot.value(&[("outcome", "done")]).is_some());
+    assert!(snapshot.value(&[("outcome", "failed")]).is_some());
+    assert_eq!(snapshot.value(&[("outcome", "not_an_outcome")]), None);
+    assert_eq!(snapshot.value(&[]), None);
+    assert_eq!(test_support::collections_on_this_thread() - before, 1);
+}
+
+#[test]
 fn the_work_gauges_read_the_last_counts_and_zero_for_the_rest() {
     test_support::install();
     let _held = hold_work_gauges();
