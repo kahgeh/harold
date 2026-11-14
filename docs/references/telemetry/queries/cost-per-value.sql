@@ -9,11 +9,13 @@
 --   A feature spec counts only by its use, never by its merge. The fixes of pod.fix.confirmed_at add no value.
 -- Token cost: the rise of harold.turn.tokens for every role and model other than none (the rule of inventory-cost.sql and tokens-and-turns.sql), priced with the
 -- list price (the ClickHouse dictionary harold_settings, read as a table, row harold.list_price.per_mtok/<model>/<kind>, USD per million tokens), then multiplied
--- by the exchange rate (row harold.exchange_rate.usd_to_aud). A price of 0 counts as no price. Without an exchange rate the token cost, the cloud cost and the fix cost are NULL.
--- unpriced_models is the models with tokens in the 7 days and no list price (one text, names with a comma between them, empty when none). They add nothing.
--- Cloud cost: the only cloud spend that Harold has a metric for is the rise of watch.cost_usd (the hosted model runs of the watches, which are not in
--- harold.turn.tokens), times the exchange rate. Harold has no metric for other cloud spend: the other hosted model runs log their cost but send no metric,
--- and Harold does not see bucket or machine bills.
+-- by the exchange rate (row harold.exchange_rate.usd_to_aud). A price of 0 counts as no price. Without an exchange rate the token cost and the fix cost are NULL.
+-- unpriced_models is the models with tokens in the 7 days and no list price, and the models of harold.workflow.tokens with tokens and no harold.workflow.cost
+-- in the 7 days (one text, names with a comma between them, empty when none). They add nothing.
+-- Cloud cost: the only cloud spend that Harold has a metric for is the rise of harold.workflow.cost (the model runs of Harold's own code: the watches, the
+-- call answer, the summaries and the routing, which are not in harold.turn.tokens). It is in AUD already, so no rate applies. The watch runs are in
+-- harold.workflow.cost and the query does not read watch.cost_usd, so a watch run counts once. Harold has no metric for other cloud spend, and Harold
+-- does not see bucket or machine bills.
 -- Attention cost: the hours of the chief.attention_answered lines (the sum of agent.attr.seconds, divided by 3600) times harold.attention.hourly_rate (100 today).
 -- Fix cost: the token cost of harold.turn.tokens.by_spec for the specs whose newest pod.spec.effort point has spec.kind = fix, in AUD. It is part of total_cost.
 -- Fix cost and the Waste card are separate. The Waste card (waste.sql) counts hours. Fix cost is AUD and the two are never added together.
@@ -49,7 +51,7 @@ WITH
                     PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
                     ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
             FROM otel.otel_metrics_sum
-            WHERE (MetricName IN ('harold.turn.tokens', 'harold.turn.tokens.by_spec', 'watch.cost_usd')
+            WHERE (MetricName IN ('harold.turn.tokens', 'harold.turn.tokens.by_spec', 'harold.workflow.cost', 'harold.workflow.tokens')
                    OR MetricName LIKE '%.feature.used')
               AND TimeUnix > now() - INTERVAL 21 DAY
         )
@@ -101,12 +103,25 @@ WITH
     ),
     clouds AS (
         SELECT
-            if(usd_to_aud IS NULL OR countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL,
-               sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY) * usd_to_aud) AS cost_now,
-            if(usd_to_aud IS NULL OR countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL,
-               sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) * usd_to_aud) AS cost_before
+            if(countIf(TimeUnix > now() - INTERVAL 7 DAY) = 0, NULL,
+               sumIf(rise, TimeUnix > now() - INTERVAL 7 DAY)) AS cost_now,
+            if(countIf(TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) = 0, NULL,
+               sumIf(rise, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY)) AS cost_before
         FROM rises
-        WHERE MetricName = 'watch.cost_usd'
+        WHERE MetricName = 'harold.workflow.cost'
+    ),
+    workflow_unpriced AS (
+        SELECT groupUniqArrayIf(model, tokens_now > 0 AND cost_now = 0) AS models
+        FROM (
+            SELECT
+                Attributes['model'] AS model,
+                sumIf(rise, MetricName = 'harold.workflow.tokens' AND TimeUnix > now() - INTERVAL 7 DAY) AS tokens_now,
+                sumIf(rise, MetricName = 'harold.workflow.cost' AND TimeUnix > now() - INTERVAL 7 DAY) AS cost_now
+            FROM rises
+            WHERE MetricName IN ('harold.workflow.tokens', 'harold.workflow.cost')
+              AND Attributes['model'] NOT IN ('', 'none')
+            GROUP BY model
+        )
     ),
     attention AS (
         SELECT
@@ -199,7 +214,9 @@ WITH
             feature_value.unvalued_now AS unvalued,
             tokens.cost_now AS token_now,
             tokens.cost_before AS token_before,
-            tokens.unpriced AS unpriced,
+            arrayStringConcat(arraySort(arrayDistinct(arrayConcat(
+                arrayFilter(name -> name != '', splitByChar(',', tokens.unpriced)),
+                workflow_unpriced.models))), ',') AS unpriced,
             clouds.cost_now AS cloud_now,
             clouds.cost_before AS cloud_before,
             fixes.cost_now AS fix_now,
@@ -213,6 +230,7 @@ WITH
         CROSS JOIN other_value
         CROSS JOIN tokens
         CROSS JOIN clouds
+        CROSS JOIN workflow_unpriced
         CROSS JOIN fixes
         CROSS JOIN attention
     )

@@ -36,6 +36,7 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `pod-role-record-1.sql` | `pod role recorded` lines for each of `chief`, `pnem` and `pod_coordination`, and a `pod role lookup` line with `outcome = found`, from `since` to `since` + 14 days, and no lookup with `no_record` or `session_file_unreadable`. Reasons `lookups_found`, `lookup_faults` and `no_lookup_yet` |
 | `decision-tool-1.sql` | `decision added` and `decision evaluated` log lines from `since` to `since` + 30 days. Reasons `evaluated`, `only_added` and `none_added` |
 | `cost-per-value-1.sql` | `pod.spec.value` and `harold.turn.tokens` have points after `since`. Reasons `value_seen`, `no_value_yet` and `no_values` |
+| `workflow-cost-1.sql` | `harold.workflow.cost` rose after `since` for 2 or more model workflows. Reasons `workflow_cost_recorded`, `one_workflow_only` and `no_workflow_run_yet` |
 | `agent-restart-1.sql` | `restart check result` lines from `since` to `since` + 30 days. Reasons `checked` (all four groups), `checked_identity_communication` (stage 1 alone) and `no_restart_yet` |
 
 ## Run one

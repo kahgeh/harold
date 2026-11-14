@@ -5881,16 +5881,44 @@ mod cost_per_value_fixture {
         let got = columns(&logq, &data);
         assert_eq!(&got[3..7], ["100", NULL, "100", NULL], "{got:?}");
 
-        // A rise of watch.cost_usd adds to cloud_cost: 3 USD at a rate of 2 is 6.
+        // A rise of harold.workflow.cost adds to cloud_cost as it is, in AUD: 6.
+        let workflow = |hours_ago, value| {
+            with(
+                row("harold.workflow.cost", "", hours_ago, value),
+                &[("workflow", "watch"), ("model", "m1")],
+            )
+        };
+        let data = base(vec![workflow(20 * DAY, 0.0), workflow(2 * DAY, 6.0)]);
+        let got = columns(&logq, &data);
+        assert_eq!((&got[3], &got[6]), (&"6".into(), &"6".into()), "{got:?}");
+
+        // A watch run is in harold.workflow.cost and counts once: watch.cost_usd adds nothing.
         let watch = |hours_ago, value| {
             with(
                 row("watch.cost_usd", "", hours_ago, value),
                 &[("folder", "x")],
             )
         };
-        let data = base(vec![watch(20 * DAY, 0.0), watch(2 * DAY, 3.0)]);
+        let data = base(vec![
+            workflow(20 * DAY, 0.0),
+            workflow(2 * DAY, 6.0),
+            watch(20 * DAY, 0.0),
+            watch(2 * DAY, 3.0),
+        ]);
         let got = columns(&logq, &data);
         assert_eq!((&got[3], &got[6]), (&"6".into(), &"6".into()), "{got:?}");
+
+        // A model with workflow tokens and no workflow cost is named in unpriced_models.
+        let mut data = base(vec![workflow(20 * DAY, 0.0), workflow(2 * DAY, 6.0)]);
+        data.sum.push(with(
+            row("harold.workflow.tokens", "", 2 * DAY, 5.0),
+            &[
+                ("workflow", "watch"),
+                ("model", "wf-unpriced"),
+                ("kind", "input"),
+            ],
+        ));
+        assert_eq!(columns(&logq, &data)[8], "wf-unpriced");
 
         // Build hours of a spec add nothing to the cost.
         let mut data = base(vec![]);

@@ -37,7 +37,8 @@ TRENDS = HYPERDX / "trends.json"
 QUERIES = TELEMETRY / "queries"
 # agent-counter.sql is a helper that other queries copy. factory-flow.sql feeds the web app page /flow. No tile reads them.
 NOT_CARDS = {"agent-counter.sql", "factory-flow.sql", "unused-features.sql", "unconfirmed-fixes.sql", "unkinded-specs.sql",
-             "fix-cost-by-cause.sql", "restart-checks.sql", "reply-owner.sql", "dictation-taps.sql", "agent-use.sql"}
+             "fix-cost-by-cause.sql", "restart-checks.sql", "reply-owner.sql", "dictation-taps.sql", "agent-use.sql",
+             "workflow-cost.sql"}
 # These dashboards may hold a tile that reads a query file.
 DASHBOARD_FILES = ["big-picture.json", "trends.json", "dashboard.json", "now.json"]
 

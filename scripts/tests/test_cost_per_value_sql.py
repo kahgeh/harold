@@ -43,9 +43,20 @@ class CostPerValueQuery(unittest.TestCase):
 
     def test_the_header_names_the_read_windows_and_the_only_cloud_source(self):
         text = header(COST)
-        for part in ("21 days", "15 days", "14 days", "watch.cost_usd", "only the newest list prices",
+        for part in ("21 days", "15 days", "14 days", "harold.workflow.cost", "only the newest list prices",
                      "Build hours are not in the cost"):
             self.assertIn(part.lower(), text.lower(), part)
+
+    def test_the_cloud_cost_reads_the_workflow_cost_and_not_the_watch_cost(self):
+        self.assertIn("'harold.workflow.cost'", body(COST))
+        self.assertNotIn("watch.cost_usd", body(COST))
+        clouds = body(COST).split("clouds AS (")[1].split("workflow_unpriced AS (")[0]
+        self.assertNotIn("usd_to_aud", clouds)
+
+    def test_a_model_with_workflow_tokens_and_no_workflow_cost_is_unpriced(self):
+        text = body(COST)
+        self.assertIn("'harold.workflow.tokens'", text)
+        self.assertIn("tokens_now > 0 AND cost_now = 0", text)
 
     def test_the_query_reads_and_never_writes(self):
         text = body(COST).upper()
