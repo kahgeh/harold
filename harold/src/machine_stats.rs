@@ -26,6 +26,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{Instrument as _, info, info_span, warn};
 
 use crate::pod_roles::PodRoles;
+use crate::pod_stats::{AGENT_PANE, POD_FOLDER, key_values};
 use crate::telemetry::{self, TRACE_TARGET};
 
 /// How often the machine is read.
@@ -701,32 +702,123 @@ impl Owner {
     }
 }
 
+/// Reads the environment of one process.
+pub(crate) trait ProcessEnv {
+    /// The variables of process `pid`, or `None` when they cannot be read. The caller keeps
+    /// three of them and drops the rest at once.
+    fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>>;
+}
+
+/// The longest `POD_PRODUCT` and `POD_SPEC` that Harold accepts, and the longest label.
+const NAME_LIMIT: usize = 64;
+
+/// The only variables of an agent process that Harold keeps, each checked. A value that
+/// fails its rule is `None`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PodEnv {
+    role: Option<&'static str>,
+    product: Option<String>,
+    spec: Option<String>,
+}
+
+fn valid_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= NAME_LIMIT
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+impl PodEnv {
+    /// Keeps `POD_ROLE`, `POD_PRODUCT` and `POD_SPEC` and drops every other variable. No
+    /// value of a variable is kept in a field that a log, a span or an error can show unless
+    /// it passed its rule.
+    fn from_vars(vars: Vec<(String, String)>) -> Self {
+        let mut kept = Self::default();
+        for (key, value) in vars {
+            match key.as_str() {
+                "POD_ROLE" => {
+                    kept.role = ["chief", "pnem", "pod_coordination", "build_worker", "other"]
+                        .into_iter()
+                        .find(|role| *role == value);
+                }
+                "POD_PRODUCT" => kept.product = valid_name(&value).then_some(value),
+                "POD_SPEC" => kept.spec = valid_name(&value).then_some(value),
+                _ => {}
+            }
+        }
+        kept
+    }
+}
+
 /// Gives each process of a table to the agent that started it.
 #[derive(Default)]
-pub(crate) struct Walker {}
+pub(crate) struct Walker {
+    /// The checked environment of each agent process, by pid and start time. It holds an
+    /// agent that has no readable environment too, so each is read once.
+    environments: HashMap<(u32, u64), PodEnv>,
+}
 
 impl Walker {
     /// The owner of every process in `table`. The walk follows the parents of a process up
     /// to the first live agent of `agents`. It stops at a parent that is not in the table,
     /// at a parent that started after its child (the parent pid is used again), at a loop
-    /// and after `MAX_DEPTH` parents.
+    /// and after `MAX_DEPTH` parents. An agent gets its owner from the role record, then
+    /// from the agent-pane file of its folder, then from the environment of its process.
     pub(crate) fn assign(
         &mut self,
         table: &[ProcInfo],
         agents: &[AgentProc],
         roles: Option<&PodRoles>,
+        env: &mut dyn ProcessEnv,
     ) -> HashMap<u32, Owner> {
         let by_pid: HashMap<u32, &ProcInfo> =
             table.iter().map(|process| (process.pid, process)).collect();
         let live: HashMap<u32, &AgentProc> = agents.iter().map(|a| (a.pid, a)).collect();
-        table
-            .iter()
-            .map(|process| {
-                let owner = walk(process, &by_pid, &live)
-                    .map_or_else(Owner::none, |agent| agent_owner(agent, roles));
-                (process.pid, owner)
-            })
-            .collect()
+        let mut agent_owners: HashMap<u32, Owner> = HashMap::new();
+        let mut owners = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for process in table {
+            let owner = match walk(process, &by_pid, &live) {
+                None => Owner::none(),
+                Some(agent) => agent_owners
+                    .entry(agent.pid)
+                    .or_insert_with(|| {
+                        seen.insert((agent.pid, agent.start));
+                        self.agent_owner(agent, live[&agent.pid], roles, env)
+                    })
+                    .clone(),
+            };
+            owners.insert(process.pid, owner);
+        }
+        self.environments.retain(|key, _| seen.contains(key));
+        owners
+    }
+
+    fn agent_owner(
+        &mut self,
+        process: &ProcInfo,
+        agent: &AgentProc,
+        roles: Option<&PodRoles>,
+        env: &mut dyn ProcessEnv,
+    ) -> Owner {
+        let start = i64::try_from(process.start).unwrap_or(i64::MAX);
+        if let Some((product, role)) = roles.and_then(|roles| roles.by_pid(process.pid, start)) {
+            return record_owner(&product, &role);
+        }
+        if let Some(owner) = build_worker_owner(agent) {
+            return owner;
+        }
+        let key = (process.pid, process.start);
+        let pod_env = self
+            .environments
+            .entry(key)
+            .or_insert_with(|| PodEnv::from_vars(env.environ(process.pid).unwrap_or_default()));
+        let folder = process
+            .cwd
+            .clone()
+            .or_else(|| (!agent.folder.is_empty()).then(|| PathBuf::from(&agent.folder)));
+        env_owner(pod_env, folder.as_deref())
     }
 }
 
@@ -754,26 +846,107 @@ fn walk<'a>(
     None
 }
 
-/// The owner for the agent process `agent`: the role record first, then `other`.
-fn agent_owner(agent: &ProcInfo, roles: Option<&PodRoles>) -> Owner {
-    let start = i64::try_from(agent.start).unwrap_or(i64::MAX);
-    let Some((product, role)) = roles.and_then(|roles| roles.by_pid(agent.pid, start)) else {
-        return Owner::other();
-    };
-    match role.as_str() {
-        "chief" => Owner::plain(CHIEF, CHIEF),
-        "pnem" | "pod_coordination" => Owner {
-            role: if role == "pnem" {
-                "pnem"
-            } else {
-                "pod_coordination"
-            },
-            label: product.clone(),
-            product,
-            spec: NONE.to_owned(),
-        },
+fn pod_role(role: &str) -> &'static str {
+    match role {
+        "chief" => CHIEF,
+        "pnem" => "pnem",
+        "pod_coordination" => "pod_coordination",
+        _ => OTHER,
+    }
+}
+
+/// The owner for a role record: the chief, or a role of a product.
+fn record_owner(product: &str, role: &str) -> Owner {
+    match pod_role(role) {
+        CHIEF => Owner::plain(CHIEF, CHIEF),
+        OTHER => Owner::other(),
+        role => with_product(role, product),
+    }
+}
+
+fn with_product(role: &'static str, product: &str) -> Owner {
+    Owner {
+        role,
+        label: product.to_owned(),
+        product: product.to_owned(),
+        spec: NONE.to_owned(),
+    }
+}
+
+/// The owner for a validated environment. A role that needs a product and has none, or an
+/// environment with no role, is `other`.
+fn env_owner(env: &PodEnv, folder: Option<&Path>) -> Owner {
+    match env.role {
+        Some(CHIEF) => Owner::plain(CHIEF, CHIEF),
+        Some(role @ ("pnem" | "pod_coordination")) => env
+            .product
+            .as_deref()
+            .map_or_else(Owner::other, |product| with_product(role, product)),
+        Some("build_worker") => {
+            let Some(label) = folder.and_then(folder_name) else {
+                return Owner::other();
+            };
+            Owner {
+                role: "build_worker",
+                label,
+                product: env.product.clone().unwrap_or_else(|| NONE.to_owned()),
+                spec: env.spec.clone().unwrap_or_else(|| NONE.to_owned()),
+            }
+        }
         _ => Owner::other(),
     }
+}
+
+/// The last part of `folder`, cut to the label limit.
+fn folder_name(folder: &Path) -> Option<String> {
+    let name = folder.file_name()?.to_string_lossy();
+    Some(name.chars().take(NAME_LIMIT).collect())
+}
+
+/// The owner when the agent-pane file of the agent's folder names the agent's pane: a build
+/// worker. The label is the folder name. The spec id is that of the `started/<id>.md` file
+/// that names the worktree, found through the `.git` file of the worktree.
+fn build_worker_owner(agent: &AgentProc) -> Option<Owner> {
+    if agent.folder.is_empty() {
+        return None;
+    }
+    let folder = Path::new(&agent.folder);
+    let text = std::fs::read_to_string(folder.join(AGENT_PANE)).ok()?;
+    let pane = text.lines().next()?.split_whitespace().next()?;
+    if pane != agent.pane_id {
+        return None;
+    }
+    let label = folder_name(folder)?;
+    let spec = started_spec(folder, &label).unwrap_or_else(|| NONE.to_owned());
+    Some(Owner {
+        role: "build_worker",
+        label,
+        product: NONE.to_owned(),
+        spec,
+    })
+}
+
+/// The id of the spec whose `started/<id>.md` file names `folder` in its `worktree:` pair.
+/// The pod folder is the one of the base checkout that the worktree's `.git` file points
+/// into. A worktree whose base checkout is not found has no spec id.
+fn started_spec(folder: &Path, label: &str) -> Option<String> {
+    let git = std::fs::read_to_string(folder.join(".git")).ok()?;
+    let gitdir = git.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let (base, _) = gitdir.split_once("/.git/worktrees/")?;
+    let mut files: Vec<PathBuf> =
+        std::fs::read_dir(Path::new(base).join(POD_FOLDER).join("started"))
+            .ok()?
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+            .collect();
+    files.sort();
+    files.into_iter().find_map(|path| {
+        let text = std::fs::read_to_string(&path).ok()?;
+        let named = *key_values(&text).get("worktree")?;
+        let same = named == label || Path::new(named) == folder;
+        let id = path.file_stem()?.to_str()?;
+        (same && valid_name(id)).then(|| id.to_owned())
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -1035,7 +1035,7 @@ fn a_child_belongs_to_the_agent_that_started_it() {
         process(301, 300, 3001, "node"),
     ];
     let agents = [agent(100, 1000), agent(200, 2000), agent(300, 3000)];
-    let owners = Walker::default().assign(&table, &agents, Some(&roles));
+    let owners = assign_plain(&table, &agents, Some(&roles));
     assert_eq!(owner_of(&owners, 102), ("chief", "chief", "none"));
     assert_eq!(owner_of(&owners, 100), ("chief", "chief", "none"));
     assert_eq!(owner_of(&owners, 201), ("pnem", "harold", "harold"));
@@ -1049,7 +1049,7 @@ fn a_process_with_no_agent_in_its_chain_is_none() {
         process(50, 1, 10, "com.apple.Virtualization.VirtualMachine"),
         process(60, 999, 10, "orphan"),
     ];
-    let owners = Walker::default().assign(&table, &[agent(100, 1000)], None);
+    let owners = assign_plain(&table, &[agent(100, 1000)], None);
     for pid in [1, 50, 60] {
         assert_eq!(owner_of(&owners, pid), ("none", "none", "none"), "{pid}");
     }
@@ -1064,14 +1064,14 @@ fn a_pid_used_again_is_not_given_to_the_old_agent() {
         // A child that started before its parent has a parent that is not its own.
         process(102, 100, 900, "older"),
     ];
-    let owners = Walker::default().assign(&table, &[agent(100, 1000)], None);
+    let owners = assign_plain(&table, &[agent(100, 1000)], None);
     assert_eq!(owner_of(&owners, 101).0, "none");
     assert_eq!(owner_of(&owners, 102).0, "none");
     let same = [
         process(100, 1, 1000, "agent"),
         process(102, 100, 900, "older"),
     ];
-    let owners = Walker::default().assign(&same, &[agent(100, 1000)], None);
+    let owners = assign_plain(&same, &[agent(100, 1000)], None);
     assert_eq!(
         owner_of(&owners, 102).0,
         "none",
@@ -1087,7 +1087,7 @@ fn a_loop_and_a_deep_chain_end_the_walk() {
         table.push(process(pid, pid + 1, 2000, "link"));
     }
     table.push(process(1100, 1, 1000, "agent"));
-    let owners = Walker::default().assign(&table, &[agent(1100, 1000)], None);
+    let owners = assign_plain(&table, &[agent(1100, 1000)], None);
     assert_eq!(owner_of(&owners, 10).0, "none");
     assert_eq!(owner_of(&owners, 11).0, "none");
     assert_eq!(owner_of(&owners, 1000).0, "none");
@@ -1106,7 +1106,7 @@ fn a_record_with_the_wrong_start_time_is_not_used() {
     assert_eq!(roles.by_pid(201, 2000), None);
     // The agent that the monitor knows with the wrong start time is `other`.
     let table = [process(200, 1, 2001, "agent"), process(201, 200, 2002, "x")];
-    let owners = Walker::default().assign(&table, &[agent(200, 2001)], Some(&roles));
+    let owners = assign_plain(&table, &[agent(200, 2001)], Some(&roles));
     assert_eq!(owner_of(&owners, 201).0, "other");
 }
 
@@ -1115,4 +1115,246 @@ fn the_record_lookup_never_returns_a_build_worker() {
     let folder = Folder::new();
     let roles = roles_with(&folder, &[("build_worker", "harold", "spec-a", 300, 3000)]);
     assert_eq!(roles.by_pid(300, 3000), None);
+}
+
+// --- build workers and the environment fallback ---
+
+/// A fake environment reader. It records each pid it reads.
+#[derive(Default)]
+struct FakeEnv {
+    vars: HashMap<u32, Vec<(String, String)>>,
+    reads: Vec<u32>,
+}
+
+impl FakeEnv {
+    fn with(pid: u32, vars: &[(&str, &str)]) -> Self {
+        let mut env = Self::default();
+        env.vars.insert(
+            pid,
+            vars.iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        );
+        env
+    }
+}
+
+impl ProcessEnv for FakeEnv {
+    fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>> {
+        self.reads.push(pid);
+        self.vars.get(&pid).cloned()
+    }
+}
+
+/// The walk with no environment to read.
+fn assign_plain(
+    table: &[ProcInfo],
+    agents: &[AgentProc],
+    roles: Option<&PodRoles>,
+) -> HashMap<u32, Owner> {
+    Walker::default().assign(table, agents, roles, &mut FakeEnv::default())
+}
+
+/// A worktree folder `<root>/<name>` whose agent-pane file names `pane`. When `base` is set
+/// the `.git` file points into `<base>/.git/worktrees/<name>`.
+fn worktree(folder: &Folder, name: &str, pane: &str, base: Option<&Path>) -> PathBuf {
+    let path = folder.0.join(name);
+    std::fs::create_dir_all(path.join(".superpowers/baton")).unwrap();
+    std::fs::write(
+        path.join(".superpowers/baton/agent-pane"),
+        format!("{pane}\n"),
+    )
+    .unwrap();
+    if let Some(base) = base {
+        std::fs::write(
+            path.join(".git"),
+            format!("gitdir: {}/.git/worktrees/{name}\n", base.display()),
+        )
+        .unwrap();
+    }
+    path
+}
+
+fn agent_in(pid: u32, start: i64, folder: &Path) -> AgentProc {
+    AgentProc {
+        folder: folder.to_string_lossy().into_owned(),
+        ..agent(pid, start)
+    }
+}
+
+#[test]
+fn a_build_worker_comes_from_its_agent_pane_file_and_the_started_spec() {
+    let folder = Folder::new();
+    let base = folder.0.join("base");
+    std::fs::create_dir_all(base.join(".superpowers/pod/started")).unwrap();
+    std::fs::write(
+        base.join(".superpowers/pod/started/macos-test-time.md"),
+        "worktree: macos-test-time-f5\n",
+    )
+    .unwrap();
+    let path = worktree(&folder, "macos-test-time-f5", "%300", Some(&base));
+    let table = [
+        process(300, 1, 3000, "agent"),
+        process(301, 300, 3001, "rustc"),
+    ];
+    let mut env = FakeEnv::default();
+    let owners = Walker::default().assign(&table, &[agent_in(300, 3000, &path)], None, &mut env);
+    let owner = &owners[&301];
+    assert_eq!(owner.role, "build_worker");
+    assert_eq!(owner.label, "macos-test-time-f5");
+    assert_eq!(owner.spec, "macos-test-time");
+    assert!(
+        env.reads.is_empty(),
+        "a matched agent has no environment read"
+    );
+}
+
+#[test]
+fn a_build_worker_without_a_started_file_has_no_spec_id() {
+    let folder = Folder::new();
+    let path = worktree(&folder, "spec-b", "%300", None);
+    let table = [process(300, 1, 3000, "agent")];
+    let owners = assign_plain(&table, &[agent_in(300, 3000, &path)], None);
+    assert_eq!(owner_of(&owners, 300), ("build_worker", "spec-b", "none"));
+    assert_eq!(owners[&300].spec, "none");
+}
+
+#[test]
+fn a_pane_file_that_names_another_pane_gives_no_build_worker() {
+    let folder = Folder::new();
+    let path = worktree(&folder, "spec-b", "%999", None);
+    let table = [process(300, 1, 3000, "agent")];
+    let owners = assign_plain(&table, &[agent_in(300, 3000, &path)], None);
+    assert_eq!(owner_of(&owners, 300).0, "other");
+}
+
+#[test]
+fn the_fallback_reads_the_role_and_the_product_of_an_unmatched_agent() {
+    let table = [
+        process(200, 1, 2000, "agent"),
+        process(201, 200, 2001, "rustc"),
+    ];
+    let mut env = FakeEnv::with(
+        200,
+        &[
+            ("POD_ROLE", "pnem"),
+            ("POD_PRODUCT", "harold"),
+            ("PATH", "/bin"),
+        ],
+    );
+    let owners = Walker::default().assign(&table, &[agent(200, 2000)], None, &mut env);
+    assert_eq!(owner_of(&owners, 201), ("pnem", "harold", "harold"));
+}
+
+#[test]
+fn the_fallback_reads_each_pid_and_start_time_once() {
+    let table = [process(200, 1, 2000, "agent")];
+    let mut env = FakeEnv::with(200, &[("POD_ROLE", "chief")]);
+    let mut walker = Walker::default();
+    for _ in 0..3 {
+        walker.assign(&table, &[agent(200, 2000)], None, &mut env);
+    }
+    assert_eq!(env.reads, vec![200]);
+    // The pid is used again by a new agent with a new start time.
+    let again = [process(200, 1, 9000, "agent")];
+    walker.assign(&again, &[agent(200, 9000)], None, &mut env);
+    assert_eq!(env.reads, vec![200, 200]);
+}
+
+#[test]
+fn a_matched_agent_has_no_environment_read() {
+    let folder = Folder::new();
+    let roles = roles_with(&folder, &[("chief", "", "", 100, 1000)]);
+    let table = [process(100, 1, 1000, "agent")];
+    let mut env = FakeEnv::with(100, &[("POD_ROLE", "pnem"), ("POD_PRODUCT", "x")]);
+    let owners = Walker::default().assign(&table, &[agent(100, 1000)], Some(&roles), &mut env);
+    assert_eq!(owner_of(&owners, 100).0, "chief");
+    assert!(env.reads.is_empty());
+}
+
+#[test]
+fn a_value_that_fails_its_rule_gives_other() {
+    let long = "a".repeat(65);
+    let cases: [&[(&str, &str)]; 5] = [
+        &[("POD_ROLE", "admin")],
+        &[("POD_ROLE", "pnem"), ("POD_PRODUCT", &long)],
+        &[("POD_ROLE", "pnem"), ("POD_PRODUCT", "a/b")],
+        &[("POD_ROLE", "pnem"), ("POD_PRODUCT", "Upper")],
+        &[("POD_PRODUCT", "harold")],
+    ];
+    for vars in cases {
+        let table = [process(200, 1, 2000, "agent")];
+        let mut env = FakeEnv::with(200, vars);
+        let owners = Walker::default().assign(&table, &[agent(200, 2000)], None, &mut env);
+        assert_eq!(
+            owner_of(&owners, 200),
+            ("other", "other", "none"),
+            "{vars:?}"
+        );
+    }
+    // 64 characters are valid.
+    let table = [process(200, 1, 2000, "agent")];
+    let product = "a".repeat(64);
+    let mut env = FakeEnv::with(
+        200,
+        &[("POD_ROLE", "pod_coordination"), ("POD_PRODUCT", &product)],
+    );
+    let owners = Walker::default().assign(&table, &[agent(200, 2000)], None, &mut env);
+    assert_eq!(owner_of(&owners, 200).0, "pod_coordination");
+}
+
+#[test]
+fn an_agent_with_no_environment_or_an_unreadable_one_is_other() {
+    let table = [process(200, 1, 2000, "agent")];
+    let owners = assign_plain(&table, &[agent(200, 2000)], None);
+    assert_eq!(owner_of(&owners, 200), ("other", "other", "none"));
+}
+
+#[test]
+fn no_environment_value_reaches_a_log_a_span_a_metric_or_an_error() {
+    let logs = CapturedLogs::start();
+    let table = [
+        process(200, 1, 2000, "agent"),
+        process(201, 200, 2001, "rustc"),
+    ];
+    let mut env = FakeEnv::with(
+        200,
+        &[
+            ("SECRET_TOKEN", "sentinel-7f3a"),
+            ("POD_ROLE", "sentinel-7f3a"),
+            ("POD_PRODUCT", "sentinel-7f3a/x"),
+            ("POD_SPEC", "sentinel-7f3a/x"),
+        ],
+    );
+    let owners = Walker::default().assign(&table, &[agent(200, 2000)], None, &mut env);
+    let shown = format!("{owners:?} {}", logs.text());
+    assert!(!shown.contains("sentinel-7f3a"), "{shown}");
+    let spans = test_support::spans();
+    assert!(!format!("{spans:?}").contains("sentinel-7f3a"));
+    let metrics = format!("{:?}", test_support::metrics());
+    assert!(!metrics.contains("sentinel-7f3a"));
+}
+
+#[test]
+fn a_build_worker_has_one_label_from_the_pane_file_and_from_the_fallback() {
+    let folder = Folder::new();
+    let path = worktree(&folder, "macos-test-time-f5", "%300", None);
+    // Source 2: the pane file.
+    let table = [process(300, 1, 3000, "agent")];
+    let one = assign_plain(&table, &[agent_in(300, 3000, &path)], None);
+    // Source 3: the environment and the current folder of the process.
+    let mut other = process(400, 1, 4000, "agent");
+    other.cwd = Some(path.clone());
+    let mut env = FakeEnv::with(
+        400,
+        &[
+            ("POD_ROLE", "build_worker"),
+            ("POD_SPEC", "macos-test-time"),
+        ],
+    );
+    let two = Walker::default().assign(&[other], &[agent(400, 4000)], None, &mut env);
+    assert_eq!(one[&300].label, "macos-test-time-f5");
+    assert_eq!(two[&400].label, one[&300].label);
+    assert_eq!(two[&400].role, "build_worker");
+    assert_eq!(two[&400].spec, "macos-test-time");
 }
