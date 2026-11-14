@@ -27,6 +27,7 @@ use crate::settings::{AgentProviderSettings, FactoryFlowSettings, Settings, Watc
 use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod backlog;
+pub(crate) mod decision;
 pub(crate) mod evidence;
 pub(crate) mod job;
 pub(crate) mod knowledge;
