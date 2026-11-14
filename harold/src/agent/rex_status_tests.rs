@@ -204,11 +204,16 @@ impl Script {
     /// The fifo opens with `O_NONBLOCK`, so a program that never opens its end makes the test
     /// fail after `FEED_WAIT`, and not hang for ever.
     fn feed(&self, line: &str) {
+        self.feed_within(line, FEED_WAIT);
+    }
+
+    /// Does what `feed` does, and gives up after `wait`.
+    fn feed_within(&self, line: &str, wait: Duration) {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         static WRITERS: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
         let path = self.dir.join("events");
-        let deadline = Instant::now() + FEED_WAIT;
+        let deadline = Instant::now() + wait;
         let mut writers = lock(&WRITERS);
         if !writers.iter().any(|(owner, _)| *owner == path) {
             let file = loop {
@@ -222,7 +227,7 @@ impl Script {
                     Err(error) if error.raw_os_error() == Some(ENXIO) => {
                         assert!(
                             Instant::now() < deadline,
-                            "the program did not open the fifo within {FEED_WAIT:?}"
+                            "the program did not open the fifo within {wait:?}"
                         );
                         std::thread::sleep(Duration::from_millis(5));
                     }
@@ -244,7 +249,7 @@ impl Script {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(
                         Instant::now() < deadline,
-                        "the fifo stays full for {FEED_WAIT:?}"
+                        "the fifo stays full for {wait:?}"
                     );
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -752,7 +757,8 @@ fn feed_fails_fast_when_the_program_never_opens_the_fifo() {
             .unwrap()
             .success()
     );
-    script.feed("never read");
+    // The wait is short, because the program is already gone.
+    script.feed_within("never read", Duration::from_millis(200));
 }
 
 // -- the notes for the observer ------------------------------------------------------
