@@ -123,6 +123,43 @@ pub(crate) fn read_registry(path: &Path) -> Result<Vec<Product>, String> {
         .collect())
 }
 
+/// A `[products.<name>]` table, read for its `match` paths only.
+#[derive(Deserialize)]
+struct MatchRow {
+    #[serde(default, rename = "match")]
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MatchRegistry {
+    #[serde(default)]
+    products: BTreeMap<String, MatchRow>,
+}
+
+/// The `match` paths of each product of the registry at `path`, with a leading `~/`
+/// expanded. A product with no `match` key has no paths.
+pub(crate) fn read_match_paths(path: &Path) -> Result<Vec<(String, Vec<PathBuf>)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let registry: MatchRegistry = Config::builder()
+        .add_source(File::from_str(&text, FileFormat::Toml))
+        .build()
+        .and_then(Config::try_deserialize)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+    Ok(registry
+        .products
+        .into_iter()
+        .map(|(name, row)| {
+            let paths = row
+                .paths
+                .iter()
+                .map(|path| PathBuf::from(expand_tilde(path.trim())))
+                .collect();
+            (name, paths)
+        })
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------

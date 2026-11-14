@@ -225,6 +225,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "listener",
     "sha",
     "spec.id",
+    "workflow",
+    "workflow.step",
     "spec.state_at",
     "merged_at",
     "spec.words",
@@ -580,6 +582,12 @@ pub(crate) struct Instruments {
     pub watch_runs: Counter<u64>,
     /// `watch.cost_usd`, `USD`, by `folder`.
     pub watch_cost_usd: Counter<f64>,
+    /// `harold.workflow.tokens`, `{token}`, by `kind`, `workflow`, `workflow.step`,
+    /// `spec.id`, `model` and `pod.product`.
+    pub workflow_tokens: Counter<u64>,
+    /// `harold.workflow.cost`, `AUD`, by `workflow`, `workflow.step`, `spec.id`, `model`
+    /// and `pod.product`.
+    pub workflow_cost: Counter<f64>,
     /// `watch.reminders`, `{reminder}`, by `outcome`.
     pub watch_reminders: Counter<u64>,
     /// `harold.notifications`, `{notification}`, by `agent`, `channel` and `outcome`.
@@ -729,6 +737,11 @@ fn build_instruments(meter: &Meter) -> Instruments {
         ),
         watch_runs: counter("watch.runs", "{run}"),
         watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
+        workflow_tokens: counter("harold.workflow.tokens", "{token}"),
+        workflow_cost: meter
+            .f64_counter("harold.workflow.cost")
+            .with_unit("AUD")
+            .build(),
         watch_reminders: counter("watch.reminders", "{reminder}"),
         notifications: counter("harold.notifications", "{notification}"),
         web_app_pushes: counter("harold.web_app.pushes", "{push}"),
@@ -3191,7 +3204,7 @@ impl TurnTokens {
 /// The model label of a count: `model` when it is `claude-` and 1 to 40 of `a-z`, `0-9`
 /// and `-`, or the seed label `none`. Any other string is `other`, so a caller cannot add
 /// series.
-fn counted_model(model: &str) -> &str {
+pub(crate) fn counted_model(model: &str) -> &str {
     if model == "none" {
         return model;
     }
@@ -5446,6 +5459,19 @@ pub(crate) mod test_support {
             };
             gauge
                 .data_points()
+                .find(|point| carries_all(point.attributes(), wanted))
+                .map(|point| point.value())
+        })
+    }
+
+    /// The value of the `f64` counter `name`'s data point that carries every attribute in
+    /// `wanted`, or `None` when none does.
+    pub(crate) fn counter_f64_value(name: &str, wanted: &[(&str, &str)]) -> Option<f64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::F64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            sum.data_points()
                 .find(|point| carries_all(point.attributes(), wanted))
                 .map(|point| point.value())
         })

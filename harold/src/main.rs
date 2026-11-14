@@ -11,6 +11,7 @@ mod cron;
 mod inbound;
 mod log_trim;
 mod machine_stats;
+mod model_workflow;
 mod outbound;
 mod pod_roles;
 mod pod_stats;
@@ -2215,6 +2216,18 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             &settings.attention.currency,
         );
         crate::telemetry::register_prices(&settings.prices);
+        crate::model_workflow::register_workflow_counters();
+        let match_paths = settings
+            .telemetry
+            .pod_registry_path()
+            .map(|path| {
+                crate::pod_stats::read_match_paths(&path).unwrap_or_else(|error| {
+                    tracing::warn!(%error, "pod registry match paths unreadable");
+                    Vec::new()
+                })
+            })
+            .unwrap_or_default();
+        crate::model_workflow::configure(settings.prices.clone(), match_paths);
         crate::telemetry::register_recap_counters(&agent::recap::recap_provider_ids(
             &settings.agents.0,
         ));
