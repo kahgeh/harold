@@ -537,9 +537,14 @@ async fn a_collector_nothing_listens_on_is_unreachable() {
 
     app.post(batch("harold-web-app", trial_spans()).to_string())
         .await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let limit = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut seen = count("collector_unreachable") - before;
+    while seen != 6 && tokio::time::Instant::now() < limit {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        seen = count("collector_unreachable") - before;
+    }
 
-    assert_eq!(count("collector_unreachable") - before, 6);
+    assert_eq!(seen, 6, "count {seen} after waiting up to 5 seconds");
 }
 
 #[tokio::test(flavor = "current_thread")]
