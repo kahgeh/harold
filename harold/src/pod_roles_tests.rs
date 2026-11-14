@@ -268,3 +268,16 @@ fn chief_pane_gives_the_installed_chief_pane_and_skips_a_record_with_no_pane() {
     assert_eq!(chief_pane(), Some("%10".to_string()));
     reset();
 }
+
+#[test]
+fn correct_changes_the_pane_and_pid_of_an_existing_record_only() {
+    let dir = Temp::new();
+    let roles = roles(dir.0.as_path(), &[(10, 1), (20, 5)]);
+    assert!(!roles.correct("harold", "pnem", "", "%20", 20));
+    roles.record(start("pnem", "harold", 10, "s-1"), 1).unwrap();
+    assert!(roles.correct("harold", "pnem", "", "%20", 20));
+    let record = roles.get("harold", "pnem").unwrap();
+    assert_eq!((record.pane_id.as_str(), record.agent_pid), ("%20", 20));
+    assert_eq!(record.agent_proc_start, 5);
+    assert_eq!(record.session_id, "s-1");
+}

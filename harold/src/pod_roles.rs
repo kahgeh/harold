@@ -166,6 +166,28 @@ impl PodRoles {
         Ok(replaced)
     }
 
+    /// Corrects the pane and the agent pid of an existing record, with the agent's own
+    /// process start time. The restart check calls it after an identity mismatch, when the
+    /// multiplexer shows the agent in `pane_id`. Returns `false` when there is no record.
+    pub(crate) fn correct(
+        &self,
+        product: &str,
+        role: &str,
+        spec: &str,
+        pane_id: &str,
+        agent_pid: u32,
+    ) -> bool {
+        let mut records = self.lock();
+        let Some(existing) = records.get_mut(&key(product, role, spec)) else {
+            return false;
+        };
+        existing.pane_id = pane_id.to_owned();
+        existing.agent_pid = agent_pid;
+        existing.agent_proc_start = self.processes.start_time(agent_pid).unwrap_or(0);
+        self.save(&records);
+        true
+    }
+
     /// Writes the file through a temporary file and a rename. A failed write is logged with a
     /// fixed reason; the record stays in memory.
     fn save(&self, records: &BTreeMap<String, RoleRecord>) {

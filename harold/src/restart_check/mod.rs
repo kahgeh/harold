@@ -2,9 +2,14 @@
 //! whole and writes the result to the restart receipt file. Stage 1 checks identity and
 //! communication.
 
+mod identity;
 mod receipt;
 mod render;
 
+pub(crate) use identity::{
+    FileClaim, Held, IdentityInput, PaneView, RecordPort, ViewError, check_identity,
+    read_file_claim,
+};
 pub(crate) use receipt::{receipt_path, write_receipt};
 pub(crate) use render::{clean_name, render};
 
@@ -20,6 +25,23 @@ pub(crate) enum Agent {
         product: String,
         spec: String,
     },
+}
+
+impl Agent {
+    /// The key of the agent in the pod role record: product, role and spec id. The chief's
+    /// product is `-`.
+    pub(crate) fn record_key(&self) -> (String, &'static str, String) {
+        match self {
+            Self::Chief => ("-".into(), "chief", String::new()),
+            Self::Pnem(product) => (product.clone(), "pnem", String::new()),
+            Self::PodCoordination(product) => (product.clone(), "pod_coordination", String::new()),
+            Self::BuildWorker { product, spec } => (
+                product.clone(),
+                crate::pod_roles::BUILD_WORKER,
+                spec.clone(),
+            ),
+        }
+    }
 }
 
 /// Who gets each FAIL line.
@@ -55,6 +77,8 @@ impl Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Ok,
+    /// A mismatch that Harold corrected, and the second check passed.
+    Fixed,
     Fail,
     /// Harold cannot make the check. The line gives the reason.
     NotChecked,

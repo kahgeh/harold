@@ -18,6 +18,7 @@ pub(crate) fn clean_name(name: &str) -> String {
 fn word(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Ok => "ok",
+        Outcome::Fixed => "fixed",
         Outcome::Fail => "FAIL",
         Outcome::NotChecked => "not checked",
     }
