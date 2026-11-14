@@ -6217,6 +6217,42 @@ fn work_counters_are_seeded_at_zero() {
 }
 
 #[test]
+fn assert_seeded_passes_when_every_set_is_present() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    register_work_counters();
+    test_support::assert_seeded(
+        "harold.work.rotations",
+        &[&[("outcome", "done")], &[("outcome", "failed")]],
+    );
+}
+
+#[test]
+#[should_panic(expected = "not_an_outcome")]
+fn assert_seeded_panics_when_one_set_is_missing() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    register_work_counters();
+    test_support::assert_seeded(
+        "harold.work.rotations",
+        &[&[("outcome", "done")], &[("outcome", "not_an_outcome")]],
+    );
+}
+
+#[test]
+fn assert_seeded_collects_once_for_all_the_sets() {
+    test_support::install();
+    let _held = hold_work_gauges();
+    register_work_counters();
+    let before = test_support::collections_on_this_thread();
+    test_support::assert_seeded(
+        "harold.work.rotations",
+        &[&[("outcome", "done")], &[("outcome", "failed")]],
+    );
+    assert_eq!(test_support::collections_on_this_thread() - before, 1);
+}
+
+#[test]
 fn the_work_gauges_read_the_last_counts_and_zero_for_the_rest() {
     test_support::install();
     let _held = hold_work_gauges();

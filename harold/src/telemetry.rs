@@ -5116,8 +5116,19 @@ pub(crate) mod test_support {
         installed().logs.get_emitted_logs().unwrap()
     }
 
+    thread_local! {
+        static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// How many times this thread has collected the metrics. A test uses it to prove
+    /// that a check collects once.
+    pub(crate) fn collections_on_this_thread() -> usize {
+        COLLECTIONS.with(std::cell::Cell::get)
+    }
+
     /// Every metric export so far, after collecting the current values.
     pub(crate) fn metrics() -> Vec<ResourceMetrics> {
+        COLLECTIONS.with(|count| count.set(count.get() + 1));
         let installed = installed();
         let _ = installed.pipeline.meter_provider.force_flush();
         if let Some(signals) = super::signal_provider_of(&installed.pipeline.signals) {
@@ -5172,6 +5183,38 @@ pub(crate) mod test_support {
                 })
                 .map(|point| point.value())
         })
+    }
+
+    /// Checks that the counter `name` has a data point for each attribute set in `sets`,
+    /// with exactly those attributes. It collects the metrics once for all the sets, so a
+    /// seed test does not pay one collection for each series. It panics and names each
+    /// missing set.
+    pub(crate) fn assert_seeded(name: &str, sets: &[&[(&str, &str)]]) {
+        let missing: Vec<&[(&str, &str)]> = read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            let points: Vec<Vec<&opentelemetry::KeyValue>> = sum
+                .data_points()
+                .map(|point| point.attributes().collect())
+                .collect();
+            Some(
+                sets.iter()
+                    .copied()
+                    .filter(|wanted| {
+                        !points.iter().any(|attributes| {
+                            attributes.len() == wanted.len()
+                                && carries_all(attributes.iter().copied(), wanted)
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(|| sets.to_vec());
+        assert!(
+            missing.is_empty(),
+            "the counter {name} has no data point for {missing:?}"
+        );
     }
 
     /// How many metric exports the test exporter holds, without collecting.
