@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are nine: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md), the [knowledge tool](knowledge.md), the [release tool](release.md), the [evidence tool](evidence.md), the [job tool](job.md) and the [telemetry tool](telemetry.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are ten: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md), the [knowledge tool](knowledge.md), the [release tool](release.md), the [evidence tool](evidence.md), the [job tool](job.md), the [decision tool](decision.md) and the [telemetry tool](telemetry.md). This page is for a developer adding another.
 
 ## The contract
 

@@ -376,6 +376,14 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | release attempt | One run of `make release`, from its checks to its install or its failure | "build" for it (a build is the GitHub run) |
 | push checks | The Linux and macOS workflows that run on each push to `main`. A release needs both to have passed on its commit | "CI" alone, "pre-release checks" |
 | release run | The GitHub run of `build.yml` on a published release. It only builds, checks the binaries and uploads them | "build" for the whole release |
+| decision record | The decision tool's record of one decision made from evidence, with its check date, status and grades. It never rotates. See the [decision reference](references/tools/decision.md) | "decision" alone, "work record decision" |
+| decision tool | The tool that keeps the decision records. In its names (`harold tool decision`, `decisions.db`, `harold.decisions.*`), the bare word "decision" means a decision record | "decision" alone outside these names |
+| decision details entry | The entry for one decision record, in the file next to the thing that it belongs to, written by its details owner (the PnEM or the chief) | "decision note" ("note" is a backlog note) |
+| coach | The chief subagent that evaluates the due decision records | "reviewer", "architect" |
+| details owner (of a decision record) | Who writes the details entry: `chief` or `pnem:<product>`. It is the field `details_owner` | "accountable" (whose decision it was), "owner" alone (the glossary uses "owner" for the owner pid of a program status record) |
+| decision kind | The group of a decision record, for the coach's lessons, from `[decision] kinds` | "type", "category" |
+| accountable (of a decision record) | `user` when the decision was the user's, otherwise the role that made it | "details owner" (the writer of the details entry), "owner" alone |
+| process grade, outcome grade | `good` or `poor`. The process grade judges how a decision was made from the evidence known then. The outcome grade judges the result against the expected result | "score" |
 
 ## Storing and delivering
 
