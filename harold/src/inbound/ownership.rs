@@ -8,6 +8,8 @@
 use std::sync::{LazyLock, Mutex};
 
 use super::parse_tag;
+#[cfg(any(feature = "imessage", test))]
+use crate::outbound::APP_UNREACHABLE;
 use crate::settings::get_settings;
 #[cfg(any(feature = "imessage", test))]
 use crate::settings::is_valid_machine_name;
@@ -36,6 +38,10 @@ pub(crate) struct Marker<'a> {
 #[cfg(any(feature = "imessage", test))]
 pub(crate) fn parse_marker(text: &str) -> Option<Marker<'_>> {
     let rest = text.trim_start().strip_prefix(HAROLD_MARKER)?.trim_start();
+    // A message that the app could not push has this text before the tag. Skip it once.
+    let rest = rest
+        .strip_prefix(APP_UNREACHABLE)
+        .map_or(rest, str::trim_start);
     let (tag, _) = rest.strip_prefix('[')?.split_once(']')?;
     let (machine, is_notification) = match tag.split_once('/') {
         Some((machine, _)) => (machine, true),
