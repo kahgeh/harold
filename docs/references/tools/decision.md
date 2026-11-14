@@ -122,7 +122,7 @@ The coach is a chief subagent, outside Harold. It runs each week, and when the a
 
 - Counters `harold.decisions.added` and `harold.decisions.evaluated`, and the gauge `harold.decisions.open` (`organisation`, `status`). The [telemetry reference](../telemetry/README.md) lists the attributes.
 - The feature `decision-tool` on `harold.feature.used`. One use is one `evaluate`.
-- Log lines: `decision added`, `decision evaluated` and `decision due` (`info`), and `decision refused` (`warn`, with the field `reason`). No line holds a title or details text.
+- Log lines: `decision added`, `decision evaluated` and `decision due` (`info`), `decision refused` (`warn`, with the field `reason`) and `decision due check failed` (`warn`, `reason` is `store_failed`: the due check could not read the store). No line holds a title or details text.
 - The big picture has the card Decisions. The alert `decisions-due` fires when a record is due.
 - Harold also logs `decide_s` (the time from `asked_at` to the add) and `to_evaluate_days` (the time from the add to the evaluation).
 
