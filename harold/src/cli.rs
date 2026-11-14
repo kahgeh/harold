@@ -13,6 +13,8 @@ use crate::harold::{
 use crate::settings::Settings;
 use harold_api::tools::backlog::v1 as backlog_api;
 use harold_api::tools::backlog::v1::backlog_service_client::BacklogServiceClient;
+use harold_api::tools::decision::v1 as decision_api;
+use harold_api::tools::decision::v1::decision_service_client::DecisionServiceClient;
 use harold_api::tools::evidence::v1 as evidence_api;
 use harold_api::tools::evidence::v1::evidence_service_client::EvidenceServiceClient;
 use harold_api::tools::job::v1 as job_api;
@@ -398,6 +400,7 @@ pub(crate) enum ToolCommand {
     Telemetry(TelemetryCommand),
     Watch(WatchCommand),
     Job(JobCommand),
+    Decision(crate::tools::decision::command::DecisionCommand),
     Release(ReleaseCommand),
     Evidence(EvidenceCommand),
     Knowledge(KnowledgeCommand),
@@ -1281,6 +1284,125 @@ fn job_list_line(job: &job_api::Job, offset: time::UtcOffset) -> String {
     )
 }
 
+/// Runs a `harold tool decision` command as `pane`. `Ok` is the text to print; `Err` is the
+/// one refusal line.
+pub(crate) async fn decision_within(
+    address: &str,
+    command: &crate::tools::decision::command::DecisionCommand,
+    pane: &str,
+    wait: Duration,
+) -> Result<String, String> {
+    use crate::tools::decision::command as text;
+    use crate::tools::decision::command::DecisionCommand as C;
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = DecisionServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| text::refusal_line(&status);
+        let pane_id = pane.to_string();
+        match command {
+            C::Add {
+                role,
+                kind,
+                details_owner,
+                accountable,
+                title,
+                link,
+                check,
+                details,
+                asked_at,
+            } => {
+                let added = client
+                    .add(decision_api::AddRequest {
+                        pane_id,
+                        role: role.clone(),
+                        kind: kind.clone(),
+                        details_owner: details_owner.clone(),
+                        accountable: accountable.clone(),
+                        title: title.clone(),
+                        link: link.clone(),
+                        check_on: check.clone(),
+                        details: details.clone(),
+                        asked_at: asked_at.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::added_line(&added.decision.unwrap_or_default()))
+            }
+            C::List(flags) => {
+                let listed = client
+                    .list(decision_api::ListRequest {
+                        due: flags.due,
+                        open: flags.open,
+                        all: flags.all,
+                        role: flags.role.clone(),
+                        kind: flags.kind.clone(),
+                        details_owner: flags.details_owner.clone(),
+                        accountable: flags.accountable.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::list_text(&listed.decisions, flags))
+            }
+            C::Show { id } => {
+                let shown = client
+                    .show(decision_api::ShowRequest { id: id.clone() })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::show_text(
+                    &shown.decision.unwrap_or_default(),
+                    &shown.details_path,
+                ))
+            }
+            C::Evaluate {
+                id,
+                process,
+                outcome,
+            } => {
+                let done = client
+                    .evaluate(decision_api::EvaluateRequest {
+                        pane_id,
+                        id: id.clone(),
+                        process_grade: process.clone(),
+                        outcome_grade: outcome.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::evaluated_line(&done.decision.unwrap_or_default()))
+            }
+            C::Recheck { id, check } => {
+                let done = client
+                    .recheck(decision_api::RecheckRequest {
+                        pane_id,
+                        id: id.clone(),
+                        check_on: check.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::rechecked_line(&done.decision.unwrap_or_default()))
+            }
+            C::Link { id, link } => {
+                let done = client
+                    .link(decision_api::LinkRequest {
+                        pane_id,
+                        id: id.clone(),
+                        link: link.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(text::linked_line(&done.decision.unwrap_or_default()))
+            }
+        }
+    })
+    .await
+}
+
 pub(crate) async fn job_within(
     address: &str,
     command: &JobCommand,
@@ -1965,6 +2087,9 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["telemetry", rest @ ..] => parse_telemetry(rest).map(ToolCommand::Telemetry),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["job", rest @ ..] => parse_job(rest).map(ToolCommand::Job),
+        ["decision", rest @ ..] => {
+            crate::tools::decision::command::parse(rest).map(ToolCommand::Decision)
+        }
         ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
         ["evidence", rest @ ..] => parse_evidence(rest).map(ToolCommand::Evidence),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
@@ -2676,6 +2801,9 @@ pub(crate) async fn tool(
         )
         .await;
     }
+    if let ToolCommand::Decision(decision) = command {
+        return decision_within(address, decision, &caller_pane(), CALL_DEADLINE).await;
+    }
     if let ToolCommand::Release(release) = command {
         return release_within(address, release, CALL_DEADLINE).await;
     }
@@ -3266,6 +3394,7 @@ pub(crate) async fn tool_within(
             | ToolCommand::Telemetry(_)
             | ToolCommand::Watch(_)
             | ToolCommand::Job(_)
+            | ToolCommand::Decision(_)
             | ToolCommand::Release(_)
             | ToolCommand::Evidence(_)
             | ToolCommand::Knowledge(_)
@@ -8212,6 +8341,25 @@ mod tests {
             Ok(other) => panic!("not a watch command: {other:?}"),
             Err(line) => Err(line),
         }
+    }
+
+    #[test]
+    fn tool_decision_commands_parse_into_the_decision_command() {
+        use crate::tools::decision::command::DecisionCommand;
+        assert_eq!(
+            parse(&["tool", "decision", "show", "d-20261114-02"]),
+            Ok(Mode::Tool(ToolCommand::Decision(DecisionCommand::Show {
+                id: "d-20261114-02".into()
+            })))
+        );
+        assert!(matches!(
+            parse(&["tool", "decision", "list", "--due", "--json"]),
+            Ok(Mode::Tool(ToolCommand::Decision(DecisionCommand::List(_))))
+        ));
+        assert_eq!(
+            parse(&["tool", "decision", "nope"]),
+            Err(crate::tools::decision::command::USAGE_LINE.into())
+        );
     }
 
     #[test]

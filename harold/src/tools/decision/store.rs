@@ -143,33 +143,28 @@ impl DecisionStore {
         })
     }
 
-    /// Stores a new open record. The id is `d-YYYYMMDD-NN` from the UTC date of `now_ms`.
-    pub(super) async fn add(&self, new: &NewDecision, now_ms: i64) -> Result<DecisionRow> {
+    /// Stores a new open record with the id `id`, which the caller has checked. Returns
+    /// `None`, and stores nothing, when a record has this id. `decided_on` is the UTC date
+    /// of `now_ms`.
+    pub(super) async fn add(
+        &self,
+        id: &str,
+        new: &NewDecision,
+        now_ms: i64,
+    ) -> Result<Option<DecisionRow>> {
         let day = utc_day(now_ms)?;
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         let work = async {
-            let prefix = format!("d-{}-", day.replace('-', ""));
-            let mut rows = conn
-                .query(
-                    "SELECT id FROM decisions WHERE id LIKE ?1",
-                    [format!("{prefix}%")],
-                )
-                .await?;
-            let mut highest = 0u32;
-            while let Some(row) = rows.next().await? {
-                let id = text(&row, 0)?;
-                let number = id.strip_prefix(&prefix).and_then(|n| n.parse::<u32>().ok());
-                highest = highest.max(number.unwrap_or(0));
+            if fetch_one(&conn, id).await?.is_some() {
+                return Ok(None);
             }
-            drop(rows);
-            let id = format!("{prefix}{:02}", highest + 1);
             conn.execute(
                 "INSERT INTO decisions (id, decided_on, organisation, role, kind, details_owner, \
                  accountable, title, link, check_on, status, details, asked_at_ms, added_at_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open', ?11, ?12, ?13)",
                 turso::params_from_iter(vec![
-                    Value::from(id.as_str()),
+                    Value::from(id),
                     Value::from(day.as_str()),
                     Value::from(new.organisation.as_str()),
                     Value::from(new.role.as_str()),
@@ -185,9 +180,10 @@ impl DecisionStore {
                 ]),
             )
             .await?;
-            fetch_one(&conn, &id)
+            fetch_one(&conn, id)
                 .await?
                 .ok_or_else(|| StoreError::Data("record missing after insert".into()))
+                .map(Some)
         }
         .await;
         finish(&conn, work).await

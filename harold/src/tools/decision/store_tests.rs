@@ -43,47 +43,36 @@ fn plain(filter_status: &[&str]) -> Filter {
 }
 
 #[tokio::test]
-async fn add_makes_01_then_02_on_the_same_day() {
+async fn add_keeps_the_given_id_and_refuses_a_used_one() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let first = store
-        .add(&new_decision("a", "2026-12-01"), NOV_14)
+        .add("d-20261114-02", &new_decision("a", "2026-12-01"), NOV_14)
         .await
         .unwrap();
-    let second = store
-        .add(&new_decision("b", "2026-12-01"), NOV_14 + 1)
+    assert_eq!(first.unwrap().id, "d-20261114-02");
+    let used = store
+        .add(
+            "d-20261114-02",
+            &new_decision("b", "2026-12-01"),
+            NOV_14 + 1,
+        )
         .await
         .unwrap();
-    assert_eq!(first.id, "d-20261114-01");
-    assert_eq!(second.id, "d-20261114-02");
-    let next_day = store
-        .add(&new_decision("c", "2026-12-01"), NOV_14 + DAY_MS)
-        .await
-        .unwrap();
-    assert_eq!(next_day.id, "d-20261115-01");
+    assert_eq!(used, None, "a used id is refused and nothing is stored");
+    assert_eq!(store.list(&plain(&[])).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn the_number_of_a_day_goes_past_09_to_10_and_stays_unique() {
+async fn decided_on_is_the_utc_date_of_the_add_even_for_an_earlier_id() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
-    let mut ids = Vec::new();
-    for n in 0..11 {
-        ids.push(
-            store
-                .add(&new_decision("x", "2026-12-01"), NOV_14 + n)
-                .await
-                .unwrap()
-                .id,
-        );
-    }
-    assert_eq!(ids[8], "d-20261114-09");
-    assert_eq!(ids[9], "d-20261114-10");
-    assert_eq!(ids[10], "d-20261114-11");
-    let mut sorted = ids.clone();
-    sorted.sort();
-    sorted.dedup();
-    assert_eq!(sorted.len(), 11);
+    let row = store
+        .add("d-20261113-07", &new_decision("a", "2026-12-01"), NOV_14)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.decided_on, "2026-11-14");
 }
 
 #[tokio::test]
@@ -91,8 +80,13 @@ async fn each_field_is_kept_and_a_new_record_is_open() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let added = store
-        .add(&new_decision("Fold the fix", "2026-12-01"), NOV_14)
+        .add(
+            "d-20261114-21",
+            &new_decision("Fold the fix", "2026-12-01"),
+            NOV_14,
+        )
         .await
+        .unwrap()
         .unwrap();
     let row = store.get(&added.id).await.unwrap().unwrap();
     assert_eq!(row.decided_on, "2026-11-14");
@@ -123,7 +117,11 @@ async fn a_link_to_a_closed_or_rotated_work_record_is_accepted() {
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let mut decision = new_decision("t", "2026-12-01");
     decision.link = "work:a-record-that-was-rotated-away".into();
-    let added = store.add(&decision, NOV_14).await.unwrap();
+    let added = store
+        .add("d-20261114-11", &decision, NOV_14)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(added.link, "work:a-record-that-was-rotated-away");
     let moved = store
         .set_link(&added.id, "work:another")
@@ -146,8 +144,9 @@ async fn the_records_stay_after_the_store_is_opened_again() {
     {
         let store = DecisionStore::open(&dir.0).await.unwrap();
         store
-            .add(&new_decision("keep", "2026-12-01"), NOV_14)
+            .add("d-20261114-22", &new_decision("keep", "2026-12-01"), NOV_14)
             .await
+            .unwrap()
             .unwrap();
     }
     let store = DecisionStore::open(&dir.0).await.unwrap();
@@ -160,8 +159,9 @@ async fn evaluate_sets_the_grades_and_refuses_a_second_time() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let added = store
-        .add(&new_decision("t", "2026-11-01"), NOV_14)
+        .add("d-20261114-23", &new_decision("t", "2026-11-01"), NOV_14)
         .await
+        .unwrap()
         .unwrap();
     let done = store
         .evaluate(&added.id, "good", "poor", NOV_14 + DAY_MS)
@@ -193,16 +193,27 @@ async fn mark_due_sets_each_open_record_whose_check_date_has_come() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let past = store
-        .add(&new_decision("past", "2026-11-13"), NOV_14)
+        .add("d-20261114-24", &new_decision("past", "2026-11-13"), NOV_14)
         .await
+        .unwrap()
         .unwrap();
     let today = store
-        .add(&new_decision("today", "2026-11-14"), NOV_14)
+        .add(
+            "d-20261114-25",
+            &new_decision("today", "2026-11-14"),
+            NOV_14,
+        )
         .await
+        .unwrap()
         .unwrap();
     let later = store
-        .add(&new_decision("later", "2026-11-15"), NOV_14)
+        .add(
+            "d-20261114-26",
+            &new_decision("later", "2026-11-15"),
+            NOV_14,
+        )
         .await
+        .unwrap()
         .unwrap();
     let turned: Vec<String> = store
         .mark_due("2026-11-14")
@@ -228,8 +239,9 @@ async fn recheck_moves_the_date_and_sends_a_due_record_back_to_open() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let added = store
-        .add(&new_decision("t", "2026-11-01"), NOV_14)
+        .add("d-20261114-27", &new_decision("t", "2026-11-01"), NOV_14)
         .await
+        .unwrap()
         .unwrap();
     store.mark_due("2026-11-14").await.unwrap();
     let back = store
@@ -261,15 +273,20 @@ async fn list_gives_the_oldest_check_date_first_and_each_filter_works() {
     let dir = Temp::new();
     let store = DecisionStore::open(&dir.0).await.unwrap();
     let late = store
-        .add(&new_decision("late", "2026-12-20"), NOV_14)
+        .add("d-20261114-28", &new_decision("late", "2026-12-20"), NOV_14)
         .await
+        .unwrap()
         .unwrap();
     let mut other = new_decision("early", "2026-11-02");
     other.role = "chief".into();
     other.kind = "model".into();
     other.details_owner = "chief".into();
     other.accountable = "user".into();
-    let early = store.add(&other, NOV_14 + 1).await.unwrap();
+    let early = store
+        .add("d-20261114-12", &other, NOV_14 + 1)
+        .await
+        .unwrap()
+        .unwrap();
     let ids = |rows: Vec<DecisionRow>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
     assert_eq!(
         ids(store.list(&plain(&["open", "due"])).await.unwrap()),
