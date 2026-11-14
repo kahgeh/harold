@@ -71,7 +71,7 @@ impl DecisionToolService {
         if !DECISION_ROLES.contains(&request.role.as_str()) {
             return Err(bad("bad_role"));
         }
-        if !self.settings.kinds.iter().any(|kind| *kind == request.kind) {
+        if !self.settings.kinds.contains(&request.kind) {
             return Err(bad("unknown_kind"));
         }
         if !validate::details_owner(&request.details_owner) {

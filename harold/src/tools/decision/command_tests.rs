@@ -167,16 +167,11 @@ fn list_show_evaluate_recheck_and_link_parse() {
     }
 }
 
-fn row(
-    id: &str,
-    on: &str,
-    role: &str,
-    kind: &str,
-    who: &str,
-    title: &str,
-    check: &str,
-    status: &str,
-) -> pb::Decision {
+/// The fields of one row, in order: id, date, role, kind, accountable, title, check date, status.
+type RowFields<'a> = [&'a str; 8];
+
+fn row(fields: RowFields) -> pb::Decision {
+    let [id, on, role, kind, who, title, check, status] = fields;
     pb::Decision {
         id: id.into(),
         decided_on: on.into(),
@@ -196,7 +191,7 @@ fn row(
 #[test]
 fn the_list_text_has_the_columns_of_the_spec_and_a_count_line() {
     let rows = [
-        row(
+        row([
             "d-20261101-04",
             "2026-11-01",
             "chief",
@@ -205,8 +200,8 @@ fn the_list_text_has_the_columns_of_the_spec_and_a_count_line() {
             "Run two builds on Sonnet",
             "2026-11-14",
             "due",
-        ),
-        row(
+        ]),
+        row([
             "d-20261103-01",
             "2026-11-03",
             "pnem",
@@ -215,7 +210,7 @@ fn the_list_text_has_the_columns_of_the_spec_and_a_count_line() {
             "Split agent-jobs into hosts",
             "2026-11-13",
             "due",
-        ),
+        ]),
     ];
     let flags = ListFlags {
         due: true,
@@ -253,7 +248,7 @@ fn the_list_text_has_the_columns_of_the_spec_and_a_count_line() {
 
 #[test]
 fn json_holds_every_field() {
-    let mut one = row(
+    let mut one = row([
         "d-1",
         "2026-11-01",
         "chief",
@@ -262,7 +257,7 @@ fn json_holds_every_field() {
         "T",
         "2026-11-14",
         "due",
-    );
+    ]);
     one.process_grade = "good".into();
     one.asked_at_ms = 5;
     let text = list_text(
@@ -300,7 +295,7 @@ fn json_holds_every_field() {
 
 #[test]
 fn the_one_line_answers_and_the_show_text() {
-    let one = row(
+    let one = row([
         "d-20261114-02",
         "2026-11-14",
         "pnem",
@@ -309,7 +304,7 @@ fn the_one_line_answers_and_the_show_text() {
         "Fold",
         "2026-12-01",
         "open",
-    );
+    ]);
     assert_eq!(added_line(&one), "added d-20261114-02 (check 2026-12-01)");
     let mut graded = one.clone();
     graded.process_grade = "good".into();

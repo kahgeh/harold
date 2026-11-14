@@ -9,6 +9,9 @@ use crate::tools::decision::test_support::{CHIEF, FakeChief, FakeDetails, Temp};
 const NOW: i64 = 1_794_625_800_000;
 const DAY_MS: i64 = 86_400_000;
 
+/// A change that a test makes to a valid add request.
+type Change = Box<dyn Fn(&mut pb::AddRequest)>;
+
 struct Rig {
     svc: DecisionToolService,
     details: Arc<FakeDetails>,
@@ -222,7 +225,7 @@ async fn reads_need_no_pane() {
 #[tokio::test]
 async fn each_bad_field_refuses_with_its_reason_and_writes_nothing() {
     let rig = rig().await;
-    let cases: Vec<(&str, Box<dyn Fn(&mut pb::AddRequest)>)> = vec![
+    let cases: Vec<(&str, Change)> = vec![
         ("unknown_kind", Box::new(|r| r.kind = "weather".into())),
         (
             "bad_details_owner",
@@ -424,7 +427,7 @@ async fn list_defaults_and_filters() {
     let list = |request: pb::ListRequest| rig.svc.list(Request::new(request));
     assert_eq!(
         ids(list(pb::ListRequest::default()).await.unwrap()),
-        [b.id.clone()],
+        std::slice::from_ref(&b.id),
         "default is open and due"
     );
     assert_eq!(
@@ -444,7 +447,7 @@ async fn list_defaults_and_filters() {
         })
         .await
         .unwrap()),
-        [b.id.clone()]
+        std::slice::from_ref(&b.id)
     );
     assert_eq!(
         ids(list(pb::ListRequest {
@@ -454,7 +457,7 @@ async fn list_defaults_and_filters() {
         })
         .await
         .unwrap()),
-        [a.id.clone()]
+        std::slice::from_ref(&a.id)
     );
     assert_eq!(
         ids(list(pb::ListRequest {
@@ -464,7 +467,7 @@ async fn list_defaults_and_filters() {
         })
         .await
         .unwrap()),
-        [b.id.clone()]
+        std::slice::from_ref(&b.id)
     );
     assert_eq!(
         ids(list(pb::ListRequest {
@@ -474,7 +477,7 @@ async fn list_defaults_and_filters() {
         })
         .await
         .unwrap()),
-        [a.id.clone()]
+        std::slice::from_ref(&a.id)
     );
     assert!(
         ids(list(pb::ListRequest {
