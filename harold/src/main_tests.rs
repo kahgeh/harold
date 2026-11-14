@@ -364,6 +364,103 @@ async fn a_claude_turn_end_without_a_session_id_warns_once_for_its_pane() {
     task.abort();
 }
 
+/// A snapshot with one Rex block, `block_id`, whose observation names `target`.
+fn rex_block_snapshot(block_id: &str, target: &str) -> AgentSnapshot {
+    let mut snapshot = populated_snapshot(1, None);
+    snapshot.panes[0].pane.incarnation.pane_id = block_id.into();
+    snapshot.panes[0].pane.tmux_target = target.into();
+    snapshot
+}
+
+#[test]
+fn a_rex_block_with_label_unknown_gets_the_label_of_its_observation() {
+    let snapshot = rex_block_snapshot("block:chief1", "chief:0.0");
+    let warned = std::sync::Mutex::default();
+
+    let label = super::rex_pane_label(&snapshot.panes, "block:chief1", "unknown", &warned);
+
+    assert_eq!(label, "chief:0.0");
+    assert!(warned.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_label_that_is_not_unknown_or_a_pane_that_is_not_rex_is_kept() {
+    let snapshot = rex_block_snapshot("block:chief1", "chief:0.0");
+    let warned = std::sync::Mutex::default();
+
+    for (pane_id, label) in [("block:chief1", "own:1.1"), ("%8", "unknown")] {
+        let label = super::rex_pane_label(&snapshot.panes, pane_id, label, &warned);
+        assert!(["own:1.1", "unknown"].contains(&label.as_str()), "{label}");
+    }
+    assert!(warned.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_unknown_rex_block_keeps_unknown_and_warns_once_for_each_block() {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = WarnLogs::default();
+    let writer = logs.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    );
+    let snapshot = rex_block_snapshot("block:chief1", "chief:0.0");
+    // This test owns the set, so no other test changes what it holds.
+    let warned = std::sync::Mutex::default();
+    let warning = "pane label unknown";
+
+    for _ in 0..2 {
+        let label = super::rex_pane_label(&snapshot.panes, "block:gone1", "unknown", &warned);
+        assert_eq!(label, "unknown");
+    }
+    assert_eq!(logs.count(warning), 1, "once for the block");
+
+    super::rex_pane_label(&snapshot.panes, "block:gone2", "unknown", &warned);
+    assert_eq!(logs.count(warning), 2, "again for another block");
+}
+
+#[tokio::test]
+async fn a_rex_turn_end_stores_the_label_that_a_reply_tag_matches() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(
+        Arc::clone(&store),
+        rex_block_snapshot("block:chief1", "chief:0.0"),
+    );
+    let request = TurnCompleteRequest {
+        pane_id: "block:chief1".into(),
+        pane_label: "unknown".into(),
+        assistant_message: "done".into(),
+        ..Default::default()
+    };
+
+    // `turn_complete` drops a Rex id when the test settings use tmux, so call `record`.
+    service.turn_path().record(request, None).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    let event: store::TurnCompleted = serde_json::from_value(events[0].payload.clone()).unwrap();
+    assert_eq!(event.pane_label, "chief:0.0");
+    let text = crate::inbound::ownership::agent_message_text("PasM1Mac", &event.pane_label, "done");
+    assert!(text.starts_with("[PasM1Mac/chief:0.0] "), "{text}");
+    let panes = [crate::inbound::AgentAddress::TmuxPane {
+        pane_id: "block:chief1".into(),
+        label: event.pane_label.clone(),
+    }];
+    let (pane, _, resolved_by) =
+        crate::inbound::resolve_pane(Some("chief:0.0"), "go", &panes).unwrap();
+    assert_eq!(pane.label(), "chief:0.0");
+    assert_eq!(resolved_by, crate::telemetry::ResolvedBy::ExactTag);
+    task.abort();
+}
+
 #[tokio::test]
 async fn turn_complete_accepts_only_after_appending_every_request_field() {
     let directory = TestDirectory::new();

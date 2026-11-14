@@ -404,9 +404,18 @@ impl TurnPath {
                 req.session_id.clone(),
                 req.transcript_path.clone(),
             );
+            static WARNED_BLOCKS: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashSet<String>>,
+            > = std::sync::OnceLock::new();
+            let pane_label = rex_pane_label(
+                &self.snapshots.current().panes,
+                &req.pane_id,
+                &req.pane_label,
+                WARNED_BLOCKS.get_or_init(Default::default),
+            );
             let event = store::TurnCompleted {
                 pane_id: req.pane_id,
-                pane_label: req.pane_label,
+                pane_label,
                 last_user_prompt: req.last_user_prompt,
                 assistant_message: req.assistant_message,
                 main_context: req.main_context,
@@ -1579,6 +1588,35 @@ fn map_host_agent(row: agent::rex_host_runner::HostAgentRow) -> Option<AgentPane
 fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+/// The label of the pane for a turn end. The hook sends `unknown` for a Rex block, so
+/// Harold takes the label from the agent snapshot: the same label that a reply's tag is
+/// matched against. A block that the snapshot lacks keeps `unknown`, and Harold warns
+/// once for each block id in `warned`.
+fn rex_pane_label(
+    panes: &[agent::domain::AgentPaneProjection],
+    pane_id: &str,
+    label: &str,
+    warned: &std::sync::Mutex<std::collections::HashSet<String>>,
+) -> String {
+    if label != "unknown" || !pane_id.starts_with(agent::rex::BLOCK_PREFIX) {
+        return label.to_string();
+    }
+    let observed = panes
+        .iter()
+        .find(|pane| pane.pane.incarnation.pane_id == pane_id);
+    if let Some(pane) = observed {
+        return inbound::tmux::pane_label(&pane.pane);
+    }
+    let first_time = warned
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pane_id.to_string());
+    if first_time {
+        warn!(pane_id = %pane_id_for_log(pane_id), "pane label unknown");
+    }
+    label.to_string()
 }
 
 fn pane_id_for_log(value: &str) -> &str {
