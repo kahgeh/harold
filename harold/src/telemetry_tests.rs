@@ -2158,6 +2158,8 @@ const METRICS: &[&str] = &[
     "harold.turns",
     "harold.turn.tokens",
     "harold.turn.tokens.by_spec",
+    "harold.workflow.tokens",
+    "harold.workflow.cost",
     "harold.turn.duration",
     "pod.specs",
     "pod.spec.words",

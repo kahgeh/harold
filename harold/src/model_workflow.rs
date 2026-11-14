@@ -26,9 +26,11 @@ pub(crate) struct CallSite {
     pub workflow: &'static str,
     /// The `workflow.step` attribute.
     pub step: &'static str,
-    /// The file that runs the model.
+    /// The file that runs the model. Only the call-site test reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub model_file: &'static str,
-    /// The file that calls `record` for this model workflow.
+    /// The file that calls `record` for this model workflow. Only the call-site test reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub record_file: &'static str,
 }
 
