@@ -48,12 +48,21 @@ impl Checker {
             u8::from(moment.month()),
             moment.day()
         );
-        let turned = self.store.mark_due(&today).await.unwrap_or_default();
+        let turned = match self.store.mark_due(&today).await {
+            Ok(turned) => turned,
+            Err(_) => {
+                obs::due_check_failed();
+                Vec::new()
+            }
+        };
         for row in &turned {
             obs::due(row, (now - row.added_at_ms).max(0) / DAY_MS);
         }
-        if let Ok((open, due)) = self.store.counts().await {
-            crate::telemetry::set_decisions_open(&self.organisation, open, due);
+        match self.store.counts().await {
+            Ok((open, due)) => {
+                crate::telemetry::set_decisions_open(&self.organisation, open, due);
+            }
+            Err(_) => obs::due_check_failed(),
         }
         turned
     }

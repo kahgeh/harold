@@ -9,7 +9,9 @@ use tonic::{Request, Response, Status};
 
 use super::details::DetailsPort;
 use super::obs;
-use super::store::{DecisionRow, DecisionStore, Filter, NewDecision, Refusal, StoreError};
+use super::store::{
+    DecisionRow, DecisionStore, Filter, NewDecision, Refusal, Status as RecordStatus, StoreError,
+};
 use super::validate;
 use crate::settings::DecisionSettings;
 use crate::telemetry::DECISION_ROLES;
@@ -273,6 +275,20 @@ impl DecisionService for DecisionToolService {
         {
             return Err(refuse(Status::invalid_argument, "bad_grade"));
         }
+        let stored = self
+            .store
+            .get(&request.id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(unknown)?;
+        if stored.status == RecordStatus::Evaluated {
+            return Err(record_refusal(Refusal::AlreadyEvaluated));
+        }
+        // The details owner writes the entry before the evaluation too: read it again.
+        self.details
+            .check(&stored.details, &stored.details_owner)
+            .await
+            .map_err(|error| refuse(Status::invalid_argument, error.reason))?;
         let now = (self.now_ms)();
         let row = self
             .store

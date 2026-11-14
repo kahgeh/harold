@@ -84,7 +84,7 @@ Every place is optional. A Harold with no `knowledge.vault` still takes `pod:` d
 
 ## The refusals
 
-`add` and `evaluate` give one reason in the message of the refusal. `add` reads the details file and checks that the heading `## <id>:` exists.
+`add` and `evaluate` give one reason in the message of the refusal. Both read the details file and check that the heading `## <id>:` exists. `evaluate` reads the details of the stored record, so the entry must still be there. It refuses an evaluated record with `already_evaluated` before it reads the file.
 
 | Reason | When |
 | --- | --- |

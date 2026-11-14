@@ -619,3 +619,48 @@ async fn the_log_lines_carry_no_title_and_the_refusal_carries_its_reason() {
         "no title in a log line: {text}"
     );
 }
+
+#[tokio::test]
+async fn evaluate_reads_the_details_again_and_a_refusal_changes_nothing() {
+    let rig = rig().await;
+    let row = added(&rig, "d-20261114-01").await;
+    rig.details.asked.lock().unwrap().clear();
+    let evaluate = || {
+        rig.svc.evaluate(Request::new(pb::EvaluateRequest {
+            pane_id: CHIEF.into(),
+            id: row.id.clone(),
+            process_grade: "good".into(),
+            outcome_grade: "good".into(),
+        }))
+    };
+    for reason in [
+        "details_missing",
+        "details_unreadable",
+        "no_vault",
+        "details_owner_mismatch",
+    ] {
+        *rig.details.refuse_with.lock().unwrap() = Some(reason);
+        assert_eq!(refusal(evaluate().await).await, invalid(reason), "{reason}");
+    }
+    let stored = rig
+        .svc
+        .show(Request::new(pb::ShowRequest { id: row.id.clone() }))
+        .await
+        .unwrap();
+    assert_eq!(stored.into_inner().decision.unwrap().status, "open");
+    *rig.details.refuse_with.lock().unwrap() = None;
+    rig.details.asked.lock().unwrap().clear();
+    assert!(evaluate().await.is_ok());
+    let asked = rig.details.asked.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [(row.details.clone(), "pnem:harold".to_owned())],
+        "the check used the stored details and owner"
+    );
+    // An evaluated record is refused as evaluated, before any details read.
+    *rig.details.refuse_with.lock().unwrap() = Some("details_missing");
+    assert_eq!(
+        refusal(evaluate().await).await,
+        (tonic::Code::FailedPrecondition, "already_evaluated".into())
+    );
+}

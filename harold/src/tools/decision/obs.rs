@@ -38,3 +38,8 @@ pub(super) fn due(row: &DecisionRow, days_open: i64) {
 pub(super) fn refused(reason: &str) {
     warn!(reason = %reason, "decision refused");
 }
+
+/// The due check could not read or write the store. Fixed words only, no error text.
+pub(super) fn due_check_failed() {
+    warn!(reason = "store_failed", "decision due check failed");
+}
