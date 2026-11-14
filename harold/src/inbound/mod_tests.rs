@@ -587,13 +587,13 @@ fn quiet_typing_into_a_host_pane_takes_no_lock() {
 }
 
 fn known_macs() -> Vec<String> {
-    vec!["PasM4MBP".to_string(), "PasM1Mac".to_string()]
+    vec!["laptop-mac".to_string(), "studio-mac".to_string()]
 }
 
-/// The logged line `reply owner decided` for a reply read on PasM4MBP.
+/// The logged line `reply owner decided` for a reply read on laptop-mac.
 fn owner_line(text: &str, latest: Option<&str>) -> String {
     let logs = CapturedLogs::start();
-    let _ = decide_and_route(text, "PasM4MBP", &known_macs(), latest, |_, _| {
+    let _ = decide_and_route(text, "laptop-mac", &known_macs(), latest, |_, _| {
         Ok(typed_report())
     });
     logs.text()
@@ -605,11 +605,11 @@ fn owner_line(text: &str, latest: Option<&str>) -> String {
 
 #[test]
 fn owner_line_for_a_tagged_reply() {
-    let line = owner_line("[PasM1Mac/chief:0.0] go", Some("PasM4MBP"));
+    let line = owner_line("[studio-mac/chief:0.0] go", Some("laptop-mac"));
     for part in [
         "owned=false",
         "owner_from=\"tag\"",
-        "latest_notifier=\"PasM4MBP\"",
+        "latest_notifier=\"laptop-mac\"",
     ] {
         assert!(line.contains(part), "{part}: {line}");
     }
@@ -618,11 +618,11 @@ fn owner_line_for_a_tagged_reply() {
 
 #[test]
 fn owner_line_for_an_untagged_reply_with_a_latest_notifier() {
-    let line = owner_line("go", Some("PasM1Mac"));
+    let line = owner_line("go", Some("studio-mac"));
     for part in [
         "owned=false",
         "owner_from=\"latest_marker\"",
-        "latest_notifier=\"PasM1Mac\"",
+        "latest_notifier=\"studio-mac\"",
     ] {
         assert!(line.contains(part), "{part}: {line}");
     }
@@ -641,14 +641,14 @@ fn owner_line_for_an_untagged_reply_with_no_latest_notifier() {
 fn no_log_line_holds_the_reply_text() {
     let sentinel = "zq-sentinel-reply";
     let logs = CapturedLogs::start();
-    let _ = decide_and_route(sentinel, "PasM4MBP", &known_macs(), None, |_, _| {
+    let _ = decide_and_route(sentinel, "laptop-mac", &known_macs(), None, |_, _| {
         Ok(typed_report())
     });
     let _ = decide_and_route(
         sentinel,
-        "PasM4MBP",
+        "laptop-mac",
         &known_macs(),
-        Some("PasM1Mac"),
+        Some("studio-mac"),
         |_, _| Ok(typed_report()),
     );
     let panes = [tmux("%1", "one"), tmux("%2", "two")];

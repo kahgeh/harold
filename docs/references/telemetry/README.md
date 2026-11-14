@@ -882,6 +882,8 @@ The watch tool logs the pause and resume of a watch and the life of each reminde
 | `watch started` (`info`) | `watch`, `folder`, `skill`, `ends_at`, `every_minutes`, `every_run`, `how`, `model`. `ends_at` is a local time, or the word `none` for an open-ended watch. `ends_at` is not on `ALLOWED_FIELDS`, so it does not leave Harold |
 | `watch paused` (`info`) | `watch`, `how` (`cli`, `control_tower`, `timed` or `budget_day`), `paused_until` (the local time the pause ends; absent for a pause with no end) |
 | `watch resumed` (`info`) | `watch`, `how` (the same values: who ended the pause, or `timed` when the time ran out, or `budget_day` when the next day started) |
+| `reply owner decided` (`info`) | `owned`, `owner_from`, `latest_notifier`, `harold.version`. One for each reply that Harold reads. It holds no reply text. The query `reply-owner.sql` reads it |
+| `pane label unknown` (`warn`) | `pane_id` (a Rex block id). One for each block id until Harold restarts: the agent snapshot has no row for the block, so its label stays `unknown`. The query `reply-owner.sql` counts it |
 | `reminder set` (`info`) | `reminder`. The due time, `due_at`, is not on `ALLOWED_FIELDS`, so it does not leave Harold |
 | `reminder typed` (`info`) | `reminder`, `late_s` (seconds from the due time to the typing; a busy pane holds a reminder), `schedule` (`in`, `at` or `cron`), `missed` (always 0: a reminder is one shot) |
 | `reminder ended` (`info`) | `reminder`, `reason` (`dropped`: not typed within 120 minutes of its time; `cancelled`: `watch stop` removed it), `schedule` (`in`, `at` or `cron`) |

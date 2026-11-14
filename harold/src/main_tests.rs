@@ -448,8 +448,9 @@ async fn a_rex_turn_end_stores_the_label_that_a_reply_tag_matches() {
         .unwrap();
     let event: store::TurnCompleted = serde_json::from_value(events[0].payload.clone()).unwrap();
     assert_eq!(event.pane_label, "chief:0.0");
-    let text = crate::inbound::ownership::agent_message_text("PasM1Mac", &event.pane_label, "done");
-    assert!(text.starts_with("[PasM1Mac/chief:0.0] "), "{text}");
+    let text =
+        crate::inbound::ownership::agent_message_text("studio-mac", &event.pane_label, "done");
+    assert!(text.starts_with("[studio-mac/chief:0.0] "), "{text}");
     let panes = [crate::inbound::AgentAddress::TmuxPane {
         pane_id: "block:chief1".into(),
         label: event.pane_label.clone(),

@@ -96,10 +96,13 @@ Every message Harold sends to the away channel starts with `🤖`, so the listen
 | Message | Form |
 |---|---|
 | Phone notification | `🤖 [<machine_name>/<pane_label>] <body>` |
+| Phone notification the app could not push | `🤖 (app unreachable) [<machine_name>/<pane_label>] <body>` |
 | Question follow-up | `🤖 <question>`, unchanged |
 | Agent message | `🤖 [<machine_name>/<pane_label>] <text>` |
 | Confirmation | `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` |
 | Error reply | `🤖 [<machine_name>] <detail>` |
+
+The label of a Rex pane is the `tmux_target` of its agent observation. The turn hook sends the label `unknown` for a Rex block, so Harold replaces it with the label from its agent snapshot before it stores the turn end. A block that the snapshot lacks keeps `unknown`, and Harold logs `pane label unknown` (`warn`) once for each block id until it restarts. A reply that starts with the tag of a Rex pane reaches that pane by an exact match.
 
 A tag written at the start of a reply is one of three forms. The text before the first `/` is the machine part.
 
@@ -120,8 +123,10 @@ Each Harold applies this rule to every inbound reply before any pane discovery, 
 1. The tag has the form `machine/pane` or `machine`. If `machine` is this Mac's `machine_name`, this Mac owns the reply and routes it with the pane part. If it names another Mac, this Mac drops the reply.
 2. The tag matches no known machine name (for example `[alir-app]`). Ownership follows rule 3, and the owning Mac uses the tag to pick the pane.
 3. The reply has no tag. This Mac owns it only if it is the latest notifier. Otherwise it drops it.
-4. A `🤖 [name/…]` message counts as a phone notification only when `name` is a known machine name. No other `🤖` text that starts with a bracket is taken for a Mac's phone notification: not a question that begins `[1/2]`, and not a phone notification in the earlier format such as `🤖 [harold:0.1] …`. A tag for a Mac that has not notified yet is still recognised.
+4. A `🤖 [name/…]` message, or a `🤖 (app unreachable) [name/…]` message, counts as a phone notification only when `name` is a known machine name. No other `🤖` text that starts with a bracket is taken for a Mac's phone notification: not a question that begins `[1/2]`, and not a phone notification in the earlier format such as `🤖 [harold:0.1] …`. A tag for a Mac that has not notified yet is still recognised.
 5. No phone notification is found in the recent conversation. Every Mac owns the reply.
+
+Harold logs each decision as the line `reply owner decided` (`info`) with `owned`, `owner_from` (`tag`, `latest_marker` or `none`), `latest_notifier` and `harold.version`. The line holds no reply text. The query `reply-owner.sql` lists the replies that a Mac took while another Mac was the latest notifier.
 
 Within the owning Mac, routing is unchanged: tag match, semantic resolution, `last_away_notification_source_agent`, `my-agent` fallback.
 
@@ -152,6 +157,7 @@ Harold refuses to start with an error that names the setting when any of these h
 - **Clocks differ between Macs.** The latest notifier follows the send time each Mac stamps on its phone notification. If two Macs notify within their clock difference, the one stamped later is the latest notifier on both Macs, even if it was sent first.
 - **Messages in iCloud does not sync a Mac's sent phone notifications to the other Mac.** Each Mac sees only its own phone notifications and owns every untagged reply.
 - **Two Macs have the same `machine_name`.** This is a configuration error that Harold does not detect.
+- **An old Harold runs on one Mac, and the other Mac runs the new one.** The new `parse_marker` reads the `(app unreachable)` messages that an old Harold sends. An old Harold does not read them, so it can take a reply that the other Mac owns. Upgrade both Macs.
 - **An old Harold runs on one Mac.** Its phone notifications carry no machine name, so it never becomes the latest notifier. Upgrade all Macs together.
 
 ## Delivery

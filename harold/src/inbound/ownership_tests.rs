@@ -67,22 +67,22 @@ fn other_messages_are_not_markers() {
 #[test]
 fn app_unreachable_notification_names_the_machine() {
     assert_eq!(
-        parse_marker("🤖 (app unreachable) [PasM1Mac/chief:0.0] hello"),
-        notification("PasM1Mac")
+        parse_marker("🤖 (app unreachable) [studio-mac/chief:0.0] hello"),
+        notification("studio-mac")
     );
     // Text that the old Harold sent: the pane part is `unknown`.
     assert_eq!(
-        parse_marker("🤖 (app unreachable) [PasM1Mac/unknown] hello"),
-        notification("PasM1Mac")
+        parse_marker("🤖 (app unreachable) [studio-mac/unknown] hello"),
+        notification("studio-mac")
     );
 }
 
 #[test]
 fn only_one_app_unreachable_and_only_after_the_marker_is_skipped() {
     for text in [
-        "(app unreachable) [PasM1Mac/chief:0.0] hi",
-        "🤖 (other) [PasM1Mac/x] hi",
-        "🤖 (app unreachable) (app unreachable) [PasM1Mac/x] hi",
+        "(app unreachable) [studio-mac/chief:0.0] hi",
+        "🤖 (other) [studio-mac/x] hi",
+        "🤖 (app unreachable) (app unreachable) [studio-mac/x] hi",
     ] {
         assert_eq!(parse_marker(text), None, "{text:?}");
     }
@@ -90,19 +90,19 @@ fn only_one_app_unreachable_and_only_after_the_marker_is_skipped() {
 
 #[test]
 fn app_unreachable_message_from_the_other_mac_moves_the_reply_owner() {
-    let mut record = NotifierRecord::for_machines(&listed(&["PasM4MBP", "PasM1Mac"]));
-    record.record_marker("🤖 [PasM4MBP/chief:1.1] done", 1_920);
-    record.record_marker("🤖 (app unreachable) [PasM1Mac/chief:0.0] hello", 1_930);
-    assert_eq!(record.latest_notifier(), Some("PasM1Mac"));
+    let mut record = NotifierRecord::for_machines(&listed(&["laptop-mac", "studio-mac"]));
+    record.record_marker("🤖 [laptop-mac/chief:1.1] done", 1_920);
+    record.record_marker("🤖 (app unreachable) [studio-mac/chief:0.0] hello", 1_930);
+    assert_eq!(record.latest_notifier(), Some("studio-mac"));
 
     let reply = "yes";
     let known = record.known_machine_names();
     assert_eq!(
-        decide_ownership(reply, "PasM4MBP", known, record.latest_notifier()),
-        owned_by("PasM1Mac")
+        decide_ownership(reply, "laptop-mac", known, record.latest_notifier()),
+        owned_by("studio-mac")
     );
     assert_eq!(
-        decide_ownership(reply, "PasM1Mac", known, record.latest_notifier()),
+        decide_ownership(reply, "studio-mac", known, record.latest_notifier()),
         owned(None, "yes")
     );
 }
