@@ -1014,6 +1014,16 @@ pub(crate) struct AgentTotal {
     pub cpu: f64,
     /// The resident memory in bytes.
     pub memory: u64,
+    /// The processes of the agent, the ones with one name together.
+    pub processes: Vec<ProcUse>,
+}
+
+/// The use of the processes that have one name.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcUse {
+    pub name: String,
+    pub cpu: f64,
+    pub memory: u64,
 }
 
 /// What one walk of the process table did, for the debug line.
@@ -1082,13 +1092,31 @@ impl AgentUse {
             if owner.role != NONE {
                 walked += 1;
             }
-            match totals.iter_mut().find(|total| total.owner == *owner) {
-                Some(total) => {
-                    total.cpu += process.cpu;
-                    total.memory += process.memory;
+            let total = match totals.iter().position(|total| total.owner == *owner) {
+                Some(index) => &mut totals[index],
+                None => {
+                    totals.push(AgentTotal {
+                        owner: owner.clone(),
+                        cpu: 0.0,
+                        memory: 0,
+                        processes: Vec::new(),
+                    });
+                    totals.last_mut().expect("just pushed")
                 }
-                None => totals.push(AgentTotal {
-                    owner: owner.clone(),
+            };
+            total.cpu += process.cpu;
+            total.memory += process.memory;
+            match total
+                .processes
+                .iter_mut()
+                .find(|used| used.name == process.name)
+            {
+                Some(used) => {
+                    used.cpu += process.cpu;
+                    used.memory += process.memory;
+                }
+                None => total.processes.push(ProcUse {
+                    name: process.name.clone(),
                     cpu: process.cpu,
                     memory: process.memory,
                 }),
@@ -1174,6 +1202,84 @@ impl ProcessSource for SystemTable {
     }
 }
 
+/// The most agents that the alert line names, and the most processes of each.
+const TOP_AGENTS: usize = 3;
+const TOP_AGENT_PROCESSES: usize = 2;
+/// The most characters of a process name in the alert line.
+const NAME_CUT: usize = 40;
+
+/// The name of an agent in the alert line.
+fn agent_text(owner: &Owner) -> String {
+    match owner.role {
+        NONE => "no agent".to_owned(),
+        CHIEF => CHIEF.to_owned(),
+        OTHER => "other agent".to_owned(),
+        role => format!("{} {}", role.replace('_', " "), owner.label),
+    }
+}
+
+/// The `top_agents` text of the alert line for `metric`: the 3 agents with the highest mean
+/// over the window, each with its 2 processes with the highest mean, as
+/// `pnem harold 4% (claude 4%) · no agent 12% (launchd 10%)`. Memory and swap rank by memory.
+/// A mean is the sum over the readings of the window divided by their number, so a reading
+/// where an agent is absent counts as 0. Also returns whether an agent that is not `none`
+/// is named.
+fn top_agents(
+    window: &VecDeque<(OffsetDateTime, Vec<AgentTotal>)>,
+    metric: Metric,
+    total_memory: u64,
+) -> (String, bool) {
+    if window.is_empty() {
+        return (String::new(), false);
+    }
+    let readings = window.len() as f64;
+    let value = |cpu: f64, memory: u64| match metric {
+        Metric::Cpu => cpu,
+        Metric::Memory | Metric::Swap => share(memory, total_memory),
+    };
+    let mut agents: HashMap<&Owner, (f64, HashMap<&str, f64>)> = HashMap::new();
+    for (_, totals) in window {
+        for total in totals {
+            let (sum, processes) = agents.entry(&total.owner).or_default();
+            *sum += value(total.cpu, total.memory);
+            for process in &total.processes {
+                *processes.entry(process.name.as_str()).or_default() +=
+                    value(process.cpu, process.memory);
+            }
+        }
+    }
+    let ranked = |mut items: Vec<(String, f64, bool)>| {
+        items.retain(|(_, sum, _)| *sum > 0.0);
+        items.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        items
+    };
+    let by_mean = ranked(
+        agents
+            .iter()
+            .map(|(owner, (sum, _))| (agent_text(owner), *sum, owner.role != NONE))
+            .collect(),
+    );
+    let mut named = false;
+    let mut parts = Vec::new();
+    for (text, sum, is_agent) in by_mean.into_iter().take(TOP_AGENTS) {
+        named |= is_agent;
+        let names = agents
+            .iter()
+            .filter(|(owner, _)| agent_text(owner) == text)
+            .flat_map(|(_, (_, processes))| processes.iter())
+            .map(|(name, sum)| (name.chars().take(NAME_CUT).collect::<String>(), *sum, false))
+            .collect();
+        let names = ranked(names)
+            .into_iter()
+            .take(TOP_AGENT_PROCESSES)
+            .map(|(name, sum, _)| format!("{name} {:.0}%", sum / readings * 100.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("{text} {:.0}% ({names})", sum / readings * 100.0));
+    }
+    (parts.join(" · "), named)
+}
+
 // ---------------------------------------------------------------------------
 // The poll
 // ---------------------------------------------------------------------------
@@ -1198,6 +1304,8 @@ pub(crate) struct MachineStats<R: Reader> {
     running: Option<Running>,
     /// The readings of the last 15 minutes.
     window: VecDeque<(OffsetDateTime, [f64; 3])>,
+    /// The use of each agent in the same readings.
+    agent_window: VecDeque<(OffsetDateTime, Vec<AgentTotal>)>,
     spells: [Option<Spell>; 3],
     snapshot: Arc<Mutex<Snapshot>>,
     /// The reason of the reading failure that has been logged since a reading last worked.
@@ -1221,6 +1329,7 @@ impl<R: Reader> MachineStats<R> {
             hourly,
             running: None,
             window: VecDeque::new(),
+            agent_window: VecDeque::new(),
             spells: [None; 3],
             snapshot,
             failing: None,
@@ -1333,6 +1442,15 @@ impl<R: Reader> MachineStats<R> {
     }
 
     async fn apply(&mut self, now: OffsetDateTime, reading: Reading) {
+        let agents = self.read_agents().await;
+        self.agent_window.push_back((now, agents.clone()));
+        while self
+            .agent_window
+            .front()
+            .is_some_and(|(at, _)| now - *at > MEAN_WINDOW)
+        {
+            self.agent_window.pop_front();
+        }
         let hour = hour_number(now);
         let values = Metric::ALL.map(|metric| reading.value(metric));
         let running = self.running.get_or_insert(Running {
@@ -1384,7 +1502,6 @@ impl<R: Reader> MachineStats<R> {
                 _ => {}
             }
         }
-        let agents = self.read_agents().await;
         {
             let mut snapshot = lock(&self.snapshot);
             snapshot.agents = agents;
@@ -1398,12 +1515,18 @@ impl<R: Reader> MachineStats<R> {
                 tokio::task::spawn_blocking(move || lock(&reader).top_processes(metric))
                     .await
                     .unwrap_or_default();
+            let total_memory = reading.memory_used.saturating_add(reading.memory_free);
+            let (top_agents, named) = top_agents(&self.agent_window, metric, total_memory);
+            if named {
+                telemetry::feature_used("agent-resource-use");
+            }
             warn!(
                 metric = metric.as_str(),
                 value,
                 normal_top = range.top,
                 days = range.days,
                 top_processes = %top_processes,
+                top_agents = %top_agents,
                 "machine use past normal"
             );
         }

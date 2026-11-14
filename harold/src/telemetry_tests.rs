@@ -8903,3 +8903,19 @@ fn the_restart_check_fields_and_feature_are_known() {
     }
     assert!(HAROLD_FEATURES.contains(&"agent-restart"));
 }
+
+#[test]
+fn the_agent_use_fields_are_allowed_and_the_feature_is_listed() {
+    for field in [
+        "top_agents",
+        "processes",
+        "cached",
+        "walked",
+        "environ_reads",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    assert!(HAROLD_FEATURES.contains(&"agent-resource-use"));
+    // `agent.label` is a metric attribute only: no log field carries it.
+    assert!(!ALLOWED_FIELDS.contains(&"agent.label"));
+}

@@ -1412,7 +1412,7 @@ fn a_build_worker_has_one_label_from_the_pane_file_and_from_the_fallback() {
 
 /// A fake process source.
 struct FakeSource {
-    table: Vec<ProcInfo>,
+    table: Arc<Mutex<Vec<ProcInfo>>>,
     env: FakeEnv,
 }
 
@@ -1424,7 +1424,7 @@ impl ProcessEnv for FakeSource {
 
 impl ProcessSource for FakeSource {
     fn processes(&mut self) -> Vec<ProcInfo> {
-        self.table.clone()
+        lock(&self.table).clone()
     }
 }
 
@@ -1438,13 +1438,21 @@ fn used(pid: u32, parent: u32, start: u64, name: &str, cpu: f64, memory: u64) ->
 
 /// The agent use of a chief with one child, a PnEM with one child and a `none` process.
 fn fake_agent_use(roles: Arc<PodRoles>) -> AgentUse {
-    let table = vec![
+    shared_agent_use(roles, Arc::new(Mutex::new(fake_table())))
+}
+
+fn fake_table() -> Vec<ProcInfo> {
+    vec![
         used(1, 0, 1, "launchd", 0.2, 10),
         used(100, 1, 1000, "agent", 0.1, 1000),
         used(101, 100, 1001, "cargo", 0.05, 500),
         used(200, 1, 2000, "agent", 0.02, 200),
         used(201, 200, 2001, "rustc", 0.03, 300),
-    ];
+    ]
+}
+
+/// The same agents, with a table that a test changes between polls.
+fn shared_agent_use(roles: Arc<PodRoles>, table: Arc<Mutex<Vec<ProcInfo>>>) -> AgentUse {
     let agents = vec![agent(100, 1000), agent(200, 2000)];
     AgentUse::new(
         Box::new(FakeSource {
@@ -1524,4 +1532,240 @@ fn the_walk_counts_processes_cached_environments_walked_and_environment_reads() 
         "read once for each pid and start time"
     );
     assert_eq!(second.cached, 1);
+}
+
+// --- the line `machine use past normal` names the top agents ---
+
+fn proc_use(name: &str, cpu: f64, memory: u64) -> ProcUse {
+    ProcUse {
+        name: name.to_owned(),
+        cpu,
+        memory,
+    }
+}
+
+fn total_of(
+    role: &'static str,
+    label: &str,
+    cpu: f64,
+    memory: u64,
+    procs: Vec<ProcUse>,
+) -> AgentTotal {
+    AgentTotal {
+        owner: Owner {
+            role,
+            label: label.to_owned(),
+            product: NONE.to_owned(),
+            spec: NONE.to_owned(),
+        },
+        cpu,
+        memory,
+        processes: procs,
+    }
+}
+
+type AgentWindow = VecDeque<(OffsetDateTime, Vec<AgentTotal>)>;
+
+fn window_of(readings: Vec<Vec<AgentTotal>>) -> AgentWindow {
+    let start = at((2026, 10, 25), (10, 0), 11);
+    readings
+        .into_iter()
+        .enumerate()
+        .map(|(minute, totals)| (start + time::Duration::minutes(minute as i64), totals))
+        .collect()
+}
+
+#[test]
+fn top_agents_ranks_by_the_mean_over_the_window_and_not_by_the_last_reading() {
+    // `steady` uses 30% for 14 readings and then 0. `burst` uses 0 and then 90% once.
+    let mut readings = Vec::new();
+    for reading in 0..15 {
+        let (steady, burst) = if reading < 14 {
+            (0.30, 0.0)
+        } else {
+            (0.0, 0.90)
+        };
+        readings.push(vec![
+            total_of(
+                "build_worker",
+                "steady",
+                steady,
+                0,
+                vec![proc_use("rustc", steady, 0)],
+            ),
+            total_of(
+                "pnem",
+                "burst",
+                burst,
+                0,
+                vec![proc_use("claude", burst, 0)],
+            ),
+        ]);
+    }
+    let (line, _) = top_agents(&window_of(readings), Metric::Cpu, 1000);
+    assert_eq!(
+        line,
+        "build worker steady 28% (rustc 28%) · pnem burst 6% (claude 6%)"
+    );
+}
+
+#[test]
+fn top_agents_keeps_3_agents_with_2_processes_each_and_names_none_no_agent() {
+    let procs = |a: f64| {
+        vec![
+            proc_use("a", a, 0),
+            proc_use("b", a / 2.0, 0),
+            proc_use("c", a / 4.0, 0),
+        ]
+    };
+    let reading = vec![
+        total_of(
+            "none",
+            "none",
+            0.12,
+            0,
+            vec![proc_use("com.apple.Virtualization.VirtualMachine", 0.10, 0)],
+        ),
+        total_of("chief", "chief", 0.05, 0, procs(0.05)),
+        total_of("other", "other", 0.04, 0, procs(0.04)),
+        total_of("pnem", "harold", 0.03, 0, procs(0.03)),
+        total_of("pod_coordination", "harold", 0.02, 0, procs(0.02)),
+    ];
+    let (line, _) = top_agents(&window_of(vec![reading]), Metric::Cpu, 1000);
+    assert_eq!(
+        line,
+        "no agent 12% (com.apple.Virtualization.VirtualMachine 10%) · chief 5% (a 5%, b 2%) · other agent 4% (a 4%, b 2%)"
+    );
+}
+
+#[test]
+fn top_agents_cuts_a_process_name_to_40_characters_and_leaves_out_an_agent_with_no_use() {
+    let long = "x".repeat(60);
+    let reading = vec![
+        total_of("chief", "chief", 0.5, 0, vec![proc_use(&long, 0.5, 0)]),
+        total_of("pnem", "idle", 0.0, 0, vec![proc_use("zsh", 0.0, 0)]),
+    ];
+    let (line, _) = top_agents(&window_of(vec![reading]), Metric::Cpu, 1000);
+    assert_eq!(line, format!("chief 50% ({} 50%)", "x".repeat(40)));
+}
+
+#[test]
+fn top_agents_ranks_memory_and_swap_by_memory_and_shows_the_share_of_the_machine() {
+    let reading = vec![
+        total_of("chief", "chief", 0.9, 100, vec![proc_use("a", 0.9, 100)]),
+        total_of(
+            "pnem",
+            "harold",
+            0.0,
+            400,
+            vec![proc_use("claude", 0.0, 400)],
+        ),
+    ];
+    for metric in [Metric::Memory, Metric::Swap] {
+        let (line, _) = top_agents(&window_of(vec![reading.clone()]), metric, 1000);
+        assert_eq!(
+            line, "pnem harold 40% (claude 40%) · chief 10% (a 10%)",
+            "{metric:?}"
+        );
+    }
+}
+
+#[test]
+fn top_agents_is_empty_with_no_reading_and_says_whether_an_agent_is_named() {
+    assert_eq!(
+        top_agents(&VecDeque::new(), Metric::Cpu, 1000),
+        (String::new(), false)
+    );
+    let only_none = vec![total_of(
+        "none",
+        "none",
+        0.5,
+        0,
+        vec![proc_use("x", 0.5, 0)],
+    )];
+    assert_eq!(
+        top_agents(&window_of(vec![only_none]), Metric::Cpu, 1000).1,
+        false
+    );
+    let with_agent = vec![total_of(
+        "chief",
+        "chief",
+        0.5,
+        0,
+        vec![proc_use("x", 0.5, 0)],
+    )];
+    assert_eq!(
+        top_agents(&window_of(vec![with_agent]), Metric::Cpu, 1000).1,
+        true
+    );
+}
+
+#[tokio::test]
+async fn the_alert_line_has_top_agents_beside_top_processes_and_counts_one_feature_use() {
+    let logs = CapturedLogs::start();
+    test_support::install();
+    let uses = || {
+        test_support::exact_counter_value(
+            "harold.feature.used",
+            &[("spec.id", "agent-resource-use")],
+        )
+        .unwrap_or(0)
+    };
+    let before = uses();
+    let folder = Folder::new();
+    let roles = Arc::new(roles_with(
+        &folder,
+        &[
+            ("chief", "", "", 100, 1000),
+            ("pnem", "harold", "", 200, 2000),
+        ],
+    ));
+    let table = Arc::new(Mutex::new(fake_table()));
+    let (mut rig, start) = judged_rig();
+    rig.stats
+        .set_agent_use(shared_agent_use(roles, Arc::clone(&table)));
+    rig.poll(minutes(start, 1), Ok(reading(0.4, 0, 0.9))).await;
+    assert_eq!(rig.past(), Some([false, false, true]));
+    // Still past: no second line and no second use.
+    rig.poll(minutes(start, 2), Ok(reading(0.4, 0, 0.9))).await;
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("machine use past normal"))
+        .unwrap();
+    assert!(
+        line.contains("top_processes=chrome 31%, rustc 12%, node 4%"),
+        "{line}"
+    );
+    assert!(
+        line.contains("top_agents=no agent 20% (launchd 20%) · chief 15% (agent 10%, cargo 5%) · pnem harold 5% (rustc 3%, agent 2%)"),
+        "{line}"
+    );
+    assert_eq!(uses() - before, 1);
+}
+
+#[tokio::test]
+async fn an_alert_whose_top_agents_are_only_none_is_not_a_feature_use() {
+    let logs = CapturedLogs::start();
+    test_support::install();
+    let uses = || {
+        test_support::exact_counter_value(
+            "harold.feature.used",
+            &[("spec.id", "agent-resource-use")],
+        )
+        .unwrap_or(0)
+    };
+    let before = uses();
+    let folder = Folder::new();
+    let roles = Arc::new(roles_with(&folder, &[]));
+    let table = Arc::new(Mutex::new(vec![used(1, 0, 1, "launchd", 0.2, 10)]));
+    let (mut rig, start) = judged_rig();
+    rig.stats.set_agent_use(shared_agent_use(roles, table));
+    rig.poll(minutes(start, 1), Ok(reading(0.4, 0, 0.9))).await;
+    let text = logs.text();
+    assert!(
+        text.contains("top_agents=no agent 20% (launchd 20%)"),
+        "{text}"
+    );
+    assert_eq!(uses(), before);
 }

@@ -340,6 +340,11 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "normal_top",
     "days",
     "top_processes",
+    "top_agents",
+    "processes",
+    "cached",
+    "walked",
+    "environ_reads",
     "minutes",
     "record",
     "lead_s",
@@ -4972,7 +4977,7 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 8] = [
+pub(crate) const HAROLD_FEATURES: [&str; 9] = [
     "factory-flow-page",
     "opencode-done-on-mac",
     "evidence-check",
@@ -4981,6 +4986,7 @@ pub(crate) const HAROLD_FEATURES: [&str; 8] = [
     "agent-jobs-hosts",
     "decision-tool",
     "agent-restart",
+    "agent-resource-use",
 ];
 
 /// Counts one use of the product feature `spec_id`.

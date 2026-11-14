@@ -485,7 +485,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.telemetry.calls` | counter, `{call}` | `prefix` (`chief`, a product, or `unknown` for a bad name or a made-up prefix), `kind` (`declare`, `count`, `gauge`, `event`, `remove`), `outcome` (`ok` or the reason word of a refusal). Seeded at 0 for each prefix, kind and outcome |
 | `harold.telemetry.log_records.unsent` | counter, `{record}` | `outcome` (`resent`, `file_only`). A log record that the collector did not get in the first send writes its line, ending `unsent=true`, to `harold.log`. `resent` counts the records sent to the collector again after it recovers. `file_only` counts the records that only the file holds: the queue of 5000 was full, so the oldest left, or the record was still queued when Harold stopped. Seeded at 0 for both outcomes |
 | `agent.<name>` | counter or gauge, no unit | `agent.attr.<key>` for each declared attribute. See [Agent signals](#what-leaves-harold) |
-| `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
+| `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal`, `harold.agent.cpu.utilization`, `harold.agent.memory.usage` | gauges | see [Machine stats](#machine-stats) |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product in all six states, 0 included.
 
@@ -1307,6 +1307,8 @@ Harold reads its own machine every 60 seconds (the `sysinfo` crate) and sends th
 | `process.cpu.utilization` | 0 to 1, all cores (Harold itself) | |
 | `harold.machine.normal_top` | the metric's unit: a share for memory and CPU, bytes for swap | `metric` = `memory`, `swap` or `cpu` |
 | `harold.machine.past_normal` | 1 or 0 | `metric` = `memory`, `swap` or `cpu` |
+| `harold.agent.cpu.utilization` | 0 to 1 of the whole machine. The CPU of all the processes of one agent | `role`, `agent.label`, `pod.product`, `spec.id` |
+| `harold.agent.memory.usage` | bytes. The resident memory of all the processes of one agent | `role`, `agent.label`, `pod.product`, `spec.id` |
 
 The disk is the one that holds the home folder. No path is sent.
 
@@ -1317,12 +1319,17 @@ The disk is the one that holds the home folder. No path is sent.
 - For the current hour of the day, the top of the normal range is the median of that hour's means on the last 7 days plus 3 times their median absolute deviation. It is at least the median plus a floor: 10 percentage points of memory or CPU, and 1 GB of swap.
 - With fewer than 5 of the 7 days, nothing is judged for that metric at that hour. On a new machine `machine-past-normal` cannot fire for about the first 5 days.
 - Every 60 seconds Harold compares the mean of the last 15 minutes with the top. `past_normal` changes to 1 at the first comparison where the mean is over the top, and back to 0 at the first comparison where it is at or under the top, or where the hour cannot be judged. A failed reading changes nothing.
-- When `past_normal` changes to 1, Harold logs the warn line `machine use past normal` with `metric`, `value`, `normal_top`, `days` and `top_processes` (3 process names with their share, no arguments or paths). Swap has no use for each process in `sysinfo`, so for swap the processes are the 3 largest in memory. When it changes back, Harold logs the info line `machine use back to normal` with `metric` and `minutes`.
+- When `past_normal` changes to 1, Harold logs the warn line `machine use past normal` with `metric`, `value`, `normal_top`, `days`, `top_processes` and `top_agents` (3 process names with their share, no arguments or paths). Swap has no use for each process in `sysinfo`, so for swap the processes are the 3 largest in memory. When it changes back, Harold logs the info line `machine use back to normal` with `metric` and `minutes`.
+- **The agent behind each process.** At each poll Harold reads every process with its parent pid. It follows the parents of a process up to the first live agent of the agent monitor, of any provider, and gives the process to that agent. The walk stops at a parent that is not in the table, at a parent that started after its child, at a loop and after 64 parents. A process with no agent in its chain has `role` = `none`. Harold finds the role of an agent in this order: the pod role record (`chief`, `pnem` and `pod_coordination` only, and only when the start time of the process is the recorded one); the agent-pane file `<folder>/.superpowers/baton/agent-pane` of the pane's working directory, which names a build worker (the spec id is that of the `started/<id>.md` file that names the worktree, or `none`); then the variables `POD_ROLE`, `POD_PRODUCT` and `POD_SPEC` of the agent process. Harold keeps only these three variables, checks their values and drops every other variable at once. It reads them once for each pid and start time. A value that fails its rule is dropped, and the agent is `other`. No environment value goes into a log line, a span, a metric or an error.
+- `role` is `chief`, `pnem`, `pod_coordination`, `build_worker`, `other` (a live agent that no source names) or `none`. `agent.label` is `chief`, the product of a PnEM or a pod coordination, the worktree folder name of a build worker, `other` or `none`. The attributes of the two agent gauges are metric attributes only: no log line carries them.
+- The warn line `machine use past normal` also has `top_agents`: the 3 agents with the highest mean over the 15 minutes, each with its 2 processes with the highest mean, as `build worker macos-test-time-f5 31% (rustc 22%, cargo 6%) · no agent 12% (launchd 10%)`. A process name is cut to 40 characters. Memory and swap rank the agents by memory. `top_processes` is unchanged.
+- The debug line `agent use walked` has the counts of one walk: `processes` (the processes read), `cached` (the agent environments that Harold holds), `walked` (the processes that went to an agent) and `environ_reads` (the environments read in this walk).
 - Disk use has no normal range. `disk-low` alone alerts on it, and a dashboard card shows its growth per day.
 
 | Line | Fields |
 |---|---|
-| `machine use past normal` | `metric`, `value` (the mean of the last 15 minutes), `normal_top` (the top of the normal range), `days` (the days the range is from), `top_processes` |
+| `machine use past normal` | `metric`, `value` (the mean of the last 15 minutes), `normal_top` (the top of the normal range), `days` (the days the range is from), `top_processes`, `top_agents` (the top agents and their top processes, by the mean of the last 15 minutes) |
+| `agent use walked` | `processes`, `cached`, `walked`, `environ_reads` |
 
 **When the alerts clear.** HyperDX 2.40 reduces a gauge to its last sample in each 15-minute window and posts `resolved` at the first check whose window is back under the threshold. `machine-past-normal` clears about 15 to 30 minutes after the last machine's `past_normal` goes back to 0. `disk-low` clears about 15 to 30 minutes after every home disk is under 90%. Both alerts are not grouped, because Harold's alert address keeps one state for each alert name: a grouped alert could clear for one machine while another is still past, and the chief would hear `cleared` too early. Harold types `harold alert: <name> cleared` once for each spell, by the rule in [How an alert reaches the chief](#how-an-alert-reaches-the-chief).
 
