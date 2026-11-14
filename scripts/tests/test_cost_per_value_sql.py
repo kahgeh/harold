@@ -81,6 +81,25 @@ class FixCostByCauseQuery(unittest.TestCase):
         self.assertIn("'spec.cause'", body(CAUSE))
 
 
+SLICING = (QUERIES / "slicing-and-sizing.sql").read_text()
+
+
+class SlicingAndSizingQuery(unittest.TestCase):
+    ROW = "specs over 8 build hours, share of specs (%)"
+
+    def test_it_has_the_row_over_all_specs_whatever_their_size(self):
+        self.assertEqual(body(SLICING).count(f"'{self.ROW}'"), 1)
+        branch = body(SLICING).split(f"'{self.ROW}'")[1].split("UNION ALL")[0]
+        self.assertIn("> 8", branch)
+        self.assertNotIn("spec.size", branch)
+
+    def test_the_header_states_both_changes(self):
+        text = header(SLICING)
+        self.assertIn("specs over 8 build hours", text)
+        self.assertIn("split rule", text)
+        self.assertIn("30 days after the last older spec merges", text)
+
+
 class EvidenceQuery(unittest.TestCase):
     def test_it_follows_the_evidence_standard(self):
         text = body(EVIDENCE)

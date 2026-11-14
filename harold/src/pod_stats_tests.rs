@@ -5739,13 +5739,17 @@ mod cost_per_value_fixture {
 
     fn answer(logq: &Path, file: &str, data: &Data) -> String {
         let text = std::fs::read_to_string(format!("{QUERIES}/{file}")).expect("read the query");
+        answer_text(logq, &text, data)
+    }
+
+    fn answer_text(logq: &Path, text: &str, data: &Data) -> String {
         let sql = text
             .replace("otel.otel_metrics_sum", &table(&data.sum))
             .replace("otel.otel_metrics_gauge", &table(&data.gauge))
             .replace("otel.otel_metrics_histogram", &table(&data.histogram))
             .replace("otel.otel_logs", &logs(&data.logs))
             .replace("otel.harold_settings", &settings(&data.settings));
-        run(logq, &sql).unwrap_or_else(|| panic!("{file} failed on the fixture:\n{sql}"))
+        run(logq, &sql).unwrap_or_else(|| panic!("the query failed on the fixture:\n{sql}"))
     }
 
     const RATES: [(&str, f64); 3] = [
@@ -5973,5 +5977,53 @@ mod cost_per_value_fixture {
         // Two fixes with one cause give one row: 1.5 million tokens at 10 USD and a rate of 2.
         assert_eq!(text.lines().count(), 1, "{text}");
         assert_eq!(&fields[..3], ["decision-tool", "2", "30"], "{text}");
+    }
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn slicing_and_sizing_sql_on_a_clickhouse_fixture() {
+        let Some(logq) = logq() else {
+            eprintln!("skipped: bin/logq or ClickHouse cannot be reached");
+            return;
+        };
+        let hours = |spec, size, value| {
+            with(
+                row("pod.spec.effort", spec, 2 * DAY, value),
+                &[
+                    ("measure", "build_worker_hours"),
+                    ("spec.size", size),
+                    ("state", "completed"),
+                ],
+            )
+        };
+        // Two unsized specs with 9 and 3 build hours and one small spec with 5.
+        let data = Data {
+            gauge: vec![
+                hours("a", "unsized", 9.0),
+                hours("b", "unsized", 3.0),
+                hours("c", "small", 5.0),
+            ],
+            ..Data::default()
+        };
+        let text = std::fs::read_to_string(format!("{QUERIES}/slicing-and-sizing.sql")).unwrap();
+        let got = answer_text(&logq, &text.replace("$__filters", "1"), &data);
+        let find = |series: &str| {
+            got.lines()
+                .find(|line| line.starts_with(series))
+                .unwrap_or_else(|| panic!("no row {series}:\n{got}"))
+                .split('\t')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        // One of the three specs is over 8 hours.
+        let over = find("specs over 8 build hours, share of specs (%)");
+        assert!(over[1].starts_with("33.33"), "{over:?}");
+        // The share rows count only the small spec: 5 hours is over the limit of 4.
+        assert_eq!(find("specs counted: small")[1], "1", "{got}");
+        assert_eq!(
+            find("over limit, share of specs (%): small")[1],
+            "100",
+            "{got}"
+        );
+        assert!(!got.contains("specs counted: unsized"), "{got}");
     }
 }

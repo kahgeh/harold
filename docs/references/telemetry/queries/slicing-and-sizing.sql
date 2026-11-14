@@ -7,6 +7,10 @@
 -- that is not completed or withdrawn, and for each spec that entered one of those states in the last 30 days. So the points of a spec repeat
 -- until the spec changes. A spec changed in a week when its state, its `revisions` value or its `build_worker_hours` value at the end of the week
 -- differs from the value at the end of the week before, or when it has no point before the week. A spec that merged in the week changed its state.
+-- The row "specs over 8 build hours, share of specs (%)" counts all specs, whatever their size, with the limit of 8 hours. It checks the split rule
+-- (work over about a day is split) from actual build hours. New specs have no size line, so they are unsized.
+-- The two share rows by size count only the specs written before 2026-11-14 (the ones that have a size line). They have no number about
+-- 30 days after the last older spec merges, because pod.spec.effort stops sending a spec 30 days after its merge. A later change removes the two old rows when they are empty.
 -- The sizes large and unsized have no limit, so the card has no share for them. The rows "specs counted" give the number of specs of each size.
 -- The row "slices per work record" is the mean of the histogram harold.work.slices: the rise of Sum divided by the rise of Count. It has no product.
 -- Counter rule: the README rule "The counter rule" in docs/references/telemetry/README.md. Each point rises by its value minus the
@@ -85,6 +89,22 @@ FROM (
         GROUP BY Attributes['spec.size'], Attributes['spec.id']
     )
     GROUP BY size
+    UNION ALL
+    SELECT
+        'specs over 8 build hours, share of specs (%)' AS series,
+        100.0 * countIf(this_v > 8) / nullIf(countIf(isNotNull(this_v)), 0) AS this_value,
+        100.0 * countIf(last_v > 8) / nullIf(countIf(isNotNull(last_v)), 0) AS last_value
+    FROM (
+        SELECT
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 7 DAY AND has(this_specs, Attributes['spec.id'])) AS this_v,
+            argMaxIfOrNull(Value, TimeUnix, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY AND has(last_specs, Attributes['spec.id'])) AS last_v
+        FROM otel.otel_metrics_gauge
+        WHERE MetricName = 'pod.spec.effort'
+          AND Attributes['measure'] = 'build_worker_hours'
+          AND TimeUnix > now() - INTERVAL 14 DAY
+          AND $__filters
+        GROUP BY Attributes['spec.id']
+    )
     UNION ALL
     SELECT
         'slices per work record' AS series,
