@@ -28,7 +28,7 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | `clarification-requests.sql` | The times the user asked the chief what a word or reply meant, by cause: the card "Clarification requests per day, by cause" | none |
 | `attention-recording.sql` | One row for each of the last 14 days: the attention requests, the answers and the chief's messages sent: the card "Attention requests against chief messages". Columns `day`, `attention_requests`, `answers`, `chief_messages` | none |
 
-Six files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `delivery-lead-time-tile.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql` and `inventory-cost.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql`, `clarification-requests.sql` and `attention-recording.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
+Eight files are the cards of the dashboard "Harold: the big picture": `value-created.sql`, `delivery-lead-time-tile.sql`, `waste.sql`, `tokens-and-turns.sql`, `products-changed.sql`, `inventory-cost.sql`, `decisions.sql` and `cost-per-value.sql`. See [Harold: the big picture](../README.md#harold-the-big-picture). `now.sql` is the dashboard "Harold now". See [Harold now](../README.md#harold-now). `delivery-lead-time.sql`, `work-waiting.sql`, `slicing-and-sizing.sql`, `test-and-release-time.sql`, `clarification-requests.sql` and `attention-recording.sql` are tables on "Harold trends". A test keeps each tile and its file equal.
 
 Two names look alike. The file `delivery-lead-time.sql` feeds the card "Lead time by phase". The glossary term "delivery lead time" names `delivery-lead-time-tile.sql`.
 
@@ -36,7 +36,7 @@ Two names look alike. The file `delivery-lead-time.sql` feeds the card "Lead tim
 
 ## The columns
 
-The files of the six cards of the big picture and `now.sql` return at most one row. Each column is a value of the line of the card, or (a column that ends with `_change_pct`) the percent change against the 7 days before. It is already a percent: 57 means 57%. A column with no number is `NULL`: the tile ends in `WHERE <value> IS NOT NULL`, so it shows HyperDX's empty state, never 0. A query returns no row when its source has no data.
+The files of the eight cards of the big picture and `now.sql` return at most one row. Each column is a value of the line of the card, or (a column that ends with `_change_pct`) the percent change against the 7 days before. It is already a percent: 57 means 57%. A column with no number is `NULL`: the tile ends in `WHERE <value> IS NOT NULL`, so it shows HyperDX's empty state, never 0. A query returns no row when its source has no data.
 
 The other files return one row for each series, with these columns:
 

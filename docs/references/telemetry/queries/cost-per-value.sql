@@ -140,8 +140,8 @@ WITH
         SELECT
             replaceRegexpOne(MetricName, '\\.feature\\.used$', '') AS product,
             Attributes['spec.id'] AS spec,
-            maxIf(rise > 0, TimeUnix > now() - INTERVAL 7 DAY) AS used_now,
-            maxIf(rise > 0, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS used_before
+            countIf(rise > 0 AND TimeUnix > now() - INTERVAL 7 DAY) > 0 AS used_now,
+            countIf(rise > 0 AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) > 0 AS used_before
         FROM rises
         WHERE MetricName LIKE '%.feature.used'
         GROUP BY product, spec
@@ -150,8 +150,8 @@ WITH
         SELECT
             Attributes['pod.product'] AS product,
             Attributes['spec.id'] AS spec,
-            maxIf(rise > 0, TimeUnix > now() - INTERVAL 7 DAY) AS merged_now,
-            maxIf(rise > 0, TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) AS merged_before
+            countIf(rise > 0 AND TimeUnix > now() - INTERVAL 7 DAY) > 0 AS merged_now,
+            countIf(rise > 0 AND TimeUnix > now() - INTERVAL 14 DAY AND TimeUnix <= now() - INTERVAL 7 DAY) > 0 AS merged_before
         FROM (
             SELECT
                 Attributes,
@@ -218,8 +218,8 @@ WITH
     )
 SELECT
     if(value_now = 0 OR total_now IS NULL, NULL, round(total_now / value_now, 2)) AS cost_per_value,
-    if(value_now = 0 OR value_before = 0 OR ifNull(total_now, 0) = 0 OR ifNull(total_before, 0) = 0, NULL,
-       round((total_now / value_now - total_before / value_before) / (total_before / value_before) * 100)) AS cost_per_value_change_pct,
+    round((total_now / nullIf(value_now, 0) - total_before / nullIf(value_before, 0))
+          / nullIf(total_before / nullIf(value_before, 0), 0) * 100) AS cost_per_value_change_pct,
     toFloat64(value_now) AS value,
     if(total_now IS NULL, NULL, round(total_now, 2)) AS total_cost,
     if(token_now IS NULL, NULL, round(token_now, 2)) AS token_cost,

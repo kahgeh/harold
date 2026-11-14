@@ -79,7 +79,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | direction revision | A revision of a spec that follows a change of what the user wants. Its heading in `specs/<id>.revisions.md` carries the tag `direction` | "rework" |
 | free slot with work waiting | A free slot while an approved spec of its pod is not started. A free slot alone (`pod.slots.free`, the `slot-idle` alert, "idle slots" in the telemetry README) counts every free slot. This counts only the free slots that work waits for, which is waste. `pod.slots.idle_with_work` stays as the signal name | "idle slot with work", "idle slot" for this one |
 | redo | Build work after a `direction` or `defect` revision of a spec that had started | "rework", "rejected" |
-| value created | The product features whose use count rose in the 7 days, plus the fixes confirmed in them | "work checked" for it (the old meaning), "output" |
+| value created | The product features whose use count rose in the 7 days, plus the fixes confirmed in them. The cost per value card weights the features by their value and does not count fixes | "work checked" for it (the old meaning), "output" |
+| value (of a spec) | How big the problem is that a spec solves, `S`, `M` or `L`, from its `**Value.**` line, with the weights 1, 2 and 4. It is set before the build and not changed after | "size", "value size", "story points" |
+| cost per value | The cost of the 7 days in AUD (tokens, attention and cloud spend), divided by the value of the same 7 days. Down is better | "value per cost", "ROI", "unit cost" |
+| fix cost | The AUD cost of the fix specs (their tokens), shown as waste on the Cost per value card. It is not in the Waste card's hours, and the two are never added | "waste" alone for it (the Waste card counts hours), "bug cost" |
+| fix cause | The spec whose merge brought the fault that a fix spec fixes, from its `**Cause.**` line | "root cause" (a fix spec may name a deeper cause in its text) |
 | product feature | A part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. Not the Cargo feature | "feature flag" for it |
 | kind (of a spec) | `feature` (a product feature), `fix` or `other`, from the spec's `**Kind.**` line | "type". Not the Cargo feature |
 | feature-use count | The counter `<product>.feature.used` with `spec.id`, which rises at each use of a product feature | "usage metric". Not the Cargo feature |
@@ -88,7 +92,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | evidence file | The file `evidence/<id>.md` in a pod folder, with the state `waiting`, `present` or `missing`, and the `told:` line when the chief has the `EVIDENCE` line for it | "evidence report", "proof file" |
 | evidence missing | The list in `harold tool release next`, and the state of a spec whose evidence query still returns 0 seven days after its release | "unproven", "no evidence" (alone) |
 | confirmed file | The file `confirmed/<id>.md` in a pod folder, which the evidence check writes when the evidence query of a fix finds its signal. It sits beside the approval, merged and withdrawn files | |
-| spec size | Small (under half a day of build), medium (up to a day) or large (split before approval), in the spec's `**Size.**` line | "estimate", "points" |
+| spec size (historical) | The `**Size.**` line of the specs written before 2026-11-14. New specs have no size. Pod stats still reads it as `spec.size`, and a new spec is `unsized` | "estimate", "points" |
 | item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |
 | wording (revision tag) | A revision that changes words only: it counts as a revision and is never redo | "typo fix" for the tag |
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
@@ -367,7 +371,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent event | An agent signal that writes one log line with declared values only | "event" alone (an event is in Harold's event store), "event stream" |
 | signal prefix | The first part of an agent signal's name, `chief` or a product, which decides which panes may write it | "namespace" |
 | named query | A SQL file in `docs/references/telemetry/queries/` that a dashboard card and `bin/logq --named` both run | "saved search" (a HyperDX search is another thing) |
-| the big picture | The HyperDX dashboard "Harold: the big picture", six cards, each one line with a value and its change against the 7 days before | "big picture page", "KPI dashboard", "scorecard" |
+| the big picture | The HyperDX dashboard "Harold: the big picture", eight cards, each one line with a value and its change against the 7 days before | "big picture page", "KPI dashboard", "scorecard" |
 | lever | A way of working that moves quality, speed, waste or token cost: spec quality, slot use, model mix, slicing and sizing, the user's waiting time, test and release time, tooling | "KPI", "metric" for it |
 | card (of a dashboard) | One HyperDX chart or table on a dashboard. On the big picture, a card is one table tile with one line | "pair", "KPI" |
 | work waiting (a card) | A card of "Harold trends" with the specs and work records that wait in each list, the oldest age and the item-days | "inventory" for it. The glossary's inventory is the agent monitor's pane scan. `pod.inventory.*` stays only as the name of the signal |

@@ -4,7 +4,7 @@ The structure tests read files as text, with the standard library only. They nee
 ClickHouse, no port and no server.
 
 The files:
-- hyperdx/big-picture.json holds an intro text and seven cards. A card is ONE table tile with ONE
+- hyperdx/big-picture.json holds an intro text and eight cards. A card is ONE table tile with ONE
   text line: the value with its unit, then its change against the 7 days before. The card Decisions is
   the one exception: its tile has three rows, one text line each (fmt "decisions", built with arrayJoin).
 - hyperdx/trends.json holds the cards that left the big picture, as tables.
@@ -36,7 +36,8 @@ DASHBOARD = HYPERDX / "big-picture.json"
 TRENDS = HYPERDX / "trends.json"
 QUERIES = TELEMETRY / "queries"
 # agent-counter.sql is a helper that other queries copy. factory-flow.sql feeds the web app page /flow. No tile reads them.
-NOT_CARDS = {"agent-counter.sql", "factory-flow.sql", "unused-features.sql", "unconfirmed-fixes.sql", "unkinded-specs.sql"}
+NOT_CARDS = {"agent-counter.sql", "factory-flow.sql", "unused-features.sql", "unconfirmed-fixes.sql", "unkinded-specs.sql",
+             "fix-cost-by-cause.sql"}
 # These dashboards may hold a tile that reads a query file.
 DASHBOARD_FILES = ["big-picture.json", "trends.json", "dashboard.json", "now.json"]
 
@@ -55,6 +56,9 @@ CARDS = {
                              change="products_change_pct", extra=None, better="higher"),
     "inventory-cost": dict(title="Inventory cost", value="total_cost", unit="", fmt="aud",
                            change="total_cost_change_pct", extra="notes", better="lower"),
+    # One line: the cost of each unit of value. Down is better.
+    "cost-per-value": dict(title="Cost per value", value="total_cost", unit="", fmt="cpv",
+                           change="cost_per_value_change_pct", extra="cpv", better="lower"),
     # Three lines. Made, evaluated and the two good shares are better up, and due is better down.
     "decisions": dict(title="Decisions", value="made", unit="made", fmt="decisions",
                       change="made_change_pct", extra=None, better="higher"),
@@ -62,6 +66,8 @@ CARDS = {
 # The columns that the card Decisions reads, besides made and made_change_pct.
 DECISION_COLUMNS = ["evaluated", "evaluated_change_pct", "good_process_pct", "good_process_change_pts",
                     "good_outcome_pct", "good_outcome_change_pts", "due", "due_change_pct"]
+# The columns that the card Cost per value reads, besides total_cost and cost_per_value_change_pct.
+CPV_COLUMNS = ["cost_per_value", "value", "fix_cost", "unpriced_models"]
 # The stubs return no row until the spec that fills them is built.
 STUBS = {}
 INTRO = (
@@ -71,8 +77,10 @@ INTRO = (
     "\"No data found within time range.\" means \"no data yet\". "
     "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
     "Higher is better: Value created, Products changed, Decisions (made, evaluated, good process and good outcome). "
-    "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost, Decisions (due). "
+    "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost, Decisions (due), Cost per value. "
     "Decisions has three lines: made and evaluated, the share graded good (its change is in percentage points, pts), and due. "
+    "Cost per value is the cost of the 7 days in Australian dollars (tokens, human attention and cloud spend) divided by the value of the 7 days. "
+    "\"no value\" means a cost and no value in the 7 days. \"fixes A$<n> (waste)\" is the part of the cost spent on fixes. "
     "Delivery lead time has data after the first release that follows spec-release-phase. "
     "Inventory cost is in Australian dollars (A$): the tokens at the list prices, plus human attention. "
     "\"human attention: no data yet\" means no answer in the last 7 days, "
@@ -142,6 +150,17 @@ def cost_text():
     return f"concat('A$', {grp('total_cost')}, '  (', {tokens}, ' + ', {human}, ')  ')"
 
 
+def cpv_text():
+    """The Cost per value line: the cost of each unit of value, the change, the fix cost and the unpriced models."""
+    with_value = (f"concat('A$', {grp('cost_per_value')}, ' per value  (A$', {grp('total_cost')}, ' / ', "
+                  f"{grp('value')}, ' value)  ', {change_text('cost_per_value_change_pct', 'lower')})")
+    no_value = f"concat('no value  (cost A$', {grp('total_cost')}, ')')"
+    fixes = f"if(ifNull(fix_cost, 0) > 0, concat(' \u00b7 fixes A$', {grp('fix_cost')}, ' (waste)'), '')"
+    unpriced = ("arrayStringConcat(arrayMap(m -> concat(' \u00b7 not priced: ', m), "
+                "arrayFilter(m -> m != '', splitByChar(',', ifNull(unpriced_models, '')))), '')")
+    return f"concat(if(cost_per_value IS NULL, {no_value}, {with_value}), {fixes}, {unpriced})"
+
+
 def pct_change_text(column, better):
     """The change of a figure in percent, with the dot and the arrow, and no "on last week"."""
     rise, fall = (GREEN, RED) if better == "higher" else (RED, GREEN)
@@ -184,6 +203,8 @@ def wrap(card, source):
     if spec["fmt"] == "decisions":
         return (f"SELECT arrayJoin([{', '.join(decision_lines())}]) AS ` `\n"
                 f"FROM (\n{source.rstrip()}\n)\nWHERE {spec['value']} IS NOT NULL")
+    if spec["fmt"] == "cpv":
+        return (f"SELECT {cpv_text()} AS ` `\nFROM (\n{source.rstrip()}\n)\nWHERE {spec['value']} IS NOT NULL")
     if spec["fmt"] == "aud":
         parts = [cost_text(), change_text(spec["change"], spec["better"])]
     else:
@@ -280,7 +301,7 @@ class BigPictureTest(unittest.TestCase):
             self.fail(f"card {card} has no query file: {path.relative_to(ROOT)}")
         return path.read_text(encoding="utf-8")
 
-    def test_seven_cards_in_order_and_no_product_filter(self):
+    def test_eight_cards_in_order_and_no_product_filter(self):
         dashboard = self.dashboard()
         self.assertEqual(dashboard["name"], "Harold: the big picture")
         self.assertEqual(dashboard.get("filters", []), [], "the big picture has no product filter")
@@ -288,7 +309,7 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(ids, ["big-picture-intro"] + list(CARDS))
         titles = [tile["name"] for tile in dashboard["tiles"][1:]]
         self.assertEqual(titles, ["Value created", "Delivery lead time", "Waste", "Tokens and turns",
-                                  "Products changed", "Inventory cost", "Decisions"])
+                                  "Products changed", "Inventory cost", "Cost per value", "Decisions"])
 
     def test_each_card_is_one_table_tile_that_wraps_its_file(self):
         tiles = self.by_id()
@@ -322,6 +343,8 @@ class BigPictureTest(unittest.TestCase):
                 columns += ["turns"]
             if spec["fmt"] == "decisions":
                 columns += DECISION_COLUMNS
+            if spec["extra"] == "cpv":
+                columns += CPV_COLUMNS
             if spec["extra"] == "notes":
                 columns += ["tokens_m", "token_cost", "attention_hours", "attention_cost", "unpriced_models",
                             "old_stock_unpriced", "overflow"]
@@ -377,7 +400,7 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual({card: spec["better"] for card, spec in CARDS.items()},
                          {"value-created": "higher", "delivery-lead-time-tile": "lower", "waste": "lower",
                           "tokens-and-turns": "lower", "products-changed": "higher", "inventory-cost": "lower",
-                          "decisions": "higher"})
+                          "cost-per-value": "lower", "decisions": "higher"})
 
     def test_the_change_text_puts_the_dot_by_direction(self):
         up = change_text("c", "higher")
@@ -640,6 +663,40 @@ class LineWrapTest(unittest.TestCase):
     def test_inventory_cost_words(self):
         for text in (self.cost(attention_hours=None, attention_cost=None), self.cost(attention_cost=None)):
             self.assertNotRegex(text, r"(?<!human )attention")
+
+
+    def cpv(self, **columns):
+        row = dict(cost_per_value=357, cost_per_value_change_pct=-12, value=6, total_cost=2140, fix_cost=310,
+                   unpriced_models="")
+        row.update(columns)
+        return self.line("cost-per-value", **row)
+
+    def test_cost_per_value_full_form(self):
+        self.assertEqual(self.cpv(), "A$357 per value  (A$2,140 / 6 value)  \U0001f7e2 \u25bc 12% on last week"
+                                     " \u00b7 fixes A$310 (waste)")
+
+    def test_cost_per_value_a_rise_a_fall_and_no_change_figure(self):
+        self.assertIn("\U0001f534 \u25b2 12% on last week", self.cpv(cost_per_value_change_pct=12))
+        self.assertIn("\U0001f7e2 \u25bc 12% on last week", self.cpv(cost_per_value_change_pct=-12))
+        self.assertIn("\u26aa 0% on last week", self.cpv(cost_per_value_change_pct=0))
+        self.assertIn("  no change figure", self.cpv(cost_per_value_change_pct=None))
+
+    def test_cost_per_value_with_no_fix_cost_has_no_fix_note(self):
+        self.assertNotIn("fixes", self.cpv(fix_cost=None))
+        self.assertNotIn("fixes", self.cpv(fix_cost=0))
+
+    def test_cost_per_value_with_cost_and_no_value(self):
+        self.assertEqual(self.cpv(cost_per_value=None, cost_per_value_change_pct=None, value=0, fix_cost=None),
+                         "no value  (cost A$2,140)")
+        self.assertEqual(self.cpv(cost_per_value=None, cost_per_value_change_pct=5, value=0, fix_cost=310),
+                         "no value  (cost A$2,140) \u00b7 fixes A$310 (waste)")
+
+    def test_cost_per_value_with_no_cost_gives_no_row(self):
+        self.assertEqual(self.cpv(total_cost=None, cost_per_value=None, cost_per_value_change_pct=None), "")
+
+    def test_cost_per_value_names_each_unpriced_model(self):
+        self.assertTrue(self.cpv(fix_cost=None, unpriced_models="claude-a,claude-b").endswith(
+            "on last week \u00b7 not priced: claude-a \u00b7 not priced: claude-b"))
 
 
 class AttentionRecordingCard(unittest.TestCase):
