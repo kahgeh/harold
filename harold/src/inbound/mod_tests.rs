@@ -4,9 +4,9 @@ use std::sync::Mutex;
 use crate::inbound::ownership::Ownership;
 use crate::inbound::type_into_pane_quietly;
 use crate::inbound::{
-    AgentAddress, ChiefRouting, RouteReport, RoutingEnv, clear_routing_state, parse_tag,
-    resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
-    set_last_away_notification_source_agent,
+    AgentAddress, ChiefRouting, RouteReport, RoutingEnv, clear_routing_state, decide_and_route,
+    parse_tag, resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
+    semantic_resolve_output, set_last_away_notification_source_agent,
 };
 use crate::outbound::DeliveryOutcome;
 use crate::outbound::fake::CapturedLogs;
@@ -584,4 +584,77 @@ fn quiet_typing_into_a_host_pane_takes_no_lock() {
     let error = type_into_pane_quietly("main:0.1", "QUIET-CANARY-1180").unwrap_err();
     assert!(error.contains("invalid_pane_id"), "{error}");
     assert!(!crate::timed_prompts::has_pane_lock("main:0.1"));
+}
+
+fn known_macs() -> Vec<String> {
+    vec!["PasM4MBP".to_string(), "PasM1Mac".to_string()]
+}
+
+/// The logged line `reply owner decided` for a reply read on PasM4MBP.
+fn owner_line(text: &str, latest: Option<&str>) -> String {
+    let logs = CapturedLogs::start();
+    let _ = decide_and_route(text, "PasM4MBP", &known_macs(), latest, |_, _| {
+        Ok(typed_report())
+    });
+    logs.text()
+        .lines()
+        .find(|line| line.contains("reply owner decided"))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn owner_line_for_a_tagged_reply() {
+    let line = owner_line("[PasM1Mac/chief:0.0] go", Some("PasM4MBP"));
+    for part in [
+        "owned=false",
+        "owner_from=\"tag\"",
+        "latest_notifier=\"PasM4MBP\"",
+    ] {
+        assert!(line.contains(part), "{part}: {line}");
+    }
+    assert!(line.contains("harold.version="), "{line}");
+}
+
+#[test]
+fn owner_line_for_an_untagged_reply_with_a_latest_notifier() {
+    let line = owner_line("go", Some("PasM1Mac"));
+    for part in [
+        "owned=false",
+        "owner_from=\"latest_marker\"",
+        "latest_notifier=\"PasM1Mac\"",
+    ] {
+        assert!(line.contains(part), "{part}: {line}");
+    }
+}
+
+#[test]
+fn owner_line_for_an_untagged_reply_with_no_latest_notifier() {
+    let line = owner_line("go", None);
+    for part in ["owned=true", "owner_from=\"none\""] {
+        assert!(line.contains(part), "{part}: {line}");
+    }
+    assert!(!line.contains("latest_notifier=\"PasM\""), "{line}");
+}
+
+#[test]
+fn no_log_line_holds_the_reply_text() {
+    let sentinel = "zq-sentinel-reply";
+    let logs = CapturedLogs::start();
+    let _ = decide_and_route(sentinel, "PasM4MBP", &known_macs(), None, |_, _| {
+        Ok(typed_report())
+    });
+    let _ = decide_and_route(
+        sentinel,
+        "PasM4MBP",
+        &known_macs(),
+        Some("PasM1Mac"),
+        |_, _| Ok(typed_report()),
+    );
+    let panes = [tmux("%1", "one"), tmux("%2", "two")];
+    let _ = semantic_resolve_output(&format!("one\n{sentinel}"), sentinel, &panes);
+    let text = logs.text();
+    assert!(!text.contains(sentinel), "{text}");
+    assert!(text.contains("named=true"), "{text}");
+    assert!(text.contains("chars=17"), "{text}");
 }

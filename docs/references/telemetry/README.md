@@ -522,7 +522,12 @@ These fields were added so that the log lines of the collector work show their i
 | `note_id` | The number of a backlog note. On `backlog note added` |
 | `question_id` | The id of a question. On the questions tool lines |
 | `rows` | A count of rows. On `app page served` |
-| `chars` | A count of characters, never the text. On `sending iMessage` and `summary question dropped` |
+| `chars` | A count of characters, never the text. On `sending iMessage`, `route_inbound_message entered` and `summary question dropped` |
+| `owned` | Whether this Mac owns the reply: `true` or `false`. On `reply owner decided` |
+| `owner_from` | How the owner was chosen: `tag` (the tag named a Mac), `latest_marker` (no tag, and a Mac sent the latest notification) or `none` (no tag and no latest notifier, so this Mac owns the reply). On `reply owner decided` |
+| `latest_notifier` | The name of the Mac that sent the latest notification, or empty when none did. On `reply owner decided` |
+| `harold.version` | The version of this Harold. On `reply owner decided` |
+| `named` | Whether the model named a pane, never the text. On `semantic resolve: AI CLI output` |
 | `matched_share` | A share from 0 to 100, never text. On `summary question dropped` |
 | `fell_back` | True when the check left no sentence and Harold used the whole reply. On `summary question dropped` |
 | `job.name` | The name of an agent job: 1 to 48 characters of `a-z`, `0-9` and `-`, set by the agent. On `job added`, `job ended` and `job end not told` |

@@ -115,7 +115,18 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
     }
 
     let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    info!(raw_output = %output, "semantic resolve: AI CLI output");
+    semantic_resolve_output(&output, body, panes)
+}
+
+/// The pane and text that the model's `output` names. The output repeats the reply, so
+/// the log line holds only whether a pane was named.
+fn semantic_resolve_output(
+    output: &str,
+    body: &str,
+    panes: &[AgentAddress],
+) -> Option<(usize, String)> {
+    let named = !(output.is_empty() || output.eq_ignore_ascii_case("none"));
+    info!(named, "semantic resolve: AI CLI output");
     if output.to_lowercase() == "none" || output.is_empty() {
         return None;
     }
@@ -232,17 +243,50 @@ impl RouteReport {
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
 pub(crate) fn route_inbound_message(text: &str) -> Result<RouteReport, String> {
-    info!(text, "route_inbound_message entered");
     let machine = get_settings().machine_name.as_str();
-    let ownership = decide_ownership(
+    decide_and_route(
         text,
         machine,
         &ownership::known_machine_names(),
         ownership::latest_notifier().as_deref(),
+        |pane_tag, body| route_owned_reply(&TmuxEnv, machine, pane_tag, body),
+    )
+}
+
+/// Decide who owns `text`, log the decision and route the reply when `machine` owns it.
+/// The log lines hold the length of the reply, never its text.
+fn decide_and_route(
+    text: &str,
+    machine: &str,
+    known_machines: &[String],
+    latest_notifier: Option<&str>,
+    route: impl FnOnce(Option<&str>, &str) -> Result<RouteReport, String>,
+) -> Result<RouteReport, String> {
+    info!(
+        chars = text.chars().count(),
+        "route_inbound_message entered"
     );
-    route_if_owned(text, ownership, |pane_tag, body| {
-        route_owned_reply(&TmuxEnv, machine, pane_tag, body)
-    })
+    let ownership = decide_ownership(text, machine, known_machines, latest_notifier);
+    let tag_names_a_machine = parse_tag(text).0.is_some_and(|tag| {
+        let named = tag.split_once('/').map_or(tag, |(named, _)| named).trim();
+        ownership::same_machine(named, machine)
+            || known_machines
+                .iter()
+                .any(|known| ownership::same_machine(known, named))
+    });
+    let owner_from = match (tag_names_a_machine, latest_notifier) {
+        (true, _) => "tag",
+        (false, Some(_)) => "latest_marker",
+        (false, None) => "none",
+    };
+    info!(
+        owned = matches!(ownership, Ownership::Owned { .. }),
+        owner_from,
+        latest_notifier = latest_notifier.unwrap_or_default(),
+        harold.version = env!("CARGO_PKG_VERSION"),
+        "reply owner decided"
+    );
+    route_if_owned(text, ownership, route)
 }
 
 /// Hand an owned reply to `route`. A reply another Mac owns is skipped here, before any

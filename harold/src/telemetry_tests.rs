@@ -546,6 +546,19 @@ fn the_count_of_remote_order_saved_is_an_allowed_field() {
 }
 
 #[test]
+fn the_reply_owner_fields_are_allowed_fields() {
+    for field in [
+        "owned",
+        "owner_from",
+        "latest_notifier",
+        "harold.version",
+        "named",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
 fn every_allowed_field_is_in_a_docs_table() {
     // Does the docs name `doc` match the field? `<n>` is one or more digits and a closing
     // `…` is any rest.

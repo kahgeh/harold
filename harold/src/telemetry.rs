@@ -385,6 +385,11 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "outcome_grade",
     "to_evaluate_days",
     "days_open",
+    "owned",
+    "owner_from",
+    "latest_notifier",
+    "harold.version",
+    "named",
 ];
 
 /// How long shutting the exporters down may take in all.
