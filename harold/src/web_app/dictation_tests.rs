@@ -84,21 +84,6 @@ impl TestServer {
         format!("http://{}{path}", self.addr)
     }
 
-    /// Posts `body` to the check as `dictation.js` sends it.
-    async fn check(&self, body: &str) -> reqwest::Response {
-        reqwest::Client::new()
-            .post(self.url("/dictation/check"))
-            .header("Tailscale-User-Login", LOGIN)
-            .header("sec-fetch-site", "same-origin")
-            .header("origin", format!("http://{}", self.addr))
-            .header("datastar-request", "true")
-            .header("content-type", "application/json")
-            .body(body.to_owned())
-            .send()
-            .await
-            .unwrap()
-    }
-
     async fn get(&self, path: &str) -> reqwest::Response {
         reqwest::Client::new()
             .get(self.url(path))
