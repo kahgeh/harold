@@ -98,6 +98,14 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
 | pod role | The job that one agent holds in a pod: `chief`, `pnem` or `pod_coordination`, the values of `role` on `pod.agents`. | "role" alone for a build worker (it holds a spec, not a pod role), "agent type" |
 | pod role record | Harold's record of the agent that holds one pod role now (pane, session id, process), kept from the `SessionStart` hook in `pod-roles.json`. | "registry" (the organisation's `products.toml`), "session name" for the record |
+| restart | A new session in a pod role or as a build worker, whoever starts it. | "reboot", "relaunch" |
+| restart check | The check that Harold runs after a restart, in four groups: identity, communication, setup and memory. | "health check" (a Harold `/health` call), "smoke test" |
+| restart receipt | The file with the result of one restart check. | "handoff", "report" (a watch's answer) |
+| roles list | The table `[roles.<role>]` in the pod registry, with the model, tools, MCP servers, commands and hooks that a role needs. | "config", "manifest" |
+| safety limit | The most input tokens that one memory check sends to the model, set with `[restart_check] max_input_tokens` (default 900,000), below what the model can take. | "cap", "token cap", "budget" (the run budget is the most a run may spend), "context window" (the model's own limit) |
+| near limit | A memory check whose input is above 80% of the safety limit, logged as `near_limit`. | "overflow", "over budget" |
+| cut | A memory check whose input was above the safety limit, so Harold removed the oldest text, logged as `cut`. | "truncated", "trimmed", "dropped" |
+| role start | The moment Harold records a new agent in a pod role or as a build worker, when the `PodAgentStarted` RPC arrives. A restart is a role start that follows an earlier session of that role. | "spawn" (the baton script) |
 | start file | The file `start/<role>.json` that states how to start a pod role's agent (folder, model, prompt file). | "start prompt" for the file (the prompt is the text in the prompt file) |
 | pod coordination | A pod's session that starts build workers and merges their work. The control-tower names its row Coordinator. `role` = `pod_coordination` on `pod.agents` names it | "baton" for the session, "orchestrator" |
 | browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |

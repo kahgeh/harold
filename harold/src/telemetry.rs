@@ -126,6 +126,8 @@ pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 /// The only span attributes and log-record attributes that leave Harold. Everything else,
 /// such as `text`, `msg`, `raw_output`, `tag` and `error`, is dropped before export.
 pub(crate) const ALLOWED_FIELDS: &[&str] = &[
+    "group",
+    "check",
     "replaced",
     "notes",
     "evidence.query",
@@ -591,6 +593,8 @@ pub(crate) struct Instruments {
     /// `harold.pod_role.lookups`, `{lookup}`, by `role`, `outcome` and `caller`: one for each
     /// lookup of the agent that holds a pod role.
     pub pod_role_lookups: Counter<u64>,
+    /// `harold.restart_check.results`, `{result}`, by `role`, `group` and `result`.
+    pub restart_check_results: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -724,6 +728,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         decisions_added: counter("harold.decisions.added", "{decision}"),
         decisions_evaluated: counter("harold.decisions.evaluated", "{decision}"),
         pod_role_lookups: counter("harold.pod_role.lookups", "{lookup}"),
+        restart_check_results: counter("harold.restart_check.results", "{result}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -2123,6 +2128,43 @@ pub(crate) fn register_pod_role_instruments() {
             }
         }
     }
+}
+
+/// The roles of `harold.restart_check.results`: the pod roles and the build worker.
+pub(crate) const RESTART_CHECK_ROLES: [&str; 4] =
+    ["chief", "pnem", "pod_coordination", "build_worker"];
+/// The groups of `harold.restart_check.results` that Harold checks now.
+pub(crate) const RESTART_CHECK_GROUPS: [&str; 2] = ["identity", "communication"];
+/// The results of `harold.restart_check.results`.
+pub(crate) const RESTART_CHECK_RESULTS: [&str; 4] = ["ok", "fail", "fixed", "not_checked"];
+
+fn restart_check_attrs(role: &str, group: &str, result: &str) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("role", role.to_owned()),
+        KeyValue::new("group", group.to_owned()),
+        KeyValue::new("result", result.to_owned()),
+    ]
+}
+
+/// Records 0 for each role, group and result of `harold.restart_check.results`. Harold calls
+/// it when it starts the restart check.
+pub(crate) fn register_restart_check_instruments() {
+    for role in RESTART_CHECK_ROLES {
+        for group in RESTART_CHECK_GROUPS {
+            for result in RESTART_CHECK_RESULTS {
+                instruments()
+                    .restart_check_results
+                    .add(0, &restart_check_attrs(role, group, result));
+            }
+        }
+    }
+}
+
+/// Counts one row of a restart check.
+pub(crate) fn record_restart_check_result(role: &str, group: &str, result: &str) {
+    instruments()
+        .restart_check_results
+        .add(1, &restart_check_attrs(role, group, result));
 }
 
 fn pod_role_attrs(role: &str, outcome: &str, caller: &str) -> Vec<KeyValue> {
@@ -4923,7 +4965,7 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 7] = [
+pub(crate) const HAROLD_FEATURES: [&str; 8] = [
     "factory-flow-page",
     "opencode-done-on-mac",
     "evidence-check",
@@ -4931,6 +4973,7 @@ pub(crate) const HAROLD_FEATURES: [&str; 7] = [
     "agent-jobs",
     "agent-jobs-hosts",
     "decision-tool",
+    "agent-restart",
 ];
 
 /// Counts one use of the product feature `spec_id`.

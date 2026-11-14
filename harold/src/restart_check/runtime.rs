@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tracing::{info, warn};
+use tracing::{info, info_span, warn};
 
 use super::{
     Agent, IdentityInput, LinkPorts, Outcome, PaneView, Recipient, Report, Resolved, Roster,
@@ -141,6 +141,7 @@ impl Checker {
         // The multiplexer reads run programs: they must not block the runtime.
         let this = Arc::clone(self);
         let (owned_agent, owned_pane) = (agent.clone(), pane.to_owned());
+        crate::telemetry::feature_used("agent-restart");
         let (report, folder) =
             tokio::task::spawn_blocking(move || this.build(&owned_agent, &owned_pane, pid))
                 .await
@@ -171,19 +172,23 @@ impl Checker {
             }
             Agent::BuildWorker { .. } => read_file_claim(&own_folder.join(WORKER_PANE_FILE), agent),
         };
-        let identity = check_identity(
-            &IdentityInput {
-                agent,
-                hook_pane: pane,
-                hook_pid: pid,
-                file,
-            },
-            &*self.roles,
-            &*self.view,
-        );
+        let identity =
+            info_span!(target: crate::telemetry::TRACE_TARGET, "identity").in_scope(|| {
+                check_identity(
+                    &IdentityInput {
+                        agent,
+                        hook_pane: pane,
+                        hook_pid: pid,
+                        file,
+                    },
+                    &*self.roles,
+                    &*self.view,
+                )
+            });
         let links = Links { checker: self };
         let plan = plan_links(agent, &self.roster());
-        let result = check_links(agent, &plan, &links);
+        let result = info_span!(target: crate::telemetry::TRACE_TARGET, "communication")
+            .in_scope(|| check_links(agent, &plan, &links));
         let (time, _) = self.clock.now();
         let mut fails = identity.fails;
         fails.extend(result.fails);
@@ -269,7 +274,7 @@ impl Checker {
         info!(
             role = %agent.record_key().1,
             channel = if to_phone { "phone" } else { "pane" },
-            delivered,
+            outcome = if delivered { "delivered" } else { "not_delivered" },
             "restart check delivered"
         );
     }
@@ -308,18 +313,19 @@ fn log_rows(agent: &Agent, report: &Report) {
         Outcome::Fail => "fail",
         Outcome::NotChecked => "not_checked",
     };
-    info!(
-        role, pod.product = %product, group = "identity", check = "identity",
-        result = word(report.identity.outcome), reason = "", "restart check result"
-    );
-    for row in &report.communication.rows {
-        let check = row.label.join(" ");
-        for result in [row.outgoing, row.incoming] {
-            info!(
-                role, pod.product = %product, group = "communication", check = %check,
-                result = word(result), reason = "", "restart check result"
-            );
-        }
+    let row = |group: &str, check: &str, outcome: Outcome| {
+        let result = word(outcome);
+        info!(
+            role, pod.product = %product, group, check, result, reason = "",
+            "restart check result"
+        );
+        crate::telemetry::record_restart_check_result(role, group, result);
+    };
+    row("identity", "identity", report.identity.outcome);
+    for link in &report.communication.rows {
+        let check = link.label.join(" ");
+        row("communication", &check, link.outgoing);
+        row("communication", &check, link.incoming);
     }
 }
 

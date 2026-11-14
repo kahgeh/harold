@@ -2103,6 +2103,7 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
 
 /// The spec's Metrics table.
 const METRICS: &[&str] = &[
+    "harold.restart_check.results",
     "harold.decisions.added",
     "harold.decisions.evaluated",
     "harold.decisions.open",
@@ -8844,4 +8845,48 @@ fn the_lag_histogram_has_its_name_unit_and_buckets_and_its_fields_may_leave() {
         })
     });
     assert!(found);
+}
+
+#[test]
+fn the_restart_check_counter_starts_at_zero_for_each_role_group_and_result_and_counts_one() {
+    test_support::install();
+    register_restart_check_instruments();
+    for role in RESTART_CHECK_ROLES {
+        for group in RESTART_CHECK_GROUPS {
+            for result in RESTART_CHECK_RESULTS {
+                let attrs = [("role", role), ("group", group), ("result", result)];
+                assert!(
+                    test_support::exact_counter_value("harold.restart_check.results", &attrs)
+                        .is_some(),
+                    "{role} {group} {result}"
+                );
+            }
+        }
+    }
+    let attrs = [("role", "pnem"), ("group", "identity"), ("result", "fail")];
+    let before =
+        test_support::exact_counter_value("harold.restart_check.results", &attrs).unwrap_or(0);
+    record_restart_check_result("pnem", "identity", "fail");
+    assert_eq!(
+        test_support::exact_counter_value("harold.restart_check.results", &attrs),
+        Some(before + 1)
+    );
+}
+
+#[test]
+fn the_restart_check_fields_and_feature_are_known() {
+    for field in [
+        "group",
+        "check",
+        "role",
+        "pod.product",
+        "result",
+        "reason",
+        "channel",
+        "outcome",
+        "spec.id",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    assert!(HAROLD_FEATURES.contains(&"agent-restart"));
 }

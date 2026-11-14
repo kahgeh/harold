@@ -2403,6 +2403,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
                 }),
             ));
             restart_check::install(Arc::clone(&checker));
+            telemetry::register_restart_check_instruments();
             Some(Arc::new(restart_check::CheckTurnEnds {
                 checker,
                 next: restart_reminder,
