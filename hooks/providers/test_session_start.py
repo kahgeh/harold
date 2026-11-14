@@ -39,8 +39,14 @@ class SessionStartHookTest(unittest.TestCase):
                 "agent_pid": 4242,
                 "start_file": "",
                 "source": "startup",
+                "pod_spec": "",
             },
         )
+
+    def test_a_build_worker_sends_its_spec_id_from_pod_spec(self):
+        env = {"POD_ROLE": "build_worker", "POD_PRODUCT": "harold", "POD_SPEC": "agent-restart"}
+        request = hook.build_request(env, PAYLOAD, 4242, "%7")
+        self.assertEqual(request["pod_spec"], "agent-restart")
 
     def test_without_pod_role_sends_nothing(self):
         self.assertIsNone(hook.build_request({}, PAYLOAD, 4242, "%7"))

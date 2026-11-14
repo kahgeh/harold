@@ -774,6 +774,7 @@ mod tests {
                     agent_pid: 10,
                     start_file: String::new(),
                     source: "startup".into(),
+                    spec: String::new(),
                 },
                 1,
             )

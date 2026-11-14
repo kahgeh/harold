@@ -83,6 +83,7 @@ impl Rig {
                     agent_pid: pid,
                     start_file: String::new(),
                     source: "startup".into(),
+                    spec: String::new(),
                 },
                 1,
             )

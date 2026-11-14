@@ -599,6 +599,7 @@ impl Harold for HaroldService {
             agent_pid: request.agent_pid,
             start_file: request.start_file,
             source: request.source,
+            spec: request.pod_spec,
         };
         let now_ms =
             i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)

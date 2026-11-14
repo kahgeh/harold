@@ -103,6 +103,7 @@ def build_request(
         "agent_pid": parent_pid,
         "start_file": start_file(role, cwd),
         "source": string_or_empty(payload.get("source")),
+        "pod_spec": env.get("POD_SPEC", ""),
     }
 
 

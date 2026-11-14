@@ -19,6 +19,10 @@ pub(crate) const RECORD_FILE: &str = "pod-roles.json";
 const CHIEF_PRODUCT: &str = "-";
 /// The pod roles: the values of `role` on `pod.agents` that an agent holds for a pod.
 const POD_ROLES: [&str; 3] = ["chief", "pnem", "pod_coordination"];
+/// The role value of a build worker. A build worker has a spec id; a pod role has none.
+pub(crate) const BUILD_WORKER: &str = "build_worker";
+/// The longest spec id a record accepts.
+const SPEC_LIMIT: usize = 64;
 /// The longest product name a record accepts.
 const PRODUCT_LIMIT: usize = 64;
 
@@ -35,6 +39,8 @@ pub(crate) struct PodStart {
     pub(crate) start_file: String,
     /// The hook's `source`: `startup`, `resume`, `clear` or `compact`.
     pub(crate) source: String,
+    /// The spec id of a build worker. Empty for a pod role.
+    pub(crate) spec: String,
 }
 
 /// The agent that holds one pod role.
@@ -56,6 +62,8 @@ pub(crate) struct RoleRecord {
 pub(crate) enum RecordError {
     UnknownRole,
     BadProduct,
+    /// A build worker with no spec id, or a spec id that is not valid.
+    BadSpec,
     /// `agent_pid` is 0: no process has it.
     BadPid,
 }
@@ -67,8 +75,13 @@ pub(crate) struct PodRoles {
     records: Mutex<BTreeMap<String, RoleRecord>>,
 }
 
-fn key(product: &str, role: &str) -> String {
-    format!("{product}/{role}")
+/// The key of a record. A pod role has no spec id and keeps the key `product/role`.
+fn key(product: &str, role: &str, spec: &str) -> String {
+    if spec.is_empty() {
+        format!("{product}/{role}")
+    } else {
+        format!("{product}/{role}/{spec}")
+    }
 }
 
 impl PodRoles {
@@ -95,14 +108,20 @@ impl PodRoles {
 
     /// The record of one role, or `None`.
     pub(crate) fn get(&self, product: &str, role: &str) -> Option<RoleRecord> {
-        self.lock().get(&key(product, role)).cloned()
+        self.get_spec(product, role, "")
+    }
+
+    /// The record of one build worker (role `build_worker`), or `None`.
+    pub(crate) fn get_spec(&self, product: &str, role: &str, spec: &str) -> Option<RoleRecord> {
+        self.lock().get(&key(product, role, spec)).cloned()
     }
 
     /// Records one start and says whether it replaced an older agent. A `clear` or `compact`
     /// source only updates the session id of an existing record, not its transcript path. Logs `pod role recorded`
     /// for a full record.
     pub(crate) fn record(&self, start: PodStart, now_ms: i64) -> Result<bool, RecordError> {
-        if !POD_ROLES.contains(&start.role.as_str()) {
+        let worker = start.role == BUILD_WORKER;
+        if !worker && !POD_ROLES.contains(&start.role.as_str()) {
             return Err(RecordError::UnknownRole);
         }
         if start.agent_pid == 0 {
@@ -113,8 +132,13 @@ impl PodRoles {
         } else {
             valid_product(&start.product)?
         };
+        let spec = if worker {
+            valid_spec(&start.spec)?
+        } else {
+            ""
+        };
         let mut records = self.lock();
-        let slot = key(product, &start.role);
+        let slot = key(product, &start.role, spec);
         if matches!(start.source.as_str(), "clear" | "compact") {
             if let Some(existing) = records.get_mut(&slot) {
                 existing.session_id = start.session_id;
@@ -126,7 +150,7 @@ impl PodRoles {
             .get(&slot)
             .is_some_and(|existing| existing.agent_pid != start.agent_pid);
         info!(
-            product = %product, role = %start.role, pane_id = %start.pane_id,
+            product = %product, role = %start.role, spec.id = %spec, pane_id = %start.pane_id,
             session.id = %start.session_id, replaced, "pod role recorded"
         );
         records.insert(
@@ -158,6 +182,15 @@ impl PodRoles {
             warn!(reason = "write_failed", "pod role record not saved");
         }
     }
+}
+
+fn valid_spec(spec: &str) -> Result<&str, RecordError> {
+    let valid = !spec.is_empty()
+        && spec.len() <= SPEC_LIMIT
+        && spec
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if valid { Ok(spec) } else { Err(RecordError::BadSpec) }
 }
 
 fn valid_product(product: &str) -> Result<&str, RecordError> {

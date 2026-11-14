@@ -942,7 +942,7 @@ fn agent_seen_has_pane_id_1_and_an_empty_response() {
 /// A hook tells Harold which agent holds a pod role. The field numbers are the wire form
 /// that the installed hook sends, so they never change.
 #[test]
-fn pod_agent_started_has_nine_fields_and_an_empty_response() {
+fn pod_agent_started_has_ten_fields_and_an_empty_response() {
     let names = [
         "pod_role",
         "pod_product",
@@ -953,6 +953,7 @@ fn pod_agent_started_has_nine_fields_and_an_empty_response() {
         "agent_pid",
         "start_file",
         "source",
+        "pod_spec",
     ];
     let expected: Vec<(String, i32)> = names
         .iter()

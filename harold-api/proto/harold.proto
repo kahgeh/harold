@@ -279,6 +279,8 @@ message PodAgentStartedRequest {
   string start_file = 8;
   // The hook's source: `startup`, `resume`, `clear` or `compact`.
   string source = 9;
+  // The spec id of a build worker. Empty for a pod role.
+  string pod_spec = 10;
 }
 
 // Empty: the call has no result.

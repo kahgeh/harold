@@ -50,6 +50,7 @@ fn start(role: &str, product: &str, pid: u32, session: &str) -> PodStart {
         agent_pid: pid,
         start_file: String::new(),
         source: "startup".into(),
+        spec: String::new(),
     }
 }
 
@@ -147,7 +148,7 @@ fn an_unknown_role_and_an_empty_product_are_refused() {
     let dir = Temp::new();
     let roles = roles(dir.0.as_path(), &[(10, 1)]);
     assert_eq!(
-        roles.record(start("build_worker", "harold", 10, "s"), 1),
+        roles.record(start("surveyor", "harold", 10, "s"), 1),
         Err(RecordError::UnknownRole)
     );
     assert_eq!(
@@ -155,6 +156,55 @@ fn an_unknown_role_and_an_empty_product_are_refused() {
         Err(RecordError::BadProduct)
     );
     assert!(roles.get("harold", "build_worker").is_none());
+}
+
+fn worker(pid: u32, spec: &str) -> PodStart {
+    PodStart {
+        spec: spec.into(),
+        ..start("build_worker", "harold", pid, &format!("s-{spec}"))
+    }
+}
+
+#[test]
+fn two_build_workers_of_one_product_get_two_records_keyed_by_spec_id() {
+    let dir = Temp::new();
+    let roles = roles(dir.0.as_path(), &[(10, 1), (11, 2)]);
+    assert_eq!(roles.record(worker(10, "spec-a"), 1), Ok(false));
+    assert_eq!(roles.record(worker(11, "spec-b"), 2), Ok(false));
+    assert_eq!(
+        roles.get_spec("harold", "build_worker", "spec-a").unwrap().agent_pid,
+        10
+    );
+    assert_eq!(
+        roles.get_spec("harold", "build_worker", "spec-b").unwrap().agent_pid,
+        11
+    );
+    assert_eq!(roles.record(worker(12, "spec-a"), 3), Ok(true));
+}
+
+#[test]
+fn a_build_worker_with_no_spec_id_or_a_bad_one_is_refused_and_a_pod_role_ignores_the_spec() {
+    let dir = Temp::new();
+    let roles = roles(dir.0.as_path(), &[(10, 1)]);
+    assert_eq!(roles.record(worker(10, ""), 1), Err(RecordError::BadSpec));
+    assert_eq!(roles.record(worker(10, "a/b"), 1), Err(RecordError::BadSpec));
+    let pnem = PodStart {
+        spec: "x".into(),
+        ..start("pnem", "harold", 10, "s")
+    };
+    assert_eq!(roles.record(pnem, 1), Ok(false));
+    assert!(roles.get("harold", "pnem").is_some());
+}
+
+#[test]
+fn an_old_record_file_with_a_two_part_key_still_reads() {
+    let dir = Temp::new();
+    let first = roles(dir.0.as_path(), &[(10, 1)]);
+    first.record(start("pnem", "harold", 10, "s-1"), 1).unwrap();
+    let text = std::fs::read_to_string(dir.0.join(RECORD_FILE)).unwrap();
+    assert!(text.contains("\"harold/pnem\""));
+    let again = roles(dir.0.as_path(), &[(10, 1)]);
+    assert_eq!(again.get("harold", "pnem").unwrap().session_id, "s-1");
 }
 
 #[test]
