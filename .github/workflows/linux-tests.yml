@@ -61,6 +61,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete
+          python3 -m unittest hooks.providers.test_session_start
           python3 -I harold/src/tts/test_tts_workers.py
 
       - name: Test the container test set

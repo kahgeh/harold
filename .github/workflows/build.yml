@@ -71,8 +71,10 @@ jobs:
           cp harold-api/proto/harold.proto "dist/$package/"
           cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
           cp scripts/install.py scripts/harold_service.py "dist/$package/scripts/"
+          cp scripts/claude-start "dist/$package/scripts/"
           cp hooks/shared/harold_turn_complete.py "dist/$package/hooks/"
           cp hooks/providers/claude_turn_complete.py hooks/providers/codex_turn_complete.py "dist/$package/hooks/"
+          cp hooks/providers/claude_session_start.py "dist/$package/hooks/"
           cp -R hooks/claude-mod "dist/$package/hooks/claude-mod"
           find "dist/$package/hooks/claude-mod" -name '*.test.ts' -delete
           for file in .claude-plugin/plugin.json hooks/hooks.json hooks/register.ts hooks/accept.ts; do
@@ -168,8 +170,10 @@ jobs:
           cp harold-api/proto/harold.proto "dist/$package/"
           cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
           cp scripts/install.py scripts/harold_service.py "dist/$package/scripts/"
+          cp scripts/claude-start "dist/$package/scripts/"
           cp hooks/shared/harold_turn_complete.py "dist/$package/hooks/"
           cp hooks/providers/claude_turn_complete.py hooks/providers/codex_turn_complete.py "dist/$package/hooks/"
+          cp hooks/providers/claude_session_start.py "dist/$package/hooks/"
           cp -R hooks/claude-mod "dist/$package/hooks/claude-mod"
           find "dist/$package/hooks/claude-mod" -name '*.test.ts' -delete
           for file in .claude-plugin/plugin.json hooks/hooks.json hooks/register.ts hooks/accept.ts; do

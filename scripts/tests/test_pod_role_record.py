@@ -104,5 +104,22 @@ class SessionStartHookTests(unittest.TestCase):
         self.assertIn('"SessionStart"', outcome)
 
 
+WORKFLOWS = SCRIPTS.parent / '.github' / 'workflows'
+
+
+class WorkflowTests(unittest.TestCase):
+    """Plain-text checks: no yaml module, no workflow is run."""
+
+    def test_both_build_jobs_copy_the_hook_and_claude_start(self):
+        text = (WORKFLOWS / 'build.yml').read_text(encoding='utf-8')
+        self.assertEqual(text.count('cp hooks/providers/claude_session_start.py "dist/$package/hooks/"'), 2)
+        self.assertEqual(text.count('cp scripts/claude-start "dist/$package/scripts/"'), 2)
+
+    def test_both_test_workflows_run_the_hook_test(self):
+        for name in ('linux-tests.yml', 'macos-checks.yml'):
+            text = (WORKFLOWS / name).read_text(encoding='utf-8')
+            self.assertIn('          python3 -m unittest hooks.providers.test_session_start\n', text, name)
+
+
 if __name__ == '__main__':
     unittest.main()
