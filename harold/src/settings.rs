@@ -270,6 +270,41 @@ impl JobSettings {
     }
 }
 
+/// The `[decision]` table: the decision tool's organisation, kinds and personal repository.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct DecisionSettings {
+    /// The organisation's name. It is an attribute of the decision metrics.
+    pub(crate) organisation: String,
+    /// The kinds that a decision record may have.
+    pub(crate) kinds: Vec<String>,
+    /// The absolute path of the personal repository, the place `personal:`. Empty: the
+    /// place is not set.
+    pub(crate) personal_repository: String,
+}
+
+impl Default for DecisionSettings {
+    fn default() -> Self {
+        Self {
+            organisation: "personal-chief".to_owned(),
+            kinds: [
+                "slicing", "model", "slot", "design", "release", "process", "other",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            personal_repository: String::new(),
+        }
+    }
+}
+
+impl DecisionSettings {
+    /// The personal repository with `~` expanded, or `None` when the setting is empty.
+    pub(crate) fn personal_repository_path(&self) -> Option<std::path::PathBuf> {
+        let text = self.personal_repository.trim();
+        (!text.is_empty()).then(|| expand_tilde(text).into())
+    }
+}
+
 /// The `[watch]` table: the model every watch runs, and the user's optional budgets. A
 /// budget is enforced only when set; an absent one is never treated as 0.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1954,6 +1989,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) job: JobSettings,
     #[serde(default)]
+    pub(crate) decision: DecisionSettings,
+    #[serde(default)]
     pub(crate) work: WorkSettings,
     #[serde(default)]
     pub(crate) knowledge: KnowledgeSettings,
@@ -2847,6 +2884,29 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             Some(std::path::PathBuf::from("/state/agent-activity"))
         );
         assert_eq!(set.job.keep_awake_every_s, 120);
+    }
+
+    #[test]
+    fn decision_settings_ship_the_seven_kinds_and_the_organisation() {
+        let settings = crate::settings::settings_with("");
+        assert_eq!(settings.decision.organisation, "personal-chief");
+        assert_eq!(
+            settings.decision.kinds,
+            [
+                "slicing", "model", "slot", "design", "release", "process", "other"
+            ]
+        );
+        assert_eq!(settings.decision.personal_repository, "");
+        assert_eq!(settings.decision.personal_repository_path(), None);
+        let set = crate::settings::settings_with(
+            "[decision]\norganisation = \"acme\"\nkinds = [\"model\", \"hiring\"]\npersonal_repository = \"/repo/personal\"",
+        );
+        assert_eq!(set.decision.organisation, "acme");
+        assert_eq!(set.decision.kinds, ["model", "hiring"]);
+        assert_eq!(
+            set.decision.personal_repository_path(),
+            Some(std::path::PathBuf::from("/repo/personal"))
+        );
     }
 
     #[test]

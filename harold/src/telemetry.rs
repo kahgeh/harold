@@ -368,6 +368,16 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "errors",
     "matched_share",
     "fell_back",
+    "decision.id",
+    "details_owner",
+    "accountable",
+    "place",
+    "link",
+    "decide_s",
+    "process_grade",
+    "outcome_grade",
+    "to_evaluate_days",
+    "days_open",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -567,6 +577,12 @@ pub(crate) struct Instruments {
     pub evidence_lines: Counter<u64>,
     /// `harold.job.ends`, `{job}`, by `how` and `end_line`: one for each agent job that ended.
     pub job_ends: Counter<u64>,
+    /// `harold.decisions.added`, `{decision}`, by `organisation`, `role`, `kind` and
+    /// `accountable`: one for each decision record added.
+    pub decisions_added: Counter<u64>,
+    /// `harold.decisions.evaluated`, `{decision}`: as `decisions_added`, plus `process_grade`
+    /// and `outcome_grade`.
+    pub decisions_evaluated: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -697,6 +713,8 @@ fn build_instruments(meter: &Meter) -> Instruments {
         evidence_reads: counter("harold.evidence.reads", "{read}"),
         evidence_lines: counter("harold.evidence.lines", "{line}"),
         job_ends: counter("harold.job.ends", "{job}"),
+        decisions_added: counter("harold.decisions.added", "{decision}"),
+        decisions_evaluated: counter("harold.decisions.evaluated", "{decision}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -1955,6 +1973,118 @@ pub(crate) fn count_job_end_on(how: &'static str, end_line: &str, host: &str) {
 pub(crate) fn set_jobs_past_due(count: u64) {
     JOBS_PAST_DUE.store(count, std::sync::atomic::Ordering::Relaxed);
     job_past_due_gauge();
+}
+
+// ---------------------------------------------------------------------------
+// Decision records
+// ---------------------------------------------------------------------------
+
+/// Every `role` of a decision record.
+pub(crate) const DECISION_ROLES: [&str; 6] = [
+    "chief",
+    "pnem",
+    "pod_coordination",
+    "build_worker",
+    "coach",
+    "user",
+];
+
+/// Every `accountable` value of a decision record: `user`, or the role that decided. The
+/// user is one of the roles, so the two lists are the same.
+pub(crate) const DECISION_ACCOUNTABLE: [&str; 6] = DECISION_ROLES;
+
+/// The grades of a decision record.
+const DECISION_GRADES: [&str; 2] = ["good", "poor"];
+
+/// The open and due counts that `harold.decisions.open` reads, by organisation.
+static DECISIONS_OPEN: Mutex<BTreeMap<String, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+fn decisions_open_gauge() {
+    static GAUGE: OnceLock<opentelemetry::metrics::ObservableGauge<u64>> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        meter()
+            .u64_observable_gauge("harold.decisions.open")
+            .with_unit("{decision}")
+            .with_callback(|observer| {
+                let state = DECISIONS_OPEN
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                for (organisation, (open, due)) in state.iter() {
+                    for (status, count) in [("open", open), ("due", due)] {
+                        observer.observe(
+                            *count,
+                            &[
+                                KeyValue::new("organisation", organisation.clone()),
+                                KeyValue::new("status", status),
+                            ],
+                        );
+                    }
+                }
+            })
+            .build()
+    });
+}
+
+/// Records 0 for each series of the two decision counters, and sets the gauge to 0. The
+/// decision tool calls it at its start with the organisation and the kinds from `[decision]`.
+pub(crate) fn register_decision_instruments(organisation: &str, kinds: &[String]) {
+    for role in DECISION_ROLES {
+        for kind in kinds {
+            for accountable in DECISION_ACCOUNTABLE {
+                let base = decision_attrs(organisation, role, kind, accountable);
+                instruments().decisions_added.add(0, &base);
+                for process in DECISION_GRADES {
+                    for outcome in DECISION_GRADES {
+                        let mut attrs = base.clone();
+                        attrs.push(KeyValue::new("process_grade", process));
+                        attrs.push(KeyValue::new("outcome_grade", outcome));
+                        instruments().decisions_evaluated.add(0, &attrs);
+                    }
+                }
+            }
+        }
+    }
+    set_decisions_open(organisation, 0, 0);
+}
+
+fn decision_attrs(organisation: &str, role: &str, kind: &str, accountable: &str) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("organisation", organisation.to_owned()),
+        KeyValue::new("role", role.to_owned()),
+        KeyValue::new("kind", kind.to_owned()),
+        KeyValue::new("accountable", accountable.to_owned()),
+    ]
+}
+
+/// Counts one decision record added.
+pub(crate) fn record_decision_added(organisation: &str, role: &str, kind: &str, accountable: &str) {
+    instruments()
+        .decisions_added
+        .add(1, &decision_attrs(organisation, role, kind, accountable));
+}
+
+/// Counts one decision record evaluated.
+pub(crate) fn record_decision_evaluated(
+    organisation: &str,
+    role: &str,
+    kind: &str,
+    accountable: &str,
+    process_grade: &str,
+    outcome_grade: &str,
+) {
+    let mut attrs = decision_attrs(organisation, role, kind, accountable);
+    attrs.push(KeyValue::new("process_grade", process_grade.to_owned()));
+    attrs.push(KeyValue::new("outcome_grade", outcome_grade.to_owned()));
+    instruments().decisions_evaluated.add(1, &attrs);
+}
+
+/// Sets what `harold.decisions.open` reads for `organisation`: the open and the due records.
+pub(crate) fn set_decisions_open(organisation: &str, open: u64, due: u64) {
+    DECISIONS_OPEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(organisation.to_owned(), (open, due));
+    decisions_open_gauge();
 }
 
 // ---------------------------------------------------------------------------
@@ -4740,13 +4870,14 @@ pub(crate) fn count_work_checked(priority: &'static str) {
 
 /// The `spec.id` of each product feature of Harold. A spec of kind `feature` adds its id
 /// here and calls `feature_used` at its one point of use.
-pub(crate) const HAROLD_FEATURES: [&str; 6] = [
+pub(crate) const HAROLD_FEATURES: [&str; 7] = [
     "factory-flow-page",
     "opencode-done-on-mac",
     "evidence-check",
     "evidence-follow-up",
     "agent-jobs",
     "agent-jobs-hosts",
+    "decision-tool",
 ];
 
 /// Counts one use of the product feature `spec_id`.

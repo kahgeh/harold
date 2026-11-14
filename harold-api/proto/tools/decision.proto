@@ -1,0 +1,126 @@
+// The decision tool: the records of decisions that a role made from evidence, each with a
+// check date, so the coach can grade them later.
+//
+//   Add       makes an open record. Only the chief's pane may call it.
+//   List      the records, oldest check date first. Open and due by default.
+//   Show      one record with every field.
+//   Evaluate  sets the grades and the status `evaluated`. Only the chief's pane.
+//   Recheck   moves the check date of an open or due record. Only the chief's pane.
+//   Link      sets or replaces the link. Only the chief's pane.
+//
+// Refusals carry a reason as the message:
+//   PermissionDenied     "not_chief", "no_pane".
+//   InvalidArgument      "unknown_kind", "bad_details_owner", "bad_accountable", "bad_date",
+//                        "bad_role", "bad_title", "bad_grade", "bad_link", and the details
+//                        reasons "unknown_place", "no_pod_registry", "unknown_product",
+//                        "no_vault", "no_personal_repository", "path_outside_place",
+//                        "details_unreadable", "details_missing", "details_owner_mismatch".
+//   NotFound             "unknown_decision".
+//   FailedPrecondition   "already_evaluated".
+//   Unavailable          "store_failed".
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tools.decision.v1;
+
+service DecisionService {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Show(ShowRequest) returns (ShowResponse);
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+  rpc Recheck(RecheckRequest) returns (RecheckResponse);
+  rpc Link(LinkRequest) returns (LinkResponse);
+}
+
+message Decision {
+  string id = 1;
+  string decided_on = 2;
+  string organisation = 3;
+  string role = 4;
+  string kind = 5;
+  string details_owner = 6;
+  string accountable = 7;
+  string title = 8;
+  string link = 9;
+  string check_on = 10;
+  // "open", "due" or "evaluated".
+  string status = 11;
+  string process_grade = 12;
+  string outcome_grade = 13;
+  // `<place>:<path>#<id>`.
+  string details = 14;
+  // Times in milliseconds since the epoch. 0 when not set.
+  int64 asked_at_ms = 15;
+  int64 added_at_ms = 16;
+  int64 evaluated_at_ms = 17;
+}
+
+message AddRequest {
+  // The pane that runs the command. The service checks that it is the chief's.
+  string pane_id = 1;
+  string role = 2;
+  string kind = 3;
+  string details_owner = 4;
+  string accountable = 5;
+  string title = 6;
+  string link = 7;
+  // `YYYY-MM-DD`.
+  string check_on = 8;
+  string details = 9;
+  // RFC 3339 time, or empty.
+  string asked_at = 10;
+}
+message AddResponse {
+  Decision decision = 1;
+}
+
+message ListRequest {
+  bool due = 1;
+  bool open = 2;
+  bool all = 3;
+  string role = 4;
+  string kind = 5;
+  string details_owner = 6;
+  string accountable = 7;
+}
+message ListResponse {
+  repeated Decision decisions = 1;
+}
+
+message ShowRequest {
+  string id = 1;
+}
+message ShowResponse {
+  Decision decision = 1;
+  // The full path of the details file, empty when the place is not set.
+  string details_path = 2;
+}
+
+message EvaluateRequest {
+  string pane_id = 1;
+  string id = 2;
+  string process_grade = 3;
+  string outcome_grade = 4;
+}
+message EvaluateResponse {
+  Decision decision = 1;
+}
+
+message RecheckRequest {
+  string pane_id = 1;
+  string id = 2;
+  string check_on = 3;
+}
+message RecheckResponse {
+  Decision decision = 1;
+}
+
+message LinkRequest {
+  string pane_id = 1;
+  string id = 2;
+  string link = 3;
+}
+message LinkResponse {
+  Decision decision = 1;
+}

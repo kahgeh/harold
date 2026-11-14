@@ -235,3 +235,12 @@ cache_read = 0.10
 # The web app ([web_app] in local.toml) admits only paired devices. The pairing code is a line
 # HAROLD_PAIRING_CODE=<code> in ~/bin/harold/config/pairing.env (mode 0600), or in the file
 # [web_app] pairing_file names. [web_app] require_pairing = false switches the check off.
+
+[decision]
+# The organisation's name. It is an attribute of the decision metrics.
+organisation = "personal-chief"
+# The kinds that a decision record may have. Add a kind here: no code change is needed.
+kinds = ["slicing", "model", "slot", "design", "release", "process", "other"]
+# The absolute path of the personal repository (the folder that the chief's .personal file
+# names). Empty: a decision record cannot have `personal:` details.
+personal_repository = ""

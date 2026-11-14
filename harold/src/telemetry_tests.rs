@@ -2103,6 +2103,9 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
 
 /// The spec's Metrics table.
 const METRICS: &[&str] = &[
+    "harold.decisions.added",
+    "harold.decisions.evaluated",
+    "harold.decisions.open",
     // The gauge of the user's hourly rate. The query inventory-cost.sql reads it through the
     // ClickHouse dictionary otel.harold_settings. Harold sends it with user-attention-signals.
     "harold.attention.hourly_rate",
@@ -2257,6 +2260,10 @@ const ATTRIBUTES: &[&str] = &[
     "cause",
     "route_class",
     "short",
+    "organisation",
+    "accountable",
+    "process_grade",
+    "outcome_grade",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -5860,6 +5867,99 @@ fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
     }
     assert!(HAROLD_FEATURES.contains(&"agent-jobs"));
     assert!(HAROLD_FEATURES.contains(&"agent-jobs-hosts"));
+}
+
+#[test]
+fn the_decision_fields_are_allowed_and_the_feature_is_listed() {
+    for field in [
+        "decision.id",
+        "role",
+        "kind",
+        "details_owner",
+        "accountable",
+        "place",
+        "link",
+        "decide_s",
+        "process_grade",
+        "outcome_grade",
+        "to_evaluate_days",
+        "days_open",
+        "reason",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+    assert!(HAROLD_FEATURES.contains(&"decision-tool"));
+}
+
+#[test]
+fn the_decision_counters_start_at_zero_for_each_value_and_count_one() {
+    test_support::install();
+    let kinds = vec!["slicing".to_owned(), "model".to_owned()];
+    register_decision_instruments("org-a", &kinds);
+    for role in DECISION_ROLES {
+        for kind in ["slicing", "model"] {
+            for accountable in DECISION_ACCOUNTABLE {
+                let added = test_support::exact_counter_value(
+                    "harold.decisions.added",
+                    &[
+                        ("organisation", "org-a"),
+                        ("role", role),
+                        ("kind", kind),
+                        ("accountable", accountable),
+                    ],
+                );
+                assert!(added.is_some(), "added {role} {kind} {accountable}");
+            }
+        }
+    }
+    let evaluated = |grade: &str| {
+        test_support::exact_counter_value(
+            "harold.decisions.evaluated",
+            &[
+                ("organisation", "org-a"),
+                ("role", "chief"),
+                ("kind", "model"),
+                ("accountable", "user"),
+                ("process_grade", grade),
+                ("outcome_grade", "poor"),
+            ],
+        )
+    };
+    assert!(evaluated("good").is_some() && evaluated("poor").is_some());
+    let added = || {
+        test_support::exact_counter_value(
+            "harold.decisions.added",
+            &[
+                ("organisation", "org-a"),
+                ("role", "chief"),
+                ("kind", "model"),
+                ("accountable", "user"),
+            ],
+        )
+        .unwrap_or(0)
+    };
+    let before = (added(), evaluated("good").unwrap_or(0));
+    record_decision_added("org-a", "chief", "model", "user");
+    record_decision_evaluated("org-a", "chief", "model", "user", "good", "poor");
+    assert_eq!(
+        (added(), evaluated("good").unwrap_or(0)),
+        (before.0 + 1, before.1 + 1)
+    );
+}
+
+#[test]
+fn the_decision_gauge_counts_open_and_due() {
+    test_support::install();
+    set_decisions_open("org-g", 4, 2);
+    let read = |status: &str| {
+        test_support::gauge_value(
+            "harold.decisions.open",
+            &[("organisation", "org-g"), ("status", status)],
+        )
+    };
+    assert_eq!((read("open"), read("due")), (Some(4), Some(2)));
+    set_decisions_open("org-g", 0, 0);
+    assert_eq!((read("open"), read("due")), (Some(0), Some(0)));
 }
 
 #[test]

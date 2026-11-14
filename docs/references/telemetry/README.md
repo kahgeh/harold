@@ -206,7 +206,7 @@ GROUP BY 1
 
 **Spec kind.** `spec.kind` comes from the `**Kind.**` line under the `**Size.**` line: `feature` (a product feature), `fix` or `other`. A spec with no kind line is `unkinded`.
 
-**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane) `agent-jobs` (one use is one `harold tool job add` that Harold accepts) and `agent-jobs-hosts` (one use is one `harold tool job add --unit` that Harold accepts). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
+**Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane) `agent-jobs` (one use is one `harold tool job add` that Harold accepts) `agent-jobs-hosts` (one use is one `harold tool job add --unit` that Harold accepts) and `decision-tool` (one use is one `harold tool decision evaluate` that Harold accepts). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
 
 **Confirmed fixes.** The evidence check writes `confirmed/<id>.md` in the pod folder when the evidence query of a fix spec returns `present = 1` after its release. The file has the lines `confirmed:` (RFC 3339 time) and `evidence:` (the name of the evidence query, with no message text). Pod stats reads it and exports the gauge `pod.fix.confirmed_at` for each confirmed file: its value is the `confirmed:` time in Unix seconds, with `spec.id` and `pod.product`. A restart exports the same times again, so the query counts the `spec.id` values whose time falls in the window, not a rise. A file with no valid `confirmed:` time gives no gauge point and one unreadable-file notice.
 
@@ -420,6 +420,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.evidence.lines` | counter, `{line}` | `outcome` (`typed`, `no_chief`, `not_typed`). One for each try to type an `EVIDENCE` line into the chief's pane. Each outcome starts at 0 |
 | `harold.job.ends` | counter, `{job}` | `how` (`ended`, `removed`), `end_line` (`typed`, `typed_at_turn_end`, `no_pane`, `failed`, `remote_pane`, and `none` for a removed job) and `host` (the empty string for a job on this machine, or the label of the slave that ran it). One for each agent job that ended or was removed, counted when its end line is done. For a slave's job, only the master counts. Each series of the empty `host` starts at 0 |
 | `harold.job.past_due` | gauge, `{job}` | none. The running agent jobs past their expected end. Starts at 0 |
+| `harold.decisions.added` | counter, `{decision}` | `organisation`, `role`, `kind`, `accountable`. One for each decision record added. Each series starts at 0 |
+| `harold.decisions.evaluated` | counter, `{decision}` | `organisation`, `role`, `kind`, `accountable`, `process_grade`, `outcome_grade`. One for each decision record evaluated. Each series starts at 0 |
+| `harold.decisions.open` | gauge, `{decision}` | `organisation`, `status` (`open`, `due`). The decision records that wait. Starts at 0 |
 | `harold.web_app.requests` | counter, `{request}` | `route_class` (a fixed class, never a path), `result` (`served`, `refused`, `not_found`, `error`), `status` (`2xx` to `5xx`), `reason` (empty when `served`; for `refused`: `no_login`, `no_cookie`, `unknown_device`, `origin`, `not_datastar`) |
 | `harold.web_app.requests.waiting` | counter, `{request}` | `route_class`. A request with no answer after 5 seconds. It is not a result of `harold.web_app.requests`. The `updates` class never counts here |
 | `harold.web_app.request.duration` | histogram, `s`, buckets 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | `route_class`, never `updates`. The time from the request's arrival to the first byte of the answer |
@@ -522,6 +525,16 @@ These fields were added so that the log lines of the collector work show their i
 | `run_s` | Whole seconds from the recording of an agent job to the check that found it ended. On `job ended` |
 | `past_due_s` | Whole seconds that an agent job ran past its expected end, 0 when it did not. On `job ended` |
 | `end_line` | How the end line of an agent job went: `typed`, `typed_at_turn_end`, `no_pane`, `failed` or `remote_pane` (the agent pane is on a Rex host, where the master cannot type yet). A removed job has `none`. On `harold.job.ends` |
+| `decision.id` | The id of a decision record, `d-YYYYMMDD-NN`, never a title. On the decision tool lines |
+| `details_owner` | Who writes the details entry of a decision record: `chief` or `pnem:<product>`. On `decision added` |
+| `accountable` | Whose decision it was: `user`, or the role that made it. On `decision added` and on the decision counters |
+| `place` | Where the details entry of a decision record lies: `pod`, `vault` or `personal`, never the path. On `decision added` |
+| `link` | The link of a decision record, `work:<name>` or `spec:<product>/<id>`. On `decision added` |
+| `decide_s` | Whole seconds from the question to the adding of a decision record. On `decision added`, when the record has `asked_at` |
+| `process_grade` | `good` or `poor`: how the decision was made, judged from the evidence known then. On `decision evaluated` and on `harold.decisions.evaluated` |
+| `outcome_grade` | `good` or `poor`: the result against the expected result. On `decision evaluated` and on `harold.decisions.evaluated` |
+| `to_evaluate_days` | Whole days from the adding of a decision record to its evaluation. On `decision evaluated` |
+| `days_open` | Whole days from the adding of a decision record to the day it became due. On `decision due` |
 | `lag_s` | Whole seconds from the tag time of a release to its first start on this machine, never text. On `release installed` |
 | `kept_bytes`, `dropped_bytes` | Byte counts. On `harold.log trimmed` |
 | `name` | The name of a timed prompt or of a paired device. Harold sets both names. On `timed prompt delayed`, `timed prompt skipped` and the pairing lines |
@@ -1087,6 +1100,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.factory_flow.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`);
 - `harold.evidence.reads`, for each `outcome` (`ok`, `unreachable`, `refused`, `timeout`, `not_set_up`, `bad_query`, `bad_row`);
 - `harold.evidence.lines`, for each `outcome` (`typed`, `no_chief`, `not_typed`);
+- `harold.decisions.added` and `harold.decisions.evaluated`, for each `role`, each `accountable` value and each kind of `[decision] kinds` (and each pair of grades for `evaluated`), and `harold.decisions.open` as 0;
 - `harold.job.ends`, for each series of `how` and `end_line` with an empty `host` (`ended` with `typed`, `typed_at_turn_end`, `no_pane`, `failed` and `remote_pane`, and `removed` with `none`), and `harold.job.past_due` as 0;
 - `harold.web_app.requests`, for each `route_class` with `result = served` and `status = 2xx`, and for each refusal `reason` with `route_class = other` and `status = 4xx`. `harold.web_app.requests.waiting`, for each `route_class` except `updates`. `harold.web_app.connections`, for each `outcome`. `harold.web_app.updates.closed`, for each `reason` with each `short`;
 - `harold.app_spans.not_forwarded`, for each `reason`;
@@ -1095,7 +1109,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.agent.blocked_long`, for each configured provider;
 - `harold.work.rotations`, for each `outcome` (`done`, `failed`). The counter `outcome="failed"` counts each failed try, retries too, while the log line `work rotation failed` is logged once for each failure. The histograms `harold.work.lead_time` and `harold.work.slices` are not seeded, because a histogram cannot start at 0. The cards for them show nothing until the first closing. The gauges `harold.work.records` (for each `priority` and open `status`) and `harold.work.waiting_long` (for each `priority`) start at 0 too;
 - `harold.work.checked`, for each `priority`;
-- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up`, `agent-jobs` and `agent-jobs-hosts`);
+- `harold.feature.used`, for each `spec.id` in Harold's list of product features (today `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up`, `agent-jobs`, `agent-jobs-hosts` and `decision-tool`);
 - `harold.turn.tokens`, with `model = none` and no `pod.product`, for each `kind` and each `role`. That is 4 x 5 = 20 series. A real model starts at its first turn, and its four kinds then each add a count, 0 included. `harold.turn.tokens.by_spec` is not seeded, because a `spec.id` cannot be known at start;
 - `harold.multiplexer.calls`, for each `operation` (`list`, `layout`, `process`, `screen_size`, `status`, `type`, `key`, and `screen_read` for each `purpose`) and each `outcome` that is not `ok` (`failed`, `timeout`, `absent`, `malformed`), with the configured `multiplexer` and the empty `host`. That is 7 x 4 = 28 points, and `screen_read` for each `purpose` (`state`, `prompt`, `writer`) adds 3 x 4 = 12 points. The total is 40 points. The `ok` series and the `other` operation start at their first call, because no alert reads them;
 
