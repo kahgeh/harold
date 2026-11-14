@@ -30,6 +30,8 @@
   const TAP_MAX = 100;
   const STOPPED = "Dictation stopped. Tap the mic again.";
   const TAP_AGAIN = "Tap the mic again.";
+  // A stopped instance that gives no `end` in this time is retired, so Listening does not stay.
+  const STOP_WAIT_MS = 1000;
   // The browser's error names, and the words the check carries for them.
   const ERROR_RESULTS = {
     "not-allowed": "not_allowed",
@@ -167,6 +169,7 @@
 
   // The `end` event of an instance. A retired instance has nothing left to do.
   function ended(inst) {
+    clearTimeout(inst.stopTimer);
     if (lingering === inst) {
       lingering = null;
     }
@@ -194,11 +197,18 @@
       // Already over.
     }
     clearTimeout(quietTimer);
+    // This timer only retires the instance (an abort); it never starts a recognition.
+    inst.stopTimer = setTimeout(() => {
+      if (inst === current) {
+        retire(inst);
+      }
+    }, STOP_WAIT_MS);
   }
 
   // Ends the instance at once and for good: its words so far stay in the box, its tap ends
   // with one report, and its late events are ignored.
   function retire(inst) {
+    clearTimeout(inst.stopTimer);
     inst.t.pageEnded = true;
     inst.write = false;
     try {

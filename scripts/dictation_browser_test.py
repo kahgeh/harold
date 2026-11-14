@@ -269,6 +269,17 @@ try {
   await reportsAre(1);
   cases.stop_without_end = { ...(await state()), beforeSecondStop };
 
+  // A stop with no `end` and no second stop: the page retires it after 1 second.
+  await load();
+  await fake(`f.cfg.noEnd = true;`);
+  await tapMic(); await waitInstances(1);
+  await fake(`f.last().fireStart();`);
+  await evaluate(`document.getElementById("dictation-stop").click()`);
+  await sleep(300);
+  const beforeTimer = await evaluate(`window.__fake.reports.length`);
+  await reportsAre(1, 3000);
+  cases.stop_timer = { ...(await state()), beforeTimer };
+
   // An end with no result and no error.
   await load();
   await tapMic(); await waitInstances(1);
@@ -430,6 +441,10 @@ def verify(results, cases):
     check('a stop with no end waits for it; a second stop gives page_ended and no notice',
           c['beforeSecondStop'] == 0 and rows('stop_without_end') == [('page_ended', 1, True)]
           and not c['note']['notice'], c)
+    c = cases['stop_timer']
+    check('a stop with no end is retired after 1 second: page_ended, no notice, Listening gone',
+          c['beforeTimer'] == 0 and rows('stop_timer') == [('page_ended', 1, True)]
+          and not c['note']['notice'] and c['note']['hidden'], c)
     c = cases['stop_after_result']
     check('a stop after a result gives ok', rows('stop_after_result') == [('ok', 1, True)], c['reports'])
     c = cases['no_result']

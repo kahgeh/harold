@@ -676,6 +676,7 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once_for_each_tap() {
         "if (t.settled) {",
         "const TAP_MAX = 100;",
         r#"const TAP_AGAIN = "Tap the mic again.";"#,
+        "const STOP_WAIT_MS = 1000;",
         // A tap retires the older instance and starts the new one in its own handler.
         "retire(old);",
         "begin(t, Boolean(old));",
