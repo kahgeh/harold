@@ -132,11 +132,7 @@ impl PodRoles {
         } else {
             valid_product(&start.product)?
         };
-        let spec = if worker {
-            valid_spec(&start.spec)?
-        } else {
-            ""
-        };
+        let spec = if worker { valid_spec(&start.spec)? } else { "" };
         let mut records = self.lock();
         let slot = key(product, &start.role, spec);
         if matches!(start.source.as_str(), "clear" | "compact") {
@@ -190,7 +186,11 @@ fn valid_spec(spec: &str) -> Result<&str, RecordError> {
         && spec
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if valid { Ok(spec) } else { Err(RecordError::BadSpec) }
+    if valid {
+        Ok(spec)
+    } else {
+        Err(RecordError::BadSpec)
+    }
 }
 
 fn valid_product(product: &str) -> Result<&str, RecordError> {

@@ -172,11 +172,17 @@ fn two_build_workers_of_one_product_get_two_records_keyed_by_spec_id() {
     assert_eq!(roles.record(worker(10, "spec-a"), 1), Ok(false));
     assert_eq!(roles.record(worker(11, "spec-b"), 2), Ok(false));
     assert_eq!(
-        roles.get_spec("harold", "build_worker", "spec-a").unwrap().agent_pid,
+        roles
+            .get_spec("harold", "build_worker", "spec-a")
+            .unwrap()
+            .agent_pid,
         10
     );
     assert_eq!(
-        roles.get_spec("harold", "build_worker", "spec-b").unwrap().agent_pid,
+        roles
+            .get_spec("harold", "build_worker", "spec-b")
+            .unwrap()
+            .agent_pid,
         11
     );
     assert_eq!(roles.record(worker(12, "spec-a"), 3), Ok(true));
@@ -187,7 +193,10 @@ fn a_build_worker_with_no_spec_id_or_a_bad_one_is_refused_and_a_pod_role_ignores
     let dir = Temp::new();
     let roles = roles(dir.0.as_path(), &[(10, 1)]);
     assert_eq!(roles.record(worker(10, ""), 1), Err(RecordError::BadSpec));
-    assert_eq!(roles.record(worker(10, "a/b"), 1), Err(RecordError::BadSpec));
+    assert_eq!(
+        roles.record(worker(10, "a/b"), 1),
+        Err(RecordError::BadSpec)
+    );
     let pnem = PodStart {
         spec: "x".into(),
         ..start("pnem", "harold", 10, "s")

@@ -16,6 +16,7 @@ mod pod_roles;
 mod pod_stats;
 mod projector;
 mod remote_order;
+mod restart_check;
 mod restart_reminder;
 mod settings;
 mod slave;
