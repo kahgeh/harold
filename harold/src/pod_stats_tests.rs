@@ -5609,3 +5609,369 @@ async fn the_effort_gauge_carries_the_value_and_the_cause() {
     assert_eq!(read("valued", ("spec.cause", "decision-tool")), None);
     *snapshot.lock().unwrap() = PodSnapshot::default();
 }
+
+// The named queries of the spec cost-per-value, on fixture rows. The fixture rows are literal
+// constants in a SELECT: the test replaces each table of the query with them, so it reads no
+// real data and writes nothing. It asks the read-only tool `bin/logq`. It skips when the tool
+// or ClickHouse cannot be reached (CI has none).
+
+mod cost_per_value_fixture {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const QUERIES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/references/telemetry/queries"
+    );
+    const DAY: u32 = 24;
+    const USED: &str = "p.feature.used";
+    const NULL: &str = "\\N";
+
+    fn logq() -> Option<PathBuf> {
+        let path = std::env::var_os("LOGQ").map_or_else(|| PathBuf::from("logq"), PathBuf::from);
+        (run(&path, "SELECT 1")? == "1").then_some(path)
+    }
+
+    fn run(logq: &Path, sql: &str) -> Option<String> {
+        let mut child = Command::new(logq)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(sql.as_bytes()).ok()?;
+        let done = child.wait_with_output().ok()?;
+        done.status
+            .success()
+            .then(|| String::from_utf8_lossy(&done.stdout).trim().to_owned())
+    }
+
+    #[derive(Clone)]
+    struct Row {
+        metric: &'static str,
+        spec: &'static str,
+        hours_ago: u32,
+        value: f64,
+        extra: Vec<(&'static str, &'static str)>,
+    }
+
+    fn row(metric: &'static str, spec: &'static str, hours_ago: u32, value: f64) -> Row {
+        Row {
+            metric,
+            spec,
+            hours_ago,
+            value,
+            extra: Vec::new(),
+        }
+    }
+
+    fn with(mut row: Row, extra: &[(&'static str, &'static str)]) -> Row {
+        row.extra.extend_from_slice(extra);
+        row
+    }
+
+    const EMPTY: &str = "SELECT '' AS MetricName, CAST(map(), 'Map(String, String)') AS Attributes, \
+         CAST(map(), 'Map(String, String)') AS ResourceAttributes, \
+         CAST(now() AS DateTime64(9)) AS TimeUnix, toFloat64(0) AS Value, \
+         toUInt64(0) AS Count, toFloat64(0) AS Sum WHERE 0";
+
+    fn table(rows: &[Row]) -> String {
+        let mut selects: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let mut attributes = format!("'spec.id', '{}', 'pod.product', 'p'", row.spec);
+                for (key, value) in &row.extra {
+                    attributes.push_str(&format!(", '{key}', '{value}'"));
+                }
+                format!(
+                    "SELECT '{}' AS MetricName, map({attributes}) AS Attributes, \
+                     map('service.name', 'h') AS ResourceAttributes, \
+                     toDateTime64(now() - toIntervalHour({}), 9) AS TimeUnix, \
+                     toFloat64({}) AS Value, toUInt64(1) AS Count, toFloat64(0) AS Sum",
+                    row.metric, row.hours_ago, row.value
+                )
+            })
+            .collect();
+        selects.push(EMPTY.to_owned());
+        format!("(\n{}\n)", selects.join("\nUNION ALL\n"))
+    }
+
+    /// The `chief.attention_answered` lines: (hours ago, seconds).
+    fn logs(lines: &[(u32, u32)]) -> String {
+        let mut selects: Vec<String> = lines
+            .iter()
+            .map(|(hours_ago, seconds)| {
+                format!(
+                    "SELECT toDateTime64(now() - toIntervalHour({hours_ago}), 9) AS Timestamp, \
+                     'agent event' AS Body, map('agent.name', 'chief.attention_answered', \
+                     'agent.attr.seconds', '{seconds}') AS LogAttributes"
+                )
+            })
+            .collect();
+        selects.push(
+            "SELECT now64(9) AS Timestamp, '' AS Body, \
+             CAST(map(), 'Map(String, String)') AS LogAttributes WHERE 0"
+                .to_owned(),
+        );
+        format!("(\n{}\n)", selects.join("\nUNION ALL\n"))
+    }
+
+    fn settings(rows: &[(&str, f64)]) -> String {
+        let mut selects: Vec<String> = rows
+            .iter()
+            .map(|(name, value)| {
+                format!("SELECT '{name}' AS name, toFloat64({value}) AS value, 'X' AS currency")
+            })
+            .collect();
+        selects.push("SELECT '' AS name, toFloat64(0) AS value, '' AS currency WHERE 0".to_owned());
+        format!("(\n{}\n)", selects.join("\nUNION ALL\n"))
+    }
+
+    #[derive(Default)]
+    struct Data {
+        sum: Vec<Row>,
+        gauge: Vec<Row>,
+        histogram: Vec<Row>,
+        logs: Vec<(u32, u32)>,
+        settings: Vec<(&'static str, f64)>,
+    }
+
+    fn answer(logq: &Path, file: &str, data: &Data) -> String {
+        let text = std::fs::read_to_string(format!("{QUERIES}/{file}")).expect("read the query");
+        let sql = text
+            .replace("otel.otel_metrics_sum", &table(&data.sum))
+            .replace("otel.otel_metrics_gauge", &table(&data.gauge))
+            .replace("otel.otel_metrics_histogram", &table(&data.histogram))
+            .replace("otel.otel_logs", &logs(&data.logs))
+            .replace("otel.harold_settings", &settings(&data.settings));
+        run(logq, &sql).unwrap_or_else(|| panic!("{file} failed on the fixture:\n{sql}"))
+    }
+
+    const RATES: [(&str, f64); 3] = [
+        ("harold.exchange_rate.usd_to_aud", 2.0),
+        ("harold.attention.hourly_rate", 100.0),
+        ("harold.list_price.per_mtok/m1/input", 10.0),
+    ];
+
+    fn weight(spec: &'static str, value: &'static str) -> Row {
+        let number = match value {
+            "s" => 1.0,
+            "m" => 2.0,
+            _ => 4.0,
+        };
+        with(
+            row("pod.spec.value", spec, 2 * DAY, number),
+            &[("spec.value", value)],
+        )
+    }
+
+    fn effort(spec: &'static str, kind: &'static str) -> Row {
+        with(
+            row("pod.spec.effort", spec, 2 * DAY, 0.0),
+            &[("spec.kind", kind), ("state", "completed")],
+        )
+    }
+
+    fn merged(spec: &'static str, hours_ago: u32) -> Row {
+        with(
+            row("pod.spec.lead_time", spec, hours_ago, 0.0),
+            &[("phase", "started_to_completed")],
+        )
+    }
+
+    fn tokens(metric: &'static str, spec: &'static str, hours_ago: u32, value: f64) -> Row {
+        with(
+            row(metric, spec, hours_ago, value),
+            &[("model", "m1"), ("kind", "input"), ("role", "build_worker")],
+        )
+    }
+
+    fn used(spec: &'static str, days_ago: u32) -> Vec<Row> {
+        vec![
+            row(USED, spec, 20 * DAY, 0.0),
+            row(USED, spec, days_ago * DAY, 1.0),
+        ]
+    }
+
+    /// The columns of the one row of `cost-per-value.sql`.
+    fn columns(logq: &Path, data: &Data) -> Vec<String> {
+        answer(logq, "cost-per-value.sql", data)
+            .split('\t')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    // The columns are: cost_per_value, cost_per_value_change_pct, value, total_cost,
+    // token_cost, attention_cost, cloud_cost, fix_cost, unpriced_models, unvalued.
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn cost_per_value_sql_on_a_clickhouse_fixture() {
+        let Some(logq) = logq() else {
+            eprintln!("skipped: bin/logq or ClickHouse cannot be reached");
+            return;
+        };
+        let spent = |hours_ago, value| tokens("harold.turn.tokens", "", hours_ago, value);
+        let base = |extra: Vec<Row>| Data {
+            sum: [used("a", 2), used("b", 3)]
+                .concat()
+                .into_iter()
+                .chain(extra)
+                .collect(),
+            gauge: vec![weight("a", "m"), weight("b", "l")],
+            settings: RATES.to_vec(),
+            ..Data::default()
+        };
+
+        // An M feature and an L feature used give 6. 1 million tokens at 10 USD and a rate of 2
+        // give 20 AUD and one hour of attention gives 100: 120 for 6 is 20.
+        let mut data = base(vec![spent(20 * DAY, 0.0), spent(2 * DAY, 1_000_000.0)]);
+        data.logs = vec![(10, 3600)];
+        let got = columns(&logq, &data);
+        assert_eq!(&got[..6], ["20", NULL, "6", "120", "20", "100"], "{got:?}");
+
+        // A fix adds no value and its cost is in fix_cost and in total_cost.
+        let by_spec =
+            |hours_ago, value| tokens("harold.turn.tokens.by_spec", "f", hours_ago, value);
+        let mut data = base(vec![
+            spent(20 * DAY, 0.0),
+            spent(2 * DAY, 2_000_000.0),
+            by_spec(20 * DAY, 0.0),
+            by_spec(2 * DAY, 1_000_000.0),
+        ]);
+        data.gauge.push(effort("f", "fix"));
+        let got = columns(&logq, &data);
+        assert_eq!(
+            (&got[2], &got[3], &got[7]),
+            (&"6".into(), &"40".into(), &"20".into()),
+            "{got:?}"
+        );
+
+        // An other spec with S and a merge in the 7 days adds 1, and one merged 8 days ago adds nothing.
+        let other = |hours_ago| Data {
+            sum: used("a", 2),
+            gauge: vec![weight("a", "m"), weight("o", "s"), effort("o", "other")],
+            histogram: vec![merged("o", hours_ago)],
+            settings: RATES.to_vec(),
+            ..Data::default()
+        };
+        assert_eq!(columns(&logq, &other(2 * DAY))[2], "3");
+        assert_eq!(columns(&logq, &other(8 * DAY))[2], "2");
+
+        // A feature spec with a value and a merge in the 7 days and no use adds nothing.
+        let mut data = other(2 * DAY);
+        data.gauge = vec![weight("a", "m"), weight("g", "l"), effort("g", "feature")];
+        data.histogram = vec![merged("g", 2 * DAY)];
+        assert_eq!(columns(&logq, &data)[2], "2");
+
+        // A used feature with no value counts 1 and is in unvalued.
+        let mut data = base(vec![]);
+        data.gauge = vec![weight("a", "m")];
+        let got = columns(&logq, &data);
+        assert_eq!((&got[2], &got[9]), (&"3".into(), &"1".into()), "{got:?}");
+
+        // No exchange rate gives the attention cost only.
+        let mut data = base(vec![spent(20 * DAY, 0.0), spent(2 * DAY, 1_000_000.0)]);
+        data.logs = vec![(10, 3600)];
+        data.settings = RATES[1..].to_vec();
+        let got = columns(&logq, &data);
+        assert_eq!(&got[3..7], ["100", NULL, "100", NULL], "{got:?}");
+
+        // A rise of watch.cost_usd adds to cloud_cost: 3 USD at a rate of 2 is 6.
+        let watch = |hours_ago, value| {
+            with(
+                row("watch.cost_usd", "", hours_ago, value),
+                &[("folder", "x")],
+            )
+        };
+        let data = base(vec![watch(20 * DAY, 0.0), watch(2 * DAY, 3.0)]);
+        let got = columns(&logq, &data);
+        assert_eq!((&got[3], &got[6]), (&"6".into(), &"6".into()), "{got:?}");
+
+        // Build hours of a spec add nothing to the cost.
+        let mut data = base(vec![]);
+        data.gauge.push(with(
+            row("pod.spec.effort", "a", 2 * DAY, 9.0),
+            &[("measure", "build_worker_hours"), ("spec.kind", "feature")],
+        ));
+        assert_eq!(columns(&logq, &data)[3], NULL);
+
+        // No value gives a NULL cost_per_value and a total_cost.
+        let data = Data {
+            sum: vec![spent(20 * DAY, 0.0), spent(2 * DAY, 1_000_000.0)],
+            settings: RATES.to_vec(),
+            ..Data::default()
+        };
+        let got = columns(&logq, &data);
+        assert_eq!(
+            (&got[0], &got[2], &got[3]),
+            (&NULL.to_owned(), &"0".into(), &"20".into()),
+            "{got:?}"
+        );
+
+        // An unpriced model is named.
+        let mut data = base(vec![]);
+        data.sum.push(with(
+            row("harold.turn.tokens", "", 2 * DAY, 5.0),
+            &[("model", "zz"), ("kind", "input"), ("role", "x")],
+        ));
+        assert_eq!(columns(&logq, &data)[8], "zz");
+
+        // The cost per value of this week against last week: both 10, so the change is 0.
+        let mut data = base(vec![
+            spent(20 * DAY, 0.0),
+            spent(10 * DAY, 1_000_000.0),
+            spent(2 * DAY, 2_000_000.0),
+        ]);
+        data.sum.truncate(2);
+        data.sum.extend(used("b", 10));
+        data.sum.extend([
+            spent(20 * DAY, 0.0),
+            spent(10 * DAY, 1_000_000.0),
+            spent(2 * DAY, 2_000_000.0),
+        ]);
+        data.gauge = vec![weight("a", "m"), weight("b", "m")];
+        let got = columns(&logq, &data);
+        assert_eq!(&got[..3], ["10", "0", "2"], "{got:?}");
+    }
+
+    #[test]
+    #[ignore = "opens a port: runs in the container test set and in CI"]
+    fn fix_cost_by_cause_sql_on_a_clickhouse_fixture() {
+        let Some(logq) = logq() else {
+            eprintln!("skipped: bin/logq or ClickHouse cannot be reached");
+            return;
+        };
+        let fix = |spec, cause, hours_ago| {
+            with(
+                row("pod.spec.effort", spec, hours_ago, 0.0),
+                &[
+                    ("spec.kind", "fix"),
+                    ("spec.cause", cause),
+                    ("state", "completed"),
+                ],
+            )
+        };
+        let spent =
+            |spec, hours_ago, value| tokens("harold.turn.tokens.by_spec", spec, hours_ago, value);
+        let data = Data {
+            gauge: vec![
+                fix("f1", "decision-tool", 2 * DAY),
+                fix("f2", "decision-tool", 3 * DAY),
+            ],
+            sum: vec![
+                spent("f1", 20 * DAY, 0.0),
+                spent("f1", 2 * DAY, 1_000_000.0),
+                spent("f2", 20 * DAY, 0.0),
+                spent("f2", 2 * DAY, 500_000.0),
+            ],
+            settings: RATES.to_vec(),
+            ..Data::default()
+        };
+        let text = answer(&logq, "fix-cost-by-cause.sql", &data);
+        let fields: Vec<&str> = text.split('\t').collect();
+        // Two fixes with one cause give one row: 1.5 million tokens at 10 USD and a rate of 2.
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert_eq!(&fields[..3], ["decision-tool", "2", "30"], "{text}");
+    }
+}

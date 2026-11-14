@@ -35,6 +35,7 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `agent-jobs-hosts-1.sql` | `harold.job.ends` with a non-empty `host` rose after `since`. Reasons `host_end_seen` and `no_host_end_yet` |
 | `pod-role-record-1.sql` | `pod role recorded` lines for each of `chief`, `pnem` and `pod_coordination`, and a `pod role lookup` line with `outcome = found`, from `since` to `since` + 14 days, and no lookup with `no_record` or `session_file_unreadable`. Reasons `lookups_found`, `lookup_faults` and `no_lookup_yet` |
 | `decision-tool-1.sql` | `decision added` and `decision evaluated` log lines from `since` to `since` + 30 days. Reasons `evaluated`, `only_added` and `none_added` |
+| `cost-per-value-1.sql` | `pod.spec.value` and `harold.turn.tokens` have points after `since`. Reasons `value_seen`, `no_value_yet` and `no_values` |
 
 ## Run one
 
