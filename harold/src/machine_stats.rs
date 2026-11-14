@@ -23,8 +23,9 @@ use time::{Date, Month, OffsetDateTime};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::{Instrument as _, info, info_span, warn};
+use tracing::{Instrument as _, debug, info, info_span, warn};
 
+use crate::agent::snapshot::AgentSnapshotHub;
 use crate::pod_roles::PodRoles;
 use crate::pod_stats::{AGENT_PANE, POD_FOLDER, key_values};
 use crate::telemetry::{self, TRACE_TARGET};
@@ -413,6 +414,9 @@ pub(crate) struct Snapshot {
     pub normal_top: [Option<f64>; 3],
     /// Whether each metric is past its normal range. None before the first reading.
     pub past_normal: Option<[bool; 3]>,
+    /// The CPU and the memory of each agent at the latest poll, with `none` for the rest.
+    /// Empty before the first reading and after a reading that failed.
+    pub agents: Vec<AgentTotal>,
 }
 
 struct Gauges {
@@ -463,6 +467,17 @@ fn gauge_f64(
             }
         })
         .build()
+}
+
+/// The attributes of an agent gauge. They are metric attributes only: no log line carries
+/// them.
+fn owner_attributes(owner: &Owner) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("role", owner.role),
+        KeyValue::new("agent.label", owner.label.clone()),
+        KeyValue::new("pod.product", owner.product.clone()),
+        KeyValue::new("spec.id", owner.spec.clone()),
+    ]
 }
 
 fn volume() -> KeyValue {
@@ -624,6 +639,32 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<Snapshot>> {
                         .collect()
                 },
             )),
+            Box::new(gauge_f64(
+                &meter,
+                &snapshot,
+                "harold.agent.cpu.utilization",
+                Some("1"),
+                |snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .map(|total| (total.cpu, owner_attributes(&total.owner)))
+                        .collect()
+                },
+            )),
+            Box::new(gauge_u64(
+                &meter,
+                &snapshot,
+                "harold.agent.memory.usage",
+                "By",
+                |snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .map(|total| (total.memory, owner_attributes(&total.owner)))
+                        .collect()
+                },
+            )),
         ];
         Gauges {
             snapshot: Arc::clone(&snapshot),
@@ -760,6 +801,11 @@ pub(crate) struct Walker {
 }
 
 impl Walker {
+    /// How many agent environments Harold holds.
+    pub(crate) fn cached(&self) -> usize {
+        self.environments.len()
+    }
+
     /// The owner of every process in `table`. The walk follows the parents of a process up
     /// to the first live agent of `agents`. It stops at a parent that is not in the table,
     /// at a parent that started after its child (the parent pid is used again), at a loop
@@ -949,6 +995,185 @@ fn started_spec(folder: &Path, label: &str) -> Option<String> {
     })
 }
 
+/// Reads the process table of the machine and the environment of one process.
+pub(crate) trait ProcessSource: ProcessEnv + Send + 'static {
+    /// Every process, with its parent, start time, CPU share and memory.
+    fn processes(&mut self) -> Vec<ProcInfo>;
+}
+
+/// The live agents of the agent monitor.
+pub(crate) type AgentSource = Arc<dyn Fn() -> Vec<AgentProc> + Send + Sync>;
+/// The pod role record, when there is one.
+pub(crate) type RolesSource = Arc<dyn Fn() -> Option<Arc<PodRoles>> + Send + Sync>;
+
+/// The CPU and the memory of the processes of one agent.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentTotal {
+    pub owner: Owner,
+    /// The CPU share of the whole machine, from 0 to 1.
+    pub cpu: f64,
+    /// The resident memory in bytes.
+    pub memory: u64,
+}
+
+/// What one walk of the process table did, for the debug line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct WalkCounts {
+    processes: usize,
+    cached: usize,
+    walked: usize,
+    environ_reads: usize,
+}
+
+/// Counts the environment reads of one walk.
+struct CountingEnv<'a> {
+    inner: &'a mut dyn ProcessEnv,
+    reads: usize,
+}
+
+impl ProcessEnv for CountingEnv<'_> {
+    fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>> {
+        self.reads += 1;
+        self.inner.environ(pid)
+    }
+}
+
+/// Gives the processes of the machine to their agents at each poll.
+pub(crate) struct AgentUse {
+    source: Box<dyn ProcessSource>,
+    agents: AgentSource,
+    roles: RolesSource,
+    walker: Walker,
+}
+
+impl AgentUse {
+    pub(crate) fn new(
+        source: Box<dyn ProcessSource>,
+        agents: AgentSource,
+        roles: RolesSource,
+    ) -> Self {
+        Self {
+            source,
+            agents,
+            roles,
+            walker: Walker::default(),
+        }
+    }
+
+    /// The total of each agent, largest CPU first, and what the walk did.
+    fn read(&mut self) -> (Vec<AgentTotal>, WalkCounts) {
+        let table = self.source.processes();
+        let agents = (self.agents)();
+        let roles = (self.roles)();
+        let mut env = CountingEnv {
+            inner: &mut *self.source,
+            reads: 0,
+        };
+        let owners = self
+            .walker
+            .assign(&table, &agents, roles.as_deref(), &mut env);
+        let environ_reads = env.reads;
+        let mut totals: Vec<AgentTotal> = Vec::new();
+        let mut walked = 0;
+        for process in &table {
+            let Some(owner) = owners.get(&process.pid) else {
+                continue;
+            };
+            if owner.role != NONE {
+                walked += 1;
+            }
+            match totals.iter_mut().find(|total| total.owner == *owner) {
+                Some(total) => {
+                    total.cpu += process.cpu;
+                    total.memory += process.memory;
+                }
+                None => totals.push(AgentTotal {
+                    owner: owner.clone(),
+                    cpu: process.cpu,
+                    memory: process.memory,
+                }),
+            }
+        }
+        totals.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+        let counts = WalkCounts {
+            processes: table.len(),
+            cached: self.walker.cached(),
+            walked,
+            environ_reads,
+        };
+        (totals, counts)
+    }
+}
+
+/// Reads the process table with `sysinfo`.
+pub(crate) struct SystemTable {
+    system: System,
+}
+
+impl SystemTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            system: System::new(),
+        }
+    }
+}
+
+impl ProcessEnv for SystemTable {
+    /// Only `POD_ROLE`, `POD_PRODUCT` and `POD_SPEC` leave this function: it drops every
+    /// other variable as it reads it.
+    fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>> {
+        let pid = Pid::from_u32(pid);
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::Always),
+        );
+        let process = self.system.process(pid)?;
+        Some(
+            process
+                .environ()
+                .iter()
+                .filter_map(|entry| {
+                    let (key, value) = entry.to_str()?.split_once('=')?;
+                    matches!(key, "POD_ROLE" | "POD_PRODUCT" | "POD_SPEC")
+                        .then(|| (key.to_owned(), value.to_owned()))
+                })
+                .collect(),
+        )
+    }
+}
+
+impl ProcessSource for SystemTable {
+    fn processes(&mut self) -> Vec<ProcInfo> {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_cwd(sysinfo::UpdateKind::OnlyIfNotSet),
+        );
+        let cores = self.system.cpus().len().max(1) as f64;
+        // The CPU list is empty until it is refreshed once.
+        if self.system.cpus().is_empty() {
+            self.system.refresh_cpu_usage();
+        }
+        self.system
+            .processes()
+            .values()
+            .map(|process| ProcInfo {
+                pid: process.pid().as_u32(),
+                parent: process.parent().map(Pid::as_u32),
+                start: process.start_time(),
+                name: process.name().to_string_lossy().into_owned(),
+                cpu: f64::from(process.cpu_usage()) / 100.0 / cores,
+                memory: process.memory(),
+                cwd: process.cwd().map(Path::to_path_buf),
+            })
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The poll
 // ---------------------------------------------------------------------------
@@ -977,6 +1202,8 @@ pub(crate) struct MachineStats<R: Reader> {
     snapshot: Arc<Mutex<Snapshot>>,
     /// The reason of the reading failure that has been logged since a reading last worked.
     failing: Option<&'static str>,
+    /// Gives each process to its agent. None until `set_agent_use`.
+    agent_use: Option<Arc<Mutex<AgentUse>>>,
 }
 
 impl<R: Reader> MachineStats<R> {
@@ -997,7 +1224,13 @@ impl<R: Reader> MachineStats<R> {
             spells: [None; 3],
             snapshot,
             failing: None,
+            agent_use: None,
         }
+    }
+
+    /// Turns on the agent gauges.
+    pub(crate) fn set_agent_use(&mut self, agent_use: AgentUse) {
+        self.agent_use = Some(Arc::new(Mutex::new(agent_use)));
     }
 
     #[cfg(test)]
@@ -1034,9 +1267,31 @@ impl<R: Reader> MachineStats<R> {
                     warn!(reason, "machine stats failed");
                 }
                 // No gauge reports an old reading. The range and the spells stay.
-                lock(&self.snapshot).reading = None;
+                let mut snapshot = lock(&self.snapshot);
+                snapshot.reading = None;
+                snapshot.agents.clear();
             }
         }
+    }
+
+    /// Gives each process to its agent and returns the total of each agent. Empty when the
+    /// agent gauges are off.
+    async fn read_agents(&self) -> Vec<AgentTotal> {
+        let Some(agent_use) = self.agent_use.as_ref().map(Arc::clone) else {
+            return Vec::new();
+        };
+        let read = tokio::task::spawn_blocking(move || lock(&agent_use).read()).await;
+        let Ok((totals, counts)) = read else {
+            return Vec::new();
+        };
+        debug!(
+            processes = counts.processes,
+            cached = counts.cached,
+            walked = counts.walked,
+            environ_reads = counts.environ_reads,
+            "agent use walked"
+        );
+        totals
     }
 
     /// Writes the means of the hour that ended, when `now` is in another hour.
@@ -1129,8 +1384,10 @@ impl<R: Reader> MachineStats<R> {
                 _ => {}
             }
         }
+        let agents = self.read_agents().await;
         {
             let mut snapshot = lock(&self.snapshot);
+            snapshot.agents = agents;
             snapshot.reading = Some(reading);
             snapshot.normal_top = normal_top;
             snapshot.past_normal = Some(self.spells.map(|spell| spell.is_some()));
@@ -1324,14 +1581,37 @@ async fn run<R: Reader>(mut stats: MachineStats<R>, mut shutdown: watch::Receive
     stats.finish(local_now().await);
 }
 
-/// Starts reading the machine, with the hourly use file at `file`.
-pub(crate) fn start(file: PathBuf, shutdown: watch::Receiver<()>) -> JoinHandle<()> {
-    let stats = MachineStats::new(
+/// Starts reading the machine, with the hourly use file at `file`. The agent monitor of
+/// `snapshots` names the live agents.
+pub(crate) fn start(
+    file: PathBuf,
+    snapshots: AgentSnapshotHub,
+    shutdown: watch::Receiver<()>,
+) -> JoinHandle<()> {
+    let mut stats = MachineStats::new(
         SystemReader::new(),
         file,
         gauge_snapshot(),
         OffsetDateTime::now_utc().to_offset(telemetry::local_offset()),
     );
+    let agents: AgentSource = Arc::new(move || {
+        snapshots
+            .current()
+            .panes
+            .iter()
+            .map(|pane| AgentProc {
+                pid: pane.pane.incarnation.agent_pid,
+                start_ms: pane.pane.incarnation.agent_started_at_ms,
+                pane_id: pane.pane.incarnation.pane_id.clone(),
+                folder: pane.pane.working_directory.clone(),
+            })
+            .collect()
+    });
+    stats.set_agent_use(AgentUse::new(
+        Box::new(SystemTable::new()),
+        agents,
+        Arc::new(crate::pod_roles::installed),
+    ));
     tokio::spawn(run(stats, shutdown))
 }
 

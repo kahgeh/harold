@@ -846,6 +846,46 @@ async fn each_gauge_has_its_name_unit_and_attributes_and_no_path_leaves() {
     assert_eq!(u64_gauge_points("process.memory.usage")[0].0, 42);
     assert_eq!(f64_gauge_points("process.cpu.utilization")[0].0, 0.01);
 
+    // The agent gauges: one series for each agent, with its four attributes.
+    let agent_folder = Folder::new();
+    let roles = Arc::new(roles_with(
+        &agent_folder,
+        &[
+            ("chief", "", "", 100, 1000),
+            ("pnem", "harold", "", 200, 2000),
+        ],
+    ));
+    rig.stats.set_agent_use(fake_agent_use(roles));
+    rig.poll(start, Ok(read)).await;
+    let chief = [
+        ("role", "chief"),
+        ("agent.label", "chief"),
+        ("pod.product", "none"),
+        ("spec.id", "none"),
+    ];
+    let pnem = [
+        ("role", "pnem"),
+        ("agent.label", "harold"),
+        ("pod.product", "harold"),
+        ("spec.id", "none"),
+    ];
+    let none = [
+        ("role", "none"),
+        ("agent.label", "none"),
+        ("pod.product", "none"),
+        ("spec.id", "none"),
+    ];
+    let cpu = |attributes: &[(&str, &str)]| {
+        test_support::gauge_f64_value("harold.agent.cpu.utilization", attributes)
+    };
+    assert!((cpu(&chief).unwrap() - 0.15).abs() < 1e-9);
+    assert!((cpu(&pnem).unwrap() - 0.05).abs() < 1e-9);
+    assert!((cpu(&none).unwrap() - 0.2).abs() < 1e-9);
+    let memory = test_support::gauge_snapshot("harold.agent.memory.usage");
+    assert_eq!(memory.value(&chief), Some(1500));
+    assert_eq!(memory.value(&pnem), Some(500));
+    assert_eq!(memory.value(&none), Some(10));
+
     // Memory, swap and cpu are past their tops (0.5, 2 GB and 0.3).
     let past = u64_gauge_points("harold.machine.past_normal");
     let by_metric: BTreeMap<String, u64> = past
@@ -934,7 +974,16 @@ fn the_reader_gives_readings_close_to_the_machine() {
 async fn the_task_stops_at_shutdown() {
     let folder = Folder::new();
     let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let handle = start(folder.file(), shutdown_rx);
+    let hub = AgentSnapshotHub::new(crate::agent::domain::AgentSnapshot {
+        tts_muted: false,
+        messaging_paused: false,
+        through_event_version: crate::store::EventVersion::start(),
+        server_time_ms: 0,
+        monitor_health: Vec::new(),
+        panes: Vec::new(),
+    });
+    // The task stops before its first poll, so no test reads the real process list.
+    let handle = start(folder.file(), hub, shutdown_rx);
     drop(shutdown_tx);
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await
@@ -1357,4 +1406,122 @@ fn a_build_worker_has_one_label_from_the_pane_file_and_from_the_fallback() {
     assert_eq!(two[&400].label, one[&300].label);
     assert_eq!(two[&400].role, "build_worker");
     assert_eq!(two[&400].spec, "macos-test-time");
+}
+
+// --- the agent gauges ---
+
+/// A fake process source.
+struct FakeSource {
+    table: Vec<ProcInfo>,
+    env: FakeEnv,
+}
+
+impl ProcessEnv for FakeSource {
+    fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>> {
+        self.env.environ(pid)
+    }
+}
+
+impl ProcessSource for FakeSource {
+    fn processes(&mut self) -> Vec<ProcInfo> {
+        self.table.clone()
+    }
+}
+
+fn used(pid: u32, parent: u32, start: u64, name: &str, cpu: f64, memory: u64) -> ProcInfo {
+    ProcInfo {
+        cpu,
+        memory,
+        ..process(pid, parent, start, name)
+    }
+}
+
+/// The agent use of a chief with one child, a PnEM with one child and a `none` process.
+fn fake_agent_use(roles: Arc<PodRoles>) -> AgentUse {
+    let table = vec![
+        used(1, 0, 1, "launchd", 0.2, 10),
+        used(100, 1, 1000, "agent", 0.1, 1000),
+        used(101, 100, 1001, "cargo", 0.05, 500),
+        used(200, 1, 2000, "agent", 0.02, 200),
+        used(201, 200, 2001, "rustc", 0.03, 300),
+    ];
+    let agents = vec![agent(100, 1000), agent(200, 2000)];
+    AgentUse::new(
+        Box::new(FakeSource {
+            table,
+            env: FakeEnv::default(),
+        }),
+        Arc::new(move || agents.clone()),
+        Arc::new(move || Some(Arc::clone(&roles))),
+    )
+}
+
+fn total<'a>(snapshot: &'a Snapshot, label: &str) -> &'a AgentTotal {
+    snapshot
+        .agents
+        .iter()
+        .find(|total| total.owner.label == label)
+        .unwrap_or_else(|| panic!("no agent {label}: {:?}", snapshot.agents))
+}
+
+#[tokio::test]
+async fn a_poll_sums_the_cpu_and_the_memory_of_each_agent() {
+    let folder = Folder::new();
+    let roles = Arc::new(roles_with(
+        &folder,
+        &[
+            ("chief", "", "", 100, 1000),
+            ("pnem", "harold", "", 200, 2000),
+        ],
+    ));
+    let now = at((2026, 10, 25), (10, 0), 11);
+    let mut rig = Rig::new(now);
+    rig.stats.set_agent_use(fake_agent_use(roles));
+    rig.poll(now, Ok(calm())).await;
+    let snapshot = lock(&rig.snapshot).clone();
+    assert_eq!(snapshot.agents.len(), 3, "{:?}", snapshot.agents);
+    let chief = total(&snapshot, "chief");
+    assert!((chief.cpu - 0.15).abs() < 1e-9);
+    assert_eq!(chief.memory, 1500);
+    let pnem = total(&snapshot, "harold");
+    assert_eq!(pnem.owner.role, "pnem");
+    assert!((pnem.cpu - 0.05).abs() < 1e-9);
+    assert_eq!(pnem.memory, 500);
+    let none = total(&snapshot, "none");
+    assert_eq!(none.owner.role, "none");
+    assert!((none.cpu - 0.2).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn a_failed_reading_leaves_no_agent_gauge() {
+    let folder = Folder::new();
+    let roles = Arc::new(roles_with(&folder, &[("chief", "", "", 100, 1000)]));
+    let now = at((2026, 10, 25), (10, 0), 11);
+    let mut rig = Rig::new(now);
+    rig.stats.set_agent_use(fake_agent_use(roles));
+    rig.poll(now, Ok(calm())).await;
+    rig.poll(at((2026, 10, 25), (10, 1), 11), Err("no_home_disk"))
+        .await;
+    assert!(lock(&rig.snapshot).agents.is_empty());
+}
+
+/// The counts of the debug line `agent use walked`. The test pipeline logs at `info`, so the
+/// test reads the counts that the line carries.
+#[test]
+fn the_walk_counts_processes_cached_environments_walked_and_environment_reads() {
+    let folder = Folder::new();
+    let roles = Arc::new(roles_with(&folder, &[("chief", "", "", 100, 1000)]));
+    let mut agent_use = fake_agent_use(roles);
+    let (_, first) = agent_use.read();
+    // The PnEM (pid 200) has no record here, so its environment is read once.
+    assert_eq!(first.processes, 5);
+    assert_eq!(first.cached, 1);
+    assert_eq!(first.walked, 4, "all but launchd");
+    assert_eq!(first.environ_reads, 1);
+    let (_, second) = agent_use.read();
+    assert_eq!(
+        second.environ_reads, 0,
+        "read once for each pid and start time"
+    );
+    assert_eq!(second.cached, 1);
 }

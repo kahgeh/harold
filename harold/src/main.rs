@@ -2756,6 +2756,7 @@ async fn start_telemetry_tasks(
         (cfg.telemetry.export && cfg.telemetry.otlp_endpoint.is_some()).then(|| {
             machine_stats::start(
                 machine_stats::hourly_use_file(std::path::Path::new(&cfg.store.resolved_path())),
+                snapshots.clone(),
                 shutdown_rx.clone(),
             )
         });
