@@ -695,8 +695,8 @@ class LineWrapTest(unittest.TestCase):
         self.assertEqual(self.cpv(total_cost=None, cost_per_value=None, cost_per_value_change_pct=None), "")
 
     def test_cost_per_value_names_each_unpriced_model(self):
-        self.assertTrue(self.cpv(fix_cost=None, unpriced_models="claude-a,claude-b").endswith(
-            "on last week \u00b7 not priced: claude-a \u00b7 not priced: claude-b"))
+        self.assertTrue(self.cpv(fix_cost=None, unpriced_models="model-a,model-b").endswith(
+            "on last week \u00b7 not priced: model-a \u00b7 not priced: model-b"))
 
 
 class AttentionRecordingCard(unittest.TestCase):
