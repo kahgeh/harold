@@ -11,3 +11,4 @@ telemetry::tests::value_created_fixture::value_created_sql_on_a_clickhouse_fixtu
 pod_stats::tests::cost_per_value_fixture::cost_per_value_sql_on_a_clickhouse_fixture
 pod_stats::tests::cost_per_value_fixture::fix_cost_by_cause_sql_on_a_clickhouse_fixture
 pod_stats::tests::cost_per_value_fixture::slicing_and_sizing_sql_on_a_clickhouse_fixture
+web_app::dictation_tests::the_check_takes_tap_and_started_behind_the_login_and_origin_checks

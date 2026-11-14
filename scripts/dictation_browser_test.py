@@ -123,7 +123,12 @@ const FAKE = String.raw`(() => {
       const row = Object.assign([{ transcript: text }], { isFinal: true });
       if (this.onresult) this.onresult({ results: [row] });
     }
-    fireError(name) { if (this.onerror) this.onerror({ error: name }); }
+    // With no end to come (cfg.noEnd) the fake models Safari's own recovery: after an error
+    // the instance is no longer active, so a later start() is not refused.
+    fireError(name) {
+      if (cfg.noEnd && F.current === this) F.current = null;
+      if (this.onerror) this.onerror({ error: name });
+    }
     fireEnd() { if (F.current === this) F.current = null; if (this.onend) this.onend({}); }
   }
   F.last = () => F.instances[F.instances.length - 1];
@@ -189,6 +194,7 @@ try {
 
   // An error with no end: the next tap starts after 1 second.
   await load();
+  await fake(`f.cfg.noEnd = true;`);
   await tapMic(); await waitInstances(1);
   const errAt = await evaluate(`(() => { const f = window.__fake; f.last().fireStart(); const t = performance.now(); f.last().fireError("network"); return t; })()`);
   await tapMic();

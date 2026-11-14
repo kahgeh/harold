@@ -173,6 +173,47 @@ async fn an_unknown_word_a_bad_tap_a_long_body_or_bad_json_gets_400_and_no_log_l
     );
 }
 
+/// The route as the router serves it: the new fields pass, and the login check still runs.
+/// It opens a loopback port, so it runs only in the container test set and in CI.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "opens a port: runs in the container test set and in CI"]
+async fn the_check_takes_tap_and_started_behind_the_login_and_origin_checks() {
+    let logs = CapturedLogs::start();
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let client = reqwest::Client::new();
+    let body = r#"{"result":"page_ended","tap":2,"started":true}"#;
+    let post = |login: Option<&str>, site: &str| {
+        let mut request = client
+            .post(server.url("/dictation/check"))
+            .header("sec-fetch-site", site.to_owned())
+            .header("origin", format!("http://{}", server.addr))
+            .header("datastar-request", "true")
+            .header("content-type", "application/json")
+            .body(body);
+        if let Some(login) = login {
+            request = request.header("Tailscale-User-Login", login);
+        }
+        request
+    };
+
+    let response = post(Some(LOGIN), "same-origin").send().await.unwrap();
+    assert_eq!(response.status(), 204);
+    let captured = logs.text();
+    assert!(captured.contains("page_ended"), "{captured}");
+    assert!(captured.contains("tap=2"), "{captured}");
+    assert!(captured.contains("started=true"), "{captured}");
+
+    for (login, site) in [
+        (None, "same-origin"),
+        (Some("someone@else"), "same-origin"),
+        (Some(LOGIN), "cross-site"),
+    ] {
+        let response = post(login, site).send().await.unwrap();
+        assert_eq!(response.status(), 403, "{login:?} {site}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_check_has_the_login_host_and_origin_checks() {
     let directory = TestDirectory::new();
