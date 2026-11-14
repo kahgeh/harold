@@ -238,3 +238,187 @@ fn record_output_with_unreadable_output_records_nothing() {
     let snapshot = test_support::counter_snapshot("harold.workflow.tokens");
     assert_eq!(snapshot.value(&[("spec.id", "wf-json-2")]), None);
 }
+
+// ---------------------------------------------------------------------------
+// The call-site test
+// ---------------------------------------------------------------------------
+
+/// Whether the text runs a model: it holds the argument `"--print"` or `"--max-turns"`, or
+/// it defines or implements a `ModelRunner`.
+fn is_model_file(text: &str) -> bool {
+    text.contains("\"--print\"")
+        || text.contains("\"--max-turns\"")
+        || text.contains("trait ModelRunner")
+        || text
+            .lines()
+            .any(|line| line.trim_start().starts_with("impl") && line.contains("ModelRunner for"))
+}
+
+/// What is wrong with the list `sites` for these files, as one line each: a model file in
+/// no entry, an entry whose file is missing, and an entry whose record file has no `record`
+/// call with the name of its model workflow.
+fn call_site_problems(files: &[(String, String)], sites: &[CallSite]) -> Vec<String> {
+    let text_of = |path: &str| {
+        files
+            .iter()
+            .find(|(name, _)| name == path)
+            .map(|(_, text)| text.as_str())
+    };
+    let mut problems = Vec::new();
+    for (path, text) in files {
+        if is_model_file(text) && !sites.iter().any(|site| site.model_file == path) {
+            problems.push(format!(
+                "{path} runs a model and is in no entry of CALL_SITES"
+            ));
+        }
+    }
+    for site in sites {
+        if text_of(site.model_file).is_none() {
+            problems.push(format!(
+                "{}: model file {} not found",
+                site.workflow, site.model_file
+            ));
+        }
+        let recorded = text_of(site.record_file).is_some_and(|text| {
+            text.contains("model_workflow::record")
+                && text.contains(&format!("\"{}\"", site.workflow))
+        });
+        if !recorded {
+            problems.push(format!(
+                "{}: {} has no record call with the name \"{}\"",
+                site.workflow, site.record_file, site.workflow
+            ));
+        }
+    }
+    problems
+}
+
+/// The text up to the line `#[cfg(test)]` that opens the test module: the next line is
+/// `mod ...` or `#[path ...]`. Another `#[cfg(test)]` item before it stays.
+fn before_test_module(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let opens = |at: usize| {
+        lines[at].trim() == "#[cfg(test)]"
+            && lines.get(at + 1).is_some_and(|next| {
+                let next = next.trim_start();
+                next.starts_with("mod ") || next.starts_with("#[path")
+            })
+    };
+    let end = (0..lines.len())
+        .find(|&at| opens(at))
+        .unwrap_or(lines.len());
+    lines[..end].join("\n")
+}
+
+/// Every non-test `.rs` file under `dir`, with its path under `dir` and its text before the
+/// test module. It skips the test files, the test support and `model_workflow.rs`.
+fn source_files(dir: &Path) -> Vec<(String, String)> {
+    fn walk(root: &Path, dir: &Path, found: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "test_support" {
+                    walk(root, &path, found);
+                }
+                continue;
+            }
+            let skipped = !name.ends_with(".rs")
+                || name.ends_with("_tests.rs")
+                || matches!(
+                    name.as_str(),
+                    "tests.rs" | "test_support.rs" | "model_workflow.rs"
+                );
+            if skipped {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let text = before_test_module(&text);
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            found.push((relative, text));
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found
+}
+
+fn file(path: &str, text: &str) -> (String, String) {
+    (path.to_owned(), text.to_owned())
+}
+
+const ENTRY: &[CallSite] = &[CallSite {
+    workflow: "demo",
+    step: "go",
+    model_file: "a.rs",
+    record_file: "b.rs",
+}];
+
+#[test]
+fn a_model_file_in_no_entry_is_reported() {
+    let files = [
+        file("a.rs", "let args = [\"--print\"];"),
+        file("b.rs", "model_workflow::record_output(\"demo\", \"go\");"),
+        file("c.rs", "let args = [\"--max-turns\", \"1\"];"),
+    ];
+    let problems = call_site_problems(&files, ENTRY);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("c.rs"));
+}
+
+#[test]
+fn a_model_runner_trait_or_impl_makes_a_model_file() {
+    let files = [
+        file("a.rs", "pub trait ModelRunner: Send {}"),
+        file("b.rs", "model_workflow::record(\"demo\", \"go\");"),
+        file("d.rs", "impl ModelRunner for Fake {}"),
+    ];
+    let problems = call_site_problems(&files, ENTRY);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("d.rs"));
+}
+
+#[test]
+fn an_entry_whose_record_file_has_no_record_call_is_reported() {
+    let files = [
+        file("a.rs", "let args = [\"--print\"];"),
+        file("b.rs", "fn other() { record_nothing(\"demo\"); }"),
+    ];
+    let problems = call_site_problems(&files, ENTRY);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("demo"));
+}
+
+#[test]
+fn a_record_call_for_another_workflow_does_not_count() {
+    let files = [
+        file("a.rs", "let args = [\"--print\"];"),
+        file("b.rs", "model_workflow::record_output(\"other\", \"go\");"),
+    ];
+    assert_eq!(call_site_problems(&files, ENTRY).len(), 1);
+}
+
+#[test]
+fn text_after_the_test_module_marker_is_not_read() {
+    let files = [
+        file("a.rs", "let args = [\"--print\"];"),
+        file("b.rs", "model_workflow::record(\"demo\", \"go\");"),
+        file(
+            "e.rs",
+            "fn x() {}\n#[cfg(test)]\nmod t { impl ModelRunner for F {} }",
+        ),
+    ];
+    assert!(call_site_problems(&files, ENTRY).is_empty());
+}
+
+#[test]
+fn every_model_call_in_harold_src_is_in_the_list_and_records() {
+    let files = source_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    assert!(files.len() > 100, "the scan read {} files", files.len());
+    let problems = call_site_problems(&files, CALL_SITES);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
