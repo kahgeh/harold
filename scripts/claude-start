@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Start Claude Code for a pod role with a short first message.
+
+    claude-start <model> <prompt file>
+
+It runs `claude --dangerously-skip-permissions --model <model> "Read <prompt file> and
+follow it."`. It is a program, not a shell function, so a restart can run it without a shell.
+"""
+import os
+import sys
+
+
+def main(arguments):
+    if len(arguments) != 2:
+        print('usage: claude-start <model> <prompt file>', file=sys.stderr)
+        return 2
+    model, prompt_file = arguments
+    if not os.path.isfile(prompt_file):
+        print('claude-start: the prompt file does not exist: {}'.format(prompt_file), file=sys.stderr)
+        return 1
+    message = 'Read {} and follow it.'.format(prompt_file)
+    os.execvp('claude', ['claude', '--dangerously-skip-permissions', '--model', model, message])
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

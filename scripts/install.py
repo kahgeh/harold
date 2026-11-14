@@ -313,6 +313,62 @@ def register_turn_hook(settings_path, hook_path):
     return outcome
 
 
+SESSION_START_HOOK = 'claude_session_start.py'
+
+
+def register_session_start_hook(settings_path, hook_path):
+    """Make Harold's claude_session_start.py a Claude Code SessionStart hook in the settings.
+
+    Returns 'unchanged' (a SessionStart command already runs `hook_path`), 'replaced' (the one
+    Harold SessionStart hook that ran another path now runs it) or 'added', or the text of the
+    JSON for the person to add when the file is missing, not valid JSON, has a SessionStart
+    list this does not know the shape of, or has two Harold hooks; then nothing is written.
+    No other hook is touched.
+    """
+    command = turn_hook_command(hook_path)
+
+    def manual(reason):
+        entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': command}]}
+        return '{}. Add this entry to "hooks": "SessionStart" in {}, in place of any Harold SessionStart hook: {}'.format(
+            reason, settings_path, json.dumps(entry))
+
+    target = settings_path.resolve()
+    try:
+        data = json.loads(target.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return manual('The settings file is missing or is not valid JSON')
+    hooks = data.get('hooks', {}) if isinstance(data, dict) else None
+    start = hooks.get('SessionStart', []) if isinstance(hooks, dict) else None
+    if not isinstance(start, list) or not all(
+            isinstance(entry, dict) and isinstance(entry.get('hooks', []), list)
+            and all(isinstance(hook, dict) for hook in entry.get('hooks', []))
+            for entry in start):
+        return manual('The settings file has a SessionStart hook list of a shape this does not know')
+    harold = []
+    for entry in start:
+        for hook in entry.get('hooks', []):
+            script = stop_hook_script(hook['command']) \
+                if hook.get('type') == 'command' and isinstance(hook.get('command'), str) else None
+            if script is not None and script.name == SESSION_START_HOOK:
+                harold.append((hook, script))
+    if len(harold) > 1:
+        return manual('The settings file has {} Harold SessionStart hooks'.format(len(harold)))
+    if harold and harold[0][1] == Path(hook_path):
+        return 'unchanged'
+    if harold:
+        harold[0][0]['command'] = command
+        outcome = 'replaced'
+    else:
+        hooks = data.setdefault('hooks', {})
+        hooks.setdefault('SessionStart', []).append({'matcher': '', 'hooks': [{'type': 'command', 'command': command}]})
+        outcome = 'added'
+    try:
+        write_settings(target, data)
+    except (OSError, ValueError) as error:
+        return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))
+    return outcome
+
+
 def write_skill(source, destination, binary):
     """Write the skill at `destination`, naming the installed harold binary where the source has
     the placeholder. The path is quoted for the shell, which leaves a path without spaces as it is."""
@@ -979,6 +1035,14 @@ def stage_bundle(stage, bundle, artifacts, assets, prebuilt, repo, local, pairin
     for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
         source = assets / ('hooks' if prebuilt is not None else 'hooks/providers') / name
         shutil.copy2(source, stage / 'hooks' / name)
+    # Optional until the release workflow packs them (a prebuilt release without them installs without them).
+    for source, destination in (
+            (assets / ('hooks' if prebuilt is not None else 'hooks/providers') / SESSION_START_HOOK,
+             stage / 'hooks' / SESSION_START_HOOK),
+            (assets / 'scripts/claude-start', stage / 'claude-start')):
+        if source.is_file():
+            shutil.copy2(source, destination)
+            destination.chmod(0o755)
     shutil.copytree(assets / 'hooks/claude-mod', stage / 'hooks/claude-mod',
                     ignore=shutil.ignore_patterns('*.test.ts'))
     shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
@@ -1137,6 +1201,9 @@ def install(args, repo):
             print('Claude Code mod: {}'.format(outcome), flush=True)
             outcome = register_turn_hook(CLAUDE_SETTINGS, bundle / 'hooks' / TURN_HOOK)
             print('Claude Code turn hook: {}'.format(outcome), flush=True)
+            if (bundle / 'hooks' / SESSION_START_HOOK).is_file():
+                outcome = register_session_start_hook(CLAUDE_SETTINGS, bundle / 'hooks' / SESSION_START_HOOK)
+                print('Claude Code session start hook: {}'.format(outcome), flush=True)
             for agent, skills_folder in AGENT_SKILL_FOLDERS:
                 print('{} skill: {}'.format(agent, link_skill(skills_folder, bundle / 'skills' / SKILL_NAME)),
                       flush=True)
