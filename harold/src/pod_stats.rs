@@ -537,8 +537,12 @@ fn read_notices(file: &Path) -> Result<BTreeMap<String, String>, &'static str> {
 }
 
 fn write_notices(file: &Path, warned: &BTreeMap<String, String>) -> std::io::Result<()> {
+    write_private(file, &serde_json::to_vec_pretty(warned)?)
+}
+
+/// Writes `bytes` to `file` through a temporary file with mode 0600, then a rename.
+fn write_private(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
-    let bytes = serde_json::to_vec_pretty(warned)?;
     let temp = file.with_extension("json.tmp");
     let mut out = std::fs::OpenOptions::new()
         .write(true)
@@ -548,9 +552,137 @@ fn write_notices(file: &Path, warned: &BTreeMap<String, String>) -> std::io::Res
         .open(&temp)?;
     // A temporary file left by an earlier run keeps its mode, so the mode is set again.
     out.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    out.write_all(&bytes)?;
+    out.write_all(bytes)?;
     out.sync_all()?;
     std::fs::rename(&temp, file)
+}
+
+/// The name of the kept values file in Harold's data folder.
+const VALUES_FILE: &str = "spec-values.json";
+
+/// What `spec-values.json` keeps for one spec.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct KeptValue {
+    /// The first value line read after the approval: `s`, `m` or `l`.
+    value: String,
+    /// The later different values that were warned about.
+    #[serde(default)]
+    warned: Vec<String>,
+}
+
+/// The value of each spec, fixed at its approval and kept in `spec-values.json` in Harold's
+/// data folder. The file is a JSON object of `<product>\0<spec id>` to `KeptValue`.
+pub(crate) struct SpecValues {
+    file: PathBuf,
+    kept: BTreeMap<String, KeptValue>,
+    dirty: bool,
+    save_failed: bool,
+}
+
+impl SpecValues {
+    /// The values in `file`. A missing file gives none. A file that cannot be used gives
+    /// none, logs one `spec values unreadable` line and is replaced at the next save.
+    pub(crate) fn load(file: PathBuf) -> Self {
+        let (kept, dirty) = match read_values(&file) {
+            Ok(kept) => (kept, false),
+            Err(reason) => {
+                warn!(reason, "spec values unreadable");
+                (BTreeMap::new(), true)
+            }
+        };
+        Self {
+            file,
+            kept,
+            dirty,
+            save_failed: false,
+        }
+    }
+
+    /// Sets `value` of each spec of `product` to its kept value. The first value read
+    /// after the approval (`value` before this call) is kept. A later different value logs
+    /// `spec value changed after approval`, once for each spec and value.
+    pub(crate) fn keep(&mut self, product: &str, specs: &mut [SpecFacts]) {
+        for spec in specs {
+            let key = format!("{product}\0{}", spec.id);
+            let read = spec.value;
+            if let Some(read) = read
+                && !self.kept.contains_key(&key)
+            {
+                let entry = KeptValue {
+                    value: read.as_str().to_owned(),
+                    warned: Vec::new(),
+                };
+                self.kept.insert(key.clone(), entry);
+                self.dirty = true;
+            }
+            let Some(entry) = self.kept.get_mut(&key) else {
+                continue;
+            };
+            spec.value = SpecValue::from_word(&entry.value);
+            let Some(read) = read.map(SpecValue::as_str) else {
+                continue;
+            };
+            if read != entry.value && !entry.warned.iter().any(|seen| seen == read) {
+                warn!(
+                    pod.product = %product,
+                    spec.id = %spec.id,
+                    kept = %entry.value,
+                    read = %read,
+                    "spec value changed after approval"
+                );
+                entry.warned.push(read.to_owned());
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Writes the values when they differ from the file. A failure logs one
+    /// `spec values not saved` line, with `reason` `permission` or `io`, until a save works.
+    pub(crate) fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let written = serde_json::to_vec_pretty(&self.kept)
+            .map_err(std::io::Error::from)
+            .and_then(|bytes| {
+                if let Some(folder) = self.file.parent() {
+                    std::fs::create_dir_all(folder)?;
+                }
+                write_private(&self.file, &bytes)
+            });
+        match written {
+            Ok(()) => {
+                self.dirty = false;
+                self.save_failed = false;
+            }
+            Err(error) => {
+                if !self.save_failed {
+                    self.save_failed = true;
+                    let reason = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        "permission"
+                    } else {
+                        "io"
+                    };
+                    warn!(reason, error = %error, "spec values not saved");
+                }
+            }
+        }
+    }
+}
+
+fn read_values(file: &Path) -> Result<BTreeMap<String, KeptValue>, &'static str> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err("permission");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Err("parse"),
+        Err(_) => return Err("io"),
+    };
+    serde_json::from_str(&text).map_err(|_| "parse")
 }
 
 /// The tip of each product's base branch at its last counted poll, kept in the tip file
@@ -859,6 +991,11 @@ pub(crate) struct SpecFacts {
     pub size: SpecSize,
     /// The kind from the `**Kind.**` line of the spec.
     pub kind: SpecKind,
+    /// The value from the `**Value.**` line, read only when `approvals/<id>.md` exists.
+    /// The poll replaces it with the value kept in `spec-values.json`.
+    pub value: Option<SpecValue>,
+    /// The cause from the `**Cause.**` line of a fix spec.
+    pub cause: Option<String>,
     /// The `confirmed:` time of `confirmed/<id>.md`, which the evidence check writes when
     /// the evidence of a fix is present.
     pub confirmed_at: Option<OffsetDateTime>,
@@ -900,6 +1037,8 @@ impl Default for SpecFacts {
             revised_after_approval: 0,
             size: SpecSize::Unsized,
             kind: SpecKind::Unkinded,
+            value: None,
+            cause: None,
             confirmed_at: None,
             evidence_missing: None,
             awaiting: false,
@@ -997,6 +1136,65 @@ pub(crate) fn spec_size(markdown: &str) -> SpecSize {
         "large" => SpecSize::Large,
         _ => SpecSize::Unsized,
     }
+}
+
+/// How big the problem is that a spec solves, from its `**Value.**` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpecValue {
+    S,
+    M,
+    L,
+}
+
+impl SpecValue {
+    /// The weight of the value on the Cost per value card: 1, 2 or 4.
+    pub(crate) fn weight(self) -> u8 {
+        match self {
+            Self::S => 1,
+            Self::M => 2,
+            Self::L => 4,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::S => "s",
+            Self::M => "m",
+            Self::L => "l",
+        }
+    }
+
+    fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "s" => Some(Self::S),
+            "m" => Some(Self::M),
+            "l" => Some(Self::L),
+            _ => None,
+        }
+    }
+}
+
+/// The first word after `marker` on the first line that starts with it, in lower case.
+/// A word holds letters, digits and hyphens.
+fn marked_word(markdown: &str, marker: &str) -> Option<String> {
+    let rest = markdown
+        .lines()
+        .find_map(|line| line.strip_prefix(marker))?;
+    rest.split(|c: char| !c.is_alphanumeric() && c != '-')
+        .find(|part| !part.is_empty())
+        .map(str::to_lowercase)
+}
+
+/// The value from the first line that starts with `**Value.**`. The word is `S`, `M` or
+/// `L`, compared in lower case. Text after the word is ignored.
+pub(crate) fn spec_value(markdown: &str) -> Option<SpecValue> {
+    SpecValue::from_word(&marked_word(markdown, "**Value.**")?)
+}
+
+/// The cause from the first line that starts with `**Cause.**`: a spec id or `unknown`,
+/// in lower case. Text after the word is ignored.
+pub(crate) fn spec_cause(markdown: &str) -> Option<String> {
+    marked_word(markdown, "**Cause.**")
 }
 
 /// True when the first line of the spec, trimmed, is `Waiting for your approval.`. One
@@ -1583,6 +1781,8 @@ fn spec_facts(id: &str, context: &SpecContext<'_>) -> Option<(SpecFacts, Vec<Not
         revised_after_approval: revised_after_approval(&entries, approved_at),
         size,
         kind,
+        value: approved_at.and(spec_text.as_deref().and_then(spec_value)),
+        cause: spec_text.as_deref().and_then(spec_cause),
         confirmed_at: confirmed_file,
         evidence_missing: evidence_file,
         awaiting,
@@ -2249,6 +2449,8 @@ pub(crate) struct PodStats<G: Git> {
     /// The warnings about a spec's merges that were logged, so each is logged once, also
     /// across restarts.
     warned: PodNotices,
+    /// The value of each spec, fixed at its approval.
+    values: SpecValues,
     /// The pod files that did not parse and were logged: (product, file) -> what the file
     /// held then.
     unreadable: HashMap<(String, String), String>,
@@ -2279,6 +2481,7 @@ impl<G: Git> PodStats<G> {
             .and_then(Path::parent)
             .unwrap_or(Path::new("."));
         let warned = PodNotices::load(data_folder.join(NOTICES_FILE));
+        let values = SpecValues::load(data_folder.join(VALUES_FILE));
         Self {
             registry,
             git,
@@ -2296,6 +2499,7 @@ impl<G: Git> PodStats<G> {
             agents,
             chief,
             warned,
+            values,
             unreadable: HashMap::new(),
         }
     }
@@ -2466,7 +2670,7 @@ impl<G: Git> PodStats<G> {
                 Some((worktree.name.clone(), created))
             })
             .collect();
-        let SpecRead { specs, notices } = read_specs(
+        let SpecRead { mut specs, notices } = read_specs(
             &pod,
             &Sources {
                 busy: &busy,
@@ -2476,6 +2680,8 @@ impl<G: Git> PodStats<G> {
                 offset: self.offset,
             },
         )?;
+        self.values.keep(&product.name, &mut specs);
+        self.values.save();
         let old_tip = self.tips.counted_tip(&product.name).map(str::to_owned);
         let moved = self.tips.moved(&self.git, product, &history).await?;
         // The tip is saved before the merges are recorded: a crash between the two loses
@@ -2861,6 +3067,7 @@ struct Gauges {
     _words: ObservableGauge<u64>,
     _effort: ObservableGauge<f64>,
     _confirmed: ObservableGauge<f64>,
+    _value: ObservableGauge<u64>,
     _evidence_missing: ObservableGauge<u64>,
     _pods: ObservableGauge<u64>,
     _agents: ObservableGauge<u64>,
@@ -2900,6 +3107,7 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
         let words = Arc::clone(&snapshot);
         let effort = Arc::clone(&snapshot);
         let confirmed = Arc::clone(&snapshot);
+        let value = Arc::clone(&snapshot);
         let evidence = Arc::clone(&snapshot);
         let pods = Arc::clone(&snapshot);
         let agents = Arc::clone(&snapshot);
@@ -2985,6 +3193,16 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                             }
                             attributes.push(KeyValue::new("spec.size", spec.size.as_str()));
                             attributes.push(KeyValue::new("spec.kind", spec.kind.as_str()));
+                            attributes.push(KeyValue::new(
+                                "spec.value",
+                                spec.value.map_or("none", SpecValue::as_str),
+                            ));
+                            if spec.kind == SpecKind::Fix {
+                                attributes.push(KeyValue::new(
+                                    "spec.cause",
+                                    spec.cause.clone().unwrap_or_else(|| "unknown".into()),
+                                ));
+                            }
                             for (measure, value) in effort_measures(spec)
                                 .into_iter()
                                 .chain(extra_effort_measures(spec))
@@ -3013,6 +3231,28 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                                 &[
                                     KeyValue::new("pod.product", product.clone()),
                                     KeyValue::new("spec.id", spec.id.clone()),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
+            // One point for each spec with a kept value, whatever its age: its weight.
+            _value: meter
+                .u64_observable_gauge("pod.spec.value")
+                .with_unit("{value}")
+                .with_callback(move |observer| {
+                    for (product, specs) in &lock(&value).specs {
+                        for spec in specs {
+                            let Some(kept) = spec.value else {
+                                continue;
+                            };
+                            observer.observe(
+                                u64::from(kept.weight()),
+                                &[
+                                    KeyValue::new("pod.product", product.clone()),
+                                    KeyValue::new("spec.id", spec.id.clone()),
+                                    KeyValue::new("spec.value", kept.as_str()),
                                 ],
                             );
                         }

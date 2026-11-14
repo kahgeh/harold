@@ -140,6 +140,9 @@ A file that does not parse logs `pod file unreadable` once per file and change, 
 | `spec state changed` | `pod.product`, `spec.id`, `state`, `spec.state_at` (RFC 3339 time the spec entered the state), `spec.words` (the spec's word count), `spec.revisions` |
 | `spec completed without merged file` | `pod.product`, `spec.id`, `merged_at` (RFC 3339 time of the newest merge), `commit` (the full commit hash of that merge, or `unknown` when Harold saw the merge only from a worktree that went; kept in `harold.log` only and not exported) |
 | `pod notices unreadable` | `reason` (`parse`, `permission` or `io`) |
+| `spec value changed after approval` | `pod.product`, `spec.id`, `kept` (the value fixed at the approval), `read` (the different value now in the spec). Level warn. Logged once for each spec and value |
+| `spec values unreadable` | `reason` (`parse`, `permission` or `io`). The file `spec-values.json` is replaced at the next save |
+| `spec values not saved` | `reason` (`permission` or `io`) |
 | `pod notices not saved` | `reason` (`permission` or `io`), `error` |
 
 **A spec with stages.** When `started/<id>.md` exists and `merged/<id>.md` does not, the reflog and worktree sources do not count for `completed`. A stage-1 merge leaves the spec `in_progress` until the last stage writes `merged/<id>.md`. The reflog and worktree sources count only for a spec with neither file.
@@ -205,6 +208,8 @@ GROUP BY 1
 **Spec size.** `spec.size` comes from the `**Size.**` line under the spec's title: `small` (under half a day of build), `medium` (up to a day) or `large` (split before approval). A spec with no size line is `unsized`.
 
 **Spec kind.** `spec.kind` comes from the `**Kind.**` line under the `**Size.**` line: `feature` (a product feature), `fix` or `other`. A spec with no kind line is `unkinded`.
+
+**Spec value.** `spec.value` comes from the `**Value.**` line under the `**Kind.**` line: `s`, `m` or `l`, with the weights 1, 2 and 4. Pod stats keeps the first value that it reads after `approvals/<id>.md` exists, in `spec-values.json` in Harold's data folder. A later different line does not change it. A spec with no value line is `none`. A fix spec also carries `spec.cause` from its `**Cause.**` line: a spec id or `unknown`.
 
 **Product features and fixes.** A product feature is a part of a product that a person or a part of the system uses, which a spec of kind `feature` adds. It is not a Cargo feature. Each product has one counter, `<product>.feature.used`, with the attribute `spec.id`. For Harold it is `harold.feature.used`, and the function `feature_used(spec_id)` counts one use at the one point that the spec of the feature names. Today the list holds `factory-flow-page`, `opencode-done-on-mac`, `evidence-check`, `evidence-follow-up` (one use is one `EVIDENCE` line typed into the chief's pane) `agent-jobs` (one use is one `harold tool job add` that Harold accepts) `agent-jobs-hosts` (one use is one `harold tool job add --unit` that Harold accepts) and `decision-tool` (one use is one `harold tool decision evaluate` that Harold accepts). For `factory-flow-page`, one use is one load of the factory flow page `/flow` that shows at least one stage. After a restart the counter starts again from 0, and the counter rule does not count old uses again.
 
@@ -440,7 +445,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.release.install_lag` | histogram, `s`, buckets 900, 3600, 7200, 14400, 43200, 86400, 172800, 604800 | `version`. The resource has `harold.machine`. One point for each new version that starts on a machine |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` (`open`, `approved`, `in_progress`, `completed`, `withdrawn`) |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
-| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), `spec.kind` (`feature`, `fix`, `other`, `unkinded`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.spec.effort` | gauge, `1` (hours for `build_worker_hours` and `redo_hours`) | `pod.product`, `spec.id`, `state`, `measure` (`revisions`, `direction_revisions`, `architect_rounds`, `build_worker_hours`, `redo_hours`, `revised_after_approval`), `spec.size` (`small`, `medium`, `large`, `unsized`), `spec.kind` (`feature`, `fix`, `other`, `unkinded`), `spec.value` (`s`, `m`, `l`, `none`), `spec.cause` (a fix spec only: a spec id or `unknown`), and for a withdrawn spec `withdrawn.reason` and `withdrawn.reached` |
+| `pod.spec.value` | gauge, `{value}` | `pod.product`, `spec.id`, `spec.value` (`s`, `m`, `l`). The number is the weight: 1, 2 or 4. One point for each spec with a kept value, whatever its age |
 | `pod.slots.idle_with_work` | gauge, `{slot}` | `pod.product` |
 | `pod.inventory.items` | gauge, `{spec}` | `pod.product`, `list` (`awaiting_approval`, `approved_not_started`, `in_progress`, `merged_not_released`, `in_spec_writing`, `in_architect_review`, `ready_not_merged`, `idea`, `released_not_installed`) |
 | `pod.inventory.oldest_hours` | gauge, `h` | `pod.product`, `list` |

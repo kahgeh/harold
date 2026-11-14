@@ -5368,3 +5368,244 @@ fn record_idea_opened_records_the_phase_idea_to_open() {
         Some(90.0)
     );
 }
+
+// --- the value line, the cause line and spec-values.json ---
+
+#[test]
+fn the_value_line_gives_the_weight_of_its_first_letter() {
+    assert_eq!(spec_value("# T\n**Value.** S\n"), Some(SpecValue::S));
+    assert_eq!(
+        spec_value("**Value.** M, a daily nuisance\n"),
+        Some(SpecValue::M)
+    );
+    assert_eq!(spec_value("**Value.** l\n"), Some(SpecValue::L));
+    assert_eq!(SpecValue::S.weight(), 1);
+    assert_eq!(SpecValue::M.weight(), 2);
+    assert_eq!(SpecValue::L.weight(), 4);
+    assert_eq!(SpecValue::M.as_str(), "m");
+}
+
+#[test]
+fn a_spec_with_no_usable_value_line_has_no_value() {
+    assert_eq!(spec_value("# T\n\nText.\n"), None);
+    assert_eq!(spec_value("**Value.**\n"), None);
+    assert_eq!(spec_value("**Value.** huge\n"), None);
+}
+
+#[test]
+fn the_first_value_line_is_the_one_that_counts() {
+    assert_eq!(
+        spec_value("**Value.** S\n**Value.** L\n"),
+        Some(SpecValue::S)
+    );
+}
+
+#[test]
+fn a_size_line_still_gives_the_size_and_no_size_line_gives_unsized() {
+    assert_eq!(spec_size("**Size.** small\n"), SpecSize::Small);
+    assert_eq!(spec_size("# T\n**Value.** M\n"), SpecSize::Unsized);
+}
+
+#[test]
+fn the_cause_line_gives_a_spec_id_or_unknown() {
+    assert_eq!(
+        spec_cause("**Cause.** decision-tool\n").as_deref(),
+        Some("decision-tool")
+    );
+    assert_eq!(
+        spec_cause("**Cause.** unknown\n").as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        spec_cause("**Cause.** Decision-Tool (the merge)\n").as_deref(),
+        Some("decision-tool")
+    );
+    assert_eq!(spec_cause("# T\n"), None);
+    assert_eq!(spec_cause("**Cause.**\n"), None);
+}
+
+fn kept_value(snapshot: &Arc<Mutex<PodSnapshot>>, pod: &Pod, id: &str) -> Option<SpecValue> {
+    snapshot.lock().unwrap().specs[&pod.name]
+        .iter()
+        .find(|spec| spec.id == id)
+        .and_then(|spec| spec.value)
+}
+
+fn values_path(pod: &Pod) -> PathBuf {
+    pod.root.join("data/spec-values.json")
+}
+
+#[tokio::test]
+async fn a_value_read_before_the_approval_is_not_kept() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** M\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    assert_eq!(kept_value(&snapshot, &pod, "v"), None);
+    put_approval(&files, "v");
+    stats.poll().await;
+    assert_eq!(kept_value(&snapshot, &pod, "v"), Some(SpecValue::M));
+}
+
+#[tokio::test]
+async fn a_changed_value_line_after_the_approval_keeps_the_first_and_warns_once() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** M\n");
+    put_approval(&files, "v");
+    let logs = CapturedLogs::start();
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** L\n");
+    stats.poll().await;
+    stats.poll().await;
+    assert_eq!(kept_value(&snapshot, &pod, "v"), Some(SpecValue::M));
+    let text = logs.text();
+    let line = format!(
+        "spec value changed after approval pod.product={} spec.id=v kept=m read=l",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
+
+#[tokio::test]
+async fn the_kept_value_survives_a_restart() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** M\n");
+    put_approval(&files, "v");
+    let registry = one_product(&pod, &repo);
+    let (mut first, _) = stats(registry.clone());
+    first.poll().await;
+    drop(first);
+    assert!(values_path(&pod).exists());
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** S\n");
+    let (mut second, snapshot) = stats(registry);
+    second.poll().await;
+    assert_eq!(kept_value(&snapshot, &pod, "v"), Some(SpecValue::M));
+}
+
+#[tokio::test]
+async fn an_unreadable_values_file_starts_empty_and_is_replaced() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(&files.join("specs/v.md"), "# V\n\n**Value.** L\n");
+    put_approval(&files, "v");
+    write(&values_path(&pod), "not json");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    assert_eq!(kept_value(&snapshot, &pod, "v"), Some(SpecValue::L));
+    let saved = std::fs::read_to_string(values_path(&pod)).unwrap();
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&saved).is_ok(),
+        "{saved}"
+    );
+}
+
+#[tokio::test]
+async fn a_spec_with_no_value_line_has_no_value_and_no_cause_unless_it_has_the_line() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let files = pod_files(&repo);
+    write(
+        &files.join("specs/f.md"),
+        "# F\n\n**Kind.** fix\n**Cause.** unknown\n",
+    );
+    put_approval(&files, "f");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let specs = snapshot.lock().unwrap().specs[&pod.name].clone();
+    assert_eq!(specs[0].value, None);
+    assert_eq!(specs[0].cause.as_deref(), Some("unknown"));
+}
+
+#[tokio::test]
+async fn the_value_gauge_sends_the_weight_of_each_kept_value_whatever_its_age() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let old = OffsetDateTime::now_utc() - time::Duration::days(200);
+    let spec = SpecFacts {
+        id: "old".into(),
+        state: SpecState::Completed,
+        state_at: old,
+        merged_at: Some(old),
+        value: Some(SpecValue::L),
+        ..SpecFacts::default()
+    };
+    let unvalued = SpecFacts {
+        id: "none".into(),
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![spec, unvalued])]),
+        ..PodSnapshot::default()
+    };
+    assert_eq!(
+        test_support::gauge_value(
+            "pod.spec.value",
+            &[
+                ("pod.product", product.as_str()),
+                ("spec.id", "old"),
+                ("spec.value", "l")
+            ],
+        ),
+        Some(4)
+    );
+    assert_eq!(
+        test_support::gauge_value(
+            "pod.spec.value",
+            &[("pod.product", product.as_str()), ("spec.id", "none")]
+        ),
+        None
+    );
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
+
+#[tokio::test]
+async fn the_effort_gauge_carries_the_value_and_the_cause() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let valued = SpecFacts {
+        id: "valued".into(),
+        state: SpecState::InProgress,
+        state_at: OffsetDateTime::now_utc(),
+        kind: SpecKind::Feature,
+        value: Some(SpecValue::M),
+        ..SpecFacts::default()
+    };
+    let fix = SpecFacts {
+        id: "fixed".into(),
+        state: SpecState::InProgress,
+        state_at: OffsetDateTime::now_utc(),
+        kind: SpecKind::Fix,
+        cause: Some("decision-tool".into()),
+        ..SpecFacts::default()
+    };
+    let snapshot = gauge_snapshot();
+    *snapshot.lock().unwrap() = PodSnapshot {
+        specs: BTreeMap::from([(product.clone(), vec![valued, fix])]),
+        ..PodSnapshot::default()
+    };
+    let read = |id: &str, extra: (&str, &str)| {
+        test_support::gauge_f64_value(
+            "pod.spec.effort",
+            &[
+                ("pod.product", product.as_str()),
+                ("spec.id", id),
+                ("measure", "revisions"),
+                extra,
+            ],
+        )
+    };
+    assert_eq!(read("valued", ("spec.value", "m")), Some(0.0));
+    assert_eq!(read("fixed", ("spec.value", "none")), Some(0.0));
+    assert_eq!(read("fixed", ("spec.cause", "decision-tool")), Some(0.0));
+    assert_eq!(read("valued", ("spec.cause", "decision-tool")), None);
+    *snapshot.lock().unwrap() = PodSnapshot::default();
+}
