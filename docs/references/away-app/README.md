@@ -204,22 +204,25 @@ With nothing typed and no photo chosen, the reply bar's last button is a mic. Ty
 - **The phone does the listening.** `dictation.js` uses Safari's speech recognition (`webkitSpeechRecognition`). Safari gives the microphone's sound to Apple's speech recognition, the service behind the keyboard's dictation key; Apple runs it on the phone or on its servers, depending on the phone and the language, and the page cannot see which. The sound never goes to Harold, and Harold transcribes nothing. The words reach Harold, then the chief and the model, only when you tap **Send**. iOS asks once for the microphone and for speech recognition, the first time you tap the mic.
 - **It may not work in the installed app.** Earlier iOS versions failed in an app added to the home screen with `service-not-allowed`. The mic shows whenever the API exists. On `not-allowed` or `service-not-allowed` the strip says `Dictation isn't available in this app.` for 3 seconds and the mic stays. The keyboard's own dictation key is still there. `no-speech` and `aborted` go back to the mic quietly; `network` says `Dictation needs a connection.` and `audio-capture` says `The microphone gave no sound.`, each for 3 seconds.
 - **It stops when you leave.** Hiding the app or starting a call aborts it; the words so far stay in the box.
+- **Every tap works.** The page keeps an instance that is ending, after a stop, an abort or an error, until its `end` event or for at most 1 second. A new tap on the mic waits for that end and then starts a new instance, so only one instance is active at a time. Safari refuses a start while an older instance is still active. A failure that you cannot fix (`start_failed`, `aborted` and any other error) shows `Dictation stopped. Tap the mic again.` for 3 seconds.
 - **A dictated reply is a typed reply.** `POST /replies`, `app reply stored`, the same row and states. No mark is added, because you checked the words before sending.
 
 | Route | Does |
 |---|---|
-| `POST /dictation/check` | The page reports once per page load the first thing it knows: `missing` (neither API exists), `ok` (the first result), or the first error: `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`. The body is the `result` signal, `{"result": "<word>"}`, at most 64 bytes, sent through Datastar with `openWhenHidden` and no retry. `204`; an unknown word, a longer body or bad JSON gets `400`. It passes the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). |
+| `POST /dictation/check` | The page reports once for each dictation tap, when the tap ends. The body is the signals `result`, `tap` and `started`, `{"result": "<word>", "tap": 2, "started": true}`, at most 128 bytes, sent through Datastar with `openWhenHidden` and no retry. `result` is `ok` (at least one result came), `no_result` (the tap ended with no result and no error), a browser error (`not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), `aborted` (the browser's own `aborted` error), `page_ended` (the page ended the tap: Send, the page hiding, a call tap, or a stop with no result), `start_failed` (the recognition did not start) or `other_error` (any other error). `missing` (neither API exists) is the one report of a page with no speech recognition. `tap` is the number of the tap on the page, from 1 to 100; the page sends no more than 100 reports for each load. A body with no `tap` and no `started`, from an old page, is accepted as `tap` 0 and `started` false. `204`; an unknown word, a `tap` over 100, a longer body or bad JSON gets `400`. It passes the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). |
 
 Whether dictation works in the installed app is answered from the log, over 30 days:
 
 ```
-SELECT LogAttributes['result'] AS result, count() AS pages
+SELECT LogAttributes['result'] AS result, count() AS taps
 FROM otel.otel_logs
 WHERE ServiceName = 'harold' AND Body = 'app dictation check' AND Timestamp > now() - INTERVAL 30 DAY
 GROUP BY result
 ```
 
-Any `service_not_allowed` means the installed app cannot dictate, and the mic stays hidden there. No log line holds the words.
+Any `service_not_allowed` means the installed app cannot dictate, and the mic stays hidden there. A line is one dictation tap, so `count()` counts taps, not pages. No log line holds the words.
+
+To see whether dictation works after the first tap, run `bin/logq --named dictation-taps`. It gives the share of `ok` for `tap = 1` and for `tap` 2 or more, and each result of a later tap that is not `ok`, `no_speech` or `page_ended`. See [the named queries](../telemetry/queries/README.md).
 
 ## The todos
 
@@ -607,7 +610,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app spec shared` | INFO. `product`, `id` and `sha`, logged when a **Share** reply is stored |
 | `factory flow read` | INFO for `ok`, WARN for each other outcome. `outcome` (`ok`, `unreachable`, `refused`, `timeout` or `not_set_up`) and `elapsed_ms`. No password, no SQL text and no row value |
 | `app page shown` | INFO. `listener` (`web_app` or `specs`), `collection` (a configured name, or `unknown`), `result` (`ok`, `not_found`, `refused`, `too_big` or `unreadable`) and `ms`. No file name and no text |
-| `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
+| `app dictation check` | `result` (`missing`, `ok`, `no_result`, `not_allowed`, `service_not_allowed`, `network`, `no_speech`, `audio_capture`, `aborted`, `page_ended`, `start_failed` or `other_error`), `tap` (1 to 100, or 0 for an old page) and `started`, once for each dictation tap |
 | `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
 | `app speech check not logged` | A warning with `reason` (`not_object`, `unknown_field`, `wrong_type` or `out_of_limit`) and `check_field`, the name of the refused field, or `-` when no field is to blame or the name is not one of the run's own (a name outside the list could hold words). Never a value. `check_field` stays in `harold.log` |
 | `app photo stored` | `photo_bytes` and `kind` (`jpeg` or `png`) |

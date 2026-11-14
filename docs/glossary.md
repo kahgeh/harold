@@ -245,6 +245,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | cron expression | Five fields, minute hour day month weekday, that name the local minutes a schedule runs | "crontab" (there is no file), "cron job", "day-of-week" for the fifth field |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
 | dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |
+| dictation tap | One tap on the mic and the recognition that it starts, until it ends, with its number on the page, recorded as `tap` | "attempt", "try" (a try is a row of its own), "session" (a session is an agent's), "recording" (nothing is recorded) |
 | photo | An image you attach to a web app reply, kept by Harold in `app-photos/` and named in the line typed to the chief | "attachment" alone, "image upload", "media" |
 | thread page | The web app's page that shows the thread and the reply box. Its header links Todos and Pages | "message page", "chat page" |
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
