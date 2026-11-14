@@ -293,12 +293,14 @@ pub(crate) fn summarise_with(
         .replace("</message>", "");
     let prompt = build_summary_prompt(&safe_prompt, &safe_msg);
 
+    // The one model name of this call: the argument and the cost record both use it.
+    const MODEL: &str = "sonnet";
     let out = Command::new(cli)
         .args([
             "-p",
             &prompt,
             "--model",
-            "sonnet",
+            MODEL,
             "--max-turns",
             "1",
             "--output-format",
@@ -317,7 +319,7 @@ pub(crate) fn summarise_with(
                 "summarize",
                 None,
                 None,
-                "sonnet",
+                MODEL,
                 &o.stdout,
             );
             let reply = serde_json::from_slice::<CliReply>(&o.stdout).ok();

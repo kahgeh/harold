@@ -88,12 +88,14 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
          If no explicit routing intent, reply: none"
     );
 
+    // The one model name of this call: the argument and the cost record both use it.
+    const MODEL: &str = "sonnet";
     let out = Command::new(cli)
         .args([
             "-p",
             &prompt,
             "--model",
-            "sonnet",
+            MODEL,
             "--max-turns",
             "1",
             "--output-format",
@@ -110,7 +112,7 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
         "classify",
         None,
         None,
-        "sonnet",
+        MODEL,
         &out.stdout,
     );
 
