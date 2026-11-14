@@ -163,6 +163,9 @@
 
   // The instance is ending: keep it until its `end` event, or for END_WAIT_MS.
   function moveToEnding(inst) {
+    if (inst.done) {
+      return;
+    }
     if (active === inst) {
       active = null;
     }
@@ -173,6 +176,7 @@
 
   // The `end` event of an instance, or the wait for it ran out.
   function ended(inst) {
+    inst.done = true;
     settle(inst.t, inst.t.pageEnded ? "page_ended" : "no_result");
     if (inst.uiOn) {
       inst.uiOn = false;
