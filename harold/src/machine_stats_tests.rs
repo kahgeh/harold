@@ -941,3 +941,178 @@ async fn the_task_stops_at_shutdown() {
         .expect("the task stops")
         .unwrap();
 }
+
+// --- which agent a process belongs to ---
+
+use std::collections::HashMap;
+
+use crate::pod_roles::{PodRoles, PodStart};
+use crate::tools::job::process::ProcessPort;
+
+/// A process table row: parent pid and start time in seconds.
+fn process(pid: u32, parent: u32, start: u64, name: &str) -> ProcInfo {
+    ProcInfo {
+        pid,
+        parent: Some(parent),
+        start,
+        name: name.to_owned(),
+        cpu: 0.0,
+        memory: 0,
+        cwd: None,
+    }
+}
+
+/// An agent of the agent monitor. `start` is in seconds.
+fn agent(pid: u32, start: i64) -> AgentProc {
+    AgentProc {
+        pid,
+        start_ms: start * 1000,
+        pane_id: format!("%{pid}"),
+        folder: String::new(),
+    }
+}
+
+struct Starts(HashMap<u32, i64>);
+
+impl ProcessPort for Starts {
+    fn start_time(&self, pid: u32) -> Option<i64> {
+        self.0.get(&pid).copied()
+    }
+}
+
+/// A role record where each agent `(role, product, spec, pid, start)` was recorded.
+fn roles_with(folder: &Folder, agents: &[(&str, &str, &str, u32, i64)]) -> PodRoles {
+    let starts = agents
+        .iter()
+        .map(|(_, _, _, pid, start)| (*pid, *start))
+        .collect();
+    let roles = PodRoles::open(&folder.0, Arc::new(Starts(starts)));
+    for (role, product, spec, pid, _) in agents {
+        roles
+            .record(
+                PodStart {
+                    role: (*role).to_owned(),
+                    product: (*product).to_owned(),
+                    pane_id: format!("%{pid}"),
+                    session_id: "s".into(),
+                    transcript_path: String::new(),
+                    folder: String::new(),
+                    agent_pid: *pid,
+                    start_file: String::new(),
+                    source: "startup".into(),
+                    spec: (*spec).to_owned(),
+                },
+                0,
+            )
+            .unwrap();
+    }
+    roles
+}
+
+fn owner_of(owners: &HashMap<u32, Owner>, pid: u32) -> (&'static str, &str, &str) {
+    let owner = &owners[&pid];
+    (owner.role, &owner.label, &owner.product)
+}
+
+#[test]
+fn a_child_belongs_to_the_agent_that_started_it() {
+    let folder = Folder::new();
+    let roles = roles_with(
+        &folder,
+        &[
+            ("chief", "", "", 100, 1000),
+            ("pnem", "harold", "", 200, 2000),
+        ],
+    );
+    let table = [
+        process(1, 0, 1, "launchd"),
+        process(100, 1, 1000, "agent"),
+        process(101, 100, 1001, "zsh"),
+        process(102, 101, 1002, "cargo"),
+        process(200, 1, 2000, "agent"),
+        process(201, 200, 2001, "rustc"),
+        process(300, 1, 3000, "agent"),
+        process(301, 300, 3001, "node"),
+    ];
+    let agents = [agent(100, 1000), agent(200, 2000), agent(300, 3000)];
+    let owners = Walker::default().assign(&table, &agents, Some(&roles));
+    assert_eq!(owner_of(&owners, 102), ("chief", "chief", "none"));
+    assert_eq!(owner_of(&owners, 100), ("chief", "chief", "none"));
+    assert_eq!(owner_of(&owners, 201), ("pnem", "harold", "harold"));
+    assert_eq!(owner_of(&owners, 301), ("other", "other", "none"));
+}
+
+#[test]
+fn a_process_with_no_agent_in_its_chain_is_none() {
+    let table = [
+        process(1, 0, 1, "launchd"),
+        process(50, 1, 10, "com.apple.Virtualization.VirtualMachine"),
+        process(60, 999, 10, "orphan"),
+    ];
+    let owners = Walker::default().assign(&table, &[agent(100, 1000)], None);
+    for pid in [1, 50, 60] {
+        assert_eq!(owner_of(&owners, pid), ("none", "none", "none"), "{pid}");
+    }
+}
+
+#[test]
+fn a_pid_used_again_is_not_given_to_the_old_agent() {
+    // The agent 100 started at 1000. The process with pid 100 now started at 5000.
+    let table = [
+        process(100, 1, 5000, "other-program"),
+        process(101, 100, 5001, "child"),
+        // A child that started before its parent has a parent that is not its own.
+        process(102, 100, 900, "older"),
+    ];
+    let owners = Walker::default().assign(&table, &[agent(100, 1000)], None);
+    assert_eq!(owner_of(&owners, 101).0, "none");
+    assert_eq!(owner_of(&owners, 102).0, "none");
+    let same = [
+        process(100, 1, 1000, "agent"),
+        process(102, 100, 900, "older"),
+    ];
+    let owners = Walker::default().assign(&same, &[agent(100, 1000)], None);
+    assert_eq!(
+        owner_of(&owners, 102).0,
+        "none",
+        "the child is older than the agent"
+    );
+}
+
+#[test]
+fn a_loop_and_a_deep_chain_end_the_walk() {
+    let mut table = vec![process(10, 11, 5, "a"), process(11, 10, 5, "b")];
+    // A chain of 100 processes ends at the agent, which is beyond the depth limit.
+    for pid in 1000..1100 {
+        table.push(process(pid, pid + 1, 2000, "link"));
+    }
+    table.push(process(1100, 1, 1000, "agent"));
+    let owners = Walker::default().assign(&table, &[agent(1100, 1000)], None);
+    assert_eq!(owner_of(&owners, 10).0, "none");
+    assert_eq!(owner_of(&owners, 11).0, "none");
+    assert_eq!(owner_of(&owners, 1000).0, "none");
+    assert_eq!(owner_of(&owners, 1099).0, "other");
+}
+
+#[test]
+fn a_record_with_the_wrong_start_time_is_not_used() {
+    let folder = Folder::new();
+    let roles = roles_with(&folder, &[("pnem", "harold", "", 200, 2000)]);
+    assert_eq!(
+        roles.by_pid(200, 2000),
+        Some(("harold".to_owned(), "pnem".to_owned()))
+    );
+    assert_eq!(roles.by_pid(200, 2001), None);
+    assert_eq!(roles.by_pid(201, 2000), None);
+    // The agent that the monitor knows with the wrong start time is `other`.
+    let table = [process(200, 1, 2001, "agent"), process(201, 200, 2002, "x")];
+    let owners = Walker::default().assign(&table, &[agent(200, 2001)], Some(&roles));
+    assert_eq!(owner_of(&owners, 201).0, "other");
+}
+
+#[test]
+fn the_record_lookup_never_returns_a_build_worker() {
+    let folder = Folder::new();
+    let roles = roles_with(&folder, &[("build_worker", "harold", "spec-a", 300, 3000)]);
+    assert_eq!(roles.by_pid(300, 3000), None);
+}

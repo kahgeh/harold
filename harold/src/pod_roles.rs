@@ -180,6 +180,23 @@ impl PodRoles {
             .collect()
     }
 
+    /// The product and role of the pod role record whose agent has pid `pid` and process
+    /// start time `start`, in seconds. Only the pod roles `chief`, `pnem` and
+    /// `pod_coordination` count: a build worker record is never returned. A record with an
+    /// unknown start time never matches. The chief has the product `-`.
+    pub(crate) fn by_pid(&self, pid: u32, start: i64) -> Option<(String, String)> {
+        self.entries()
+            .into_iter()
+            .find_map(|(product, role, spec, record)| {
+                let matches = spec.is_empty()
+                    && POD_ROLES.contains(&role.as_str())
+                    && record.agent_pid == pid
+                    && record.agent_proc_start != 0
+                    && record.agent_proc_start == start;
+                matches.then_some((product, role))
+            })
+    }
+
     /// Corrects the pane and the agent pid of an existing record, with the agent's own
     /// process start time. The restart check calls it after an identity mismatch, when the
     /// multiplexer shows the agent in `pane_id`. Returns `false` when there is no record.

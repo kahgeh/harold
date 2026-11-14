@@ -6,7 +6,7 @@
 //! `harold.machine.past_normal`. Disk use has no normal range: the `disk-low` alert reads
 //! the fixed limit.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{Instrument as _, info, info_span, warn};
 
+use crate::pod_roles::PodRoles;
 use crate::telemetry::{self, TRACE_TARGET};
 
 /// How often the machine is read.
@@ -629,6 +630,150 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<Snapshot>> {
         }
     });
     Arc::clone(&gauges.snapshot)
+}
+
+// ---------------------------------------------------------------------------
+// Which agent a process belongs to
+// ---------------------------------------------------------------------------
+
+/// The most parents that the walk follows from one process.
+const MAX_DEPTH: usize = 64;
+/// How far the start time of an agent in the agent monitor may differ from the start time
+/// of its process, in seconds. The two are read apart.
+const START_TOLERANCE: i64 = 2;
+
+/// The `role`, `agent.label`, `pod.product` and `spec.id` value of a process with no value.
+const NONE: &str = "none";
+const OTHER: &str = "other";
+const CHIEF: &str = "chief";
+
+/// One process of the process table.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcInfo {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    /// The start time in seconds since the epoch.
+    pub start: u64,
+    pub name: String,
+    /// The CPU share of the whole machine, from 0 to 1.
+    pub cpu: f64,
+    /// The resident memory in bytes.
+    pub memory: u64,
+    /// The current folder, when it is known.
+    pub cwd: Option<PathBuf>,
+}
+
+/// A live agent of the agent monitor, of any provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentProc {
+    pub pid: u32,
+    pub start_ms: i64,
+    pub pane_id: String,
+    /// The working directory of the pane.
+    pub folder: String,
+}
+
+/// The agent that owns a process: the values of the agent gauges.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Owner {
+    pub role: &'static str,
+    pub label: String,
+    pub product: String,
+    pub spec: String,
+}
+
+impl Owner {
+    fn none() -> Self {
+        Self::plain(NONE, NONE)
+    }
+
+    fn other() -> Self {
+        Self::plain(OTHER, OTHER)
+    }
+
+    fn plain(role: &'static str, label: &str) -> Self {
+        Self {
+            role,
+            label: label.to_owned(),
+            product: NONE.to_owned(),
+            spec: NONE.to_owned(),
+        }
+    }
+}
+
+/// Gives each process of a table to the agent that started it.
+#[derive(Default)]
+pub(crate) struct Walker {}
+
+impl Walker {
+    /// The owner of every process in `table`. The walk follows the parents of a process up
+    /// to the first live agent of `agents`. It stops at a parent that is not in the table,
+    /// at a parent that started after its child (the parent pid is used again), at a loop
+    /// and after `MAX_DEPTH` parents.
+    pub(crate) fn assign(
+        &mut self,
+        table: &[ProcInfo],
+        agents: &[AgentProc],
+        roles: Option<&PodRoles>,
+    ) -> HashMap<u32, Owner> {
+        let by_pid: HashMap<u32, &ProcInfo> =
+            table.iter().map(|process| (process.pid, process)).collect();
+        let live: HashMap<u32, &AgentProc> = agents.iter().map(|a| (a.pid, a)).collect();
+        table
+            .iter()
+            .map(|process| {
+                let owner = walk(process, &by_pid, &live)
+                    .map_or_else(Owner::none, |agent| agent_owner(agent, roles));
+                (process.pid, owner)
+            })
+            .collect()
+    }
+}
+
+/// The first process, from `process` up, that is a live agent.
+fn walk<'a>(
+    process: &'a ProcInfo,
+    by_pid: &HashMap<u32, &'a ProcInfo>,
+    live: &HashMap<u32, &AgentProc>,
+) -> Option<&'a ProcInfo> {
+    let mut current = process;
+    for _ in 0..=MAX_DEPTH {
+        let is_agent = live.get(&current.pid).is_some_and(|agent| {
+            let start = i64::try_from(current.start).unwrap_or(i64::MAX);
+            (agent.start_ms / 1000 - start).abs() <= START_TOLERANCE
+        });
+        if is_agent {
+            return Some(current);
+        }
+        let parent = by_pid.get(&current.parent?)?;
+        if parent.start > current.start {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// The owner for the agent process `agent`: the role record first, then `other`.
+fn agent_owner(agent: &ProcInfo, roles: Option<&PodRoles>) -> Owner {
+    let start = i64::try_from(agent.start).unwrap_or(i64::MAX);
+    let Some((product, role)) = roles.and_then(|roles| roles.by_pid(agent.pid, start)) else {
+        return Owner::other();
+    };
+    match role.as_str() {
+        "chief" => Owner::plain(CHIEF, CHIEF),
+        "pnem" | "pod_coordination" => Owner {
+            role: if role == "pnem" {
+                "pnem"
+            } else {
+                "pod_coordination"
+            },
+            label: product.clone(),
+            product,
+            spec: NONE.to_owned(),
+        },
+        _ => Owner::other(),
+    }
 }
 
 // ---------------------------------------------------------------------------
