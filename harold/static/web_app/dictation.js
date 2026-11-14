@@ -1,8 +1,9 @@
 // Dictation in the reply box. The mic asks the phone's own speech recognition (Safari's
 // `webkitSpeechRecognition`) to turn speech into text, and every result is written into
 // the box, so the words are the user's to check and edit before Send. The sound stays
-// with the phone's recognition; nothing recorded goes to Harold. Harold hears only one
-// word per page load, from `POST /dictation/check`: whether dictation worked here.
+// with the phone's recognition; nothing recorded goes to Harold. Harold hears one word for
+// each dictation tap, from `POST /dictation/check`, with the tap's number and whether the
+// recognition started: how dictation went on that tap.
 //
 // Datastar owns what shows: the hidden inputs `dictation-on` and `dictation-listening` are
 // bound to the `dictation` and `listening` signals, and this script sets them, the way
@@ -25,6 +26,11 @@
   const STORAGE_KEY = "harold-dictation";
   const QUIET_MS = 4000;
   const NOTICE_MS = 3000;
+  // The longest wait for the `end` of an instance that is ending.
+  const END_WAIT_MS = 1000;
+  // The page sends no more reports than this for each load.
+  const TAP_MAX = 100;
+  const STOPPED = "Dictation stopped. Tap the mic again.";
   // The browser's error names, and the words the check carries for them.
   const ERROR_RESULTS = {
     "not-allowed": "not_allowed",
@@ -32,10 +38,16 @@
     network: "network",
     "no-speech": "no_speech",
     "audio-capture": "audio_capture",
+    aborted: "aborted",
   };
 
-  let reported = false;
-  let recognition = null;
+  // One instance is active at a time. `ending` is the one that was stopped, aborted or
+  // failed, kept until its `end` event or END_WAIT_MS. `waiting` is a tap that waits for it.
+  let tapCount = 0;
+  let active = null;
+  let ending = null;
+  let waiting = null;
+  let endTimer = null;
   let quietTimer = null;
   let noticeTimer = null;
 
@@ -82,16 +94,23 @@
     return status;
   }
 
-  // Tells Harold the first thing known about dictation on this page, and nothing after. It
-  // may go as the page hides, so the request stays open then.
-  function report(result) {
-    if (reported) {
-      return;
-    }
-    reported = true;
-    post(null, "/dictation/check", { result }, /^result$/, {
+  // Tells Harold how one dictation tap went. It may go as the page hides, so the request
+  // stays open then.
+  function report(result, tap, started) {
+    post(null, "/dictation/check", { result, tap, started }, /^(result|tap|started)$/, {
       request: { openWhenHidden: true },
     }).catch(() => {});
+  }
+
+  // Ends a tap with one report: `ok` when a result came, else `word`. A second call does nothing.
+  function settle(t, word) {
+    if (t.settled) {
+      return;
+    }
+    t.settled = true;
+    if (t.n <= TAP_MAX) {
+      report(t.results ? "ok" : word, t.n, t.started);
+    }
   }
 
   // Sets a signal through its hidden input; Datastar follows the input event.
@@ -126,20 +145,15 @@
     box.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  function armQuiet(r) {
+  function armQuiet(inst) {
     clearTimeout(quietTimer);
-    quietTimer = setTimeout(() => {
-      if (recognition === r) {
-        r.stop();
-      }
-    }, QUIET_MS);
+    quietTimer = setTimeout(() => stopInstance(inst), QUIET_MS);
   }
 
-  // The recognition is over: the last words stay, in the normal colour, and Send shows.
-  function finish() {
+  // The listening is over: the last words stay, in the normal colour, and Send shows.
+  function finishUi() {
     clearTimeout(quietTimer);
     quietTimer = null;
-    recognition = null;
     box.classList.remove("interim");
     setFlag(listeningInput, false);
     if (!noticeTimer) {
@@ -147,36 +161,95 @@
     }
   }
 
-  // Ends the recognition at once; the words so far stay in the box.
-  function abort() {
-    const r = recognition;
-    if (!r) {
+  // The instance is ending: keep it until its `end` event, or for END_WAIT_MS.
+  function moveToEnding(inst) {
+    if (active === inst) {
+      active = null;
+    }
+    ending = inst;
+    clearTimeout(endTimer);
+    endTimer = setTimeout(() => ended(inst), END_WAIT_MS);
+  }
+
+  // The `end` event of an instance, or the wait for it ran out.
+  function ended(inst) {
+    settle(inst.t, inst.t.pageEnded ? "page_ended" : "no_result");
+    if (inst.uiOn) {
+      inst.uiOn = false;
+      finishUi();
+    }
+    if (active === inst) {
+      active = null;
+    }
+    if (ending !== inst) {
       return;
     }
-    recognition = null;
+    ending = null;
+    clearTimeout(endTimer);
+    endTimer = null;
+    const next = waiting;
+    waiting = null;
+    if (next) {
+      begin(next);
+    }
+  }
+
+  // Asks the instance to finish; the words still to come are written, and its `end` follows.
+  function stopInstance(inst) {
+    if (active !== inst) {
+      return;
+    }
+    inst.t.pageEnded = true;
+    inst.write = true;
     try {
-      r.abort();
+      inst.r.stop();
     } catch (error) {
       // Already over.
     }
-    finish();
+    clearTimeout(quietTimer);
+    moveToEnding(inst);
   }
 
-  function start() {
-    if (recognition) {
+  // Ends the listening at once; the words so far stay in the box. A tap that waits is dropped.
+  function abort() {
+    if (waiting) {
+      settle(waiting, "page_ended");
+      waiting = null;
+    }
+    const inst = active || ending;
+    if (!inst || (inst.t.settled && !inst.uiOn)) {
       return;
     }
+    inst.t.pageEnded = true;
+    inst.write = false;
+    try {
+      inst.r.abort();
+    } catch (error) {
+      // Already over.
+    }
+    settle(inst.t, "page_ended");
+    inst.uiOn = false;
+    finishUi();
+    if (active === inst) {
+      moveToEnding(inst);
+    }
+  }
+
+  function begin(t) {
     let r;
     try {
       r = new Recognition();
     } catch (error) {
+      settle(t, "start_failed");
+      notice(STOPPED);
       return;
     }
+    const inst = { r, t, write: false, uiOn: false };
     r.lang = navigator.language;
     r.interimResults = true;
     r.continuous = true;
     r.onresult = (event) => {
-      if (recognition !== r) {
+      if (active !== inst && !(ending === inst && inst.write)) {
         return;
       }
       const results = Array.from(event.results);
@@ -185,16 +258,20 @@
         .filter(Boolean)
         .join(" ");
       setWords(words, results.some((result) => !result.isFinal));
-      report("ok");
-      armQuiet(r);
+      t.results = true;
+      if (active === inst) {
+        armQuiet(inst);
+      }
     };
     r.onerror = (event) => {
-      if (recognition !== r) {
+      const error = event.error;
+      // Our own abort gives an `aborted` error: it is not a failure.
+      if (t.settled || (t.pageEnded && error === "aborted")) {
         return;
       }
-      const error = event.error;
-      if (ERROR_RESULTS[error]) {
-        report(ERROR_RESULTS[error]);
+      settle(t, ERROR_RESULTS[error] || "other_error");
+      if (active !== inst) {
+        return;
       }
       if (error === "not-allowed" || error === "service-not-allowed") {
         notice("Dictation isn't available in this app.");
@@ -202,38 +279,56 @@
         notice("Dictation needs a connection.");
       } else if (error === "audio-capture") {
         notice("The microphone gave no sound.");
+      } else if (!ERROR_RESULTS[error] || error === "aborted") {
+        notice(STOPPED);
       }
+      inst.uiOn = false;
+      finishUi();
       // Some builds give no `end` after an error.
-      finish();
+      moveToEnding(inst);
     };
     // The quiet timer waits for the service to listen, so the first-use prompts for the
     // microphone and speech recognition do not count against it.
     r.onstart = () => {
-      if (recognition === r) {
-        armQuiet(r);
+      t.started = true;
+      if (active === inst) {
+        armQuiet(inst);
       }
     };
-    r.onend = () => {
-      if (recognition === r) {
-        finish();
-      }
-    };
-    recognition = r;
+    r.onend = () => ended(inst);
+    active = inst;
     try {
       r.start();
     } catch (error) {
-      recognition = null;
+      active = null;
+      settle(t, "start_failed");
+      notice(STOPPED);
       return;
     }
+    inst.uiOn = true;
     clearTimeout(noticeTimer);
     noticeTimer = null;
     showNote("Listening", false);
     setFlag(listeningInput, true);
   }
 
+  // A tap on the mic. A tap while an instance is ending waits for its end.
+  function tap() {
+    if (active || waiting) {
+      return;
+    }
+    tapCount += 1;
+    const t = { n: tapCount, started: false, results: false, pageEnded: false, settled: false };
+    if (ending) {
+      waiting = t;
+      return;
+    }
+    begin(t);
+  }
+
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
-    report("missing");
+    report("missing", 0, false);
     return;
   }
   try {
@@ -244,10 +339,10 @@
   }
   setFlag(onInput, true);
 
-  mic.addEventListener("click", start);
+  mic.addEventListener("click", tap);
   stop.addEventListener("click", () => {
-    if (recognition) {
-      recognition.stop();
+    if (active) {
+      stopInstance(active);
     }
   });
   form.addEventListener("submit", abort);

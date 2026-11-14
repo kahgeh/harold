@@ -631,12 +631,12 @@ fn the_photo_rules_are_in_the_stylesheet() {
 }
 
 #[test]
-fn dictation_js_listens_into_the_box_and_tells_harold_once() {
+fn dictation_js_listens_into_the_box_and_tells_harold_once_for_each_tap() {
     let script = include_str!("../../static/web_app/dictation.js");
     for wanted in [
         // The mic hides only when neither API exists; an old remembered hide is cleared.
         "window.SpeechRecognition || window.webkitSpeechRecognition",
-        r#"report("missing");"#,
+        r#"report("missing", 0, false);"#,
         r#"const STORAGE_KEY = "harold-dictation";"#,
         "localStorage.removeItem(STORAGE_KEY)",
         // The recognition starts with the phone's language, interim results and no end.
@@ -668,13 +668,20 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         "Dictation needs a connection.",
         "The microphone gave no sound.",
         "const NOTICE_MS = 3000;",
-        // One check per page load, through Datastar, to the one route, open while the page
-        // hides.
-        r#"post(null, "/dictation/check", { result }, /^result$/"#,
+        // One check for each dictation tap, through Datastar, to the one route, with the
+        // result, the tap's number and `started`, open while the page hides.
+        r#"post(null, "/dictation/check", { result, tap, started }, /^(result|tap|started)$/"#,
         "openWhenHidden: true",
         "retryMaxCount: 0",
-        "if (reported) {",
-        r#"report("ok");"#,
+        "if (t.settled) {",
+        "const TAP_MAX = 100;",
+        "const END_WAIT_MS = 1000;",
+        r#"t.results ? "ok" : word"#,
+        r#"settle(t, "start_failed");"#,
+        r#""page_ended""#,
+        r#""no_result""#,
+        r#""other_error""#,
+        r#"const STOPPED = "Dictation stopped. Tap the mic again.";"#,
         // The signals are set through hidden inputs Datastar binds.
         r#"input.dispatchEvent(new Event("input", { bubbles: true }))"#,
     ] {
@@ -696,7 +703,8 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
     ] {
         assert!(!script.contains(absent), "dictation.js holds {absent}");
     }
-    // The words are never sent: the only post is the check, with the result word alone.
+    // The words are never sent: the only post is the check, with the result word, the tap
+    // and `started`.
     assert_eq!(
         script.matches("post(").count(),
         2,
