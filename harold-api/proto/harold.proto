@@ -24,7 +24,7 @@ service Harold {
   // that pane and records the time the agent waited. It changes nothing else. For a pane
   // that does not wait, or that Harold does not know, it does nothing and does not fail.
   rpc AgentSeen (AgentSeenRequest) returns (AgentSeenResponse);
-  // A Claude Code SessionStart hook tells Harold which agent holds a pod role. Harold keeps
+  // A start hook of the agent tells Harold which agent holds a pod role. Harold keeps
   // the newest agent for each (product, role). A role that is not a pod role (`chief`,
   // `pnem`, `pod_coordination`) or a product that is not valid gives `invalid_argument`.
   // When the pod tool did not start, the call gives `unavailable`.

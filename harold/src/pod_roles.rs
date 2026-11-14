@@ -1,5 +1,5 @@
 //! The pod role record: which agent holds each pod role now (ADR for the spec
-//! pod-role-record). A Claude Code `SessionStart` hook reports each start through the RPC
+//! pod-role-record). A start hook of the agent reports each start through the RPC
 //! `PodAgentStarted`. The newest agent for each (product, role) keeps the role. The record
 //! is the file `pod-roles.json` in the pod tool's data folder.
 
