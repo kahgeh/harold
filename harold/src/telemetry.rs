@@ -5185,19 +5185,23 @@ pub(crate) mod test_support {
         })
     }
 
-    /// The data points of one counter, read in one collection.
-    pub(crate) struct CounterSnapshot {
+    /// The data points of one `u64` counter or gauge, read in one collection.
+    pub(crate) struct SeriesSnapshot {
         points: Vec<(Vec<(String, String)>, u64)>,
+        /// A counter point must carry exactly the wanted attributes. A gauge point must
+        /// carry at least those.
+        exact: bool,
     }
 
-    impl CounterSnapshot {
-        /// The value of the data point whose attributes are exactly `wanted`, or `None`
-        /// when there is no such point. It does not collect.
+    impl SeriesSnapshot {
+        /// The value of the data point that matches `wanted` as `exact_counter_value` (for
+        /// a counter) or `gauge_value` (for a gauge) matches, or `None` when there is no
+        /// such point. It does not collect.
         pub(crate) fn value(&self, wanted: &[(&str, &str)]) -> Option<u64> {
             self.points
                 .iter()
                 .find(|(attributes, _)| {
-                    attributes.len() == wanted.len()
+                    (!self.exact || attributes.len() == wanted.len())
                         && wanted.iter().all(|(key, value)| {
                             attributes.iter().any(|(k, v)| k == key && v == value)
                         })
@@ -5206,27 +5210,53 @@ pub(crate) mod test_support {
         }
     }
 
+    fn pairs<'a>(
+        attributes: impl Iterator<Item = &'a opentelemetry::KeyValue>,
+    ) -> Vec<(String, String)> {
+        attributes
+            .map(|kv| (kv.key.as_str().to_owned(), kv.value.as_str().into_owned()))
+            .collect()
+    }
+
     /// The data points of the counter `name`, after one collection. It is empty when the
     /// counter has no data point.
-    pub(crate) fn counter_snapshot(name: &str) -> CounterSnapshot {
+    pub(crate) fn counter_snapshot(name: &str) -> SeriesSnapshot {
         let points = read_latest(name, |data| {
             let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
                 return None;
             };
             Some(
                 sum.data_points()
-                    .map(|point| {
-                        let attributes = point
-                            .attributes()
-                            .map(|kv| (kv.key.as_str().to_owned(), kv.value.as_str().into_owned()))
-                            .collect();
-                        (attributes, point.value())
-                    })
+                    .map(|point| (pairs(point.attributes()), point.value()))
                     .collect(),
             )
         })
         .unwrap_or_default();
-        CounterSnapshot { points }
+        SeriesSnapshot {
+            points,
+            exact: true,
+        }
+    }
+
+    /// The data points of the `u64` gauge `name`, after one collection. It is empty when
+    /// the gauge has no data point.
+    pub(crate) fn gauge_snapshot(name: &str) -> SeriesSnapshot {
+        let points = read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = data else {
+                return None;
+            };
+            Some(
+                gauge
+                    .data_points()
+                    .map(|point| (pairs(point.attributes()), point.value()))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+        SeriesSnapshot {
+            points,
+            exact: false,
+        }
     }
 
     /// Checks that the counter `name` has a data point for each attribute set in `sets`,

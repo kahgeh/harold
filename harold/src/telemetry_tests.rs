@@ -3713,6 +3713,8 @@ fn the_web_app_phone_request_series_are_exported_from_zero_but_never_wrong() {
 #[test]
 fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
     register_phone_counters();
+    let requests = test_support::counter_snapshot("harold.phone_requests");
+    let wrong = test_support::counter_snapshot("harold.phone_requests.wrong");
     for channel in PHONE_CHANNELS {
         for resolved_by in ResolvedBy::ALL {
             let resolved_by = resolved_by.as_str();
@@ -3722,16 +3724,10 @@ fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
                     ("outcome", outcome),
                     ("resolved_by", resolved_by),
                 ];
-                assert!(
-                    test_support::exact_counter_value("harold.phone_requests", &set).is_some(),
-                    "{set:?}"
-                );
+                assert!(requests.value(&set).is_some(), "{set:?}");
             }
             let set = [("channel", channel), ("resolved_by", resolved_by)];
-            assert!(
-                test_support::exact_counter_value("harold.phone_requests.wrong", &set).is_some(),
-                "{set:?}"
-            );
+            assert!(wrong.value(&set).is_some(), "{set:?}");
         }
     }
 }
@@ -3809,6 +3805,7 @@ fn record_call_adds_one_and_records_the_time() {
 fn start_records_zero_on_the_40_failure_series() {
     test_support::install();
     register_multiplexer_counters("zero_probe");
+    let calls = test_support::counter_snapshot("harold.multiplexer.calls");
     let read = |operation: &str, outcome: &str, purpose: Option<&str>| {
         let mut set = vec![
             ("multiplexer", "zero_probe"),
@@ -3819,7 +3816,7 @@ fn start_records_zero_on_the_40_failure_series() {
         if let Some(purpose) = purpose {
             set.push(("purpose", purpose));
         }
-        test_support::exact_counter_value("harold.multiplexer.calls", &set)
+        calls.value(&set)
     };
     let mut series = 0;
     for operation in MultiplexerOperation::ALL {
@@ -5884,14 +5881,12 @@ fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
 fn the_pod_role_counter_starts_at_zero_for_each_role_outcome_and_caller_and_counts_one() {
     test_support::install();
     register_pod_role_instruments();
+    let lookups = test_support::counter_snapshot("harold.pod_role.lookups");
     for role in ["chief", "pnem", "pod_coordination"] {
         for outcome in POD_ROLE_OUTCOMES {
             for caller in ["who", "pick_chief"] {
                 let attrs = [("role", role), ("outcome", outcome), ("caller", caller)];
-                assert!(
-                    test_support::exact_counter_value("harold.pod_role.lookups", &attrs).is_some(),
-                    "{role} {outcome} {caller}"
-                );
+                assert!(lookups.value(&attrs).is_some(), "{role} {outcome} {caller}");
             }
         }
     }
@@ -5949,22 +5944,32 @@ fn the_decision_counters_start_at_zero_for_each_value_and_count_one() {
     test_support::install();
     let kinds = vec!["slicing".to_owned(), "model".to_owned()];
     register_decision_instruments("org-a", &kinds);
+    let seeded_added = test_support::counter_snapshot("harold.decisions.added");
+    let seeded_evaluated = test_support::counter_snapshot("harold.decisions.evaluated");
     for role in DECISION_ROLES {
         for kind in ["slicing", "model"] {
             for accountable in DECISION_ACCOUNTABLE {
-                let added = test_support::exact_counter_value(
-                    "harold.decisions.added",
-                    &[
-                        ("organisation", "org-a"),
-                        ("role", role),
-                        ("kind", kind),
-                        ("accountable", accountable),
-                    ],
-                );
+                let added = seeded_added.value(&[
+                    ("organisation", "org-a"),
+                    ("role", role),
+                    ("kind", kind),
+                    ("accountable", accountable),
+                ]);
                 assert!(added.is_some(), "added {role} {kind} {accountable}");
             }
         }
     }
+    let seeded = |grade: &str| {
+        seeded_evaluated.value(&[
+            ("organisation", "org-a"),
+            ("role", "chief"),
+            ("kind", "model"),
+            ("accountable", "user"),
+            ("process_grade", grade),
+            ("outcome_grade", "poor"),
+        ])
+    };
+    assert!(seeded("good").is_some() && seeded("poor").is_some());
     let evaluated = |grade: &str| {
         test_support::exact_counter_value(
             "harold.decisions.evaluated",
@@ -5978,7 +5983,6 @@ fn the_decision_counters_start_at_zero_for_each_value_and_count_one() {
             ],
         )
     };
-    assert!(evaluated("good").is_some() && evaluated("poor").is_some());
     let added = || {
         test_support::exact_counter_value(
             "harold.decisions.added",
@@ -6069,49 +6073,38 @@ fn web_request_counters_are_seeded_at_zero() {
     assert_eq!(WEB_ROUTE_CLASSES.len(), 13);
     assert_eq!(WEB_REFUSAL_REASONS.len(), 5);
     assert_eq!(UPDATES_CLOSE_REASONS.len(), 3);
+    let requests = test_support::counter_snapshot("harold.web_app.requests");
+    let waiting_requests = test_support::counter_snapshot("harold.web_app.requests.waiting");
+    let connections = test_support::counter_snapshot("harold.web_app.connections");
+    let closed = test_support::counter_snapshot("harold.web_app.updates.closed");
     for class in WEB_ROUTE_CLASSES {
-        let served = test_support::exact_counter_value(
-            "harold.web_app.requests",
-            &[
-                ("route_class", class),
-                ("result", "served"),
-                ("status", "2xx"),
-                ("reason", ""),
-            ],
-        );
+        let served = requests.value(&[
+            ("route_class", class),
+            ("result", "served"),
+            ("status", "2xx"),
+            ("reason", ""),
+        ]);
         assert!(served.is_some(), "requests {class}");
-        let waiting = test_support::exact_counter_value(
-            "harold.web_app.requests.waiting",
-            &[("route_class", class)],
-        );
+        let waiting = waiting_requests.value(&[("route_class", class)]);
         // A waiting request is never a result of `requests`. `updates` has no waiting series.
         assert_eq!(waiting.is_some(), class != "updates", "waiting {class}");
     }
     for reason in WEB_REFUSAL_REASONS {
-        let refused = test_support::exact_counter_value(
-            "harold.web_app.requests",
-            &[
-                ("route_class", "other"),
-                ("result", "refused"),
-                ("status", "4xx"),
-                ("reason", reason),
-            ],
-        );
+        let refused = requests.value(&[
+            ("route_class", "other"),
+            ("result", "refused"),
+            ("status", "4xx"),
+            ("reason", reason),
+        ]);
         assert!(refused.is_some(), "refused {reason}");
     }
     for outcome in ["requests", "no_request"] {
-        let point = test_support::exact_counter_value(
-            "harold.web_app.connections",
-            &[("outcome", outcome)],
-        );
+        let point = connections.value(&[("outcome", outcome)]);
         assert!(point.is_some(), "connections {outcome}");
     }
     for reason in UPDATES_CLOSE_REASONS {
         for short in ["true", "false"] {
-            let point = test_support::exact_counter_value(
-                "harold.web_app.updates.closed",
-                &[("reason", reason), ("short", short)],
-            );
+            let point = closed.value(&[("reason", reason), ("short", short)]);
             assert!(point.is_some(), "closed {reason} {short}");
         }
     }
@@ -6193,25 +6186,24 @@ fn work_counters_are_seeded_at_zero() {
     test_support::install();
     let _held = hold_work_gauges();
     register_work_counters();
+    let rotations = test_support::counter_snapshot("harold.work.rotations");
+    let checks = test_support::counter_snapshot("harold.work.checked");
+    let records = test_support::gauge_snapshot("harold.work.records");
+    let waiting_long = test_support::gauge_snapshot("harold.work.waiting_long");
     for outcome in ["done", "failed"] {
-        let counted =
-            test_support::exact_counter_value("harold.work.rotations", &[("outcome", outcome)]);
+        let counted = rotations.value(&[("outcome", outcome)]);
         assert!(counted.is_some(), "{outcome}");
     }
     assert_eq!(WORK_OPEN_STATUSES.len(), 9);
     for priority in WORK_PRIORITIES {
         // Another test may have counted a check, so the value is 0 or more.
-        let checked =
-            test_support::exact_counter_value("harold.work.checked", &[("priority", priority)]);
+        let checked = checks.value(&[("priority", priority)]);
         assert!(checked.is_some(), "{priority}");
         for status in WORK_OPEN_STATUSES {
-            let read = test_support::gauge_value(
-                "harold.work.records",
-                &[("priority", priority), ("status", status)],
-            );
+            let read = records.value(&[("priority", priority), ("status", status)]);
             assert_eq!(read, Some(0), "{priority} {status}");
         }
-        let read = test_support::gauge_value("harold.work.waiting_long", &[("priority", priority)]);
+        let read = waiting_long.value(&[("priority", priority)]);
         assert_eq!(read, Some(0), "{priority}");
     }
 }
@@ -6253,7 +6245,7 @@ fn assert_seeded_collects_once_for_all_the_sets() {
 }
 
 #[test]
-fn a_counter_snapshot_reads_many_series_from_one_collection() {
+fn a_snapshot_reads_many_series_from_one_collection() {
     test_support::install();
     let _held = hold_work_gauges();
     register_work_counters();
@@ -6893,13 +6885,12 @@ fn the_telemetry_calls_counter_is_seeded_for_every_prefix_kind_and_outcome() {
     assert_eq!(TELEMETRY_OUTCOMES[0], "ok");
     assert_eq!(TELEMETRY_OUTCOMES.len(), 13);
     assert_eq!(TELEMETRY_OUTCOMES[12], "invalid");
+    let seeded = test_support::counter_snapshot("harold.telemetry.calls");
     for prefix in [product.as_str(), "harold", "chief", "unknown"] {
         for kind in TELEMETRY_KINDS {
             for outcome in TELEMETRY_OUTCOMES {
-                let point = test_support::exact_counter_value(
-                    "harold.telemetry.calls",
-                    &[("prefix", prefix), ("kind", kind), ("outcome", outcome)],
-                );
+                let point =
+                    seeded.value(&[("prefix", prefix), ("kind", kind), ("outcome", outcome)]);
                 assert!(point.is_some(), "{prefix} {kind} {outcome}");
             }
         }
@@ -6909,10 +6900,7 @@ fn the_telemetry_calls_counter_is_seeded_for_every_prefix_kind_and_outcome() {
         ("kind", "count"),
         ("outcome", "rate_limited"),
     ];
-    assert_eq!(
-        test_support::exact_counter_value("harold.telemetry.calls", &wanted),
-        Some(0)
-    );
+    assert_eq!(seeded.value(&wanted), Some(0));
     count_telemetry_call(&product, "count", "rate_limited");
     assert_eq!(
         test_support::exact_counter_value("harold.telemetry.calls", &wanted),

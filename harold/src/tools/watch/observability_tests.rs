@@ -196,6 +196,7 @@ async fn the_counters_carry_the_folder_and_the_outcome_and_never_the_watch_name(
     let folder = h.folder.0.to_string_lossy().into_owned();
     h.start(&name, 10, 120).await;
     // Counted from 0 at start for the failures and skipped runs.
+    let seeded = test_support::counter_snapshot("watch.runs");
     for outcome in [
         "timeout",
         "process_failed",
@@ -206,10 +207,7 @@ async fn the_counters_carry_the_folder_and_the_outcome_and_never_the_watch_name(
         "skipped",
     ] {
         assert_eq!(
-            test_support::exact_counter_value(
-                "watch.runs",
-                &[("folder", &folder), ("outcome", outcome)]
-            ),
+            seeded.value(&[("folder", &folder), ("outcome", outcome)]),
             Some(0),
             "{outcome}"
         );

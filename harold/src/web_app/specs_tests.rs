@@ -872,12 +872,10 @@ async fn the_web_app_start_seeds_the_collection_counters() {
     )
     .await
     .unwrap();
+    let pages = crate::telemetry::test_support::counter_snapshot("harold.web_app.collection_pages");
     for name in ["seeded-one", "seeded-two", "unknown"] {
         for result in crate::telemetry::COLLECTION_RESULTS {
-            let point = crate::telemetry::test_support::exact_counter_value(
-                "harold.web_app.collection_pages",
-                &[("collection", name), ("result", result)],
-            );
+            let point = pages.value(&[("collection", name), ("result", result)]);
             assert!(point.is_some(), "{name} {result}");
         }
     }
