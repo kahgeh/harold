@@ -2138,6 +2138,8 @@ const METRICS: &[&str] = &[
     "process.cpu.utilization",
     "harold.machine.normal_top",
     "harold.machine.past_normal",
+    "harold.agent.cpu.utilization",
+    "harold.agent.memory.usage",
     "harold.app_spans.not_forwarded",
     "pod.slots.busy",
     "pod.slots.free",
@@ -2202,6 +2204,8 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    // The attribute of the agent gauges (agent-resource-use). A metric attribute, not a log field.
+    "agent.label",
     // The keys of the log line `agent event`, read by inventory-cost.sql (user-attention-signals).
     "agent.name",
     "agent.attr.seconds",
@@ -3487,6 +3491,8 @@ fn the_machine_dashboard_shows_each_machine_and_its_normal_range() {
             "Past the normal range, by metric",
             "Harold's own memory and CPU",
             "Machine stats reading p95",
+            "CPU by agent",
+            "Memory by agent",
         ]
     );
     for tile in tiles(&dashboard) {
@@ -3552,11 +3558,23 @@ fn the_machine_dashboard_shows_each_machine_and_its_normal_range() {
     let own = sql_of("Harold's own memory and CPU");
     assert!(own.contains("process.memory.usage"), "{own}");
     assert!(own.contains("process.cpu.utilization"), "{own}");
-    let reading = tiles(&dashboard).last().unwrap();
+    let reading = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == "Machine stats reading p95")
+        .unwrap();
     assert_eq!(reading["config"]["sourceId"], "@TRACES_SOURCE_ID@");
     let sql = reading["config"]["sqlTemplate"].as_str().unwrap();
     assert!(sql.contains("SpanName = 'harold.machine_stats'"), "{sql}");
     assert!(sql.contains("quantile(0.95)(Duration)"), "{sql}");
+    for (card, metric) in [
+        ("CPU by agent", "harold.agent.cpu.utilization"),
+        ("Memory by agent", "harold.agent.memory.usage"),
+    ] {
+        let sql = sql_of(card);
+        assert!(sql.contains(&format!("MetricName = '{metric}'")), "{sql}");
+        assert!(sql.contains("Attributes['role']"), "{sql}");
+        assert!(sql.contains("Attributes['agent.label']"), "{sql}");
+    }
     // Only the placeholders the README fills.
     let mut texts = Vec::new();
     strings_in(&dashboard, &mut texts);

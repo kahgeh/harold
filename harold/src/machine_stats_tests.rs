@@ -1683,10 +1683,7 @@ fn top_agents_is_empty_with_no_reading_and_says_whether_an_agent_is_named() {
         0,
         vec![proc_use("x", 0.5, 0)],
     )];
-    assert_eq!(
-        top_agents(&window_of(vec![only_none]), Metric::Cpu, 1000).1,
-        false
-    );
+    assert!(!top_agents(&window_of(vec![only_none]), Metric::Cpu, 1000).1);
     let with_agent = vec![total_of(
         "chief",
         "chief",
@@ -1694,10 +1691,7 @@ fn top_agents_is_empty_with_no_reading_and_says_whether_an_agent_is_named() {
         0,
         vec![proc_use("x", 0.5, 0)],
     )];
-    assert_eq!(
-        top_agents(&window_of(vec![with_agent]), Metric::Cpu, 1000).1,
-        true
-    );
+    assert!(top_agents(&window_of(vec![with_agent]), Metric::Cpu, 1000).1);
 }
 
 #[tokio::test]

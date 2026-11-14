@@ -119,6 +119,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | host | The machine whose multiplexer holds a pane. It can be another machine than the one Harold runs on. The metric attribute `host` is the empty string for Harold's own machine. Machine stats are always about Harold's own machine, not about a host. For an agent on a Rex host, it is the label of that Rex host | "server" for the machine, "node" |
 | machine stats | The disk, memory, swap and CPU use that Harold reads on its own machine and sends to HyperDX | "system metrics" alone, "host metrics" |
 | normal range | For one machine, metric and local hour of the day, the use from 0 to the top that Harold computes from the same hour on the last 7 days | "baseline" (that is the pane's prompt fingerprints), "threshold" (that is HyperDX's fixed limit) |
+| agent use | The CPU share and the resident memory of all the processes that one agent started, found through their parent chain. It goes to the gauges `harold.agent.cpu.utilization` and `harold.agent.memory.usage`. | "agent load", "footprint" |
+| agent label | The name of one agent in the agent gauges, as `agent.label`: `chief`, the product of a PnEM or a pod-coordination, the worktree folder name of a build worker, `other` or `none`. | "agent name" (`agent.name` names an agent signal), "agent id" |
 | hourly use | The mean of one machine stat for one local hour, kept for 14 days in the hourly use file, `data/machine-hourly-use.json` | "baseline", "history" (that is a pane's history capture, or a history note) |
 | user | The person Harold works for | — |
 | phone | The user's iPhone, reached by iMessage or the web app | "away device", except in the skill name `send-message-to-away-device` |

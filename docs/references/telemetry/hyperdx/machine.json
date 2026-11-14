@@ -138,6 +138,36 @@
         "sourceId": "@TRACES_SOURCE_ID@",
         "sqlTemplate": "SELECT $__timeInterval(Timestamp) AS ts, ResourceAttributes['harold.machine'] AS machine, quantile(0.95)(Duration) / 1000000 AS p95_ms FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.machine_stats' AND $__timeFilter(Timestamp) GROUP BY ts, machine ORDER BY ts"
       }
+    },
+    {
+      "id": "cpu-by-agent",
+      "name": "CPU by agent",
+      "x": 12,
+      "y": 24,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, concat(Attributes['role'], ' ', Attributes['agent.label']) AS agent, avg(Value) AS cpu FROM $__sourceTable(gauge) WHERE MetricName = 'harold.agent.cpu.utilization' AND $__timeFilter(TimeUnix) GROUP BY ts, machine, agent ORDER BY ts"
+      }
+    },
+    {
+      "id": "memory-by-agent",
+      "name": "Memory by agent",
+      "x": 0,
+      "y": 30,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, concat(Attributes['role'], ' ', Attributes['agent.label']) AS agent, avg(Value) AS memory_bytes FROM $__sourceTable(gauge) WHERE MetricName = 'harold.agent.memory.usage' AND $__timeFilter(TimeUnix) GROUP BY ts, machine, agent ORDER BY ts"
+      }
     }
   ]
 }

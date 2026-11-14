@@ -1333,7 +1333,7 @@ The disk is the one that holds the home folder. No path is sent.
 
 **When the alerts clear.** HyperDX 2.40 reduces a gauge to its last sample in each 15-minute window and posts `resolved` at the first check whose window is back under the threshold. `machine-past-normal` clears about 15 to 30 minutes after the last machine's `past_normal` goes back to 0. `disk-low` clears about 15 to 30 minutes after every home disk is under 90%. Both alerts are not grouped, because Harold's alert address keeps one state for each alert name: a grouped alert could clear for one machine while another is still past, and the chief would hear `cleared` too early. Harold types `harold alert: <name> cleared` once for each spell, by the rule in [How an alert reaches the chief](#how-an-alert-reaches-the-chief).
 
-**The dashboard.** `machine.json` is the "Machine resources" dashboard. It has no filters. Its tiles are: disk used and free, disk growth per day, memory, swap and CPU use drawn with `harold.machine.normal_top`, load average, `past_normal` by machine and metric, Harold's own memory and CPU, and "Machine stats reading p95" (the aim is under 50 ms).
+**The dashboard.** `machine.json` is the "Machine resources" dashboard. It has no filters. Its tiles are: disk used and free, disk growth per day, memory, swap and CPU use drawn with `harold.machine.normal_top`, load average, `past_normal` by machine and metric, Harold's own memory and CPU, "Machine stats reading p95" (the aim is under 50 ms), "CPU by agent" and "Memory by agent" (the two agent gauges, grouped by `role` and `agent.label`).
 
 ## The alerts
 
