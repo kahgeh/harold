@@ -5881,6 +5881,34 @@ fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
 }
 
 #[test]
+fn the_pod_role_counter_starts_at_zero_for_each_role_outcome_and_caller_and_counts_one() {
+    test_support::install();
+    register_pod_role_instruments();
+    for role in ["chief", "pnem", "pod_coordination"] {
+        for outcome in POD_ROLE_OUTCOMES {
+            for caller in ["who", "pick_chief"] {
+                let attrs = [("role", role), ("outcome", outcome), ("caller", caller)];
+                assert!(
+                    test_support::exact_counter_value("harold.pod_role.lookups", &attrs).is_some(),
+                    "{role} {outcome} {caller}"
+                );
+            }
+        }
+    }
+    let attrs = [
+        ("role", "chief"),
+        ("outcome", "found"),
+        ("caller", "pick_chief"),
+    ];
+    let before = test_support::exact_counter_value("harold.pod_role.lookups", &attrs).unwrap_or(0);
+    record_pod_role_lookup("chief", "found", "pick_chief");
+    assert_eq!(
+        test_support::exact_counter_value("harold.pod_role.lookups", &attrs),
+        Some(before + 1)
+    );
+}
+
+#[test]
 fn the_pod_role_fields_are_allowed() {
     for field in [
         "product",

@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/tools/telemetry.proto");
     println!("cargo:rerun-if-changed=proto/tools/job.proto");
     println!("cargo:rerun-if-changed=proto/tools/decision.proto");
+    println!("cargo:rerun-if-changed=proto/tools/pod.proto");
 
     let descriptor_path =
         std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("harold_descriptor.bin");
@@ -32,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/tools/telemetry.proto",
                 "proto/tools/job.proto",
                 "proto/tools/decision.proto",
+                "proto/tools/pod.proto",
             ],
             &["proto"],
         )?;

@@ -21,6 +21,8 @@ use harold_api::tools::job::v1 as job_api;
 use harold_api::tools::job::v1::job_service_client::JobServiceClient;
 use harold_api::tools::knowledge::v1 as knowledge_api;
 use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
+use harold_api::tools::pod::v1 as pod_api;
+use harold_api::tools::pod::v1::pod_service_client::PodServiceClient;
 use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::release::v1 as release_api;
@@ -401,6 +403,7 @@ pub(crate) enum ToolCommand {
     Watch(WatchCommand),
     Job(JobCommand),
     Decision(crate::tools::decision::command::DecisionCommand),
+    Pod(crate::tools::pod::command::PodCommand),
     Release(ReleaseCommand),
     Evidence(EvidenceCommand),
     Knowledge(KnowledgeCommand),
@@ -1284,6 +1287,35 @@ fn job_list_line(job: &job_api::Job, offset: time::UtcOffset) -> String {
     )
 }
 
+/// Runs a `harold tool pod` command. `Ok` is the text to print; `Err` is the one refusal line.
+pub(crate) async fn pod_within(
+    address: &str,
+    command: &crate::tools::pod::command::PodCommand,
+    wait: Duration,
+) -> Result<String, String> {
+    use crate::tools::pod::command as text;
+    let text::PodCommand::Who {
+        product,
+        role,
+        json,
+    } = command;
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = PodServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let answer = client
+            .who(pod_api::WhoRequest {
+                product: product.clone(),
+                role: role.clone(),
+            })
+            .await
+            .map_err(|status| text::refusal_line(&status))?
+            .into_inner();
+        Ok(text::render(&answer, *json))
+    })
+    .await
+}
+
 /// Runs a `harold tool decision` command as `pane`. `Ok` is the text to print; `Err` is the
 /// one refusal line.
 pub(crate) async fn decision_within(
@@ -2090,6 +2122,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["decision", rest @ ..] => {
             crate::tools::decision::command::parse(rest).map(ToolCommand::Decision)
         }
+        ["pod", rest @ ..] => crate::tools::pod::command::parse(rest).map(ToolCommand::Pod),
         ["release", rest @ ..] => parse_release(rest).map(ToolCommand::Release),
         ["evidence", rest @ ..] => parse_evidence(rest).map(ToolCommand::Evidence),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
@@ -2804,6 +2837,9 @@ pub(crate) async fn tool(
     if let ToolCommand::Decision(decision) = command {
         return decision_within(address, decision, &caller_pane(), CALL_DEADLINE).await;
     }
+    if let ToolCommand::Pod(pod) = command {
+        return pod_within(address, pod, CALL_DEADLINE).await;
+    }
     if let ToolCommand::Release(release) = command {
         return release_within(address, release, CALL_DEADLINE).await;
     }
@@ -3395,6 +3431,7 @@ pub(crate) async fn tool_within(
             | ToolCommand::Watch(_)
             | ToolCommand::Job(_)
             | ToolCommand::Decision(_)
+            | ToolCommand::Pod(_)
             | ToolCommand::Release(_)
             | ToolCommand::Evidence(_)
             | ToolCommand::Knowledge(_)
@@ -8341,6 +8378,23 @@ mod tests {
             Ok(other) => panic!("not a watch command: {other:?}"),
             Err(line) => Err(line),
         }
+    }
+
+    #[test]
+    fn tool_pod_who_parses_into_the_pod_command() {
+        use crate::tools::pod::command::PodCommand;
+        assert_eq!(
+            parse(&["tool", "pod", "who", "harold", "pnem"]),
+            Ok(Mode::Tool(ToolCommand::Pod(PodCommand::Who {
+                product: "harold".into(),
+                role: "pnem".into(),
+                json: false
+            })))
+        );
+        assert_eq!(
+            parse(&["tool", "pod", "nope"]),
+            Err(crate::tools::pod::command::USAGE_LINE.into())
+        );
     }
 
     #[test]

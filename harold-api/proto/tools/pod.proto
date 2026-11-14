@@ -1,0 +1,47 @@
+// The pod tool: which agent holds a pod role now.
+//
+//   Who  the session name of the agent that holds one pod role, and its record. It reads the
+//        pod role record that the SessionStart hook fills, checks that the agent's process
+//        still runs with the same start time, and reads the session name from the agent's
+//        own session file. No folder and no name is matched.
+//
+// Refusals carry a reason as the message:
+//   InvalidArgument      "bad_role" (a role that is not `chief`, `pnem` or `pod_coordination`).
+//   NotFound             "no_record".
+//   FailedPrecondition   "agent_gone" (the process ended, or the pid runs another process).
+//   Unavailable          "session_file_unreadable" (the session file is missing, is not
+//                        JSON, or lacks `pid`, `procStart` or `name`).
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tools.pod.v1;
+
+service PodService {
+  rpc Who(WhoRequest) returns (WhoResponse);
+}
+
+message WhoRequest {
+  // The product of the role. `-` for the chief.
+  string product = 1;
+  // `chief`, `pnem` or `pod_coordination`.
+  string role = 2;
+}
+
+message WhoResponse {
+  // The session name of the agent.
+  string session_name = 1;
+  PodRoleRecord record = 2;
+}
+
+message PodRoleRecord {
+  string pane_id = 1;
+  string session_id = 2;
+  uint32 agent_pid = 3;
+  // Seconds since the epoch. 0 when it was not known at the start.
+  int64 agent_proc_start = 4;
+  string folder = 5;
+  string transcript_path = 6;
+  string start_file = 7;
+  int64 started_at_ms = 8;
+}

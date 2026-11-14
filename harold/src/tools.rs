@@ -31,6 +31,7 @@ pub(crate) mod decision;
 pub(crate) mod evidence;
 pub(crate) mod job;
 pub(crate) mod knowledge;
+pub(crate) mod pod;
 pub(crate) mod questions;
 pub(crate) mod release;
 pub(crate) mod telemetry;
@@ -356,6 +357,18 @@ async fn start_with(
             shutdown: &shutdown,
         },
     );
+    let pod_ctx = tool_context(
+        store_path,
+        pod::NAME,
+        None,
+        &ToolHost {
+            chief_pane: &chief_pane,
+            pane_folder: &pane_folder,
+            products: &products,
+            extras: &extras,
+            shutdown: &shutdown,
+        },
+    );
     let [
         (questions_name, questions_ctx),
         (backlog_name, backlog_ctx),
@@ -392,6 +405,7 @@ async fn start_with(
         decision::start(decision_ctx).await,
         &mut tools,
     );
+    start_tool(pod::NAME, pod::start(pod_ctx).await, &mut tools);
     start_tool(
         evidence::NAME,
         evidence::start(evidence_launch).await,

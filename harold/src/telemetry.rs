@@ -584,6 +584,9 @@ pub(crate) struct Instruments {
     /// `harold.decisions.evaluated`, `{decision}`: as `decisions_added`, plus `process_grade`
     /// and `outcome_grade`.
     pub decisions_evaluated: Counter<u64>,
+    /// `harold.pod_role.lookups`, `{lookup}`, by `role`, `outcome` and `caller`: one for each
+    /// lookup of the agent that holds a pod role.
+    pub pod_role_lookups: Counter<u64>,
     /// `harold.web_app.requests`, `{request}`, by `route_class`, `result`, `status` and `reason`.
     pub web_app_requests: Counter<u64>,
     /// `harold.web_app.requests.waiting`, `{request}`, by `route_class`. A request that
@@ -716,6 +719,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         job_ends: counter("harold.job.ends", "{job}"),
         decisions_added: counter("harold.decisions.added", "{decision}"),
         decisions_evaluated: counter("harold.decisions.evaluated", "{decision}"),
+        pod_role_lookups: counter("harold.pod_role.lookups", "{lookup}"),
         web_app_requests: counter("harold.web_app.requests", "{request}"),
         web_app_requests_waiting: counter("harold.web_app.requests.waiting", "{request}"),
         web_app_request_duration: seconds(
@@ -2086,6 +2090,50 @@ pub(crate) fn set_decisions_open(organisation: &str, open: u64, due: u64) {
         .unwrap_or_else(PoisonError::into_inner)
         .insert(organisation.to_owned(), (open, due));
     decisions_open_gauge();
+}
+
+// ---------------------------------------------------------------------------
+// Pod role lookups
+// ---------------------------------------------------------------------------
+
+/// Every `outcome` of a pod role lookup.
+pub(crate) const POD_ROLE_OUTCOMES: [&str; 4] = [
+    "found",
+    "no_record",
+    "agent_gone",
+    "session_file_unreadable",
+];
+
+/// Every `caller` of a pod role lookup.
+const POD_ROLE_CALLERS: [&str; 2] = ["who", "pick_chief"];
+
+/// Records 0 for each role, outcome and caller of `harold.pod_role.lookups`. The pod tool
+/// calls it at its start.
+pub(crate) fn register_pod_role_instruments() {
+    for role in ["chief", "pnem", "pod_coordination"] {
+        for outcome in POD_ROLE_OUTCOMES {
+            for caller in POD_ROLE_CALLERS {
+                instruments()
+                    .pod_role_lookups
+                    .add(0, &pod_role_attrs(role, outcome, caller));
+            }
+        }
+    }
+}
+
+fn pod_role_attrs(role: &str, outcome: &str, caller: &str) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("role", role.to_owned()),
+        KeyValue::new("outcome", outcome.to_owned()),
+        KeyValue::new("caller", caller.to_owned()),
+    ]
+}
+
+/// Counts one lookup of the agent that holds `role`.
+pub(crate) fn record_pod_role_lookup(role: &str, outcome: &str, caller: &str) {
+    instruments()
+        .pod_role_lookups
+        .add(1, &pod_role_attrs(role, outcome, caller));
 }
 
 // ---------------------------------------------------------------------------

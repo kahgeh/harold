@@ -269,7 +269,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     )
     .await;
 
-    // The release and evidence tools keep no folder, so they start; the other six fail.
+    // The release and evidence tools keep no folder, so they start; the others fail.
     assert_eq!(tools.tasks.len(), 2);
     let text = logs.text();
     let failed: Vec<&str> = text
@@ -287,6 +287,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
             " WARN harold::tools: tool failed to start tool=\"telemetry\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"job\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"decision\" reason=\"store_open_failed\"",
+            " WARN harold::tools: tool failed to start tool=\"pod\" reason=\"store_open_failed\"",
         ],
         "{text}"
     );
@@ -489,7 +490,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 9);
+    assert_eq!(tools.tasks.len(), 10);
     assert!(folder.0.join("tools/backlog/backlog.db").is_file());
     let listing: bp::ListQueueResponse = call(
         &tools.routes,
@@ -533,7 +534,7 @@ async fn the_work_tool_starts_and_makes_the_current_work_file() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 9);
+    assert_eq!(tools.tasks.len(), 10);
     let made: Vec<String> = std::fs::read_dir(folder.0.join("tools/work"))
         .unwrap()
         .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
@@ -572,7 +573,7 @@ async fn the_telemetry_tool_starts_seeds_and_records_through_the_host() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 9);
+    assert_eq!(tools.tasks.len(), 10);
     assert!(folder.0.join("tools/telemetry/telemetry.db").is_file());
     // The start seeds `harold.telemetry.calls` for the registry's product.
     assert_eq!(
@@ -760,7 +761,7 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 9);
+    assert_eq!(tools.tasks.len(), 10);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
@@ -875,7 +876,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 9);
+    assert_eq!(tools.tasks.len(), 10);
     // An item id no other test uses, so this test's lines can be told apart.
     let id = unique_id();
 
