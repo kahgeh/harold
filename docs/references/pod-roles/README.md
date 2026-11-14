@@ -22,7 +22,7 @@ The pod role record (`pod-roles.json`) holds one record for each key. The mocks 
 
 Harold compares its record (pane and agent pid) with where the agent runs now. The pane comes from the `Stop` hook. The agent pid comes from the role start. The multiplexer must show that pid in that pane.
 
-1. On a mismatch in the record, Harold corrects the record from the multiplexer's view and checks again. The row says `fixed`. A second mismatch is a FAIL.
+1. On a mismatch in the record, Harold corrects the record from the multiplexer's view and checks again. The row shows `fixed`. A second mismatch is a FAIL.
 2. For a PnEM and a pod-coordination, Harold also reads the `agent-panes` file of the pod. Line one is pod-coordination and line two is the PnEM. For a build worker, Harold reads the `agent-pane` file of its worktree.
 3. Harold never changes these two files. A mismatch in a file stays a FAIL for the owner of the file.
 4. When the multiplexer cannot be read, the row is `not checked` with the reason `multiplexer_unreachable`.

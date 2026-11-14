@@ -5,6 +5,8 @@ fn link(label: &[&str], outgoing: Outcome, incoming: Outcome) -> LinkRow {
         label: label.iter().map(|part| (*part).to_string()).collect(),
         outgoing,
         incoming,
+        outgoing_reason: "",
+        incoming_reason: "",
     }
 }
 

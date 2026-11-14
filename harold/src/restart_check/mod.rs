@@ -129,6 +129,9 @@ pub(crate) struct LinkRow {
     pub(crate) label: Vec<String>,
     pub(crate) outgoing: Outcome,
     pub(crate) incoming: Outcome,
+    /// The reason word of each direction, empty for `ok`.
+    pub(crate) outgoing_reason: &'static str,
+    pub(crate) incoming_reason: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

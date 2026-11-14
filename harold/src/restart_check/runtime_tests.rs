@@ -157,7 +157,7 @@ async fn an_on_demand_check_of_a_whole_pnem_prints_ok_and_writes_the_same_text_a
 }
 
 #[tokio::test]
-async fn a_record_with_an_old_pane_is_corrected_and_the_row_says_fixed() {
+async fn a_record_with_an_old_pane_is_corrected_and_the_row_shows_fixed() {
     let world = world(true);
     world.pod();
     world.view.0.lock().unwrap().insert("%9".into(), 200);
@@ -271,4 +271,25 @@ async fn a_first_start_the_same_session_and_a_clear_or_compact_are_no_restart() 
         .note_start(&pnem(), Some("s-old".into()), "s-200", 200, "compact");
     world.checker.on_turn_end("%2", "s-200").await;
     assert!(!world.dir.join("w200/.superpowers/pod/restarts").exists());
+}
+
+#[tokio::test]
+async fn a_pane_that_now_holds_another_agent_is_an_old_agent_and_a_reused_pid_is_gone() {
+    let world = world(true);
+    world.pod();
+    world.view.0.lock().unwrap().insert("%1".into(), 999);
+    let done = world.checker.run(&pnem()).await.unwrap();
+    assert!(
+        done.text.contains("pnem harold -> chief: old_agent: "),
+        "{}",
+        done.text
+    );
+    // A pid that runs with another start time than the record holds is gone.
+    world.processes.0.lock().unwrap().insert(300, 777);
+    let done = world.checker.run(&pnem()).await.unwrap();
+    assert!(
+        done.text.contains("pod-coordination harold: agent_gone: "),
+        "{}",
+        done.text
+    );
 }

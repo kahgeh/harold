@@ -141,11 +141,19 @@ impl Checker {
         // The multiplexer reads run programs: they must not block the runtime.
         let this = Arc::clone(self);
         let (owned_agent, owned_pane) = (agent.clone(), pane.to_owned());
+        let (span_product, span_role, _) = agent.record_key();
+        let span = info_span!(
+            target: crate::telemetry::TRACE_TARGET,
+            "harold.restart_check",
+            role = span_role,
+            pod.product = %span_product
+        );
+        let (report, folder) = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| this.build(&owned_agent, &owned_pane, pid))
+        })
+        .await
+        .ok()??;
         crate::telemetry::feature_used("agent-restart");
-        let (report, folder) =
-            tokio::task::spawn_blocking(move || this.build(&owned_agent, &owned_pane, pid))
-                .await
-                .ok()??;
         let text = render(&report);
         let (_, stamp) = self.clock.now();
         if let Some(folder) = folder {
@@ -305,6 +313,18 @@ fn delivery_line(report: &Report) -> String {
     )
 }
 
+/// The reason word of an identity row: the first word of its detail when it is a reason word,
+/// else `mismatch` for a FAIL and an empty word for the rest.
+fn identity_reason(row: &super::IdentityRow) -> &'static str {
+    match row.outcome {
+        Outcome::Fail if row.detail.starts_with("no_record") => "no_record",
+        Outcome::Fail => "mismatch",
+        Outcome::Fixed => "corrected",
+        Outcome::NotChecked => "multiplexer_unreachable",
+        Outcome::Ok => "",
+    }
+}
+
 fn log_rows(agent: &Agent, report: &Report) {
     let (product, role, _) = agent.record_key();
     let word = |outcome: Outcome| match outcome {
@@ -313,19 +333,24 @@ fn log_rows(agent: &Agent, report: &Report) {
         Outcome::Fail => "fail",
         Outcome::NotChecked => "not_checked",
     };
-    let row = |group: &str, check: &str, outcome: Outcome| {
+    let row = |group: &str, check: &str, outcome: Outcome, reason: &str| {
         let result = word(outcome);
         info!(
-            role, pod.product = %product, group, check, result, reason = "",
+            role, pod.product = %product, group, check, result, reason,
             "restart check result"
         );
         crate::telemetry::record_restart_check_result(role, group, result);
     };
-    row("identity", "identity", report.identity.outcome);
+    row(
+        "identity",
+        "identity",
+        report.identity.outcome,
+        identity_reason(&report.identity),
+    );
     for link in &report.communication.rows {
         let check = link.label.join(" ");
-        row("communication", &check, link.outgoing);
-        row("communication", &check, link.incoming);
+        row("communication", &check, link.outgoing, link.outgoing_reason);
+        row("communication", &check, link.incoming, link.incoming_reason);
     }
 }
 
@@ -342,7 +367,14 @@ impl LinkPorts for Links<'_> {
             .roles
             .get_spec(&product, role, &spec)
             .ok_or("no_record")?;
-        if checker.processes.start_time(record.agent_pid).is_none() {
+        // The same test as `Who`: the process runs, with the start time that the record holds.
+        let same_process = checker
+            .processes
+            .start_time(record.agent_pid)
+            .is_some_and(|started| {
+                record.agent_proc_start == 0 || started == record.agent_proc_start
+            });
+        if !same_process {
             return Err("agent_gone");
         }
         if matches!(receiver, Agent::BuildWorker { .. }) {
@@ -364,12 +396,11 @@ impl LinkPorts for Links<'_> {
         })
     }
 
+    /// The agent that the multiplexer shows now in the pane that the record holds.
     fn running(&self, receiver: &Agent) -> Option<u32> {
         let (product, role, spec) = receiver.record_key();
-        self.checker
-            .roles
-            .get_spec(&product, role, &spec)
-            .map(|record| record.agent_pid)
+        let record = self.checker.roles.get_spec(&product, role, &spec)?;
+        self.checker.view.agent_pid(&record.pane_id).ok().flatten()
     }
 
     fn socket(&self, pid: u32) -> SocketProbe {

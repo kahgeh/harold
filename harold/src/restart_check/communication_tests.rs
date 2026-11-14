@@ -147,7 +147,12 @@ fn a_lookup_that_gives_an_old_agent_fails_that_direction_only() {
     let result = check_links(&pnem(), &plan_links(&pnem(), &roster), &fake);
     let row = &result.table.rows[0];
     assert_eq!((row.outgoing, row.incoming), (Outcome::Fail, Outcome::Ok));
-    assert_eq!(result.fails[0].text, "pnem harold -> chief: old_agent");
+    assert!(
+        result.fails[0]
+            .text
+            .starts_with("pnem harold -> chief: old_agent: ")
+    );
+    assert_eq!(result.table.rows[0].outgoing_reason, "old_agent");
 }
 
 #[test]

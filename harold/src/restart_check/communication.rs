@@ -191,6 +191,25 @@ fn direction(
     }
 }
 
+/// What a reason word means, and who fixes it, in plain words for a FAIL line.
+fn explain(reason: &str) -> &'static str {
+    match reason {
+        "no_record" => {
+            "Harold has no record of the receiver; the receiver starts again with its role set"
+        }
+        "agent_gone" => "the process of the receiver ended; the receiver starts again",
+        "agent_pane_file" => "the agent-pane file is missing or empty; pod-coordination writes it",
+        "pane_no_agent" => "the pane holds no agent; pod-coordination fixes the agent-pane file",
+        "old_agent" => "the address names an old agent; the sender looks the receiver up again",
+        "socket_missing" => "the messaging socket is missing; the receiver starts again",
+        "socket_refused" => "the messaging socket refuses a connection; the receiver starts again",
+        "pane_holds_other_agent" => {
+            "the pane holds another agent; the owner of the pane file fixes it"
+        }
+        _ => "the owner of the receiver fixes it",
+    }
+}
+
 /// Tests both directions of each row of the plan.
 pub(crate) fn check_links(me: &Agent, plan: &LinkPlan, ports: &dyn LinkPorts) -> LinksResult {
     let mut rows = Vec::new();
@@ -204,13 +223,13 @@ pub(crate) fn check_links(me: &Agent, plan: &LinkPlan, ports: &dyn LinkPorts) ->
         {
             let (outcome, reason) = direction(sender, receiver, planned.delivery, ports);
             results[slot] = (outcome, reason);
-            let text = format!("{} -> {}: {reason}", sender.title(), receiver.title());
+            let link = format!("{} -> {}: {reason}", sender.title(), receiver.title());
             match outcome {
                 Outcome::Fail => fails.push(FailLine {
                     group: Group::Communication,
-                    text,
+                    text: format!("{link}: {}", explain(reason)),
                 }),
-                Outcome::NotChecked => not_checked.push(text),
+                Outcome::NotChecked => not_checked.push(link),
                 _ => {}
             }
         }
@@ -218,6 +237,8 @@ pub(crate) fn check_links(me: &Agent, plan: &LinkPlan, ports: &dyn LinkPorts) ->
             label: planned.label.clone(),
             outgoing: results[0].0,
             incoming: results[1].0,
+            outgoing_reason: results[0].1,
+            incoming_reason: results[1].1,
         });
     }
     LinksResult {

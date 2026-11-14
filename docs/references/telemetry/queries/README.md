@@ -11,7 +11,6 @@ A **named query** is a SQL file in this folder. A dashboard card and `bin/logq -
 | `agent-counter.sql` | A declared counter of the [telemetry tool](../../tools/telemetry.md), this week against last week | `{name:String}`: the exported metric name, such as `agent.harold.release.attempts` |
 | `value-created.sql` | The `spec.id` values whose `*.feature.used` counter rose in the 7 days plus the fixes whose `pod.fix.confirmed_at` time falls in the 7 days, and the change: the card "Value created". Columns `value`, `value_change_pct` | none |
 | `unused-features.sql` | The `spec.id` values of `*.feature.used` whose rise in the last 14 days is 0. The chief's weekly digest runs it. Column `spec_id` | none |
-| `restart-checks.sql` | The `restart check result` rows with `result = fail` in the last 7 days, by `role`, `group` and `check`. The chief's weekly digest runs it. Not an alert. Columns `role`, `group`, `check`, `fails` |
 | `unconfirmed-fixes.sql` | The fix specs with a `merged_to_released` point older than 7 days and no `pod.fix.confirmed_at` series. The chief's weekly digest runs it. Column `spec_id` | none |
 | `unkinded-specs.sql` | The specs with `spec.kind = unkinded` at state `approved` or later, first seen in the last 14 days. The chief's weekly digest runs it. Column `spec_id` | none |
 | `delivery-lead-time-tile.sql` | The median days from the first draft of a spec to the release that holds it, for the specs released in the 7 days, and the change: the card "Delivery lead time" of the big picture. Columns `days`, `days_change_pct` | none |

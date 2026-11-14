@@ -155,7 +155,7 @@ pub(crate) fn check_identity(
             row: IdentityRow {
                 outcome: Outcome::Fixed,
                 subject,
-                detail: format!("Harold had pane {old}; its record now says pane {pane}"),
+                detail: format!("Harold had pane {old}; its record now holds pane {pane}"),
             },
             fails: Vec::new(),
         },
