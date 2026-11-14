@@ -10286,6 +10286,14 @@ mod tests {
                 Ok(tonic::Response::new(Default::default()))
             }
 
+            async fn pod_agent_started(
+                &self,
+                _: tonic::Request<harold_api::harold::PodAgentStartedRequest>,
+            ) -> Result<tonic::Response<harold_api::harold::PodAgentStartedResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(Default::default()))
+            }
+
             async fn set_messaging_paused(
                 &self,
                 _: tonic::Request<SetMessagingPausedRequest>,

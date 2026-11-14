@@ -12,6 +12,7 @@ mod inbound;
 mod log_trim;
 mod machine_stats;
 mod outbound;
+mod pod_roles;
 mod pod_stats;
 mod projector;
 mod remote_order;
@@ -49,12 +50,12 @@ use harold::harold_server::{Harold, HaroldServer};
 use harold::{
     AgentMonitorHealth, AgentPaneState, AgentSeenRequest, AgentSeenResponse, AgentState,
     AgentStateSnapshot, CallRequest, CallResponse, GetHaroldStateRequest, GetHaroldStateResponse,
-    GetRemoteOrderRequest, GetRemoteOrderResponse, MonitorHealthState, ReportAgentStateRequest,
-    ReportAgentStateResponse, RexHostIcon, SendMessageToAwayDeviceRequest,
-    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetRemoteOrderRequest, SetRemoteOrderResponse, SetTtsMutedRequest, SetTtsMutedResponse,
-    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse,
-    WatchAgentStatesRequest,
+    GetRemoteOrderRequest, GetRemoteOrderResponse, MonitorHealthState, PodAgentStartedRequest,
+    PodAgentStartedResponse, ReportAgentStateRequest, ReportAgentStateResponse, RexHostIcon,
+    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
+    SetMessagingPausedResponse, SetRemoteOrderRequest, SetRemoteOrderResponse, SetTtsMutedRequest,
+    SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
+    TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 /// Release tag compiled in by the release workflow; "source" for any other build.
@@ -580,6 +581,33 @@ impl Harold for HaroldService {
         // mark to clear.
         let _ = self.seen_calls.send(pane_id).await;
         Ok(Response::new(AgentSeenResponse {}))
+    }
+
+    /// A hook tells Harold which agent holds a pod role. See `pod_roles`.
+    async fn pod_agent_started(
+        &self,
+        request: Request<PodAgentStartedRequest>,
+    ) -> Result<Response<PodAgentStartedResponse>, Status> {
+        let request = request.into_inner();
+        let start = pod_roles::PodStart {
+            role: request.pod_role,
+            product: request.pod_product,
+            pane_id: request.pane_id,
+            session_id: request.session_id,
+            transcript_path: request.transcript_path,
+            folder: request.cwd,
+            agent_pid: request.agent_pid,
+            start_file: request.start_file,
+            source: request.source,
+        };
+        let now_ms =
+            i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                .unwrap_or(i64::MAX);
+        match pod_roles::record_start(start, now_ms) {
+            None => Err(Status::unavailable("pod tool")),
+            Some(Err(_)) => Err(Status::invalid_argument("pod role or product")),
+            Some(Ok(_)) => Ok(Response::new(PodAgentStartedResponse {})),
+        }
     }
 
     async fn get_harold_state(

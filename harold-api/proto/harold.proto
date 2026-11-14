@@ -24,6 +24,11 @@ service Harold {
   // that pane and records the time the agent waited. It changes nothing else. For a pane
   // that does not wait, or that Harold does not know, it does nothing and does not fail.
   rpc AgentSeen (AgentSeenRequest) returns (AgentSeenResponse);
+  // A Claude Code SessionStart hook tells Harold which agent holds a pod role. Harold keeps
+  // the newest agent for each (product, role). A role that is not a pod role (`chief`,
+  // `pnem`, `pod_coordination`) or a product that is not valid gives `invalid_argument`.
+  // When the pod tool did not start, the call gives `unavailable`.
+  rpc PodAgentStarted (PodAgentStartedRequest) returns (PodAgentStartedResponse);
 }
 
 // The web app's paired devices and its pairing lock, for `harold app`.
@@ -258,6 +263,26 @@ message AgentSeenRequest {
 
 // Empty: the call has no result.
 message AgentSeenResponse {}
+
+message PodAgentStartedRequest {
+  string pod_role = 1;
+  // The product of the role. Empty for the chief.
+  string pod_product = 2;
+  // The pane of the agent, or empty when the hook found none.
+  string pane_id = 3;
+  string session_id = 4;
+  string transcript_path = 5;
+  string cwd = 6;
+  // The process id of the hook's parent, the agent.
+  uint32 agent_pid = 7;
+  // The path of the start file of the role, or empty.
+  string start_file = 8;
+  // The hook's source: `startup`, `resume`, `clear` or `compact`.
+  string source = 9;
+}
+
+// Empty: the call has no result.
+message PodAgentStartedResponse {}
 
 message SetMessagingPausedRequest {
   bool paused = 1;

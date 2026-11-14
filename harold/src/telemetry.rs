@@ -126,6 +126,7 @@ pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 /// The only span attributes and log-record attributes that leave Harold. Everything else,
 /// such as `text`, `msg`, `raw_output`, `tag` and `error`, is dropped before export.
 pub(crate) const ALLOWED_FIELDS: &[&str] = &[
+    "replaced",
     "notes",
     "evidence.query",
     "confirmed",

@@ -324,6 +324,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "GetRemoteOrder".to_string(),
             "SetRemoteOrder".to_string(),
             "AgentSeen".to_string(),
+            "PodAgentStarted".to_string(),
         ]
     );
 }
@@ -936,4 +937,31 @@ fn agent_seen_has_pane_id_1_and_an_empty_response() {
     assert_eq!(request.encode_to_vec(), [0x0a, 0x02, b'%', b'7']);
     assert_eq!(round_trip(&request).pane_id, "%7");
     assert_eq!(AgentSeenResponse {}.encode_to_vec(), Vec::<u8>::new());
+}
+
+/// A hook tells Harold which agent holds a pod role. The field numbers are the wire form
+/// that the installed hook sends, so they never change.
+#[test]
+fn pod_agent_started_has_nine_fields_and_an_empty_response() {
+    let names = [
+        "pod_role",
+        "pod_product",
+        "pane_id",
+        "session_id",
+        "transcript_path",
+        "cwd",
+        "agent_pid",
+        "start_file",
+        "source",
+    ];
+    let expected: Vec<(String, i32)> = names
+        .iter()
+        .zip(1..)
+        .map(|(name, number)| ((*name).to_string(), number))
+        .collect();
+    assert_eq!(message_fields("PodAgentStartedRequest"), expected);
+    assert_eq!(
+        message_fields("PodAgentStartedResponse"),
+        Vec::<(String, i32)>::new()
+    );
 }

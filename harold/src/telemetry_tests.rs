@@ -5881,6 +5881,20 @@ fn the_job_fields_are_allowed_and_agent_jobs_is_a_listed_feature() {
 }
 
 #[test]
+fn the_pod_role_fields_are_allowed() {
+    for field in [
+        "product",
+        "role",
+        "pane_id",
+        "session.id",
+        "replaced",
+        "outcome",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
+}
+
+#[test]
 fn the_decision_fields_are_allowed_and_the_feature_is_listed() {
     for field in [
         "decision.id",

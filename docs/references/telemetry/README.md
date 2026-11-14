@@ -530,6 +530,7 @@ These fields were added so that the log lines of the collector work show their i
 | `accountable` | Whose decision it was: `user`, or the role that made it. On `decision added` and on the decision counters |
 | `place` | Where the details entry of a decision record lies: `pod`, `vault` or `personal`, never the path. On `decision added` |
 | `link` | The link of a decision record, `work:<name>` or `spec:<product>/<id>`. On `decision added` |
+| `replaced` | Whether an older agent held the pod role before this start: `true` or `false`. On `pod role recorded` |
 | `decide_s` | Whole seconds from the question to the adding of a decision record. On `decision added`, when the record has `asked_at` |
 | `process_grade` | `good` or `poor`: how the decision was made, judged from the evidence known then. On `decision evaluated` and on `harold.decisions.evaluated` |
 | `outcome_grade` | `good` or `poor`: the result against the expected result. On `decision evaluated` and on `harold.decisions.evaluated` |
