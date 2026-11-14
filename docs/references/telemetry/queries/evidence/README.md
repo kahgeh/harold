@@ -33,6 +33,7 @@ An **evidence query** is a named query file `<id>-<n>.sql` in this folder. `<id>
 | `agent-jobs-1.sql` | `harold.feature.used` with `spec.id = agent-jobs` rose after `since`. Reasons `job_added` and `no_job_yet` |
 | `agent-jobs-2.sql` | `harold.job.ends` with `how = ended` rose after `since`, with no `end_line = failed`. Reasons `end_told`, `no_end_yet` and `end_not_told` |
 | `agent-jobs-hosts-1.sql` | `harold.job.ends` with a non-empty `host` rose after `since`. Reasons `host_end_seen` and `no_host_end_yet` |
+| `decision-tool-1.sql` | `decision added` and `decision evaluated` log lines from `since` to `since` + 30 days. Reasons `evaluated`, `only_added` and `none_added` |
 
 ## Run one
 

@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_twelve_alerts_are_the_ones_in_the_specs() {
+fn the_thirteen_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -118,6 +118,7 @@ fn the_twelve_alerts_are_the_ones_in_the_specs() {
             "agent-recaps-stopped",
             "agent-blocked-long",
             "slave-link-down",
+            "decisions-due",
             "work-rotation-failed"
         ]
     );

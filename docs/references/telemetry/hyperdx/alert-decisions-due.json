@@ -1,0 +1,31 @@
+{
+  "name": "decisions-due",
+  "note": "decisions-due",
+  "message": "A decision record is due. Run harold tool decision list --due, then start the coach to evaluate or recheck each one.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "decisions-due",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "max",
+        "valueExpression": "Value",
+        "metricName": "harold.decisions.open",
+        "metricType": "gauge",
+        "where": "Attributes['status'] = 'due'",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0,
+  "thresholdType": "above_exclusive",
+  "interval": "1h",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

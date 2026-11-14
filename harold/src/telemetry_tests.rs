@@ -2549,6 +2549,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
         [
             "alert-agent-blocked-long.json",
             "alert-agent-recaps-stopped.json",
+            "alert-decisions-due.json",
             "alert-disk-low.json",
             "alert-machine-past-normal.json",
             "alert-multiplexer-calls-failing.json",
@@ -2566,6 +2567,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "trends.json",
             "webhook-agent-blocked-long.json",
             "webhook-agent-recaps-stopped.json",
+            "webhook-decisions-due.json",
             "webhook-disk-low.json",
             "webhook-machine-past-normal.json",
             "webhook-multiplexer-calls-failing.json",
@@ -3373,6 +3375,15 @@ fn the_alert_files_carry_the_spec_thresholds() {
             1.0,
             "below",
             30,
+        ),
+        (
+            "decisions-due",
+            METRICS_SOURCE,
+            "harold.decisions.open",
+            "max",
+            0.0,
+            "above_exclusive",
+            60,
         ),
     ];
     // `work-rotation-failed` counts a log line, so it has its own test below.
@@ -4300,8 +4311,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 12, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 12, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 13, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 13, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -4315,8 +4326,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 12, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 12, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 13, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 13, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -4492,8 +4503,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the ten created.
-    assert_eq!(stand_in.objects("webhooks").len(), 13, "{stderr}");
+    // The old webhook, the two kept, and the eleven created.
+    assert_eq!(stand_in.objects("webhooks").len(), 14, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -4503,7 +4514,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 10, "{calls:?}");
+    assert_eq!(posts, 11, "{calls:?}");
 }
 
 #[test]
@@ -4848,7 +4859,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 12, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 13, "{stderr}");
     stand_in
 }
 
@@ -4857,7 +4868,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 12 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 13 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),

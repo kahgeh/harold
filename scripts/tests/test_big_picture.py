@@ -4,8 +4,9 @@ The structure tests read files as text, with the standard library only. They nee
 ClickHouse, no port and no server.
 
 The files:
-- hyperdx/big-picture.json holds an intro text and six cards. A card is ONE table tile with ONE
-  text line: the value with its unit, then its change against the 7 days before.
+- hyperdx/big-picture.json holds an intro text and seven cards. A card is ONE table tile with ONE
+  text line: the value with its unit, then its change against the 7 days before. The card Decisions is
+  the one exception: its tile has three rows, one text line each (fmt "decisions", built with arrayJoin).
 - hyperdx/trends.json holds the cards that left the big picture, as tables.
 - queries/<card>.sql holds the SQL of the card. It returns at most one row of numbers.
 
@@ -54,7 +55,13 @@ CARDS = {
                              change="products_change_pct", extra=None, better="higher"),
     "inventory-cost": dict(title="Inventory cost", value="total_cost", unit="", fmt="aud",
                            change="total_cost_change_pct", extra="notes", better="lower"),
+    # Three lines. Made, evaluated and the two good shares are better up, and due is better down.
+    "decisions": dict(title="Decisions", value="made", unit="made", fmt="decisions",
+                      change="made_change_pct", extra=None, better="higher"),
 }
+# The columns that the card Decisions reads, besides made and made_change_pct.
+DECISION_COLUMNS = ["evaluated", "evaluated_change_pct", "good_process_pct", "good_process_change_pts",
+                    "good_outcome_pct", "good_outcome_change_pts", "due", "due_change_pct"]
 # The stubs return no row until the spec that fills them is built.
 STUBS = {}
 INTRO = (
@@ -63,8 +70,9 @@ INTRO = (
     "\U0001f7e2 better, \U0001f534 worse, \u26aa no change. "
     "\"No data found within time range.\" means \"no data yet\". "
     "A line that ends in \"no change figure\" has no number in the 7 days before to compare with. "
-    "Higher is better: Value created, Products changed. "
-    "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost. "
+    "Higher is better: Value created, Products changed, Decisions (made, evaluated, good process and good outcome). "
+    "Lower is better: Delivery lead time, Waste, Tokens and turns, Inventory cost, Decisions (due). "
+    "Decisions has three lines: made and evaluated, the share graded good (its change is in percentage points, pts), and due. "
     "Delivery lead time has data after the first release that follows spec-release-phase. "
     "Inventory cost is in Australian dollars (A$): the tokens at the list prices, plus human attention. "
     "\"human attention: no data yet\" means no answer in the last 7 days, "
@@ -134,9 +142,48 @@ def cost_text():
     return f"concat('A$', {grp('total_cost')}, '  (', {tokens}, ' + ', {human}, ')  ')"
 
 
+def pct_change_text(column, better):
+    """The change of a figure in percent, with the dot and the arrow, and no "on last week"."""
+    rise, fall = (GREEN, RED) if better == "higher" else (RED, GREEN)
+    r = f"round({column})"
+    return (f"multiIf({column} IS NULL, 'no change figure', "
+            f"{r} > 0, concat('{rise} \u25b2 ', toString(toInt64({r})), '%'), "
+            f"{r} < 0, concat('{fall} \u25bc ', toString(abs(toInt64({r}))), '%'), "
+            f"'{WHITE} 0%')")
+
+
+def pts_change_text(column, better):
+    """The change of a share in percentage points, with one decimal."""
+    rise, fall = (GREEN, RED) if better == "higher" else (RED, GREEN)
+    r = f"round({column}, 1)"
+    return (f"multiIf({column} IS NULL, 'no change figure', "
+            f"{r} > 0, concat('{rise} \u25b2 ', {d1(column)}, ' pts'), "
+            f"{r} < 0, concat('{fall} \u25bc ', {d1(f'abs({column})')}, ' pts'), "
+            f"'{WHITE} 0.0 pts')")
+
+
+def share_text(column):
+    return f"if({column} IS NULL, 'no data yet', concat(toString(toInt64({column})), '%'))"
+
+
+def decision_lines():
+    """The three lines of the card Decisions: made and evaluated, the good shares, and due."""
+    return [
+        f"concat({grp('made')}, ' made ', {pct_change_text('made_change_pct', 'higher')}, ' \u00b7 ', "
+        f"{grp('evaluated')}, ' evaluated ', {pct_change_text('evaluated_change_pct', 'higher')})",
+        f"concat('good process ', {share_text('good_process_pct')}, ' ', "
+        f"{pts_change_text('good_process_change_pts', 'higher')}, ' \u00b7 good outcome ', "
+        f"{share_text('good_outcome_pct')}, ' ', {pts_change_text('good_outcome_change_pts', 'higher')})",
+        f"concat({grp('due')}, ' due ', {change_text('due_change_pct', 'lower')})",
+    ]
+
+
 def wrap(card, source):
     """Return the sqlTemplate of the tile of the card. The source is the text of the file or a fake SELECT."""
     spec = CARDS[card]
+    if spec["fmt"] == "decisions":
+        return (f"SELECT arrayJoin([{', '.join(decision_lines())}]) AS ` `\n"
+                f"FROM (\n{source.rstrip()}\n)\nWHERE {spec['value']} IS NOT NULL")
     if spec["fmt"] == "aud":
         parts = [cost_text(), change_text(spec["change"], spec["better"])]
     else:
@@ -233,7 +280,7 @@ class BigPictureTest(unittest.TestCase):
             self.fail(f"card {card} has no query file: {path.relative_to(ROOT)}")
         return path.read_text(encoding="utf-8")
 
-    def test_six_cards_in_order_and_no_product_filter(self):
+    def test_seven_cards_in_order_and_no_product_filter(self):
         dashboard = self.dashboard()
         self.assertEqual(dashboard["name"], "Harold: the big picture")
         self.assertEqual(dashboard.get("filters", []), [], "the big picture has no product filter")
@@ -241,7 +288,7 @@ class BigPictureTest(unittest.TestCase):
         self.assertEqual(ids, ["big-picture-intro"] + list(CARDS))
         titles = [tile["name"] for tile in dashboard["tiles"][1:]]
         self.assertEqual(titles, ["Value created", "Delivery lead time", "Waste", "Tokens and turns",
-                                  "Products changed", "Inventory cost"])
+                                  "Products changed", "Inventory cost", "Decisions"])
 
     def test_each_card_is_one_table_tile_that_wraps_its_file(self):
         tiles = self.by_id()
@@ -253,7 +300,8 @@ class BigPictureTest(unittest.TestCase):
                 self.assertEqual(config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@")
                 self.assertRegex(config["sourceId"], r"^@[A-Z_]+_SOURCE_ID@$")
                 self.assertEqual(config["sqlTemplate"], wrap(card, self.query_text(card)))
-                self.assertTrue(config["sqlTemplate"].startswith("SELECT concat("))
+                start = "SELECT arrayJoin([" if spec["fmt"] == "decisions" else "SELECT concat("
+                self.assertTrue(config["sqlTemplate"].startswith(start))
                 self.assertIn("AS ` `\nFROM (", config["sqlTemplate"], "the column name is one space")
                 self.assertNotIn(f'AS "{spec["title"]}"', config["sqlTemplate"])
                 self.assertTrue(config["sqlTemplate"].endswith(f"WHERE {spec['value']} IS NOT NULL"))
@@ -272,6 +320,8 @@ class BigPictureTest(unittest.TestCase):
             columns = [spec["value"], spec["change"]]
             if spec["extra"] == "turns":
                 columns += ["turns"]
+            if spec["fmt"] == "decisions":
+                columns += DECISION_COLUMNS
             if spec["extra"] == "notes":
                 columns += ["tokens_m", "token_cost", "attention_hours", "attention_cost", "unpriced_models",
                             "old_stock_unpriced", "overflow"]
@@ -326,7 +376,8 @@ class BigPictureTest(unittest.TestCase):
     def test_the_direction_of_each_card(self):
         self.assertEqual({card: spec["better"] for card, spec in CARDS.items()},
                          {"value-created": "higher", "delivery-lead-time-tile": "lower", "waste": "lower",
-                          "tokens-and-turns": "lower", "products-changed": "higher", "inventory-cost": "lower"})
+                          "tokens-and-turns": "lower", "products-changed": "higher", "inventory-cost": "lower",
+                          "decisions": "higher"})
 
     def test_the_change_text_puts_the_dot_by_direction(self):
         up = change_text("c", "higher")

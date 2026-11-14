@@ -1155,7 +1155,7 @@ Two limits remain:
 
 ## Harold: the big picture
 
-`big-picture.json` is the dashboard "Harold: the big picture". It has six cards, each one line with a value and its change against the 7 days before: Value created, Delivery lead time, Waste, Tokens and turns, Products changed and Inventory cost. The dashboard has no product filter: it reads all products.
+`big-picture.json` is the dashboard "Harold: the big picture". It has seven cards. Six have one line with a value and its change against the 7 days before: Value created, Delivery lead time, Waste, Tokens and turns, Products changed and Inventory cost. The seventh, Decisions, has three lines. The dashboard has no product filter: it reads all products.
 
 **A card** is ONE table tile with ONE line of text, for example `4,717 turns  🟢 ▲ 56% on last week`. The column of the tile is named with one space (`` AS ` ` ``), so the table shows no header text that repeats the title of the tile. HyperDX 2.40 cannot do this with a number tile: a number tile shows one number only and gives "Error loading chart" for text. The line is the value with its unit, then the change against the 7 days before: `(this - before) / before * 100` in the query, rounded to a whole percent. `▲` is a rise and `▼` is a fall. A dot comes before the arrow: 🟢 for a change to the better way, 🔴 for a change to the worse way. A change of 0% gives `⚪ 0% on last week` with no arrow. The better way depends on the card. Up is better for Value created and Products changed, so a rise is `🟢 ▲` and a fall is `🔴 ▼`. Down is better for Delivery lead time, Waste, Tokens and turns and Inventory cost, so a fall is `🟢 ▼` and a rise is `🔴 ▲`. With no number or 0 in the 7 days before, the line ends in `no change figure`, with no dot. A table cell has no colour, so the dot gives the colour. A text tile over the cards explains the dots. Tokens and turns adds the turns after the tokens (`4.7 M tokens  🟢 ▼ 12% on last week · 4,717 turns`). Inventory cost adds your attention after the tokens (`1.2 M tokens  🔴 ▲ 8% on last week · attention 350 AUD (3.5 h, 12 requests)`). With no answer in the 7 days it reads `attention: no data yet`. With answers and no rate it reads `attention: no rate set`.
 
@@ -1171,6 +1171,7 @@ The last 7 days are the 7 days before now, and the 7 days before are the 7 days 
 | Tokens and turns | Tokens in M with one decimal, with their change, then the turns | `harold.turn.tokens`, `harold.turns`, `harold.turn.tokens.by_spec` | The flow: all tokens spent in the 7 days, on all work. A build worker on Opus is the first thing to check. |
 | Products changed | The products with at least one merge | `pod.merges` | None. |
 | Inventory cost | The cost in Australian dollars (A$) of the work not delivered: the total, then the tokens and the human attention in parentheses, then the change, then the notes | `harold.turn.tokens.by_spec` with `pod.spec.words`; `harold.turn.tokens` for the mix of the build workers; `harold.list_price.per_mtok`, `harold.exchange_rate.usd_to_aud` and `harold.attention.hourly_rate` through the dictionary `otel.harold_settings`; the events `chief.attention_request` and `chief.attention_answered` | The stock: the tokens already spent, at any time, on the specs that are approved or in progress now, at the list prices. |
+| Decisions | Three rows, one line each: the decision records made and evaluated; the share of the evaluated ones graded good for process and for outcome; and the records due | `harold.decisions.added`, `harold.decisions.evaluated`, `harold.decisions.open` | The tile has one column and three rows, made with `arrayJoin`, so each line shows on its own row. Each figure has its change on last week. The changes of made, evaluated and due are in percent. The change of a share is in percentage points (`pts`). Made, evaluated and the two shares are better up. Due is better down, so a rise in due has a 🔴 dot. A share with no evaluated record shows `no data yet`. The card shows 0 made when Harold exported the counters and no record was added. |
 
 **Tokens and turns against Inventory cost.** Tokens and turns is the flow: all tokens spent in the 7 days. Inventory cost is the stock: the tokens already spent on work that has not reached the user. The change of the stock compares the stock now with the stock 7 days ago.
 
@@ -1308,6 +1309,7 @@ The disk is the one that holds the home folder. No path is sent.
 | `work-rotation-failed` | A work file did not rotate: Harold logged `work rotation failed` at least once in a day. The line is logged once when a failure begins for a file, and not again for its daily retries, so the alert fires once for each failure. Severity: warn. Action: read the line's `file` and `reason` (`count_mismatch`, `write_failed` or `rename_failed`) and the work data folder `tools/work/`. Expected rate: never | count of the log lines `ServiceName = 'harold' AND Body = 'work rotation failed'` above 0, over 1 day, on the logs source |
 | `agent-blocked-long` | An agent has been blocked for 15 minutes: Harold counts one for each blocked spell and logs `agent blocked long` (`warn`, fields `pane_id`, `provider_id`, no agent text) once. Severity: warn. Action: go to the agent named by `pane_id` and answer it. Expected rate: under 1 a day | sum of `harold.agent.blocked_long` above 0, every 5 minutes. HyperDX's reading is right, because of the 0 points at start. The alert reads the counter, as every other definition reads a metric; the log line is for diagnosis |
 | `slave-link-down` | A slave Harold was not connected to the master for 30 minutes. Severity: warn. Action: check that the slave's machine is on and awake, then read the `slave link` lines in its logs (HyperDX, or its `harold.log` when its collector cannot be reached) and the `slave link closed` and `slave link refused` lines on the master. To silence it for a long time off, remove the name from `[slaves] names`. Expected rate: each time the slave's machine is off or asleep for over 30 minutes. While the link is down, the slave's turn ends and questions do not reach the phone, and a card shows that only to someone who looks | `max` of `harold.slave_link.connected` below 1, grouped by `slave`, every 15 minutes, for 2 windows in a row. The gauge is 0 from the start for each name in `[slaves] names`, so a slave that never connects fires too. Harold's alert address keeps one state for each alert name, so with two slaves a `cleared` can come while the other is still down |
+| `decisions-due` | A decision record is due: the check date of an open record has come. Severity: warn. Action: the chief starts the coach, which evaluates or rechecks each due record (`harold tool decision list --due` names them). The alert resolves when no record is due. Expected rate: about one firing a week | `max` of `harold.decisions.open` with `status = due` above 0, every hour |
 | `disk-low` | A home disk was 90% full or more for 30 minutes. Severity: warn. Action: look today, then free space. Expected rate: 0 a month on the Mac, whose home disk was 56% full on 25 October | `max` of `system.filesystem.utilization` over every machine, not grouped, above 0.9, every 15 minutes, for 2 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
@@ -1420,7 +1422,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the twelve alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the thirteen alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -1543,7 +1545,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down decisions-due; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -1579,7 +1581,7 @@ fill now.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold n
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down decisions-due; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -1592,7 +1594,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low multiplexer-calls-failing agent-recaps-stopped agent-blocked-long work-rotation-failed slave-link-down decisions-due; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
