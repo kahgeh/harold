@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are ten: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md), the [knowledge tool](knowledge.md), the [release tool](release.md), the [evidence tool](evidence.md), the [job tool](job.md), the [decision tool](decision.md) and the [telemetry tool](telemetry.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are eleven: the [question tool](questions.md), the [backlog and queue](backlog.md), the [work tool](work.md), the [watch tool](watch.md), the [knowledge tool](knowledge.md), the [release tool](release.md), the [evidence tool](evidence.md), the [job tool](job.md), the [decision tool](decision.md), the [pod tool](pod.md) and the [telemetry tool](telemetry.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -69,6 +69,7 @@ The knowledge tool is the one tool with an off switch: it starts only when `[kno
 - [Question tool](questions.md): the chief's questions for the user, answered from the control-tower and typed back into the chief's pane.
 - [Backlog and queue](backlog.md): each product's ranked backlog, kept by its product manager, and the chief's own queue.
 - [Work tool](work.md): the chief's work records, with their priority, status and decisions, kept in Turso files that Harold rotates by itself.
+- [Pod tool](pod.md): which agent holds each pod role now, found by the pod role record that a start hook fills, so a session name never breaks the link.
 - [Watch tool](watch.md): an agent asks Harold to run one of its skills with a model on a schedule, and Harold types the reports into the chief's pane or the agent's.
 - [Knowledge tool](knowledge.md): Harold's index of the organisation's vault of Markdown notes by meaning, for the chief, the web app's Notes page and the control-tower.
 - [Telemetry tool](telemetry.md): the chief, the PnEMs and pod scripts record a declared counter, gauge or event with one command, exported as `agent.<name>`.

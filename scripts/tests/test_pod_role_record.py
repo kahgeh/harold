@@ -12,6 +12,9 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import test_decision_tool_sql as dt  # noqa: E402
 
 CLAUDE_START = SCRIPTS / 'claude-start'
 FAKE_CLAUDE = '#!/bin/sh\nfor argument in "$@"; do printf "%s\\n" "$argument"; done > "$ARGS_FILE"\n'
@@ -102,6 +105,76 @@ class SessionStartHookTests(unittest.TestCase):
         self.assertEqual(self.path.read_text(), '{not json')
         self.assertIn(self.command, outcome)
         self.assertIn('"SessionStart"', outcome)
+
+
+EVIDENCE = SCRIPTS.parent / 'docs' / 'references' / 'telemetry' / 'queries' / 'evidence' / 'pod-role-record-1.sql'
+
+
+def role_log(body, hours_ago, role='', outcome='', service='harold'):
+    attrs = []
+    if role:
+        attrs += ["'role'", f"'{role}'"]
+    if outcome:
+        attrs += ["'outcome'", f"'{outcome}'"]
+    mapping = f"map({', '.join(attrs)})" if attrs else dt.EMPTY_MAP
+    return (f"SELECT '{service}' AS ServiceName, '{body}' AS Body, {mapping} AS LogAttributes, "
+            f"now() - INTERVAL {int(hours_ago * 3600)} SECOND AS Timestamp")
+
+
+def recorded_all():
+    return [role_log('pod role recorded', 30, role) for role in ('chief', 'pnem', 'pod_coordination')]
+
+
+class EvidenceQueryTextTests(unittest.TestCase):
+    """These tests read the file as text. They need no ClickHouse."""
+
+    def test_the_file_follows_the_form_of_the_other_evidence_files(self):
+        text = EVIDENCE.read_text(encoding='utf-8')
+        for word in ('{since:DateTime}', 'INTERVAL 14 DAY', 'LIMIT 1', 'AS present', 'AS reason', 'AS recorded',
+                     'AS found', 'AS faults', 'otel.otel_logs', "'lookups_found'", "'lookup_faults'",
+                     "'no_lookup_yet'", '-- Note:', '-- Waits for:', '-- Shows:', '-- Columns:'):
+            self.assertIn(word, text)
+        for word in ('INSERT', 'ALTER', 'DROP', 'CREATE', 'DELETE'):
+            self.assertNotIn(word, text.upper().replace('--', ''))
+        self.assertLess(len(text.encode('utf-8')), 64 * 1024)
+
+
+class EvidenceQueryFixtureTests(dt.LogqTest):
+    def run_since(self, logs=()):
+        sql = EVIDENCE.read_text(encoding='utf-8')
+        sql = sql.replace('{since:DateTime}', '(now() - INTERVAL 172800 SECOND)')
+        sql = sql.replace('otel.otel_logs', '(' + ' UNION ALL '.join(logs or [dt.EMPTY_LOGS]) + ')')
+        rows = self.rows(sql)
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    def test_every_role_recorded_and_a_found_lookup_without_fault_is_found(self):
+        row = self.run_since(recorded_all() + [role_log('pod role lookup', 5, 'pnem', 'found')])
+        self.assertEqual((row['present'], row['reason'], row['recorded'], row['found'], row['faults']),
+                         ('1', 'lookups_found', '3', '1', '0'))
+
+    def test_a_no_record_or_unreadable_lookup_is_a_fault(self):
+        for outcome in ('no_record', 'session_file_unreadable'):
+            row = self.run_since(recorded_all() + [role_log('pod role lookup', 5, 'pnem', 'found'),
+                                                   role_log('pod role lookup', 4, 'pnem', outcome)])
+            self.assertEqual((row['present'], row['reason'], row['faults']), ('0', 'lookup_faults', '1'), outcome)
+
+    def test_agent_gone_is_no_fault(self):
+        row = self.run_since(recorded_all() + [role_log('pod role lookup', 5, 'pnem', 'found'),
+                                               role_log('pod role lookup', 4, 'pnem', 'agent_gone')])
+        self.assertEqual((row['reason'], row['faults']), ('lookups_found', '0'))
+
+    def test_a_role_with_no_recorded_line_or_no_found_lookup_is_no_lookup_yet(self):
+        row = self.run_since([role_log('pod role recorded', 30, 'chief'),
+                              role_log('pod role lookup', 5, 'chief', 'found')])
+        self.assertEqual((row['present'], row['reason']), ('0', 'no_lookup_yet'))
+        self.assertEqual(self.run_since(recorded_all())['reason'], 'no_lookup_yet')
+        self.assertEqual(self.run_since([])['reason'], 'no_lookup_yet')
+
+    def test_a_line_before_since_or_of_another_service_does_not_count(self):
+        row = self.run_since(recorded_all() + [role_log('pod role lookup', 24 * 3, 'pnem', 'found'),
+                                               role_log('pod role lookup', 5, 'pnem', 'found', 'other')])
+        self.assertEqual(row['reason'], 'no_lookup_yet')
 
 
 WORKFLOWS = SCRIPTS.parent / '.github' / 'workflows'

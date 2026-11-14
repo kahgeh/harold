@@ -92,6 +92,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | item-days | The sum of the ages, in days, of the specs waiting in one list | "WIP" |
 | wording (revision tag) | A revision that changes words only: it counts as a revision and is never redo | "typo fix" for the tag |
 | PnEM | A pod's product and engineering manager: the session that keeps the pod's backlog and writes its specs. `role` = `pnem` on `pod.agents` names it | "PM", "product manager", "planner" |
+| pod role | The job that one agent holds in a pod: `chief`, `pnem` or `pod_coordination`, the values of `role` on `pod.agents`. | "role" alone for a build worker (it holds a spec, not a pod role), "agent type" |
+| pod role record | Harold's record of the agent that holds one pod role now (pane, session id, process), kept from the `SessionStart` hook in `pod-roles.json`. | "registry" (the organisation's `products.toml`), "session name" for the record |
+| start file | The file `start/<role>.json` that states how to start a pod role's agent (folder, model, prompt file). | "start prompt" for the file (the prompt is the text in the prompt file) |
 | pod coordination | A pod's session that starts build workers and merges their work. The control-tower names its row Coordinator. `role` = `pod_coordination` on `pod.agents` names it | "baton" for the session, "orchestrator" |
 | browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |
 | collector | The OpenTelemetry collector at `http://localhost:4317` and `http://localhost:4318`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC on 4317, and browser spans, which Harold forwards, as OTLP JSON on 4318, and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
