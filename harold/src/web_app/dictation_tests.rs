@@ -214,7 +214,10 @@ async fn the_check_takes_tap_and_started_behind_the_login_and_origin_checks() {
     }
 }
 
+// This test opens a loopback port. The container test set runs it: see
+// scripts/container-tests/port-tests.txt.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "opens a port: runs in the container test set and in CI"]
 async fn the_check_has_the_login_host_and_origin_checks() {
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await).await;
@@ -281,7 +284,10 @@ pub(super) fn assert_reply_box_is_a_textarea(form: &str) {
     assert!(!form.contains(r#"<input type="text""#), "{form}");
 }
 
+// This test opens a loopback port. The container test set runs it: see
+// scripts/container-tests/port-tests.txt.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "opens a port: runs in the container test set and in CI"]
 async fn the_bar_holds_send_the_mic_and_the_stop_button_and_the_listening_strip_sits_above_it() {
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await).await;

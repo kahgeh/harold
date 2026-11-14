@@ -37,6 +37,7 @@ import otel_test as ot
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 STOPPED = 'Dictation stopped. Tap the mic again.'
+TAP_AGAIN = 'Tap the mic again.'
 
 BROWSER = r'''
 import { spawn } from "node:child_process";
@@ -280,6 +281,20 @@ try {
   await reportsAre(1, 3000);
   cases.stop_timer = { ...(await state()), beforeTimer };
 
+  // The abort does not release the old instance and its `end` never comes: each later tap is
+  // refused by the fake, shows the notice and reports start_failed. No second start succeeds.
+  await load();
+  await fake(`f.cfg.abortReleases = false; f.cfg.noEnd = true;`);
+  await tapMic(); await waitInstances(1);
+  await fake(`f.last().fireStart(); f.last().fireError("network");`);
+  await tapMic();
+  await reportsAre(2);
+  cases.abort_never_ends_tap2 = await state();
+  await tapMic();
+  await reportsAre(3);
+  cases.abort_never_ends_tap3 = {
+    ...(await state()), firstStillActive: await evaluate(`window.__fake.current === window.__fake.instances[0]`) };
+
   // An end with no result and no error.
   await load();
   await tapMic(); await waitInstances(1);
@@ -444,7 +459,17 @@ def verify(results, cases):
     c = cases['stop_timer']
     check('a stop with no end is retired after 1 second: page_ended, no notice, Listening gone',
           c['beforeTimer'] == 0 and rows('stop_timer') == [('page_ended', 1, True)]
-          and not c['note']['notice'] and c['note']['hidden'], c)
+          and not c['note']['notice'] and c['note']['hidden'] and c['instances'] == 1, c)
+    c = cases['abort_never_ends_tap2']
+    check('abort never ends: the second tap gives start_failed and the notice, and the fake refuses it once',
+          rows('abort_never_ends_tap2') == [('network', 1, True), ('start_failed', 2, False)]
+          and c['refusals'] == 1 and not c['note']['hidden'] and c['note']['text'] == TAP_AGAIN
+          and c['outsideGesture'] == 0, c)
+    c = cases['abort_never_ends_tap3']
+    check('abort never ends: the third tap gives start_failed and the notice, and the first instance stays active',
+          rows('abort_never_ends_tap3') == [('network', 1, True), ('start_failed', 2, False), ('start_failed', 3, False)]
+          and c['refusals'] == 2 and not c['note']['hidden'] and c['note']['text'] == TAP_AGAIN
+          and c['firstStillActive'] and c['outsideGesture'] == 0, c)
     c = cases['stop_after_result']
     check('a stop after a result gives ok', rows('stop_after_result') == [('ok', 1, True)], c['reports'])
     c = cases['no_result']
