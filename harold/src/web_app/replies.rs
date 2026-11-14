@@ -41,9 +41,15 @@ pub(crate) const REPLY_MAX_CHARS: usize = 1000;
 /// The largest reply body read, in bytes.
 const REPLY_BODY_MAX_BYTES: usize = 16 * 1024;
 /// The largest dictation check body read, in bytes.
-const DICTATION_BODY_MAX_BYTES: usize = 64;
-/// What the page may say about dictation: `dictation.js` reports one of these, once per page.
-const DICTATION_RESULTS: [&str; 7] = [
+const DICTATION_BODY_MAX_BYTES: usize = 128;
+/// The highest dictation tap number a page may report.
+const DICTATION_TAP_MAX: u64 = 100;
+/// What the page may say about dictation: `dictation.js` reports one of these for each
+/// dictation tap, or `missing` once when the page has no speech recognition. `ok` is at
+/// least one result. `no_result` is an end with no result and no error. `page_ended` is an
+/// end that the page made, with no result. `start_failed` is a recognition that did not
+/// start. `aborted` is the browser's own `aborted` error. `other_error` is any other error.
+const DICTATION_RESULTS: [&str; 12] = [
     "missing",
     "ok",
     "not_allowed",
@@ -51,6 +57,11 @@ const DICTATION_RESULTS: [&str; 7] = [
     "network",
     "no_speech",
     "audio_capture",
+    "no_result",
+    "aborted",
+    "page_ended",
+    "start_failed",
+    "other_error",
 ];
 /// The largest subscription body read, in bytes.
 const SUBSCRIPTION_BODY_MAX_BYTES: usize = 4 * 1024;
@@ -79,6 +90,12 @@ struct PhotoSignals {
 #[derive(Deserialize)]
 struct DictationCheck {
     result: String,
+    /// The tap's number on the page; missing for a page with an old script, then 0.
+    #[serde(default)]
+    tap: u64,
+    /// Whether the recognition fired `start`.
+    #[serde(default)]
+    started: bool,
 }
 
 /// The subscription as the page's `alerts.js` posts it.
@@ -287,9 +304,11 @@ pub(crate) async fn get_photo(State(state): State<AppState>, Path(id): Path<Stri
     response
 }
 
-/// `POST /dictation/check`: logs the one word the page says about dictation here and
-/// answers `204`. A word that is not one of `DICTATION_RESULTS`, a body over 64 bytes, or
-/// a body that is not `{"result": "<word>"}` gives `400`, and nothing is logged.
+/// `POST /dictation/check`: logs the word the page says about one dictation tap, with the
+/// tap's number and `started`, and answers `204`. A word that is not one of
+/// `DICTATION_RESULTS`, a `tap` over 100, a body over 128 bytes, or a body that is not
+/// `{"result": "<word>", "tap": <number>, "started": <bool>}` gives `400`, and nothing is
+/// logged. `tap` and `started` may be missing: they are then 0 and false.
 pub(crate) async fn post_dictation_check(body: Bytes) -> Response {
     if body.len() > DICTATION_BODY_MAX_BYTES {
         return StatusCode::BAD_REQUEST.into_response();
@@ -303,7 +322,15 @@ pub(crate) async fn post_dictation_check(body: Bytes) -> Response {
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    info!(result, "app dictation check");
+    if check.tap > DICTATION_TAP_MAX {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    info!(
+        result,
+        tap = check.tap,
+        started = check.started,
+        "app dictation check"
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 

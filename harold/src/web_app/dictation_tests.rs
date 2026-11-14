@@ -13,13 +13,19 @@ use crate::outbound::fake::CapturedLogs;
 use crate::store::HaroldStore;
 
 const LOGIN: &str = "chief@example.com";
-const RESULTS: [&str; 6] = [
+const RESULTS: [&str; 12] = [
     "missing",
     "ok",
     "not_allowed",
     "service_not_allowed",
     "network",
     "no_speech",
+    "audio_capture",
+    "no_result",
+    "aborted",
+    "page_ended",
+    "start_failed",
+    "other_error",
 ];
 
 struct TestDirectory(std::path::PathBuf);
@@ -109,47 +115,71 @@ impl Drop for TestServer {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn each_known_result_is_logged_with_its_word_and_answered_204() {
-    let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let server = TestServer::serve(directory.store().await).await;
+/// Posts `body` to the check handler with no socket and returns its status.
+async fn check_status(body: &str) -> axum::http::StatusCode {
+    use axum::response::IntoResponse;
+    let response = super::replies::post_dictation_check(axum::body::Bytes::from(body.to_owned()))
+        .await
+        .into_response();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty(), "{body}");
+    status
+}
 
-    for result in RESULTS.into_iter().chain(["audio_capture"]) {
-        let response = server.check(&format!(r#"{{"result":"{result}"}}"#)).await;
-        assert_eq!(response.status(), 204, "{result}");
-        assert!(response.bytes().await.unwrap().is_empty());
+#[tokio::test(flavor = "current_thread")]
+async fn each_known_result_is_logged_with_its_word_its_tap_and_started_and_answered_204() {
+    let logs = CapturedLogs::start();
+
+    for result in RESULTS {
+        let body = format!(r#"{{"result":"{result}","tap":2,"started":true}}"#);
+        assert_eq!(check_status(&body).await, 204, "{result}");
         let captured = logs.text();
         assert!(
             captured.contains(&format!(r#"app dictation check result="{result}""#))
                 || captured.contains(&format!("app dictation check result={result}")),
             "{result}: {captured}"
         );
+        assert!(captured.contains("tap=2"), "{result}: {captured}");
+        assert!(captured.contains("started=true"), "{result}: {captured}");
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn an_unknown_word_a_long_body_or_bad_json_gets_400_and_no_log_line() {
+async fn a_body_with_no_tap_or_started_logs_tap_0_and_started_false() {
     let logs = CapturedLogs::start();
-    let directory = TestDirectory::new();
-    let server = TestServer::serve(directory.store().await).await;
-    let long = format!(r#"{{"result":"ok","note":"{}"}}"#, "x".repeat(60));
-    assert!(long.len() > 64);
+    assert_eq!(check_status(r#"{"result":"ok"}"#).await, 204);
+    let captured = logs.text();
+    assert!(captured.contains("tap=0"), "{captured}");
+    assert!(captured.contains("started=false"), "{captured}");
+    assert_eq!(check_status(r#"{"result":"ok","tap":0}"#).await, 204);
+    assert_eq!(check_status(r#"{"result":"ok","tap":100}"#).await, 204);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unknown_word_a_bad_tap_a_long_body_or_bad_json_gets_400_and_no_log_line() {
+    let logs = CapturedLogs::start();
+    let long = format!(r#"{{"result":"ok","note":"{}"}}"#, "x".repeat(120));
+    assert!(long.len() > 128);
 
     for body in [
         r#"{"result":"fine"}"#,
         r#"{"result":""}"#,
         r#"{"result":"OK"}"#,
         r#"{"result":3}"#,
+        r#"{"result":"ok","tap":101}"#,
+        r#"{"result":"ok","tap":-1}"#,
+        r#"{"result":"ok","tap":"2"}"#,
+        r#"{"result":"ok","started":"yes"}"#,
         r#"{}"#,
         r#"{"result":"ok""#,
         "ok",
         "",
         long.as_str(),
     ] {
-        let response = server.check(body).await;
-        assert_eq!(response.status(), 400, "{body}");
-        assert!(response.bytes().await.unwrap().is_empty());
+        assert_eq!(check_status(body).await, 400, "{body}");
     }
     assert!(
         !logs.text().contains("app dictation check"),
