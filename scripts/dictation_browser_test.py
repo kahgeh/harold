@@ -8,8 +8,9 @@ that Tailscale Serve adds). The web app runs with require_pairing = false, becau
 is not a paired device. The test needs a Harold built with the default features (cargo build --locked).
 
 The test puts a fake `webkitSpeechRecognition` in the page before the page's scripts run. The fake
-refuses a `start()` while another instance is active, as iOS Safari does, and it counts each
-refusal. The test records every body that the page posts to /dictation/check by wrapping `fetch`.
+models iOS Safari: it refuses a `start()` while another instance is active, and it refuses a
+`start()` outside a user gesture. The test sets `inGesture` only while it dispatches the click on the
+mic, so a start from an event or a timer is refused. The fake counts each refusal. The test records every body that the page posts to /dictation/check by wrapping `fetch`.
 Each case loads the thread again, so the page and the fake start new.
 
 Each check prints `PASS name` or `FAIL name: why`. The test stops at the first failure and the exit
@@ -95,8 +96,9 @@ const until = async (what, check, ms = 5000) => {
 // The page's side: a fake speech recognition and a record of the checks. It runs before the
 // page's own scripts.
 const FAKE = String.raw`(() => {
-  const cfg = { throwOnNew: false, throwOnStart: false, noEnd: false };
-  const F = { cfg, instances: [], current: null, refusals: 0, reports: [] };
+  // abortReleases: abort() makes the instance inactive at once (else only its end event does).
+  const cfg = { throwOnNew: false, throwOnStart: false, noEnd: false, abortReleases: true };
+  const F = { cfg, instances: [], current: null, refusals: 0, outsideGesture: 0, inGesture: false, reports: [] };
   window.__fake = F;
   class Fake {
     constructor() {
@@ -106,6 +108,10 @@ const FAKE = String.raw`(() => {
     }
     start() {
       if (cfg.throwOnStart) throw new DOMException("refused", "InvalidStateError");
+      if (!F.inGesture) {
+        F.outsideGesture += 1;
+        throw new DOMException("start outside a user gesture", "NotAllowedError");
+      }
       if (F.current && F.current !== this) {
         F.refusals += 1;
         throw new DOMException("another instance is active", "InvalidStateError");
@@ -115,6 +121,7 @@ const FAKE = String.raw`(() => {
     stop() { this.stopped = true; if (!cfg.noEnd) setTimeout(() => this.fireEnd(), 30); }
     abort() {
       this.aborted = true;
+      if (cfg.abortReleases && F.current === this) F.current = null;
       if (cfg.noEnd) return;
       setTimeout(() => { if (this.onerror) this.onerror({ error: "aborted" }); this.fireEnd(); }, 30);
     }
@@ -123,12 +130,7 @@ const FAKE = String.raw`(() => {
       const row = Object.assign([{ transcript: text }], { isFinal: true });
       if (this.onresult) this.onresult({ results: [row] });
     }
-    // With no end to come (cfg.noEnd) the fake models Safari's own recovery: after an error
-    // the instance is no longer active, so a later start() is not refused.
-    fireError(name) {
-      if (cfg.noEnd && F.current === this) F.current = null;
-      if (this.onerror) this.onerror({ error: name });
-    }
+    fireError(name) { if (this.onerror) this.onerror({ error: name }); }
     fireEnd() { if (F.current === this) F.current = null; if (this.onend) this.onend({}); }
   }
   F.last = () => F.instances[F.instances.length - 1];
@@ -149,12 +151,14 @@ const load = async () => {
   await until("load", async () => (await evaluate("document.readyState")) === "complete");
   await until("the mic is on", async () => (await evaluate(`document.getElementById("dictation-listening") !== null && document.getElementById("dictation-on").value === "1"`)));
 };
-const tapMic = () => evaluate(`document.getElementById("dictation-mic").click()`);
+// The click runs inside the fake's gesture, and only there.
+const tapMic = () => evaluate(`(() => { const f = window.__fake; f.inGesture = true;
+  try { document.getElementById("dictation-mic").click(); } finally { f.inGesture = false; } })()`);
 const count = () => evaluate("window.__fake.instances.length");
 const waitInstances = (n) => until("instance " + n, async () => (await count()) >= n);
 const fake = (code) => evaluate(`(() => { const f = window.__fake; ${code} })()`);
 const state = () => evaluate(`(() => { const f = window.__fake; const n = document.getElementById("listening-note");
-  return { reports: f.reports, instances: f.instances.length, refusals: f.refusals,
+  return { reports: f.reports, instances: f.instances.length, refusals: f.refusals, outsideGesture: f.outsideGesture,
     box: document.querySelector("#reply textarea").value,
     note: { hidden: n.hidden, notice: n.classList.contains("notice"), text: document.getElementById("listening-text").textContent } }; })()`);
 const reportsAre = async (n, ms = 3000) => { try { await until(n + " reports", async () => (await evaluate("window.__fake.reports.length")) >= n, ms); } catch {} };
@@ -179,30 +183,33 @@ try {
   await reportsAre(2);
   cases.two_taps = await state();
 
-  // A tap right after an error, before the old instance's end, waits for that end.
+  // A tap right after an error, with no `end`: the page aborts the old instance and starts the
+  // new one in the tap's own handler.
   await load();
   await tapMic(); await waitInstances(1);
   await fake(`f.last().fireStart(); f.last().fireError("network");`);
   await tapMic();
-  await sleep(300);
-  const before = await count();
-  await fake(`f.last().fireEnd();`);
   await waitInstances(2);
   await fake(`f.last().fireStart(); f.last().fireResult("after the error"); f.last().fireEnd();`);
   await reportsAre(2);
-  cases.after_error = { ...(await state()), instancesBeforeEnd: before };
+  await sleep(200);
+  cases.after_error_no_end = await state();
 
-  // An error with no end: the next tap starts after 1 second.
+  // The same, but the abort does not release the old instance: the start is refused, the
+  // notice shows, and the tap after the old `end` works.
   await load();
-  await fake(`f.cfg.noEnd = true;`);
+  await fake(`f.cfg.abortReleases = false;`);
   await tapMic(); await waitInstances(1);
-  const errAt = await evaluate(`(() => { const f = window.__fake; f.last().fireStart(); const t = performance.now(); f.last().fireError("network"); return t; })()`);
+  await fake(`f.last().fireStart(); f.last().fireError("network");`);
   await tapMic();
-  await waitInstances(2);
-  const gap = await evaluate(`window.__fake.instances[1].createdAt`) - errAt;
-  await fake(`f.last().fireStart(); f.last().fireResult("late end"); f.last().fireEnd();`);
   await reportsAre(2);
-  cases.no_end = { ...(await state()), gapMs: gap };
+  cases.refused_start = await state();
+  await sleep(200);
+  await tapMic();
+  await waitInstances(3);
+  await fake(`f.last().fireStart(); f.last().fireResult("third tap"); f.last().fireEnd();`);
+  await reportsAre(3);
+  cases.after_refused_start = await state();
 
   // A start() that throws, a new Recognition() that throws.
   await load();
@@ -249,6 +256,18 @@ try {
   await reportsAre(1);
   await sleep(300);
   cases.stop_after_result = await state();
+
+  // A stop with no `end`: a second tap on stop ends the tap at once.
+  await load();
+  await fake(`f.cfg.noEnd = true;`);
+  await tapMic(); await waitInstances(1);
+  await fake(`f.last().fireStart();`);
+  await evaluate(`document.getElementById("dictation-stop").click()`);
+  await sleep(200);
+  const beforeSecondStop = await evaluate(`window.__fake.reports.length`);
+  await evaluate(`document.getElementById("dictation-stop").click()`);
+  await reportsAre(1);
+  cases.stop_without_end = { ...(await state()), beforeSecondStop };
 
   // An end with no result and no error.
   await load();
@@ -373,19 +392,22 @@ def verify(results, cases):
     check('two taps in a row give two ok reports, tap 1 and 2',
           rows('two_taps') == [('ok', 1, True), ('ok', 2, True)], c['reports'])
     check('the second tap writes its words into the box', c['box'] == 'second words', c['box'])
-    check('the second tap met no refusal from the fake', c['refusals'] == 0, c)
+    check('the second tap met no refusal from the fake and no start outside a gesture',
+          c['refusals'] == 0 and c['outsideGesture'] == 0, c)
 
-    c = cases['after_error']
-    check('a tap after an error waits for the old end: no second instance before it',
-          c['instancesBeforeEnd'] == 1 and c['refusals'] == 0, c)
-    check('the tap after an error gives network for tap 1 and ok for tap 2',
-          rows('after_error') == [('network', 1, True), ('ok', 2, True)], c['reports'])
+    c = cases['after_error_no_end']
+    check('a tap after an error with no end aborts the old instance and starts in its own handler',
+          rows('after_error_no_end') == [('network', 1, True), ('ok', 2, True)] and c['refusals'] == 0
+          and c['outsideGesture'] == 0 and c['instances'] == 2, c)
 
-    c = cases['no_end']
-    check('with no end after an error, the next tap starts after 1 second (900 to 2000 ms)',
-          900 <= c['gapMs'] <= 2000, c['gapMs'])
-    check('with no end after an error, the next tap gives ok and met no refusal',
-          rows('no_end') == [('network', 1, True), ('ok', 2, True)] and c['refusals'] == 0, c)
+    c = cases['refused_start']
+    check('a start that the old instance refuses gives start_failed for that tap and the notice',
+          rows('refused_start') == [('network', 1, True), ('start_failed', 2, False)] and c['refusals'] == 1
+          and not c['note']['hidden'] and c['note']['text'] == 'Tap the mic again.', c)
+    c = cases['after_refused_start']
+    check('the tap after the old end works',
+          rows('after_refused_start') == [('network', 1, True), ('start_failed', 2, False), ('ok', 3, True)]
+          and c['outsideGesture'] == 0, c)
 
     for case, why in (('start_throws', 'a start() that throws'), ('new_throws', 'a new Recognition() that throws')):
         c = cases[case]
@@ -404,6 +426,10 @@ def verify(results, cases):
             continue
         check('{} gives page_ended, tap 1, started true, and no notice'.format(key),
               rows('page_ended_' + key) == [('page_ended', 1, True)] and not c['note']['notice'], c)
+    c = cases['stop_without_end']
+    check('a stop with no end waits for it; a second stop gives page_ended and no notice',
+          c['beforeSecondStop'] == 0 and rows('stop_without_end') == [('page_ended', 1, True)]
+          and not c['note']['notice'], c)
     c = cases['stop_after_result']
     check('a stop after a result gives ok', rows('stop_after_result') == [('ok', 1, True)], c['reports'])
     c = cases['no_result']

@@ -26,11 +26,10 @@
   const STORAGE_KEY = "harold-dictation";
   const QUIET_MS = 4000;
   const NOTICE_MS = 3000;
-  // The longest wait for the `end` of an instance that is ending.
-  const END_WAIT_MS = 1000;
   // The page sends no more reports than this for each load.
   const TAP_MAX = 100;
   const STOPPED = "Dictation stopped. Tap the mic again.";
+  const TAP_AGAIN = "Tap the mic again.";
   // The browser's error names, and the words the check carries for them.
   const ERROR_RESULTS = {
     "not-allowed": "not_allowed",
@@ -41,13 +40,13 @@
     aborted: "aborted",
   };
 
-  // One instance is active at a time. `ending` is the one that was stopped, aborted or
-  // failed, kept until its `end` event or END_WAIT_MS. `waiting` is a tap that waits for it.
+  // `current` is the newest instance, until its `end` event or until a tap or the page
+  // retires it. `lingering` is a retired instance that has not fired `end` yet. A tap starts
+  // its instance inside the tap's own handler, never from an event or a timer, because iOS
+  // Safari may refuse a start outside the user's gesture.
   let tapCount = 0;
-  let active = null;
-  let ending = null;
-  let waiting = null;
-  let endTimer = null;
+  let current = null;
+  let lingering = null;
   let quietTimer = null;
   let noticeTimer = null;
 
@@ -161,69 +160,45 @@
     }
   }
 
-  // The instance is ending: keep it until its `end` event, or for END_WAIT_MS.
-  function moveToEnding(inst) {
-    if (inst.done) {
-      return;
-    }
-    if (active === inst) {
-      active = null;
-    }
-    ending = inst;
-    clearTimeout(endTimer);
-    endTimer = setTimeout(() => ended(inst), END_WAIT_MS);
+  // Whether the instance is listening: not stopping and not failed.
+  function listening(inst) {
+    return inst === current && !inst.stopping && !inst.errored;
   }
 
-  // The `end` event of an instance, or the wait for it ran out.
+  // The `end` event of an instance. A retired instance has nothing left to do.
   function ended(inst) {
-    inst.done = true;
+    if (lingering === inst) {
+      lingering = null;
+    }
+    if (inst !== current) {
+      return;
+    }
+    current = null;
     settle(inst.t, inst.t.pageEnded ? "page_ended" : "no_result");
     if (inst.uiOn) {
       inst.uiOn = false;
       finishUi();
     }
-    if (active === inst) {
-      active = null;
-    }
-    if (ending !== inst) {
-      return;
-    }
-    ending = null;
-    clearTimeout(endTimer);
-    endTimer = null;
-    const next = waiting;
-    waiting = null;
-    if (next) {
-      begin(next);
-    }
   }
 
   // Asks the instance to finish; the words still to come are written, and its `end` follows.
   function stopInstance(inst) {
-    if (active !== inst) {
+    if (!listening(inst)) {
       return;
     }
     inst.t.pageEnded = true;
-    inst.write = true;
+    inst.stopping = true;
     try {
       inst.r.stop();
     } catch (error) {
       // Already over.
     }
     clearTimeout(quietTimer);
-    moveToEnding(inst);
   }
 
-  // Ends the listening at once; the words so far stay in the box. A tap that waits is dropped.
-  function abort() {
-    if (waiting) {
-      settle(waiting, "page_ended");
-      waiting = null;
-    }
-    const inst = active || ending;
-    if (!inst || (inst.t.settled && !inst.uiOn)) {
-      return;
-    }
+  // Ends the instance at once and for good: its words so far stay in the box, its tap ends
+  // with one report, and its late events are ignored.
+  function retire(inst) {
     inst.t.pageEnded = true;
     inst.write = false;
     try {
@@ -232,14 +207,24 @@
       // Already over.
     }
     settle(inst.t, "page_ended");
-    inst.uiOn = false;
-    finishUi();
-    if (active === inst) {
-      moveToEnding(inst);
+    if (inst.uiOn) {
+      inst.uiOn = false;
+      finishUi();
+    }
+    if (current === inst) {
+      current = null;
+      lingering = inst;
     }
   }
 
-  function begin(t) {
+  // Ends the listening at once, for Send, the page hiding and a call.
+  function abort() {
+    if (current) {
+      retire(current);
+    }
+  }
+
+  function begin(t, hadOld) {
     let r;
     try {
       r = new Recognition();
@@ -248,12 +233,12 @@
       notice(STOPPED);
       return;
     }
-    const inst = { r, t, write: false, uiOn: false };
+    const inst = { r, t, write: true, stopping: false, errored: false, uiOn: false };
     r.lang = navigator.language;
     r.interimResults = true;
     r.continuous = true;
     r.onresult = (event) => {
-      if (active !== inst && !(ending === inst && inst.write)) {
+      if (inst !== current || !inst.write) {
         return;
       }
       const results = Array.from(event.results);
@@ -263,20 +248,23 @@
         .join(" ");
       setWords(words, results.some((result) => !result.isFinal));
       t.results = true;
-      if (active === inst) {
+      if (listening(inst)) {
         armQuiet(inst);
       }
     };
     r.onerror = (event) => {
       const error = event.error;
-      // Our own abort gives an `aborted` error: it is not a failure.
+      // The error of an instance that the page retired, or of an `abort` it asked for, is not
+      // a failure.
       if (t.settled || (t.pageEnded && error === "aborted")) {
         return;
       }
       settle(t, ERROR_RESULTS[error] || "other_error");
-      if (active !== inst) {
+      if (inst !== current) {
         return;
       }
+      inst.errored = true;
+      inst.write = false;
       if (error === "not-allowed" || error === "service-not-allowed") {
         notice("Dictation isn't available in this app.");
       } else if (error === "network") {
@@ -288,25 +276,24 @@
       }
       inst.uiOn = false;
       finishUi();
-      // Some builds give no `end` after an error.
-      moveToEnding(inst);
+      // Some builds give no `end` after an error. The next tap retires this instance.
     };
     // The quiet timer waits for the service to listen, so the first-use prompts for the
     // microphone and speech recognition do not count against it.
     r.onstart = () => {
       t.started = true;
-      if (active === inst) {
+      if (listening(inst)) {
         armQuiet(inst);
       }
     };
     r.onend = () => ended(inst);
-    active = inst;
+    current = inst;
     try {
       r.start();
     } catch (error) {
-      active = null;
+      current = null;
       settle(t, "start_failed");
-      notice(STOPPED);
+      notice(hadOld ? TAP_AGAIN : STOPPED);
       return;
     }
     inst.uiOn = true;
@@ -316,18 +303,19 @@
     setFlag(listeningInput, true);
   }
 
-  // A tap on the mic. A tap while an instance is ending waits for its end.
+  // A tap on the mic. It retires an older instance that is still there (it asks it to abort)
+  // and starts the new one in this same handler.
   function tap() {
-    if (active || waiting) {
+    if (current && listening(current)) {
       return;
     }
     tapCount += 1;
     const t = { n: tapCount, started: false, results: false, pageEnded: false, settled: false };
-    if (ending) {
-      waiting = t;
-      return;
+    const old = current || lingering;
+    if (old) {
+      retire(old);
     }
-    begin(t);
+    begin(t, Boolean(old));
   }
 
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -345,8 +333,14 @@
 
   mic.addEventListener("click", tap);
   stop.addEventListener("click", () => {
-    if (active) {
-      stopInstance(active);
+    if (!current) {
+      return;
+    }
+    // A second tap on stop, with no `end` after the first, ends it at once.
+    if (current.stopping) {
+      retire(current);
+    } else {
+      stopInstance(current);
     }
   });
   form.addEventListener("submit", abort);

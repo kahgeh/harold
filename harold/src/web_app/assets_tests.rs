@@ -675,7 +675,11 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once_for_each_tap() {
         "retryMaxCount: 0",
         "if (t.settled) {",
         "const TAP_MAX = 100;",
-        "const END_WAIT_MS = 1000;",
+        r#"const TAP_AGAIN = "Tap the mic again.";"#,
+        // A tap retires the older instance and starts the new one in its own handler.
+        "retire(old);",
+        "begin(t, Boolean(old));",
+        "mic.addEventListener(\"click\", tap);",
         r#"t.results ? "ok" : word"#,
         r#"settle(t, "start_failed");"#,
         r#""page_ended""#,
@@ -700,6 +704,10 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once_for_each_tap() {
         "REMEMBER_MS",
         "failedRecently",
         "setFlag(onInput, false)",
+        // No wait for an `end`, and no start from an event or a timer.
+        "END_WAIT_MS",
+        "waiting",
+        "ending",
     ] {
         assert!(!script.contains(absent), "dictation.js holds {absent}");
     }
