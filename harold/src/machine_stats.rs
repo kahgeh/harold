@@ -1151,12 +1151,15 @@ impl ProcessEnv for SystemTable {
     /// other variable as it reads it.
     fn environ(&mut self, pid: u32) -> Option<Vec<(String, String)>> {
         let pid = Pid::from_u32(pid);
-        self.system.refresh_processes_specifics(
+        // A throwaway `System`: the full environment does not stay in Harold's memory after
+        // this call.
+        let mut system = System::new();
+        system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
             ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::Always),
         );
-        let process = self.system.process(pid)?;
+        let process = system.process(pid)?;
         Some(
             process
                 .environ()
