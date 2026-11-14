@@ -56,8 +56,9 @@ jobs:
 
       - name: Test
         timeout-minutes: 25
+        shell: bash
         run: |
-          cargo test --locked --workspace --no-default-features --features harold/linux-defaults
+          cargo test --locked --workspace --no-default-features --features harold/linux-defaults 2>&1 | scripts/ci_test_time.sh
           python3 -m unittest discover -s scripts/tests
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete
