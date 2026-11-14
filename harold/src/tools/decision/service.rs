@@ -9,9 +9,7 @@ use tonic::{Request, Response, Status};
 
 use super::details::DetailsPort;
 use super::obs;
-use super::store::{
-    DecisionRow, DecisionStore, Filter, NewDecision, Refusal, Status as RecordStatus, StoreError,
-};
+use super::store::{DecisionRow, DecisionStore, Filter, NewDecision, Refusal, StoreError};
 use super::validate;
 use crate::settings::DecisionSettings;
 use crate::telemetry::DECISION_ROLES;

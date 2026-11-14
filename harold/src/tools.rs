@@ -265,6 +265,13 @@ pub(crate) async fn start(
         specs_url: specs_addr.map(|addr| format!("http://{addr}")),
     };
     job::configure(cfg.job.clone(), cfg.master.is_some());
+    decision::configure(
+        cfg.decision.clone(),
+        cfg.knowledge
+            .vault
+            .as_deref()
+            .map(|vault| PathBuf::from(crate::settings::expand_tilde(vault))),
+    );
     let extras = Extras {
         watch_typing: Arc::new(TmuxTyping {
             ports: Arc::clone(&ports),
@@ -337,6 +344,18 @@ async fn start_with(
             shutdown: &shutdown,
         },
     );
+    let decision_ctx = tool_context(
+        store_path,
+        decision::NAME,
+        None,
+        &ToolHost {
+            chief_pane: &chief_pane,
+            pane_folder: &pane_folder,
+            products: &products,
+            extras: &extras,
+            shutdown: &shutdown,
+        },
+    );
     let [
         (questions_name, questions_ctx),
         (backlog_name, backlog_ctx),
@@ -368,6 +387,11 @@ async fn start_with(
         &mut tools,
     );
     start_tool(job::NAME, job::start(job_ctx).await, &mut tools);
+    start_tool(
+        decision::NAME,
+        decision::start(decision_ctx).await,
+        &mut tools,
+    );
     start_tool(
         evidence::NAME,
         evidence::start(evidence_launch).await,
