@@ -129,6 +129,7 @@ fn a_clear_source_updates_the_session_id_only() {
     let record = roles.get("harold", "pnem").unwrap();
     assert_eq!((record.session_id.as_str(), record.agent_pid), ("s-9", 10));
     assert_eq!((record.pane_id.as_str(), record.started_at_ms), ("%10", 1));
+    assert_eq!(record.transcript_path, "/t/s-1.jsonl");
 }
 
 #[test]
@@ -154,6 +155,22 @@ fn an_unknown_role_and_an_empty_product_are_refused() {
         Err(RecordError::BadProduct)
     );
     assert!(roles.get("harold", "build_worker").is_none());
+}
+
+#[test]
+fn an_agent_pid_of_zero_is_refused_for_every_source() {
+    let dir = Temp::new();
+    let roles = roles(dir.0.as_path(), &[]);
+    for source in ["startup", "resume", "clear", "compact"] {
+        let mut request = start("pnem", "harold", 0, "s");
+        request.source = source.into();
+        assert_eq!(
+            roles.record(request, 1),
+            Err(RecordError::BadPid),
+            "{source}"
+        );
+    }
+    assert!(roles.get("harold", "pnem").is_none());
 }
 
 #[test]

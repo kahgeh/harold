@@ -53,14 +53,41 @@ class SessionStartHookTest(unittest.TestCase):
         request = hook.build_request(ROLE_ENV, {**PAYLOAD, "cwd": str(self.folder)}, 1, "%7")
         self.assertEqual(request["start_file"], str(start))
 
-    def test_pane_from_tmux_then_rex_then_empty(self):
+    def test_pane_from_tmux_then_rex_then_empty_and_no_command_runs(self):
         with patch.dict(os.environ, {"TMUX_PANE": "%3", "REX_BLOCK": "block:9"}, clear=True):
-            with patch.object(subprocess, "run", side_effect=OSError):
+            with patch.object(subprocess, "run") as run:
                 self.assertEqual(hook.pane_id(), "%3")
+            run.assert_not_called()
         with patch.dict(os.environ, {"REX_BLOCK": "block:9"}, clear=True):
             self.assertEqual(hook.pane_id(), "block:9")
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(hook.pane_id(), "")
+
+    def test_the_agent_is_the_first_claude_process_up_the_parent_chain(self):
+        table = {
+            50: (40, "/bin/sh"),
+            40: (30, "/usr/local/bin/claude"),
+            30: (1, "zsh"),
+        }
+        self.assertEqual(hook.find_agent_pid(50, table.get), 40)
+        self.assertEqual(hook.find_agent_pid(40, table.get), 40)
+
+    def test_the_walk_stops_after_5_levels_and_falls_back_to_the_parent(self):
+        table = {pid: (pid - 1, "sh") for pid in range(100, 90, -1)}
+        table[95] = (94, "claude")
+        self.assertEqual(hook.find_agent_pid(100, table.get), 100)
+        table[96] = (95, "claude")
+        self.assertEqual(hook.find_agent_pid(100, table.get), 96)
+
+    def test_no_claude_process_or_a_missing_row_gives_the_parent(self):
+        self.assertEqual(hook.find_agent_pid(7, {7: (1, "sh")}.get), 7)
+        self.assertEqual(hook.find_agent_pid(7, lambda pid: None), 7)
+
+    def test_main_sends_the_pid_the_walk_found(self):
+        with patch.object(hook, "find_agent_pid", return_value=4242):
+            code, run = self.run_main(ROLE_ENV, PAYLOAD)
+        command = run.call_args.args[0]
+        self.assertEqual(json.loads(command[command.index("-d") + 1])["agent_pid"], 4242)
 
     def run_main(self, env, payload, grpc_addr="127.0.0.1:1"):
         (self.folder / "service.json").write_text(json.dumps({"grpc_addr": grpc_addr}), encoding="utf-8")

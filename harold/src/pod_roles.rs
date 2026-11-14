@@ -56,6 +56,8 @@ pub(crate) struct RoleRecord {
 pub(crate) enum RecordError {
     UnknownRole,
     BadProduct,
+    /// `agent_pid` is 0: no process has it.
+    BadPid,
 }
 
 /// The records, kept in memory and in `pod-roles.json`.
@@ -97,11 +99,14 @@ impl PodRoles {
     }
 
     /// Records one start and says whether it replaced an older agent. A `clear` or `compact`
-    /// source only updates the session id of an existing record. Logs `pod role recorded`
+    /// source only updates the session id of an existing record, not its transcript path. Logs `pod role recorded`
     /// for a full record.
     pub(crate) fn record(&self, start: PodStart, now_ms: i64) -> Result<bool, RecordError> {
         if !POD_ROLES.contains(&start.role.as_str()) {
             return Err(RecordError::UnknownRole);
+        }
+        if start.agent_pid == 0 {
+            return Err(RecordError::BadPid);
         }
         let product = if start.role == "chief" {
             CHIEF_PRODUCT
@@ -113,7 +118,6 @@ impl PodRoles {
         if matches!(start.source.as_str(), "clear" | "compact") {
             if let Some(existing) = records.get_mut(&slot) {
                 existing.session_id = start.session_id;
-                existing.transcript_path = start.transcript_path;
                 self.save(&records);
             }
             return Ok(false);

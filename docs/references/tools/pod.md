@@ -28,13 +28,18 @@ No session name and no folder is matched: a role is found by the record only.
 
 ## The record
 
-The `SessionStart` hook `hooks/providers/claude_session_start.py` runs when an agent starts with `POD_ROLE` set. It calls `PodAgentStarted` with `pod_role`, `pod_product`, `pane_id`, `session_id`, `transcript_path`, `cwd`, `agent_pid` (the hook's parent process), `start_file` and `source`. Without `POD_ROLE`, the hook does nothing. When Harold does not answer within 3 seconds, the hook exits 0, so an agent never waits on it.
+The `SessionStart` hook `hooks/providers/claude_session_start.py` runs when an agent starts with `POD_ROLE` set. It calls `PodAgentStarted` with `pod_role`, `pod_product`, `pane_id`, `session_id`, `transcript_path`, `cwd`, `agent_pid` (the first process named `claude` among the hook's parents, at most 5 levels up, else the hook's parent), `start_file` and `source`. Without `POD_ROLE`, the hook does nothing. When Harold does not answer within 3 seconds, the hook exits 0, so an agent never waits on it.
 
 The hook takes the pane id from `TMUX_PANE`, then `REX_BLOCK`. With neither, `pane_id` is empty: Harold keeps the record, `Who` still answers by the pid, and `pick_chief` skips a record with no pane id.
 
-Harold keeps one record for each (product, role) in `pod-roles.json`: `pane_id`, `session_id`, `agent_pid`, `agent_proc_start`, `folder`, `transcript_path`, `start_file` and `started_at_ms`. A later start of the same role replaces the record, so the newest agent holds the role. On the sources `clear` and `compact`, Harold only updates `session_id` and `transcript_path`.
+Harold keeps one record for each (product, role) in `pod-roles.json`: `pane_id`, `session_id`, `agent_pid`, `agent_proc_start`, `folder`, `transcript_path`, `start_file` and `started_at_ms`. A later start of the same role replaces the record, so the newest agent holds the role. On the sources `clear` and `compact`, Harold only updates `session_id`: the other fields keep their values. A call with `agent_pid` 0 is refused with `invalid_argument`.
 
 The command `scripts/claude-start <model> <prompt file>` starts the agent with the short first message `Read <prompt file> and follow it.` It refuses a prompt file that does not exist.
+
+## Known risks
+
+- A nested agent that inherits `POD_ROLE` and `POD_PRODUCT` from a role's shell replaces the record when it starts. `Who` then gives `agent_gone` when that agent ends. Start no agent from the shell of a role without `env -u POD_ROLE -u POD_PRODUCT`.
+- A record with `agent_proc_start` 0 (Harold could not read the start time at the start) matches any live process with the same pid. A reused pid then reads as the agent.
 
 ## The start file
 

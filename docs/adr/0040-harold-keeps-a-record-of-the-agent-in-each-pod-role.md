@@ -19,4 +19,6 @@ The chief and Harold found a pod role by its folder or by a session name. Two ch
 
 - A Claude Code release that changes the session file breaks `Who` until Harold reads the new shape. `bin/pod chief` then uses its folder scan, as before.
 - The pod metrics keep `pod_pane_roles`, so two sources of roles exist until a later spec moves them to the record.
+- A nested agent that inherits `POD_ROLE` from a role's shell replaces the record when it starts.
+- A record with `agent_proc_start` 0 matches any live process with the same pid, so a reused pid reads as the agent.
 - Build workers have no record. Pod coordination finds them by `.superpowers/baton/agent-pane`.
